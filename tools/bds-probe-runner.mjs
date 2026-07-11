@@ -87,6 +87,7 @@ async function configureServer(serverRoot) {
     "allow-cheats": "true",
     "allow-list": "true",
     "content-log-file-enabled": "true",
+    "content-log-console-output-enabled": "true",
     "default-player-permission-level": "operator",
     "level-name": worldName,
     "online-mode": "true",

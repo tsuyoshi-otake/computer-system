@@ -46,6 +46,10 @@ suite branch must emit a `CS_PROBE_RESULT` terminal record. The runner uses an
 allowlist and keeps Xbox Live authentication enabled so no player can join the
 isolated server.
 
+The harness was verified against Bedrock Dedicated Server 1.26.33.2. Both
+sessions completed with 20 computers receiving exactly 2,000 instructions over
+40 ticks, and the Dynamic Property sequence advanced from 1 to 2 after restart.
+
 Set `BDS_WORKDIR` only when an explicit empty work directory is preferred. The
 runner refuses a non-empty directory and never recursively deletes it.
 

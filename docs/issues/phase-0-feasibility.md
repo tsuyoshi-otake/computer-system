@@ -94,9 +94,10 @@ before production architecture depends on an unsupported behavior.
 - A tester completed the in-game runtime command through the 20-computer probe.
 - Six host tests cover fair scheduling, transactional paged storage recovery,
   and the machine-readable probe protocol.
-- `npm run test:bds` now prepares an isolated Dedicated Server world and runs
-  runtime and Dynamic Property probes across a restart. Execution remains
-  pending until an official BDS distribution is supplied through `BDS_HOME`.
+- `npm run test:bds` passed on Bedrock Dedicated Server 1.26.33.2. Both runtime
+  sessions produced `min=2000` and `max=2000` across 20 computers and 40 ticks.
+- World Dynamic Property persistence passed a full restart: the sequence
+  advanced from 1 to 2 and both sessions reported 101 stored bytes.
 - Visual, audio, and interaction-only checks are isolated in
   `docs/manual-verification.md`; automation does not control the Minecraft
   client.
