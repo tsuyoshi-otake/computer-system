@@ -7,8 +7,8 @@ Target environment: Minecraft Bedrock 1.26.30+, `@minecraft/server` 2.8.0, and
 | ------------------------------------- | ------------------------- | ------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
 | Stable pack and script loading        | supported                 | GDK client recognized both packs and loaded the stable Script API bundle without Beta API experiments               | Keep stable module pins and validate on every Bedrock update                                |
 | Instruction-budgeted runtime          | supported                 | Tester completed the in-game 20-computer runtime probe; host tests also prove equal 40-tick scheduling              | Start with 200 instructions per slice and 1,000 globally                                    |
-| 51x19 terminal UI                     | pending                   | DDUI probe                                                                                                          | pending                                                                                     |
-| Terminal input and finalization       | pending                   | DDUI probe                                                                                                          | pending                                                                                     |
+| 51x19 terminal UI                     | supported_with_constraint | GDK client displayed all 19 fixed-width rows and live updates; input controls required vertical scrolling           | Use DDUI for the first vertical slice; prototype a denser production terminal view          |
+| Terminal input and finalization       | supported_with_constraint | Live input mirrored `hello computer`; Submit cleared it; Terminate and Close ended as ServerClosed and ClientClosed | Map every close reason to an explicit VM result; retain bounded redraw and focus handling   |
 | Connected monitor rendering and touch | pending                   | Monitor probe                                                                                                       | pending                                                                                     |
 | Six-sided redstone input              | supported_with_constraint | BDS sampled power 15 independently from all six adjacent positions; `onRedstoneUpdate` emitted zero reliable events | Poll six neighbors at a bounded rate and synthesize change events                           |
 | Independent digital redstone output   | supported_with_constraint | BDS verified all 64 face masks twice using redstone lamps                                                           | Generate 64 hidden fixed-output block types; swap type by mask                              |
@@ -30,3 +30,8 @@ Those states still require the Holiday Creator Features experiment in the stable
 Bedrock documentation. Computer System instead generates 64 internal block
 identifiers (one per digital face mask), preserving the no-experiments baseline.
 The visible resource and logical computer identity remain shared.
+
+The GDK DDUI probe was verified at 1280x1024. Observable updates advanced while
+the form remained open, but rapid label replacement occasionally produced a
+partial frame during redraw. The production terminal must coalesce updates and
+must not refresh its full label every scheduler slice.

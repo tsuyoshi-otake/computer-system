@@ -29,6 +29,22 @@ Record `PASS` or `FAIL` for size/readability, live updates, input/submit,
 terminate, and normal close. Include a short note for any clipping, wrapping,
 focus, or controller-navigation problem.
 
+### Result: Windows GDK 1.26.33
+
+- Size/readability: `PASS_WITH_CONSTRAINT` — all rows through `19:` were
+  readable, but the input field and action buttons required vertical scrolling
+  at 1280x1024.
+- Live updates: `PASS_WITH_CONSTRAINT` — the counter advanced and live input was
+  reflected, while rapid full-label replacement occasionally exposed a partial
+  redraw frame.
+- Input/submit: `PASS` — `hello computer` appeared in the live input status and
+  Submit cleared the client-writable field. The transient echo was shorter than
+  the capture interval and was not independently captured.
+- Terminate: `PASS` — chat reported `reason=ServerClosed` with an empty final
+  input.
+- Normal close: `PASS` — chat reported `reason=ClientClosed` with an empty final
+  input.
+
 ## Later manual-only checks
 
 The following checks remain manual when their probes are implemented:
