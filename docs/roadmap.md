@@ -202,6 +202,16 @@ suppressed error may leave a device accidentally marked as running.
 
 ## Milestones
 
+### Tracking issues
+
+- [Phase 0: Prove Bedrock feasibility gates](https://github.com/tsuyoshi-otake/computer-system/issues/2)
+- [Phase 1: Build the host-side Computer System runtime](https://github.com/tsuyoshi-otake/computer-system/issues/3)
+- [Phase 2: Deliver the Bedrock Computer vertical slice](https://github.com/tsuyoshi-otake/computer-system/issues/4)
+- [Phase 3: Implement redstone and local peripherals](https://github.com/tsuyoshi-otake/computer-system/issues/5)
+- [Phase 4: Implement networking and pocket computers](https://github.com/tsuyoshi-otake/computer-system/issues/6)
+- [Phase 5: Implement turtles and upgrades](https://github.com/tsuyoshi-otake/computer-system/issues/7)
+- [Phase 6: Add command computers, hidden content, and release hardening](https://github.com/tsuyoshi-otake/computer-system/issues/8)
+
 ### M1: Repository and host-side runtime
 
 - [ ] TypeScript package, lint, formatting, type-checking, and Vitest setup
