@@ -1,0 +1,29 @@
+# Dependencies
+node_modules/
+
+# Generated output
+dist/
+build/
+coverage/
+*.mcpack
+*.mcaddon
+
+# Local environments and secrets
+.env
+.env.*
+!.env.example
+
+# Editors and operating systems
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# Goal-loop artifacts
+.codex/goal-loop/
