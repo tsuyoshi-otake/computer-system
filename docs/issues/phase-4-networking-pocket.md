@@ -1,14 +1,15 @@
 # Phase 4: Implement networking and pocket computers
 
-Parent: #1
-Blocked by: #5
+Parent: #1 Blocked by: #5
 
 ## Scope
 
-- [ ] Implement Wired Modem and Networking Cable topology with component caching.
+- [ ] Implement Wired Modem and Networking Cable topology with component
+      caching.
 - [ ] Implement Wireless Modem distance and dimension rules.
 - [ ] Implement Ender Modem long-range and cross-dimension rules.
-- [ ] Implement `rednet` open, close, send, broadcast, receive, host, and lookup.
+- [ ] Implement `rednet` open, close, send, broadcast, receive, host, and
+      lookup.
 - [ ] Implement normal and Advanced Pocket Computers.
 - [ ] Implement Wireless, Ender, and Noisy Pocket Computer upgrades.
 - [ ] Reconcile pocket lifecycle without hidden every-tick inventory scans.

@@ -170,8 +170,8 @@ off -> booting -> running
 missing block -> orphaned -> restored or administratively removed
 ```
 
-Every lifecycle, VM, peripheral, storage, and turtle branch must terminate in
-an observable success, wait, retry, stopped, or failed state. No caught or
+Every lifecycle, VM, peripheral, storage, and turtle branch must terminate in an
+observable success, wait, retry, stopped, or failed state. No caught or
 suppressed error may leave a device accidentally marked as running.
 
 ## Load and safety constraints
@@ -185,8 +185,8 @@ suppressed error may leave a device accidentally marked as running.
 - no every-tick full inventory scan for pocket computers
 - no implicit chunk loading for turtles
 - command computers are administrator-only and command-audited
-- unsupported Bedrock behavior fails explicitly instead of silently producing
-  an incorrect approximation
+- unsupported Bedrock behavior fails explicitly instead of silently producing an
+  incorrect approximation
 
 ## Known compatibility boundaries
 
@@ -293,8 +293,8 @@ for further progress or cleanup.
 
 ### Filesystem durability
 
-`Verify:` Save files, interrupt a staged generation write, reload the world,
-and remount floppy disks.
+`Verify:` Save files, interrupt a staged generation write, reload the world, and
+remount floppy disks.
 
 `Expect:` The latest complete generation loads, partial data is ignored, and
 computer and disk identities remain stable.
@@ -309,8 +309,8 @@ events, updates the terminal, and changes the output.
 
 ### Networking
 
-`Verify:` Test direct, broadcast, protocol-filtered, timed-out, wired,
-wireless, Ender, and cross-dimension messages.
+`Verify:` Test direct, broadcast, protocol-filtered, timed-out, wired, wireless,
+Ender, and cross-dimension messages.
 
 `Expect:` Messages reach exactly the eligible computers with no duplicates and
 timeouts return control to the caller.

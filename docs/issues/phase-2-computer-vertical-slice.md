@@ -1,7 +1,6 @@
 # Phase 2: Deliver the Bedrock Computer vertical slice
 
-Parent: #1
-Blocked by: #2 and #3
+Parent: #1 Blocked by: #2 and #3
 
 ## Scope
 
@@ -17,9 +16,9 @@ Blocked by: #2 and #3
 
 ## Acceptance rubric
 
-`Verify:` In a clean Bedrock world, place a computer, create `startup.py`, mirror
-left redstone input to right output, break and replace the computer, reload the
-world, and terminate an infinite program.
+`Verify:` In a clean Bedrock world, place a computer, create `startup.py`,
+mirror left redstone input to right output, break and replace the computer,
+reload the world, and terminate an infinite program.
 
 `Expect:` Identity and files remain stable, startup runs after reload, redstone
 events and output work, all lifecycle paths are visible, and Minecraft remains

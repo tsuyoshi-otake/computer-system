@@ -12,9 +12,12 @@ before production architecture depends on an unsupported behavior.
 
 ### Runtime and packaging
 
-- [ ] Pin a current stable Bedrock version, pack format, and Script API module versions.
-- [ ] Prove that a bundled TypeScript runtime loads without experimental toggles.
-- [ ] Run instruction-budgeted work for 20 simulated computers without watchdog termination.
+- [x] Pin a current stable Bedrock version, pack format, and Script API module
+      versions.
+- [ ] Prove that a bundled TypeScript runtime loads without experimental
+      toggles.
+- [ ] Run instruction-budgeted work for 20 simulated computers without watchdog
+      termination.
 - [ ] Measure bundle size, tick cost, and memory warning signals.
 
 ### Terminal input and UI
@@ -22,13 +25,15 @@ before production architecture depends on an unsupported behavior.
 - [ ] Display a 51x19 terminal model through the supported UI surface.
 - [ ] Update output while the terminal remains open.
 - [ ] Submit line input and convert it into terminal events.
-- [ ] Prove terminate, cancel, disconnect, and competing-form finalization paths.
+- [ ] Prove terminate, cancel, disconnect, and competing-form finalization
+      paths.
 - [ ] Document which raw keyboard and pointer events cannot be represented.
 
 ### Monitor
 
 - [ ] Discover a 3x2 connected monitor surface.
-- [ ] Render bounded text updates on the world-facing surface or establish the best fallback.
+- [ ] Render bounded text updates on the world-facing surface or establish the
+      best fallback.
 - [ ] Convert a player interaction into monitor cell coordinates.
 - [ ] Measure update cost at near and far distances.
 
@@ -43,14 +48,17 @@ before production architecture depends on an unsupported behavior.
 ### Persistent identities and storage
 
 - [ ] Store an ID on a non-stackable computer or floppy ItemStack.
-- [ ] Move it between player inventory, container, dropped entity, and placed block.
-- [ ] Save paged world Dynamic Properties and recover the last complete generation.
+- [ ] Move it between player inventory, container, dropped entity, and placed
+      block.
+- [ ] Save paged world Dynamic Properties and recover the last complete
+      generation.
 - [ ] Reload the world and prove stable identity without accidental duplication.
 
 ### Pocket computer lifecycle
 
 - [ ] Open a terminal from an item-use interaction.
-- [ ] Reconcile held, inventory, container, dropped, disconnected, and duplicated states.
+- [ ] Reconcile held, inventory, container, dropped, disconnected, and
+      duplicated states.
 - [ ] Prove reconciliation without an every-tick full inventory scan.
 
 ### Turtle operations
@@ -59,17 +67,20 @@ before production architecture depends on an unsupported behavior.
 - [ ] Reject occupied and unloaded destinations with an observable result.
 - [ ] Inspect, break, place, and collect a representative block drop.
 - [ ] Transfer an item to an adjacent container.
-- [ ] Force an intermediate failure and prove rollback or explicit recovery ownership.
+- [ ] Force an intermediate failure and prove rollback or explicit recovery
+      ownership.
 
 ### Speaker
 
 - [ ] Play registered sounds with volume and pitch.
 - [ ] Play a bounded note sequence without a retry or callback storm.
-- [ ] Decide and document whether arbitrary PCM/DFPWM is unsupported or has a safe substitute.
+- [ ] Decide and document whether arbitrary PCM/DFPWM is unsupported or has a
+      safe substitute.
 
 ## Deliverables
 
-- [ ] A feasibility matrix with `supported`, `supported_with_constraint`, or `not_supported` for every question.
+- [ ] A feasibility matrix with `supported`, `supported_with_constraint`, or
+      `not_supported` for every question.
 - [ ] Minimal prototype packs and reproducible test instructions.
 - [ ] Performance observations for a low-end-safe budget baseline.
 - [ ] Updated compatibility boundaries in #1 and `docs/roadmap.md`.
