@@ -4,6 +4,10 @@ import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 
 import {
+  createRedstoneInterfaceBlock,
+  redstoneInterfaceIdentifier,
+} from "./redstone-interface-block.mjs";
+import {
   createRedstoneProbeBlock,
   redstoneProbeIdentifier,
 } from "./redstone-probe-block.mjs";
@@ -33,6 +37,16 @@ await Promise.all(
     await writeFile(
       path.join(generatedBlocksDirectory, `${identifier}.json`),
       `${JSON.stringify(createRedstoneProbeBlock(mask), null, 2)}\n`,
+      "utf8",
+    );
+  }),
+);
+await Promise.all(
+  Array.from({ length: 16 }, async (_, power) => {
+    const identifier = redstoneInterfaceIdentifier(power).split(":")[1];
+    await writeFile(
+      path.join(generatedBlocksDirectory, `${identifier}.json`),
+      `${JSON.stringify(createRedstoneInterfaceBlock(power), null, 2)}\n`,
       "utf8",
     );
   }),

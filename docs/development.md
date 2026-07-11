@@ -50,8 +50,11 @@ The harness was verified against Bedrock Dedicated Server 1.26.33.2. Both
 sessions completed with 20 computers receiving exactly 2,000 instructions over
 40 ticks, and the Dynamic Property sequence advanced from 1 to 2 after restart.
 Both sessions also passed transactional turtle operations, two pitched sound
-calls, six-face redstone input sampling, and all 64 independent digital output
-masks. The second session recovered the ItemStack identity written by the first.
+calls, six-face redstone input sampling, all 64 independent digital output
+masks, all 16 Redstone Interface analog levels, and simultaneous analog levels 4
+and 12. Turtle probes rejected occupied, unloaded, and conflicting moves without
+leaving an active resource lease. The second session recovered the ItemStack
+identity written by the first.
 
 The arena loader polls a fixed set of required chunks for at most 40 ticks. Each
 redstone output transition settles for at most eight ticks. These bounds prevent
@@ -77,11 +80,19 @@ suite.
 
 `Verify:` Run `npm run validate`.
 
-`Expect:` Formatting, lint, type checking, seven host tests, and the pack build
+`Expect:` Formatting, lint, type checking, ten host tests, and the pack build
 all exit successfully.
 
 `Verify:` Set `BDS_HOME` and run `npm run test:bds`.
 
 `Expect:` Both isolated sessions end in a `suite/PASS` terminal record; the
 second session reports storage sequence 2, persisted item identity, six input
-faces, 64 digital output masks, and runtime minimum/maximum 2,000.
+faces, 64 digital output masks, 16 analog levels, rejected turtle conflict and
+unloaded movement, and runtime minimum/maximum 2,000.
+
+`Verify:` Start one turtle operation while holding a lease on its destination,
+then target an unloaded coordinate and inject a failure after world mutation.
+
+`Expect:` The results are `conflict`, `unloaded`, and `rolled_back`; the source
+marker remains intact and the active resource count returns to zero after every
+terminal branch.

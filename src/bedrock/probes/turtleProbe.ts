@@ -8,21 +8,29 @@ import {
   type Vector3,
 } from "@minecraft/server";
 
+import {
+  ExclusiveOperationRegistry,
+  OperationLease,
+} from "../../phase0/exclusiveOperationRegistry.js";
 import { offset, probeArenaY, requireCondition } from "./worldProbeSupport.js";
 
 export interface TurtleProbeResult {
   readonly blockedMoveRejected: boolean;
+  readonly conflictRejected: boolean;
   readonly dropRecovered: boolean;
   readonly inventoryTransferred: boolean;
   readonly rollbackRestored: boolean;
   readonly successfulMove: boolean;
+  readonly unloadedMoveRejected: boolean;
 }
 
 interface MoveResult {
-  readonly status: "blocked" | "moved" | "rolled_back";
+  readonly status:
+    "blocked" | "conflict" | "moved" | "rolled_back" | "unloaded";
 }
 
 export function executeTurtleProbe(dimension: Dimension): TurtleProbeResult {
+  const registry = new ExclusiveOperationRegistry();
   const origin = { x: -6, y: probeArenaY, z: 0 };
   const moved = offset(origin, { x: 1, y: 0, z: 0 });
   const occupied = offset(origin, { x: 2, y: 0, z: 0 });
@@ -30,24 +38,44 @@ export function executeTurtleProbe(dimension: Dimension): TurtleProbeResult {
   const dropLocation = offset(origin, { x: 0, y: 0, z: 3 });
   const sourceChest = offset(origin, { x: 2, y: 0, z: 3 });
   const targetChest = offset(origin, { x: 4, y: 0, z: 3 });
+  const conflictTarget = offset(origin, { x: 1, y: 0, z: -1 });
+  const unloadedTarget = { x: 16_384, y: probeArenaY, z: 16_384 };
 
   setBlock(dimension, origin, "minecraft:gold_block");
   setBlock(dimension, moved, "minecraft:air");
   const successfulMove =
-    moveMarker(dimension, origin, moved).status === "moved";
+    moveMarker(dimension, origin, moved, registry).status === "moved";
 
   setBlock(dimension, occupied, "minecraft:stone");
   const blockedMoveRejected =
-    moveMarker(dimension, moved, occupied).status === "blocked" &&
+    moveMarker(dimension, moved, occupied, registry).status === "blocked" &&
     getBlock(dimension, moved).typeId === "minecraft:gold_block" &&
     getBlock(dimension, occupied).typeId === "minecraft:stone";
 
   setBlock(dimension, rollbackTarget, "minecraft:air");
   const rollbackRestored =
-    moveMarker(dimension, moved, rollbackTarget, true).status ===
+    moveMarker(dimension, moved, rollbackTarget, registry, true).status ===
       "rolled_back" &&
     getBlock(dimension, moved).typeId === "minecraft:gold_block" &&
     getBlock(dimension, rollbackTarget).isAir;
+
+  setBlock(dimension, conflictTarget, "minecraft:air");
+  const held = registry.tryBegin("held-operation", [
+    blockResource(dimension, moved),
+    blockResource(dimension, conflictTarget),
+  ]);
+  requireCondition(held instanceof OperationLease, "Could not stage conflict.");
+  const conflictRejected =
+    moveMarker(dimension, moved, conflictTarget, registry).status ===
+      "conflict" &&
+    getBlock(dimension, moved).typeId === "minecraft:gold_block";
+  held.rollback();
+
+  const unloadedMoveRejected =
+    moveMarker(dimension, moved, unloadedTarget, registry).status ===
+      "unloaded" &&
+    getBlock(dimension, moved).typeId === "minecraft:gold_block" &&
+    registry.activeResourceCount === 0;
 
   setBlock(dimension, dropLocation, "minecraft:stone");
   setBlock(dimension, dropLocation, "minecraft:air");
@@ -77,6 +105,14 @@ export function executeTurtleProbe(dimension: Dimension): TurtleProbeResult {
     "Occupied turtle move was not rejected.",
   );
   requireCondition(rollbackRestored, "Failed turtle move did not roll back.");
+  requireCondition(
+    conflictRejected,
+    "Conflicting turtle move was not rejected.",
+  );
+  requireCondition(
+    unloadedMoveRejected,
+    "Unloaded turtle destination was not rejected cleanly.",
+  );
   requireCondition(dropRecovered, "Turtle drop could not be recovered.");
   requireCondition(
     inventoryTransferred,
@@ -85,10 +121,12 @@ export function executeTurtleProbe(dimension: Dimension): TurtleProbeResult {
 
   return {
     blockedMoveRejected,
+    conflictRejected,
     dropRecovered,
     inventoryTransferred,
     rollbackRestored,
     successfulMove,
+    unloadedMoveRejected,
   };
 }
 
@@ -96,11 +134,28 @@ function moveMarker(
   dimension: Dimension,
   sourceLocation: Vector3,
   targetLocation: Vector3,
+  registry: ExclusiveOperationRegistry,
   injectFailure = false,
 ): MoveResult {
-  const source = getBlock(dimension, sourceLocation);
-  const target = getBlock(dimension, targetLocation);
+  const lease = registry.tryBegin(
+    `move-${sourceLocation.x}-${targetLocation.x}`,
+    [
+      blockResource(dimension, sourceLocation),
+      blockResource(dimension, targetLocation),
+    ],
+  );
+  if (!(lease instanceof OperationLease)) {
+    return { status: "conflict" };
+  }
+
+  const source = dimension.getBlock(sourceLocation);
+  const target = dimension.getBlock(targetLocation);
+  if (source === undefined || target === undefined) {
+    lease.rollback();
+    return { status: "unloaded" };
+  }
   if (source.typeId !== "minecraft:gold_block" || !target.isAir) {
+    lease.rollback();
     return { status: "blocked" };
   }
 
@@ -112,12 +167,18 @@ function moveMarker(
     if (injectFailure) {
       throw new Error("Injected move failure");
     }
+    lease.commit();
     return { status: "moved" };
   } catch {
     source.setPermutation(sourceBefore);
     target.setPermutation(targetBefore);
+    lease.rollback();
     return { status: "rolled_back" };
   }
+}
+
+function blockResource(dimension: Dimension, location: Vector3): string {
+  return `${dimension.id}:${location.x}:${location.y}:${location.z}`;
 }
 
 function getBlock(dimension: Dimension, location: Vector3): Block {

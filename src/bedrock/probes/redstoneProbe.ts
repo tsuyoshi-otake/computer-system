@@ -26,9 +26,11 @@ const directions = [
 ] as const;
 
 export interface RedstoneProbeResult {
+  readonly analogLevelsVerified: number;
   readonly consumerEvents: number;
   readonly digitalMasksVerified: number;
   readonly inputFacesVerified: number;
+  readonly simultaneousAnalogOutputs: boolean;
 }
 
 export async function executeRedstoneProbe(
@@ -79,11 +81,80 @@ export async function executeRedstoneProbe(
     digitalMasksVerified += 1;
   }
 
+  const analog = await verifyRedstoneInterfaces(dimension);
+
   return {
+    analogLevelsVerified: analog.levelsVerified,
     consumerEvents,
     digitalMasksVerified,
     inputFacesVerified: directions.length,
+    simultaneousAnalogOutputs: analog.simultaneousOutputs,
   };
+}
+
+async function verifyRedstoneInterfaces(dimension: Dimension): Promise<{
+  readonly levelsVerified: number;
+  readonly simultaneousOutputs: boolean;
+}> {
+  const first = { x: 4, y: probeArenaY, z: -4 };
+  const second = { x: 4, y: probeArenaY, z: 4 };
+  const firstWire = offset(first, { x: 1, y: 0, z: 0 });
+  const secondWire = offset(second, { x: 1, y: 0, z: 0 });
+  for (const wire of [firstWire, secondWire]) {
+    getBlock(dimension, offset(wire, { x: 0, y: -1, z: 0 })).setType(
+      "minecraft:stone",
+    );
+    getBlock(dimension, wire).setType("minecraft:redstone_wire");
+  }
+
+  let levelsVerified = 0;
+  for (let power = 0; power < 16; power += 1) {
+    setInterfacePower(dimension, first, power);
+    const settled = await waitForPower(dimension, firstWire, power);
+    requireCondition(
+      settled,
+      `Redstone Interface power ${power} did not settle.`,
+    );
+    levelsVerified += 1;
+  }
+
+  setInterfacePower(dimension, first, 4);
+  setInterfacePower(dimension, second, 12);
+  const simultaneousOutputs =
+    (await waitForPower(dimension, firstWire, 4)) &&
+    (await waitForPower(dimension, secondWire, 12));
+  requireCondition(
+    simultaneousOutputs,
+    "Independent Redstone Interface outputs did not settle.",
+  );
+
+  return { levelsVerified, simultaneousOutputs };
+}
+
+function setInterfacePower(
+  dimension: Dimension,
+  location: Vector3,
+  power: number,
+): void {
+  getBlock(dimension, location).setPermutation(
+    BlockPermutation.resolve(
+      `computer_system:redstone_interface_${String(power).padStart(2, "0")}`,
+    ),
+  );
+}
+
+async function waitForPower(
+  dimension: Dimension,
+  location: Vector3,
+  expected: number,
+): Promise<boolean> {
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    await waitTicks(1);
+    if (getBlock(dimension, location).getRedstonePower() === expected) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function clearNeighbors(dimension: Dimension, center: Vector3): void {

@@ -329,6 +329,8 @@ function verifySessions(first, second) {
     for (const detail of [
       "successfulMove",
       "blockedMoveRejected",
+      "conflictRejected",
+      "unloadedMoveRejected",
       "rollbackRestored",
       "dropRecovered",
       "inventoryTransferred",
@@ -349,6 +351,12 @@ function verifySessions(first, second) {
     if (record.details.digitalMasksVerified !== 64) {
       throw new Error(`${name} did not verify 64 output masks.`);
     }
+    if (record.details.analogLevelsVerified !== 16) {
+      throw new Error(`${name} did not verify 16 analog levels.`);
+    }
+    if (record.details.simultaneousAnalogOutputs !== true) {
+      throw new Error(`${name} did not verify independent analog outputs.`);
+    }
   }
 
   if (firstSpeaker.details.calls !== 2 || secondSpeaker.details.calls !== 2) {
@@ -363,6 +371,9 @@ function verifySessions(first, second) {
     itemIdentityPersisted: secondIdentity.details.previousIdentityPresent,
     redstoneInputFaces: secondRedstone.details.inputFacesVerified,
     redstoneOutputMasks: secondRedstone.details.digitalMasksVerified,
+    redstoneAnalogLevels: secondRedstone.details.analogLevelsVerified,
+    turtleConflictRejected: secondTurtle.details.conflictRejected,
+    turtleUnloadedMoveRejected: secondTurtle.details.unloadedMoveRejected,
   };
 }
 
