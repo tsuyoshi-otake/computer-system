@@ -53,8 +53,10 @@ Both sessions also passed transactional turtle operations, two pitched sound
 calls, six-face redstone input sampling, all 64 independent digital output
 masks, all 16 Redstone Interface analog levels, and simultaneous analog levels 4
 and 12. Turtle probes rejected occupied, unloaded, and conflicting moves without
-leaving an active resource lease. The second session recovered the ItemStack
-identity written by the first.
+leaving an active resource lease. The second session recovered the Pocket
+Computer ItemStack identity written by the first. The custom item is parsed in
+the current direct-component format and is verified as non-stackable before any
+Dynamic Property is written.
 
 The arena loader polls a fixed set of required chunks for at most 40 ticks. Each
 redstone output transition settles for at most eight ticks. These bounds prevent
@@ -80,8 +82,8 @@ suite.
 
 `Verify:` Run `npm run validate`.
 
-`Expect:` Formatting, lint, type checking, ten host tests, and the pack build
-all exit successfully.
+`Expect:` Formatting, lint, type checking, 16 host tests, and the pack build all
+exit successfully.
 
 `Verify:` Set `BDS_HOME` and run `npm run test:bds`.
 

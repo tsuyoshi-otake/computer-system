@@ -1,5 +1,10 @@
 import { Player, system, world } from "@minecraft/server";
 
+import {
+  givePocketComputer,
+  registerPocketComputerComponent,
+  startPocketComputerLifecycle,
+} from "./pocketComputer.js";
 import { startHeadlessProbeSuite } from "./probes/headlessProbe.js";
 import { registerRedstoneProbeComponent } from "./probes/redstoneProbeComponent.js";
 import { startRuntimeProbe } from "./probes/runtimeProbe.js";
@@ -9,11 +14,15 @@ import { showTerminalProbe } from "./probes/uiProbe.js";
 
 const packVersion = "0.1.0";
 
-system.beforeEvents.startup.subscribe(({ blockComponentRegistry }): void => {
-  registerRedstoneProbeComponent(blockComponentRegistry);
-});
+system.beforeEvents.startup.subscribe(
+  ({ blockComponentRegistry, itemComponentRegistry }): void => {
+    registerRedstoneProbeComponent(blockComponentRegistry);
+    registerPocketComputerComponent(itemComponentRegistry);
+  },
+);
 
 system.run((): void => {
+  startPocketComputerLifecycle();
   world.sendMessage(`Computer System Phase 0 loaded (${packVersion}).`);
 });
 
@@ -37,7 +46,7 @@ system.afterEvents.scriptEventReceive.subscribe((event): void => {
     case "help":
     case "status":
       event.sourceEntity.sendMessage(
-        "Computer System Phase 0 commands: status, ui, runtime, storage, speaker, headless",
+        "Computer System Phase 0 commands: status, ui, pocket, runtime, storage, speaker, headless",
       );
       return;
     case "runtime":
@@ -59,6 +68,11 @@ system.afterEvents.scriptEventReceive.subscribe((event): void => {
     case "ui":
       void showTerminalProbe(event.sourceEntity);
       return;
+    case "pocket": {
+      const identity = givePocketComputer(event.sourceEntity);
+      event.sourceEntity.sendMessage(`Pocket Computer granted (${identity}).`);
+      return;
+    }
     default:
       event.sourceEntity.sendMessage(
         `Unknown Computer System probe: ${command}`,

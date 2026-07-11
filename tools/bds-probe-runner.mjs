@@ -177,6 +177,7 @@ function runServer(serverRoot, mode) {
     let ready = false;
     let terminalObserved = false;
     let stopSent = false;
+    let diagnosticContinuation = 0;
 
     const timeout = setTimeout(() => {
       requestStop();
@@ -206,8 +207,16 @@ function runServer(serverRoot, mode) {
           recentLines.shift();
         }
 
-        if (/\[(?:Blocks|Json|Scripting)\].*(?:error|warning)/iu.test(line)) {
+        if (
+          /\[(?:Blocks|Item|Items|Json|Scripting)\].*(?:error|warning)/iu.test(
+            line,
+          )
+        ) {
           console.error(`BDS_DIAGNOSTIC ${line}`);
+          diagnosticContinuation = 4;
+        } else if (diagnosticContinuation > 0 && line.trim() !== "") {
+          console.error(`BDS_DIAGNOSTIC ${line}`);
+          diagnosticContinuation -= 1;
         }
 
         if (!ready && /Server started/u.test(line)) {

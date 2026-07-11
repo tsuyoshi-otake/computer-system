@@ -75,3 +75,22 @@ Verify:
 The automated BDS suite proves that both stable API calls are accepted. This
 manual check covers only audibility and perceived pitch; it does not replace the
 automated result.
+
+## Phase 0 Pocket Computer checklist
+
+Run this command as a player:
+
+```text
+/scriptevent computer_system:probe pocket
+```
+
+Verify:
+
+- Chat reports that one Pocket Computer was granted with an instance ID.
+- The item appears with a clock icon and cannot stack above one.
+- Holding and using the item opens `Computer System Phase 0 Terminal`.
+- Dropping the item closes ownership cleanly; picking it up and using it opens
+  the terminal again.
+
+Automated tests cover identity persistence and lifecycle transitions. This check
+covers the real player's item-use interaction and presentation only.

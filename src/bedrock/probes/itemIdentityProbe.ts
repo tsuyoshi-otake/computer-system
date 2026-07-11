@@ -6,8 +6,12 @@ import {
 } from "@minecraft/server";
 
 import { offset, probeArenaY, requireCondition } from "./worldProbeSupport.js";
+import {
+  pocketComputerTypeId,
+  pocketIdentityProperty,
+} from "../pocketComputer.js";
 
-const identityProperty = "computer_system:instance_id";
+const identityProperty = pocketIdentityProperty;
 
 export interface ItemIdentityProbeResult {
   readonly droppedIdentityPreserved: boolean;
@@ -36,13 +40,17 @@ export function executeItemIdentityProbe(
   const previousIdentityPresent = typeof previousIdentity === "string";
   if (previous !== undefined) {
     requireCondition(
-      previous.typeId === "minecraft:diamond_sword" && previousIdentityPresent,
+      previous.typeId === pocketComputerTypeId && previousIdentityPresent,
       "Persisted identity item was corrupt.",
     );
   }
 
   const identity = `computer-${world.getAbsoluteTime()}`;
-  const item = new ItemStack("minecraft:diamond_sword", 1);
+  const item = new ItemStack(pocketComputerTypeId, 1);
+  requireCondition(
+    !item.isStackable && item.maxAmount === 1,
+    `Pocket Computer item definition is stackable (isStackable=${String(item.isStackable)}, maxAmount=${String(item.maxAmount)}).`,
+  );
   item.setDynamicProperty(identityProperty, identity);
   inventory.container.setItem(0, item);
 
