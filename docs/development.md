@@ -22,7 +22,35 @@ npm run deploy
 
 `npm run build` creates development Behavior and Resource Packs under `dist/`.
 `npm run deploy` replaces only the `computer_system_phase_0` development-pack
-directories in the locally installed Bedrock client.
+directories in the locally installed Bedrock GDK client. The deployment root is
+`%APPDATA%\Minecraft Bedrock\users\shared\games\com.mojang`, which is the
+current Windows creator-content location following the UWP-to-GDK migration.
+
+## Headless Bedrock verification
+
+Download and extract the official Bedrock Dedicated Server distribution, then
+point `BDS_HOME` at the extracted directory. Downloading the server constitutes
+acceptance of the Minecraft EULA and Privacy Policy, so the repository tooling
+does not download it automatically.
+
+```text
+$env:BDS_HOME="C:\path\to\bedrock-server"
+npm run test:bds
+```
+
+The runner copies the distribution into a new isolated directory under
+`~/tmp/computer-system-bds/`; it never modifies `BDS_HOME`. It creates a test
+world, installs both Phase 0 packs, runs the stable Script API probes twice, and
+requires the Dynamic Property sequence to survive the server restart. Every
+suite branch must emit a `CS_PROBE_RESULT` terminal record. The runner uses an
+allowlist and keeps Xbox Live authentication enabled so no player can join the
+isolated server.
+
+Set `BDS_WORKDIR` only when an explicit empty work directory is preferred. The
+runner refuses a non-empty directory and never recursively deletes it.
+
+The remaining player-experience checks are listed in
+[the manual verification checklist](manual-verification.md).
 
 After activating both packs in a test world, run:
 
@@ -30,5 +58,6 @@ After activating both packs in a test world, run:
 /scriptevent computer_system:probe status
 ```
 
-The script should acknowledge the probe in chat. More probe commands will be
-added as Phase 0 capabilities are implemented.
+The script should acknowledge the probe in chat. The Dedicated Server console
+uses `scriptevent computer_system:probe headless` for the automated runtime and
+storage suite.

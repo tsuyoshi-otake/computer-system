@@ -1,5 +1,6 @@
 import { Player, system, world } from "@minecraft/server";
 
+import { startHeadlessProbeSuite } from "./probes/headlessProbe.js";
 import { startRuntimeProbe } from "./probes/runtimeProbe.js";
 import { runStorageProbe } from "./probes/storageProbe.js";
 import { showTerminalProbe } from "./probes/uiProbe.js";
@@ -15,17 +16,22 @@ system.afterEvents.scriptEventReceive.subscribe((event): void => {
     return;
   }
 
+  const command = event.message.trim().toLowerCase() || "status";
+  if (command === "headless") {
+    startHeadlessProbeSuite();
+    return;
+  }
+
   if (!(event.sourceEntity instanceof Player)) {
     world.sendMessage("Computer System probes must be run by a player.");
     return;
   }
 
-  const command = event.message.trim().toLowerCase() || "status";
   switch (command) {
     case "help":
     case "status":
       event.sourceEntity.sendMessage(
-        "Computer System Phase 0 commands: status, ui, runtime, storage",
+        "Computer System Phase 0 commands: status, ui, runtime, storage, headless",
       );
       return;
     case "runtime":

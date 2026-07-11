@@ -8,24 +8,39 @@ interface StorageProbeRecord {
   readonly writtenAtTick: number;
 }
 
+export interface StorageProbeResult {
+  readonly passed: boolean;
+  readonly previousSequence: number;
+  readonly sequence: number;
+  readonly totalDynamicPropertyBytes: number;
+}
+
 export function runStorageProbe(player: Player): void {
+  const result = executeStorageProbe(player.id);
+  player.sendMessage(
+    `Storage probe ${result.passed ? "PASS" : "FAIL"}: sequence=${result.sequence}, totalDynamicPropertyBytes=${result.totalDynamicPropertyBytes}.`,
+  );
+}
+
+export function executeStorageProbe(playerId: string): StorageProbeResult {
   const previous = readRecord();
   const next: StorageProbeRecord = {
-    playerId: player.id,
+    playerId,
     sequence: (previous?.sequence ?? 0) + 1,
     writtenAtTick: world.getAbsoluteTime(),
   };
 
   world.setDynamicProperty(storageProbeKey, JSON.stringify(next));
   const loaded = readRecord();
-  const passed =
-    loaded?.playerId === next.playerId &&
-    loaded.sequence === next.sequence &&
-    loaded.writtenAtTick === next.writtenAtTick;
-
-  player.sendMessage(
-    `Storage probe ${passed ? "PASS" : "FAIL"}: sequence=${next.sequence}, totalDynamicPropertyBytes=${world.getDynamicPropertyTotalByteCount()}.`,
-  );
+  return {
+    passed:
+      loaded?.playerId === next.playerId &&
+      loaded.sequence === next.sequence &&
+      loaded.writtenAtTick === next.writtenAtTick,
+    previousSequence: previous?.sequence ?? 0,
+    sequence: next.sequence,
+    totalDynamicPropertyBytes: world.getDynamicPropertyTotalByteCount(),
+  };
 }
 
 function readRecord(): StorageProbeRecord | undefined {

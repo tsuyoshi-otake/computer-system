@@ -3,19 +3,19 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const localAppData = process.env.LOCALAPPDATA;
+const appData = process.env.APPDATA;
 
-if (localAppData === undefined) {
+if (appData === undefined) {
   throw new Error(
-    "LOCALAPPDATA is required to deploy Bedrock development packs.",
+    "APPDATA is required to deploy Bedrock GDK development packs.",
   );
 }
 
 const comMojang = path.join(
-  localAppData,
-  "Packages",
-  "Microsoft.MinecraftUWP_8wekyb3d8bbwe",
-  "LocalState",
+  appData,
+  "Minecraft Bedrock",
+  "users",
+  "shared",
   "games",
   "com.mojang",
 );

@@ -14,9 +14,9 @@ before production architecture depends on an unsupported behavior.
 
 - [x] Pin a current stable Bedrock version, pack format, and Script API module
       versions.
-- [ ] Prove that a bundled TypeScript runtime loads without experimental
+- [x] Prove that a bundled TypeScript runtime loads without experimental
       toggles.
-- [ ] Run instruction-budgeted work for 20 simulated computers without watchdog
+- [x] Run instruction-budgeted work for 20 simulated computers without watchdog
       termination.
 - [ ] Measure bundle size, tick cost, and memory warning signals.
 
@@ -85,6 +85,21 @@ before production architecture depends on an unsupported behavior.
 - [ ] Performance observations for a low-end-safe budget baseline.
 - [ ] Updated compatibility boundaries in #1 and `docs/roadmap.md`.
 - [ ] A concrete go/no-go decision and fallback for every non-green result.
+
+## Evidence checkpoint
+
+- The GDK client recognized and activated both packs from the current shared
+  creator-content directory.
+- The stable Script API bundle loaded without Beta API experiments.
+- A tester completed the in-game runtime command through the 20-computer probe.
+- Six host tests cover fair scheduling, transactional paged storage recovery,
+  and the machine-readable probe protocol.
+- `npm run test:bds` now prepares an isolated Dedicated Server world and runs
+  runtime and Dynamic Property probes across a restart. Execution remains
+  pending until an official BDS distribution is supplied through `BDS_HOME`.
+- Visual, audio, and interaction-only checks are isolated in
+  `docs/manual-verification.md`; automation does not control the Minecraft
+  client.
 
 ## Acceptance rubric
 
