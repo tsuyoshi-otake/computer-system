@@ -41,14 +41,21 @@ npm run test:bds
 The runner copies the distribution into a new isolated directory under
 `~/tmp/computer-system-bds/`; it never modifies `BDS_HOME`. It creates a test
 world, installs both Phase 0 packs, runs the stable Script API probes twice, and
-requires the Dynamic Property sequence to survive the server restart. Every
-suite branch must emit a `CS_PROBE_RESULT` terminal record. The runner uses an
-allowlist and keeps Xbox Live authentication enabled so no player can join the
-isolated server.
+requires both the World Dynamic Property sequence and non-stackable ItemStack
+identity to survive the server restart. Every suite branch must emit a
+`CS_PROBE_RESULT` terminal record. The runner uses an allowlist and keeps Xbox
+Live authentication enabled so no player can join the isolated server.
 
 The harness was verified against Bedrock Dedicated Server 1.26.33.2. Both
 sessions completed with 20 computers receiving exactly 2,000 instructions over
 40 ticks, and the Dynamic Property sequence advanced from 1 to 2 after restart.
+Both sessions also passed transactional turtle operations, two pitched sound
+calls, six-face redstone input sampling, and all 64 independent digital output
+masks. The second session recovered the ItemStack identity written by the first.
+
+The arena loader polls a fixed set of required chunks for at most 40 ticks. Each
+redstone output transition settles for at most eight ticks. These bounds prevent
+startup races without turning either path into an unbounded retry loop.
 
 Set `BDS_WORKDIR` only when an explicit empty work directory is preferred. The
 runner refuses a non-empty directory and never recursively deletes it.
@@ -63,5 +70,18 @@ After activating both packs in a test world, run:
 ```
 
 The script should acknowledge the probe in chat. The Dedicated Server console
-uses `scriptevent computer_system:probe headless` for the automated runtime and
-storage suite.
+uses `scriptevent computer_system:probe headless` for the complete automated
+suite.
+
+## Headless verification rubric
+
+`Verify:` Run `npm run validate`.
+
+`Expect:` Formatting, lint, type checking, seven host tests, and the pack build
+all exit successfully.
+
+`Verify:` Set `BDS_HOME` and run `npm run test:bds`.
+
+`Expect:` Both isolated sessions end in a `suite/PASS` terminal record; the
+second session reports storage sequence 2, persisted item identity, six input
+faces, 64 digital output masks, and runtime minimum/maximum 2,000.

@@ -41,3 +41,21 @@ The following checks remain manual when their probes are implemented:
 Logic behind these surfaces still requires automated tests. A manual result must
 not substitute for state-transition, persistence, scheduling, or failure-path
 coverage.
+
+## Phase 0 speaker checklist
+
+Stand somewhere quiet and run:
+
+```text
+/scriptevent computer_system:probe speaker
+```
+
+Verify:
+
+- Two short registered notes are audible at the player's position.
+- The second note is clearly higher than the first.
+- Chat reports two calls and pitches `0.5,2`.
+
+The automated BDS suite proves that both stable API calls are accepted. This
+manual check covers only audibility and perceived pitch; it does not replace the
+automated result.

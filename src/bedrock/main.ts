@@ -1,11 +1,17 @@
 import { Player, system, world } from "@minecraft/server";
 
 import { startHeadlessProbeSuite } from "./probes/headlessProbe.js";
+import { registerRedstoneProbeComponent } from "./probes/redstoneProbeComponent.js";
 import { startRuntimeProbe } from "./probes/runtimeProbe.js";
+import { executeSpeakerProbe } from "./probes/speakerProbe.js";
 import { runStorageProbe } from "./probes/storageProbe.js";
 import { showTerminalProbe } from "./probes/uiProbe.js";
 
 const packVersion = "0.1.0";
+
+system.beforeEvents.startup.subscribe(({ blockComponentRegistry }): void => {
+  registerRedstoneProbeComponent(blockComponentRegistry);
+});
 
 system.run((): void => {
   world.sendMessage(`Computer System Phase 0 loaded (${packVersion}).`);
@@ -31,7 +37,7 @@ system.afterEvents.scriptEventReceive.subscribe((event): void => {
     case "help":
     case "status":
       event.sourceEntity.sendMessage(
-        "Computer System Phase 0 commands: status, ui, runtime, storage, headless",
+        "Computer System Phase 0 commands: status, ui, runtime, storage, speaker, headless",
       );
       return;
     case "runtime":
@@ -40,6 +46,16 @@ system.afterEvents.scriptEventReceive.subscribe((event): void => {
     case "storage":
       runStorageProbe(event.sourceEntity);
       return;
+    case "speaker": {
+      const result = executeSpeakerProbe(
+        event.sourceEntity.dimension,
+        event.sourceEntity.location,
+      );
+      event.sourceEntity.sendMessage(
+        `Speaker probe issued ${result.calls} notes at pitches ${result.pitches}.`,
+      );
+      return;
+    }
     case "ui":
       void showTerminalProbe(event.sourceEntity);
       return;

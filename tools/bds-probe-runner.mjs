@@ -206,6 +206,10 @@ function runServer(serverRoot, mode) {
           recentLines.shift();
         }
 
+        if (/\[(?:Blocks|Json|Scripting)\].*(?:error|warning)/iu.test(line)) {
+          console.error(`BDS_DIAGNOSTIC ${line}`);
+        }
+
         if (!ready && /Server started/u.test(line)) {
           ready = true;
           if (mode === "generate") {
@@ -240,7 +244,8 @@ function runServer(serverRoot, mode) {
         console.log(`${probeLogPrefix}${JSON.stringify(record)}`);
         if (
           record.probe === "suite" &&
-          (record.details?.phase === "complete" || record.status !== "PASS")
+          (record.details?.phase === "complete" ||
+            record.details?.phase === "exception")
         ) {
           terminalObserved = true;
           requestStop();
@@ -280,8 +285,16 @@ function runServer(serverRoot, mode) {
 function verifySessions(first, second) {
   const firstStorage = requirePassingRecord(first, "storage");
   const firstRuntime = requirePassingRecord(first, "runtime");
+  const firstTurtle = requirePassingRecord(first, "turtle");
+  const firstIdentity = requirePassingRecord(first, "item_identity");
+  const firstSpeaker = requirePassingRecord(first, "speaker");
+  const firstRedstone = requirePassingRecord(first, "redstone");
   const secondStorage = requirePassingRecord(second, "storage");
   const secondRuntime = requirePassingRecord(second, "runtime");
+  const secondTurtle = requirePassingRecord(second, "turtle");
+  const secondIdentity = requirePassingRecord(second, "item_identity");
+  const secondSpeaker = requirePassingRecord(second, "speaker");
+  const secondRedstone = requirePassingRecord(second, "redstone");
   requirePassingRecord(first, "suite", "complete");
   requirePassingRecord(second, "suite", "complete");
 
@@ -302,12 +315,54 @@ function verifySessions(first, second) {
       "Dynamic Property sequence did not persist across restart.",
     );
   }
+  if (firstIdentity.details.previousIdentityPresent !== false) {
+    throw new Error("First session unexpectedly found an identity item.");
+  }
+  if (secondIdentity.details.previousIdentityPresent !== true) {
+    throw new Error("Item identity did not persist across restart.");
+  }
+
+  for (const [name, record] of [
+    ["first turtle", firstTurtle],
+    ["second turtle", secondTurtle],
+  ]) {
+    for (const detail of [
+      "successfulMove",
+      "blockedMoveRejected",
+      "rollbackRestored",
+      "dropRecovered",
+      "inventoryTransferred",
+    ]) {
+      if (record.details[detail] !== true) {
+        throw new Error(`${name} did not verify ${detail}.`);
+      }
+    }
+  }
+
+  for (const [name, record] of [
+    ["first redstone", firstRedstone],
+    ["second redstone", secondRedstone],
+  ]) {
+    if (record.details.inputFacesVerified !== 6) {
+      throw new Error(`${name} did not verify six input faces.`);
+    }
+    if (record.details.digitalMasksVerified !== 64) {
+      throw new Error(`${name} did not verify 64 output masks.`);
+    }
+  }
+
+  if (firstSpeaker.details.calls !== 2 || secondSpeaker.details.calls !== 2) {
+    throw new Error("Speaker probe did not issue both pitched sound calls.");
+  }
 
   return {
     firstStorageSequence: firstStorage.details.sequence,
     secondStorageSequence: secondStorage.details.sequence,
     runtimeMinimum: secondRuntime.details.minimum,
     runtimeMaximum: secondRuntime.details.maximum,
+    itemIdentityPersisted: secondIdentity.details.previousIdentityPresent,
+    redstoneInputFaces: secondRedstone.details.inputFacesVerified,
+    redstoneOutputMasks: secondRedstone.details.digitalMasksVerified,
   };
 }
 

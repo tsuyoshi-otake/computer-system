@@ -1,7 +1,12 @@
-import { cp, mkdir, readFile, rm } from "node:fs/promises";
+import { cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
+
+import {
+  createRedstoneProbeBlock,
+  redstoneProbeIdentifier,
+} from "./redstone-probe-block.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const outputRoot = path.join(root, "dist");
@@ -19,6 +24,19 @@ await Promise.all([
     recursive: true,
   }),
 ]);
+
+const generatedBlocksDirectory = path.join(behaviorOutput, "blocks");
+await mkdir(generatedBlocksDirectory, { recursive: true });
+await Promise.all(
+  Array.from({ length: 64 }, async (_, mask) => {
+    const identifier = redstoneProbeIdentifier(mask).split(":")[1];
+    await writeFile(
+      path.join(generatedBlocksDirectory, `${identifier}.json`),
+      `${JSON.stringify(createRedstoneProbeBlock(mask), null, 2)}\n`,
+      "utf8",
+    );
+  }),
+);
 
 await build({
   bundle: true,
