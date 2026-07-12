@@ -1,7 +1,6 @@
 # Phase 5: Implement turtles and upgrades
 
-Parent: #1
-Blocked by: #6
+Parent: #1 Blocked by: #6
 
 ## Scope
 
@@ -10,9 +9,11 @@ Blocked by: #6
 - [ ] Implement inspect, detect, dig, place, attack, suck, and drop.
 - [ ] Implement 16-slot inventory, adjacent-container transfers, and fuel.
 - [ ] Implement left and right upgrade slots.
-- [ ] Implement mining, melee, digging, felling, farming, wireless, Ender, noisy, and crafty upgrades.
+- [ ] Implement mining, melee, digging, felling, farming, wireless, Ender,
+      noisy, and crafty upgrades.
 - [ ] Implement representative preconfigured turtle items and recipes.
-- [ ] Define recovery ownership for block, entity, inventory, and chunk failures.
+- [ ] Define recovery ownership for block, entity, inventory, and chunk
+      failures.
 
 ## Acceptance rubric
 

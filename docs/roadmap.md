@@ -170,8 +170,8 @@ off -> booting -> running
 missing block -> orphaned -> restored or administratively removed
 ```
 
-Every lifecycle, VM, peripheral, storage, and turtle branch must terminate in
-an observable success, wait, retry, stopped, or failed state. No caught or
+Every lifecycle, VM, peripheral, storage, and turtle branch must terminate in an
+observable success, wait, retry, stopped, or failed state. No caught or
 suppressed error may leave a device accidentally marked as running.
 
 ## Load and safety constraints
@@ -185,14 +185,17 @@ suppressed error may leave a device accidentally marked as running.
 - no every-tick full inventory scan for pocket computers
 - no implicit chunk loading for turtles
 - command computers are administrator-only and command-audited
-- unsupported Bedrock behavior fails explicitly instead of silently producing
-  an incorrect approximation
+- unsupported Bedrock behavior fails explicitly instead of silently producing an
+  incorrect approximation
 
 ## Known compatibility boundaries
 
 - Bedrock UI cannot expose every raw keyboard and mouse event exactly like a
-  Java ComputerCraft terminal.
-- Monitor rendering requires a bounded refresh rate and distance-aware updates.
+  Java ComputerCraft terminal. The production terminal must use an explicit cell
+  buffer and map cancel, disconnect, competing-form, and failure outcomes into
+  VM-visible results.
+- Stable APIs do not expose arbitrary world-facing text rendering. Monitors use
+  a bounded world frame and touch mapping plus the terminal UI fallback.
 - Speakers can play registered sounds and pitched notes, but arbitrary DFPWM or
   PCM streaming is not part of the initial release.
 - A computer block cannot expose six independent analog output strengths with
@@ -228,6 +231,12 @@ suppressed error may leave a device accidentally marked as running.
 - [ ] stable computer IDs and block/item identity transfer
 - [ ] Computer System OS shell and editor
 - [ ] Bedrock terminal UI
+  - dedicated ComputerCraft-inspired 51x19 cell presentation rather than the
+    Phase 0 DDUI probe
+  - fixed cells, monospace glyphs, cursor state, 16-color palette, and primary
+    input controls without scrolling at the reference resolution
+  - coalesced bounded redraws and explicit close/disconnect/competing-form
+    finalization
 - [ ] paged and transactional filesystem persistence
 - [ ] `startup.py`, shutdown, reboot, and crash reporting
 
@@ -293,8 +302,8 @@ for further progress or cleanup.
 
 ### Filesystem durability
 
-`Verify:` Save files, interrupt a staged generation write, reload the world,
-and remount floppy disks.
+`Verify:` Save files, interrupt a staged generation write, reload the world, and
+remount floppy disks.
 
 `Expect:` The latest complete generation loads, partial data is ignored, and
 computer and disk identities remain stable.
@@ -309,8 +318,8 @@ events, updates the terminal, and changes the output.
 
 ### Networking
 
-`Verify:` Test direct, broadcast, protocol-filtered, timed-out, wired,
-wireless, Ender, and cross-dimension messages.
+`Verify:` Test direct, broadcast, protocol-filtered, timed-out, wired, wireless,
+Ender, and cross-dimension messages.
 
 `Expect:` Messages reach exactly the eligible computers with no duplicates and
 timeouts return control to the caller.

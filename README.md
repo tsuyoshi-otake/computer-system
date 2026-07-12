@@ -15,6 +15,12 @@ The project is in its architecture and bootstrap phase. See
 [the implementation roadmap](docs/roadmap.md) for the planned compatibility
 scope and executable acceptance criteria.
 
+Development setup and Phase 0 evidence are documented in
+[the development guide](docs/development.md) and
+[the feasibility matrix](docs/feasibility-matrix.md). Player-experience checks
+are intentionally isolated in the
+[manual verification checklist](docs/manual-verification.md).
+
 ## Planned platform
 
 - Minecraft Bedrock Edition

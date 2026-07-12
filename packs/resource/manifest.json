@@ -1,0 +1,17 @@
+{
+  "format_version": 2,
+  "header": {
+    "name": "Computer System Phase 0 RP",
+    "description": "Resources for Computer System Bedrock feasibility probes",
+    "uuid": "ad53eb5b-6854-4977-b9d8-b45d7ccc29ba",
+    "version": [0, 1, 0],
+    "min_engine_version": [1, 26, 30]
+  },
+  "modules": [
+    {
+      "type": "resources",
+      "uuid": "c81a7baf-1da0-4577-b40a-cd803d0ff6f1",
+      "version": [0, 1, 0]
+    }
+  ]
+}
