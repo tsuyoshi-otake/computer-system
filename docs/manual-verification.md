@@ -48,6 +48,29 @@ Do not mark Phase 2 complete when any item above is `NOT_RECORDED`; host tests
 do not substitute for layout, controller focus, background-color, or
 responsiveness evidence.
 
+### Phase 2 terminal result: Windows GDK 1.26.33
+
+- Palette: `PASS_WITH_CONSTRAINT` — all 16 indexed foreground colors and all 16
+  background swatches were visibly distinct at 1280x1030 after assigning each
+  index a unique native formatting color. The native label has no cell
+  background API, so a blank cell with a non-default background is represented
+  by a colored block glyph rather than exact RGB behind arbitrary text.
+- Continuous output: `PASS_WITH_CONSTRAINT` — the bounded stream reached 200
+  updates, Minecraft remained responsive, and Close reported `updates: 200`,
+  `state: completed`, and `kind: cancelled`. A capture taken immediately around
+  a full-label replacement could still show a transient partial frame; the next
+  stable frame was complete.
+- Layout: `FAIL_COMPATIBILITY_BOUNDARY` — 51-character rows wrap in the native
+  form width and Input, Submit, and Terminate are not all simultaneously visible
+  without vertical scrolling. GDK 1.26.33 ignored the attempted Resource Pack
+  header/label remapping, so this cannot truthfully satisfy the no-scroll gate
+  through the current stable `CustomForm` API.
+- Real disconnect: `PASS` — the GDK client joined the persistent localhost BDS,
+  opened the terminal, and exited while the form remained open. The server
+  stayed running and recorded exactly one
+  `CS_TERMINAL_CLOSE {"kind":"disconnected"}`; the disconnect harness passed
+  with `terminalResults: 1`.
+
 ## Phase 0 terminal checklist
 
 Run this command as a player in the `Computer System Phase 0` test world:

@@ -31,3 +31,11 @@
   reporting step so one exception cannot skip later work or leak ownership. —
   Evidence: deferred-finalization tests inject failures into all three phases
   and observe remaining steps plus guard release.
+- GDK 1.26.33 native labels expose foreground formatting but no per-cell
+  background API. Render non-default blank backgrounds as block glyphs and keep
+  the 16-index formatting-code mapping injective; otherwise distinct terminal
+  palette entries silently collapse to the same visible color.
+- Relaunch Minecraft for Windows through its registered app ID
+  `Microsoft.MinecraftUWP_8wekyb3d8bbwe!Game`. Immediately launching the
+  `C:\XboxGames\...\Minecraft.Windows.exe` path after shutdown can be ignored
+  even when no process or crash event remains.

@@ -23,6 +23,7 @@ import { runStorageProbe } from "./probes/storageProbe.js";
 import {
   showTerminalProbe,
   startTerminalCompetitionProbe,
+  startTerminalStreamProbe,
 } from "./probes/uiProbe.js";
 
 const packVersion = "0.1.0";
@@ -63,7 +64,7 @@ system.afterEvents.scriptEventReceive.subscribe((event): void => {
     case "help":
     case "status":
       event.sourceEntity.sendMessage(
-        "Computer System Phase 0 commands: status, ui, compete, monitor, pocket, runtime, storage, speaker, headless",
+        "Computer System Phase 0 commands: status, ui, stream, compete, monitor, pocket, runtime, storage, speaker, headless",
       );
       return;
     case "runtime":
@@ -92,6 +93,11 @@ system.afterEvents.scriptEventReceive.subscribe((event): void => {
     case "compete": {
       const player = event.sourceEntity;
       system.run((): void => startTerminalCompetitionProbe(player));
+      return;
+    }
+    case "stream": {
+      const player = event.sourceEntity;
+      system.run((): void => startTerminalStreamProbe(player));
       return;
     }
     case "pocket": {

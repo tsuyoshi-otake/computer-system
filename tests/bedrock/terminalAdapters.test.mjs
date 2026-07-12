@@ -12,6 +12,19 @@ describe("Bedrock terminal adapters", () => {
     );
   });
 
+  it("maps every terminal palette index to a distinct native formatting color", async () => {
+    const terminalView = await source("src/bedrock/terminalView.ts");
+    const paletteSource = terminalView.match(
+      /const formattingCodes = \[([\s\S]*?)\] as const;/u,
+    )?.[1];
+    const codes = [...(paletteSource ?? "").matchAll(/"([0-9a-f])"/gu)].map(
+      (match) => match[1],
+    );
+
+    expect(codes).toHaveLength(16);
+    expect(new Set(codes)).toHaveProperty("size", 16);
+  });
+
   it("routes Computer and Pocket Computer through the production coordinator", async () => {
     const [computer, pocket, coordinator] = await Promise.all([
       source("src/bedrock/computerComponent.ts"),
@@ -79,6 +92,20 @@ describe("Bedrock terminal adapters", () => {
       "const executable = path.join(serverRoot, executableName)",
     );
     expect(packageJson).toContain('"test:bds:disconnect"');
+  });
+
+  it("exposes bounded background and continuous-output GDK probes", async () => {
+    const [main, probe] = await Promise.all([
+      source("src/bedrock/main.ts"),
+      source("src/bedrock/probes/uiProbe.ts"),
+    ]);
+
+    expect(main).toContain('case "stream"');
+    expect(probe).toContain("startTerminalStreamProbe");
+    expect(probe).toContain("CS_TERMINAL_STREAM");
+    expect(probe).toContain("updates !== 200");
+    expect(probe).toContain("system.clearRun(streamRun)");
+    expect(probe).toContain('color === 15 ? "█" : " "');
   });
 });
 
