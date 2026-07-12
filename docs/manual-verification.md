@@ -123,3 +123,13 @@ Verify:
 
 The BDS suite verifies discovery and update bounds. This manual check covers the
 real block-face coordinates and player-facing fallback interaction.
+
+### Result: Windows GDK 1.26.33
+
+- Connected surface: `PASS` — the generated 3x2 Monitor surface was available
+  for player interaction.
+- Touch mapping: `PASS` — separate touches reported `monitor_touch north 45 3`
+  and `monitor_touch north 38 3`, proving that the mapped cell changes with the
+  interaction position.
+- Terminal fallback: `PASS` — a valid Monitor touch opened the Computer System
+  terminal UI.
