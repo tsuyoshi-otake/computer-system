@@ -1,0 +1,65 @@
+import { describe, expect, it } from "vitest";
+
+import {
+  TerminalBuffer,
+  TerminalError,
+} from "../../src/domain/terminal/terminalBuffer.js";
+
+describe("terminal cell buffer", (): void => {
+  it("tracks fixed cells, colors, cursor position, and clipping", (): void => {
+    const terminal = new TerminalBuffer(5, 2);
+    terminal.setTextColor(3);
+    terminal.setBackgroundColor(12);
+    terminal.setCursorPosition(4, 1);
+    terminal.write("abcd");
+
+    expect(terminal.line(1)).toBe("   ab");
+    expect(terminal.cell(4, 1)).toEqual({
+      character: "a",
+      foreground: 3,
+      background: 12,
+    });
+    expect(terminal.cursorX).toBe(8);
+    expect(terminal.cursorY).toBe(1);
+  });
+
+  it("clears with current colors and scrolls in both directions", (): void => {
+    const terminal = new TerminalBuffer(3, 3);
+    for (let row = 1; row <= 3; row += 1) {
+      terminal.setCursorPosition(1, row);
+      terminal.write(String(row).repeat(3));
+    }
+    terminal.setTextColor(2);
+    terminal.setBackgroundColor(9);
+    terminal.scroll(1);
+
+    expect([terminal.line(1), terminal.line(2), terminal.line(3)]).toEqual([
+      "222",
+      "333",
+      "   ",
+    ]);
+    expect(terminal.cell(1, 3)).toMatchObject({ foreground: 2, background: 9 });
+    terminal.scroll(-1);
+    expect([terminal.line(1), terminal.line(2), terminal.line(3)]).toEqual([
+      "   ",
+      "222",
+      "333",
+    ]);
+    terminal.setCursorPosition(1, 2);
+    terminal.clearLine();
+    expect(terminal.line(2)).toBe("   ");
+    terminal.clear();
+    expect(terminal.line(3)).toBe("   ");
+  });
+
+  it("stores cursor blink and rejects invalid dimensions, coordinates, colors, and line breaks", (): void => {
+    const terminal = new TerminalBuffer(2, 2);
+    terminal.setCursorBlink(true);
+    expect(terminal.cursorBlink).toBe(true);
+    expect(() => new TerminalBuffer(0, 1)).toThrow(TerminalError);
+    expect(() => new TerminalBuffer(201, 1)).toThrow(TerminalError);
+    expect(() => terminal.setCursorPosition(0, 1)).toThrow(TerminalError);
+    expect(() => terminal.setTextColor(16)).toThrow(TerminalError);
+    expect(() => terminal.write("a\nb")).toThrow(TerminalError);
+  });
+});

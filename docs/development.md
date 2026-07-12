@@ -1,5 +1,18 @@
 # Development
 
+## Host runtime verification
+
+The Phase 1 language, VM, scheduler, terminal, filesystem, and native modules
+run entirely outside Minecraft. Run the complete acceptance suite with:
+
+```powershell
+npm run validate
+```
+
+This checks formatting, lint, TypeScript types, deterministic host tests, and
+the production Behavior Pack build. The Phase 1 evidence map is recorded in
+[`docs/issues/phase-1-host-runtime.md`](issues/phase-1-host-runtime.md).
+
 ## Supported Phase 0 environment
 
 - Minecraft Bedrock Edition 1.26.30 or later in the 1.26 release line
