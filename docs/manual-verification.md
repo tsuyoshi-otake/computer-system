@@ -94,3 +94,13 @@ Verify:
 
 Automated tests cover identity persistence and lifecycle transitions. This check
 covers the real player's item-use interaction and presentation only.
+
+### Result: Windows GDK 1.26.33
+
+- Item grant and presentation: `PASS` — the Pocket Computer was granted and
+  appeared as a usable held item.
+- Item use: `PASS` — using the held Pocket Computer opened the Computer System
+  terminal.
+- Drop and pickup reuse: `NOT_RECORDED` — identity preservation through an item
+  entity is covered by BDS, but the player interaction was not separately
+  recorded in this manual run.
