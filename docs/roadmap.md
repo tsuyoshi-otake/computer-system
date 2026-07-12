@@ -217,12 +217,12 @@ suppressed error may leave a device accidentally marked as running.
 
 ### M1: Repository and host-side runtime
 
-- [ ] TypeScript package, lint, formatting, type-checking, and Vitest setup
-- [ ] domain boundaries and Minecraft adapter interfaces
-- [ ] Python lexer and parser
-- [ ] bytecode compiler and deterministic VM
-- [ ] fair scheduler, events, timers, terminal buffer, and in-memory filesystem
-- [ ] initial `os`, `term`, and `fs` modules
+- [x] TypeScript package, lint, formatting, type-checking, and Vitest setup
+- [x] domain boundaries and Minecraft adapter interfaces
+- [x] Python lexer and parser
+- [x] bytecode compiler and deterministic VM
+- [x] fair scheduler, events, timers, terminal buffer, and in-memory filesystem
+- [x] initial `os`, `term`, and `fs` modules
 
 ### M2: Bedrock Computer vertical slice
 

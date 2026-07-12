@@ -11,7 +11,8 @@ pocket computers, and turtles follow ComputerCraft-style behavior.
 
 ## Status
 
-The project is in its architecture and bootstrap phase. See
+The host-side Phase 1 runtime is complete, and the project is ready for the
+Bedrock Computer vertical slice. See
 [the implementation roadmap](docs/roadmap.md) for the planned compatibility
 scope and executable acceptance criteria.
 
