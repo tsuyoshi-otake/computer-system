@@ -1,17 +1,19 @@
 # Development
 
-## Host runtime verification
+## Host and vertical-slice verification
 
-The Phase 1 language, VM, scheduler, terminal, filesystem, and native modules
-run entirely outside Minecraft. Run the complete acceptance suite with:
+The language, VM, scheduler, computer lifecycle, terminal, filesystem,
+persistence adapters, OS, and native modules run entirely outside Minecraft. Run
+the complete host acceptance suite with:
 
 ```powershell
 npm run validate
 ```
 
 This checks formatting, lint, TypeScript types, deterministic host tests, and
-the production Behavior Pack build. The Phase 1 evidence map is recorded in
-[`docs/issues/phase-1-host-runtime.md`](issues/phase-1-host-runtime.md).
+the production Behavior/Resource Pack build. Phase evidence is recorded in
+[`docs/issues/phase-1-host-runtime.md`](issues/phase-1-host-runtime.md) and
+[`docs/issues/phase-2-computer-vertical-slice.md`](issues/phase-2-computer-vertical-slice.md).
 
 ## Supported Phase 0 environment
 

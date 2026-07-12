@@ -313,6 +313,10 @@ function verifySessions(first, second, bundleBytes) {
   const firstMonitor = requirePassingRecord(first.records, "monitor");
   const firstSpeaker = requirePassingRecord(first.records, "speaker");
   const firstRedstone = requirePassingRecord(first.records, "redstone");
+  const firstComputer = requirePassingRecord(
+    first.records,
+    "computer_vertical",
+  );
   const secondStorage = requirePassingRecord(second.records, "storage");
   const secondRuntime = requirePassingRecord(second.records, "runtime");
   const secondTurtle = requirePassingRecord(second.records, "turtle");
@@ -320,6 +324,10 @@ function verifySessions(first, second, bundleBytes) {
   const secondMonitor = requirePassingRecord(second.records, "monitor");
   const secondSpeaker = requirePassingRecord(second.records, "speaker");
   const secondRedstone = requirePassingRecord(second.records, "redstone");
+  const secondComputer = requirePassingRecord(
+    second.records,
+    "computer_vertical",
+  );
   requirePassingRecord(first.records, "suite", "complete");
   requirePassingRecord(second.records, "suite", "complete");
 
@@ -357,6 +365,20 @@ function verifySessions(first, second, bundleBytes) {
     throw new Error(
       "Dynamic Property sequence did not persist across restart.",
     );
+  }
+  for (const [name, record, loadedSnapshot] of [
+    ["first computer", firstComputer, false],
+    ["second computer", secondComputer, true],
+  ]) {
+    if (
+      record.details.identityStable !== true ||
+      record.details.loadedSnapshot !== loadedSnapshot ||
+      record.details.outputMask !== 2 ||
+      record.details.startupPresent !== true ||
+      record.details.terminatedOff !== true
+    ) {
+      throw new Error(`${name} did not verify the Phase 2 vertical slice.`);
+    }
   }
   if (firstIdentity.details.previousIdentityPresent !== false) {
     throw new Error("First session unexpectedly found an identity item.");
@@ -452,6 +474,7 @@ function verifySessions(first, second, bundleBytes) {
     runtimeMinimum: secondRuntime.details.minimum,
     runtimeMaximum: secondRuntime.details.maximum,
     itemIdentityPersisted: secondIdentity.details.previousIdentityPresent,
+    computerSnapshotPersisted: secondComputer.details.loadedSnapshot,
     monitorTiles: secondMonitor.details.tilesDiscovered,
     monitorCells: `${String(secondMonitor.details.cellsWide)}x${String(secondMonitor.details.cellsHigh)}`,
     redstoneInputFaces: secondRedstone.details.inputFacesVerified,

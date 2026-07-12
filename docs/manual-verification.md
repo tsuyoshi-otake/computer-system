@@ -4,6 +4,50 @@ Most Computer System behavior is verified by host tests or the headless Bedrock
 Dedicated Server harness. Manual testing is reserved for behavior that depends
 on a real player's visual, audio, or interaction experience.
 
+## Phase 2 Computer vertical-slice checklist
+
+Build and deploy both packs, create a clean world, and obtain
+`computer_system:computer_item` plus `computer_system:advanced_computer_item`.
+Record the exact client and server versions with each result.
+
+Verify lifecycle and persistence:
+
+- Place each Computer family and confirm interaction opens its 51x19 terminal.
+- Run `edit /startup.py`, enter a program, and finish with `.save`.
+- Break the Computer, confirm exactly one non-stackable item is returned, place
+  it elsewhere, and confirm its numeric computer ID and file remain unchanged.
+- Reload the world and confirm `startup.py` runs from a fresh VM.
+- Run an infinite program, press Terminate, and confirm Minecraft remains
+  responsive and the lifecycle reaches `off` exactly once.
+
+Verify redstone using a startup program that waits for `redstone`, reads `left`,
+and calls `redstone.set_output("right", value)`:
+
+- Toggle each of the six adjacent inputs and confirm the reported side and
+  analog level are correct.
+- Mirror left input to right output and confirm only the right output face emits
+  digital power 15.
+- Reload and repeat to prove identity, program, and output configuration
+  survive.
+
+Verify the shared terminal from a Computer, Pocket Computer, and Monitor touch:
+
+- All 51 columns and 19 rows remain visible with monospace alignment.
+- Cursor position/blink and every foreground/background combination from the 16
+  ComputerCraft palette colors are visually distinguishable.
+- The terminal and primary Input, Submit, Terminate, and Close controls require
+  no scrolling at the reference resolution.
+- Continuous output does not freeze Minecraft or expose a partial redraw queue.
+- Every submitted line reaches the VM once; rapid double submission creates two,
+  not zero, one, or more than two, events.
+- Terminate, normal Close, player disconnect, a competing form, server close,
+  and an injected presentation failure each produce exactly one visible/VM
+  result.
+
+Do not mark Phase 2 complete when any item above is `NOT_RECORDED`; host tests
+do not substitute for layout, controller focus, background-color, or
+responsiveness evidence.
+
 ## Phase 0 terminal checklist
 
 Run this command as a player in the `Computer System Phase 0` test world:

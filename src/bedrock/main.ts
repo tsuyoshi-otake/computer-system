@@ -1,5 +1,11 @@
 import { Player, system, world } from "@minecraft/server";
 
+import { startComputerHost } from "./computerHost.js";
+import {
+  registerComputerComponents,
+  startComputerComponents,
+} from "./computerComponent.js";
+
 import {
   placeMonitorProbe,
   registerMonitorComponent,
@@ -20,6 +26,7 @@ const packVersion = "0.1.0";
 
 system.beforeEvents.startup.subscribe(
   ({ blockComponentRegistry, itemComponentRegistry }): void => {
+    registerComputerComponents(blockComponentRegistry, itemComponentRegistry);
     registerRedstoneProbeComponent(blockComponentRegistry);
     registerMonitorComponent(blockComponentRegistry);
     registerPocketComputerComponent(itemComponentRegistry);
@@ -27,6 +34,8 @@ system.beforeEvents.startup.subscribe(
 );
 
 system.run((): void => {
+  startComputerHost();
+  startComputerComponents();
   startPocketComputerLifecycle();
   world.sendMessage(`Computer System Phase 0 loaded (${packVersion}).`);
 });

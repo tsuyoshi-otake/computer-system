@@ -11,11 +11,18 @@ import {
 } from "../../domain/runtime/value.js";
 import { TerminalError } from "../../domain/terminal/terminalBuffer.js";
 import type { TerminalBuffer } from "../../domain/terminal/terminalBuffer.js";
+import {
+  isRedstoneSide,
+  type RedstoneSide,
+  type RedstoneState,
+} from "../../domain/redstone/redstoneState.js";
+import { ShellSession } from "../os/shellSession.js";
 
 export interface NativeModuleContext {
   readonly computerId: number;
   readonly filesystem: InMemoryFilesystem;
   readonly terminal: TerminalBuffer;
+  readonly redstone?: RedstoneState;
   readonly currentTick?: () => number;
   readonly queueEvent?: (
     name: string,
@@ -23,23 +30,118 @@ export interface NativeModuleContext {
   ) => void;
   readonly startTimer?: (delayTicks: number) => number;
   readonly cancelTimer?: (timerId: number) => boolean;
+  readonly shutdown?: () => void;
+  readonly reboot?: () => void;
   readonly ticksPerSecond?: number;
 }
 
 export interface NativeEnvironment {
   readonly moduleLoader: ModuleLoader;
   readonly modules: ReadonlyMap<string, RuntimeNamespace>;
+  readonly globals: ReadonlyMap<string, RuntimeValue>;
 }
 
 export function createNativeEnvironment(
   context: NativeModuleContext,
 ): NativeEnvironment {
+  const shell = new ShellSession(context.filesystem);
   const modules = new Map<string, RuntimeNamespace>([
     ["os", createOsModule(context)],
     ["term", createTermModule(context.terminal)],
     ["fs", createFsModule(context.filesystem)],
+    ...(context.redstone === undefined
+      ? []
+      : ([["redstone", createRedstoneModule(context.redstone)]] as const)),
+    ["shell", createShellModule(shell, context)],
   ]);
-  return { modules, moduleLoader: (name) => modules.get(name) };
+  return {
+    modules,
+    moduleLoader: (name) => modules.get(name),
+    globals: new Map([["print", createPrint(context.terminal)]]),
+  };
+}
+
+function createShellModule(
+  shell: ShellSession,
+  context: NativeModuleContext,
+): RuntimeNamespace {
+  const banner = fn("banner", (positional, keywords) => {
+    requireArity(positional, keywords, 0, 0);
+    writeTerminalLines(context.terminal, ["Computer System OS"]);
+    return null;
+  });
+  const prompt = fn("prompt", (positional, keywords) => {
+    requireArity(positional, keywords, 0, 0);
+    context.terminal.write(shell.prompt());
+    return null;
+  });
+  const submit = fn("submit", (positional, keywords) => {
+    requireArity(positional, keywords, 1, 1);
+    const line = stringArgument(positional[0]);
+    writeTerminalLines(context.terminal, [line]);
+    const result = shell.submit(line);
+    if (result.action === "clear") {
+      context.terminal.clear();
+      context.terminal.setCursorPosition(1, 1);
+    } else {
+      writeTerminalLines(context.terminal, result.lines);
+    }
+    if (result.action === "shutdown") {
+      requireCapability(context.shutdown, "shutdown")();
+    } else if (result.action === "reboot") {
+      requireCapability(context.reboot, "reboot")();
+    }
+    return null;
+  });
+  return namespace("shell", { banner, prompt, submit });
+}
+
+function writeTerminalLines(
+  terminal: TerminalBuffer,
+  lines: readonly string[],
+): void {
+  for (const line of lines) {
+    terminal.write(line);
+    if (terminal.cursorY >= terminal.height) {
+      terminal.scroll(1);
+      terminal.setCursorPosition(1, terminal.height);
+    } else {
+      terminal.setCursorPosition(1, terminal.cursorY + 1);
+    }
+  }
+}
+
+function createRedstoneModule(redstone: RedstoneState): RuntimeNamespace {
+  const getInput = fn("get_input", (positional, keywords) => {
+    requireArity(positional, keywords, 1, 1);
+    return redstone.getInput(redstoneSideArgument(positional[0]));
+  });
+  const getAnalogInput = fn("get_analog_input", (positional, keywords) => {
+    requireArity(positional, keywords, 1, 1);
+    return redstone.getAnalogInput(redstoneSideArgument(positional[0]));
+  });
+  const getOutput = fn("get_output", (positional, keywords) => {
+    requireArity(positional, keywords, 1, 1);
+    return redstone.getOutput(redstoneSideArgument(positional[0]));
+  });
+  const setOutput = fn("set_output", (positional, keywords) => {
+    requireArity(positional, keywords, 2, 2);
+    redstone.setOutput(
+      redstoneSideArgument(positional[0]),
+      booleanArgument(positional[1]),
+    );
+    return null;
+  });
+  return namespace("redstone", {
+    get_input: getInput,
+    getInput,
+    get_analog_input: getAnalogInput,
+    getAnalogInput,
+    get_output: getOutput,
+    getOutput,
+    set_output: setOutput,
+    setOutput,
+  });
 }
 
 function createOsModule(context: NativeModuleContext): RuntimeNamespace {
@@ -88,6 +190,16 @@ function createOsModule(context: NativeModuleContext): RuntimeNamespace {
     const callback = requireCapability(context.cancelTimer, "cancel_timer");
     return callback(integerArgument(positional[0]));
   });
+  const shutdown = fn("shutdown", (positional, keywords) => {
+    requireArity(positional, keywords, 0, 0);
+    requireCapability(context.shutdown, "shutdown")();
+    return null;
+  });
+  const reboot = fn("reboot", (positional, keywords) => {
+    requireArity(positional, keywords, 0, 0);
+    requireCapability(context.reboot, "reboot")();
+    return null;
+  });
   return namespace("os", {
     get_computer_id: getComputerId,
     getComputerID: getComputerId,
@@ -101,6 +213,27 @@ function createOsModule(context: NativeModuleContext): RuntimeNamespace {
     startTimer,
     cancel_timer: cancelTimer,
     cancelTimer,
+    shutdown,
+    reboot,
+  });
+}
+
+function createPrint(terminal: TerminalBuffer): NativeFunction {
+  return terminalFunction("print", (positional, keywords) => {
+    if (keywords.size > 0) {
+      throw new VmRuntimeError(
+        "TypeError",
+        "print accepts positional arguments only",
+      );
+    }
+    terminal.write(positional.map(displayValue).join(" "));
+    if (terminal.cursorY >= terminal.height) {
+      terminal.scroll(1);
+      terminal.setCursorPosition(1, terminal.height);
+    } else {
+      terminal.setCursorPosition(1, terminal.cursorY + 1);
+    }
+    return null;
   });
 }
 
@@ -382,6 +515,14 @@ function stringArgument(value: RuntimeValue | undefined): string {
   return value;
 }
 
+function redstoneSideArgument(value: RuntimeValue | undefined): RedstoneSide {
+  const side = stringArgument(value);
+  if (!isRedstoneSide(side)) {
+    throw new VmRuntimeError("ValueError", `Unknown redstone side ${side}`);
+  }
+  return side;
+}
+
 function numberArgument(value: RuntimeValue | undefined): number {
   if (typeof value !== "number" || !Number.isFinite(value)) {
     throw new VmRuntimeError("TypeError", "Expected finite number argument");
@@ -431,4 +572,16 @@ function requireCapability<T>(capability: T | undefined, name: string): T {
 
 function tuple(...values: readonly RuntimeValue[]): RuntimeValue {
   return { kind: "tuple", values };
+}
+
+function displayValue(value: RuntimeValue): string {
+  if (value === null) return "None";
+  if (value === true) return "True";
+  if (value === false) return "False";
+  if (typeof value === "string" || typeof value === "number")
+    return String(value);
+  if (value.kind === "list" || value.kind === "tuple") {
+    return value.values.map(displayValue).join(", ");
+  }
+  return `<${value.kind}>`;
 }

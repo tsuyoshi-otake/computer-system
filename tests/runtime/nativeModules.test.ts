@@ -6,6 +6,7 @@ import { RoundRobinScheduler } from "../../src/application/runtime/scheduler.js"
 import { StackVm } from "../../src/application/runtime/vm.js";
 import { InMemoryFilesystem } from "../../src/domain/filesystem/inMemoryFilesystem.js";
 import { TerminalBuffer } from "../../src/domain/terminal/terminalBuffer.js";
+import { RedstoneState } from "../../src/domain/redstone/redstoneState.js";
 
 describe("initial native modules", (): void => {
   it("exposes allowlisted os, term, and fs operations to programs", (): void => {
@@ -125,6 +126,34 @@ elapsed = os.clock()
     if (capabilityVm.state.kind === "crashed") {
       expect(capabilityVm.state.error.typeName).toBe("UnsupportedError");
     }
+  });
+
+  it("exposes validated six-sided redstone input and digital output", (): void => {
+    const redstone = new RedstoneState();
+    redstone.setInput("left", 12);
+    const environment = createNativeEnvironment({
+      computerId: 2,
+      terminal: new TerminalBuffer(),
+      filesystem: new InMemoryFilesystem(),
+      redstone,
+    });
+    const vm = new StackVm(
+      {
+        code: compileSource(`
+import redstone
+level = redstone.get_analog_input("left")
+active = redstone.get_input("left")
+redstone.set_output("right", active)
+output = redstone.get_output("right")
+`),
+      },
+      environment.moduleLoader,
+    );
+    run(vm);
+    expect(vm.state.kind).toBe("completed");
+    expect(vm.globals.get("level")).toBe(12);
+    expect(vm.globals.get("output")).toBe(true);
+    expect(redstone.outputMask).toBe(2);
   });
 });
 

@@ -2,6 +2,7 @@ import { world } from "@minecraft/server";
 
 import { formatProbeRecord } from "../../phase0/probeProtocol.js";
 import { executeItemIdentityProbe } from "./itemIdentityProbe.js";
+import { executeComputerVerticalProbe } from "./computerVerticalProbe.js";
 import { executeMonitorProbe } from "./monitorProbe.js";
 import { executeRedstoneProbe } from "./redstoneProbe.js";
 import {
@@ -48,6 +49,14 @@ async function executeSuite(runId: string): Promise<void> {
     } catch (error: unknown) {
       failures += 1;
       emitFailure(runId, "storage", error);
+    }
+
+    try {
+      const computer = executeComputerVerticalProbe();
+      emit(runId, "computer_vertical", "PASS", { ...computer });
+    } catch (error: unknown) {
+      failures += 1;
+      emitFailure(runId, "computer_vertical", error);
     }
 
     const dimension = getProbeDimension();

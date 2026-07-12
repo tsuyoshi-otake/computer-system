@@ -4,6 +4,17 @@ import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 
 import {
+  computerBlockIdentifier,
+  computerFamilies,
+  createComputerBlock,
+} from "./computer-block.mjs";
+import {
+  computerItemFamilies,
+  computerItemIdentifier,
+  createComputerItem,
+} from "./computer-item.mjs";
+
+import {
   createRedstoneInterfaceBlock,
   redstoneInterfaceIdentifier,
 } from "./redstone-interface-block.mjs";
@@ -39,6 +50,28 @@ await writeFile(
   path.join(generatedBlocksDirectory, "monitor.json"),
   `${JSON.stringify(createMonitorBlock(), null, 2)}\n`,
   "utf8",
+);
+await Promise.all(
+  computerFamilies.flatMap((family) =>
+    Array.from({ length: 64 }, async (_, mask) => {
+      const identifier = computerBlockIdentifier(family, mask).split(":")[1];
+      await writeFile(
+        path.join(generatedBlocksDirectory, `${identifier}.json`),
+        `${JSON.stringify(createComputerBlock(family, mask), null, 2)}\n`,
+        "utf8",
+      );
+    }),
+  ),
+);
+await Promise.all(
+  computerItemFamilies.map(async (family) => {
+    const identifier = computerItemIdentifier(family).split(":")[1];
+    await writeFile(
+      path.join(generatedItemsDirectory, `${identifier}.json`),
+      `${JSON.stringify(createComputerItem(family), null, 2)}\n`,
+      "utf8",
+    );
+  }),
 );
 await writeFile(
   path.join(generatedItemsDirectory, "pocket_computer.json"),

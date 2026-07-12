@@ -11,8 +11,8 @@ pocket computers, and turtles follow ComputerCraft-style behavior.
 
 ## Status
 
-The host-side Phase 1 runtime is complete, and the project is ready for the
-Bedrock Computer vertical slice. See
+The Phase 2 Bedrock Computer vertical slice is implemented and host-verified;
+clean-world BDS and GDK player-experience acceptance remain release gates. See
 [the implementation roadmap](docs/roadmap.md) for the planned compatibility
 scope and executable acceptance criteria.
 

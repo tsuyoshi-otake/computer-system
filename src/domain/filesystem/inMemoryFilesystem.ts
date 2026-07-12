@@ -12,6 +12,11 @@ export const defaultFilesystemLimits: FilesystemLimits = {
   maxPathLength: 255,
 };
 
+export interface InMemoryFilesystemSnapshot {
+  readonly directories: readonly string[];
+  readonly files: readonly (readonly [path: string, contents: string])[];
+}
+
 export class InMemoryFilesystem {
   private readonly files = new Map<string, string>();
   private readonly directories = new Set<string>(["/"]);
@@ -104,7 +109,7 @@ export class InMemoryFilesystem {
   copy(from: string, to: string): void {
     const source = this.normalize(from);
     const destination = this.normalize(to);
-    const snapshot = this.snapshot(source, from);
+    const snapshot = this.subtreeSnapshot(source, from);
     this.validateTransfer(source, destination, snapshot, false);
     this.commitSnapshot(source, destination, snapshot);
   }
@@ -114,7 +119,7 @@ export class InMemoryFilesystem {
     const destination = this.normalize(to);
     if (source === "/")
       throw new FilesystemError("protected", "Cannot move root");
-    const snapshot = this.snapshot(source, from);
+    const snapshot = this.subtreeSnapshot(source, from);
     this.validateTransfer(source, destination, snapshot, true);
     this.delete(source);
     this.commitSnapshot(source, destination, snapshot);
@@ -130,6 +135,33 @@ export class InMemoryFilesystem {
 
   getFreeSpace(): number {
     return this.limits.capacityBytes - this.usedBytes();
+  }
+
+  snapshot(): InMemoryFilesystemSnapshot {
+    return {
+      directories: [...this.directories].filter((path) => path !== "/").sort(),
+      files: [...this.files].sort(([left], [right]) =>
+        left.localeCompare(right),
+      ),
+    };
+  }
+
+  restore(snapshot: InMemoryFilesystemSnapshot): void {
+    const restored = new InMemoryFilesystem(this.limits);
+    for (const directory of [...snapshot.directories].sort(
+      (left, right) => left.length - right.length || left.localeCompare(right),
+    )) {
+      restored.makeDirectory(directory);
+    }
+    for (const [path, contents] of snapshot.files) {
+      restored.writeFile(path, contents);
+    }
+    this.files.clear();
+    this.directories.clear();
+    for (const directory of restored.directories)
+      this.directories.add(directory);
+    for (const [path, contents] of restored.files)
+      this.files.set(path, contents);
   }
 
   normalize(path: string): string {
@@ -184,7 +216,7 @@ export class InMemoryFilesystem {
     this.files.set(path, contents);
   }
 
-  private snapshot(path: string, original: string): FilesystemSnapshot {
+  private subtreeSnapshot(path: string, original: string): FilesystemSnapshot {
     const file = this.files.get(path);
     if (file !== undefined) return { directories: [], files: [[path, file]] };
     if (!this.directories.has(path)) {

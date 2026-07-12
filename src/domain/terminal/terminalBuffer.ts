@@ -9,6 +9,20 @@ export interface TerminalSizeLimits {
   readonly maxHeight: number;
 }
 
+export interface TerminalBufferSnapshot {
+  readonly schema: 1;
+  readonly width: number;
+  readonly height: number;
+  readonly rows: readonly string[];
+  readonly foreground: readonly (readonly number[])[];
+  readonly background: readonly (readonly number[])[];
+  readonly cursor: {
+    readonly x: number;
+    readonly y: number;
+    readonly blink: boolean;
+  };
+}
+
 const defaultSizeLimits: TerminalSizeLimits = { maxWidth: 200, maxHeight: 100 };
 
 export class TerminalBuffer {
@@ -126,6 +140,70 @@ export class TerminalBuffer {
     return value;
   }
 
+  snapshot(): TerminalBufferSnapshot {
+    return {
+      schema: 1,
+      width: this.width,
+      height: this.height,
+      rows: Array.from({ length: this.height }, (_, index) =>
+        this.line(index + 1),
+      ),
+      foreground: Array.from({ length: this.height }, (_, y) =>
+        Array.from(
+          { length: this.width },
+          (_value, x) => this.cell(x + 1, y + 1).foreground,
+        ),
+      ),
+      background: Array.from({ length: this.height }, (_, y) =>
+        Array.from(
+          { length: this.width },
+          (_value, x) => this.cell(x + 1, y + 1).background,
+        ),
+      ),
+      cursor: {
+        x: this.cursorXValue,
+        y: this.cursorYValue,
+        blink: this.cursorBlinkValue,
+      },
+    };
+  }
+
+  restore(snapshot: TerminalBufferSnapshot): void {
+    if (
+      snapshot.schema !== 1 ||
+      snapshot.width !== this.width ||
+      snapshot.height !== this.height
+    ) {
+      throw new TerminalError("Terminal snapshot dimensions do not match");
+    }
+    const cells: TerminalCell[] = [];
+    for (let y = 0; y < this.height; y += 1) {
+      const characters = [...(snapshot.rows[y] ?? "")];
+      const foreground = snapshot.foreground[y];
+      const background = snapshot.background[y];
+      if (
+        characters.length !== this.width ||
+        foreground?.length !== this.width ||
+        background?.length !== this.width
+      ) {
+        throw new TerminalError(`Terminal snapshot row ${y + 1} is invalid`);
+      }
+      for (let x = 0; x < this.width; x += 1) {
+        cells.push({
+          character: characters[x]!,
+          foreground: requireColor(foreground[x]!),
+          background: requireColor(background[x]!),
+        });
+      }
+    }
+    requireWriteCursorX(snapshot.cursor.x);
+    requireCoordinate(snapshot.cursor.y, this.height, "y");
+    this.cells = cells;
+    this.cursorXValue = snapshot.cursor.x;
+    this.cursorYValue = snapshot.cursor.y;
+    this.cursorBlinkValue = snapshot.cursor.blink;
+  }
+
   private blankCell(): TerminalCell {
     return {
       character: " ",
@@ -155,6 +233,12 @@ function requireDimension(value: number, maximum: number, name: string): void {
 function requireCoordinate(value: number, maximum: number, name: string): void {
   if (!Number.isInteger(value) || value < 1 || value > maximum) {
     throw new TerminalError(`${name} must be between 1 and ${maximum}`);
+  }
+}
+
+function requireWriteCursorX(value: number): void {
+  if (!Number.isSafeInteger(value) || value < 1) {
+    throw new TerminalError("x must be a positive safe integer");
   }
 }
 
