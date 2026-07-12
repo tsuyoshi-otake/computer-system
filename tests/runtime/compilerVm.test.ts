@@ -100,6 +100,33 @@ except ValueError as error:
     expect(vm.globals.get("message")).toBe("invalid value");
   });
 
+  it("preserves the active exception in nested handler blocks", (): void => {
+    const reraised = run(`
+try:
+    missing_name
+except NameError:
+    try:
+        raise
+    finally:
+        finalized = True
+`);
+
+    expectCrash(reraised, "NameError", /not defined/u);
+    expect(reraised.globals.get("finalized")).toBe(true);
+  });
+
+  it("treats Exception as the common runtime exception base", (): void => {
+    const vm = run(`
+try:
+    missing_name
+except Exception as error:
+    caught = error.type
+`);
+
+    expectCompleted(vm);
+    expect(vm.globals.get("caught")).toBe("NameError");
+  });
+
   it("preserves return and exception control flow through finally", (): void => {
     const returned = run(`
 def choose():

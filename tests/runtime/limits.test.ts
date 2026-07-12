@@ -7,6 +7,7 @@ import {
   BoundedTimerQueue,
 } from "../../src/domain/runtime/events.js";
 import { VmLimitError } from "../../src/domain/runtime/errors.js";
+import { nativeFunction } from "../../src/domain/runtime/value.js";
 
 const base: VmLimits = {
   maxCallDepth: 8,
@@ -42,6 +43,47 @@ describe("runtime resource limits", (): void => {
     const stringOverflow = machine('value = "1234" + "56789"\n', base);
     run(stringOverflow);
     expectLimit(stringOverflow, "string");
+  });
+
+  it("enforces limits on constants and native return values", (): void => {
+    const literal = machine('value = "123456789"\n', base);
+    run(literal);
+    expectLimit(literal, "string");
+
+    const native = new StackVm(
+      {
+        code: compileSource("value = oversized()\n"),
+        globals: new Map([
+          [
+            "oversized",
+            nativeFunction("oversized", () => ({
+              kind: "list",
+              values: [1, 2, 3, 4, 5, 6, 7, 8, 9],
+            })),
+          ],
+        ]),
+      },
+      undefined,
+      base,
+    );
+    run(native);
+    expectLimit(native, "collection");
+  });
+
+  it("bounds dictionary growth while permitting replacement", (): void => {
+    const replacement = machine('value = {"key": 1}\nvalue["key"] = 2\n', {
+      ...base,
+      maxCollectionSize: 1,
+    });
+    run(replacement);
+    expect(replacement.state.kind).toBe("completed");
+
+    const growth = machine('value = {"key": 1}\nvalue["other"] = 2\n', {
+      ...base,
+      maxCollectionSize: 1,
+    });
+    run(growth);
+    expectLimit(growth, "collection");
   });
 
   it("rejects stack and call-depth overflow as terminal crashes", (): void => {

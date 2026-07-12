@@ -290,6 +290,14 @@ export class StackVm {
         const value = this.pop(frame, instruction.span);
         const index = this.pop(frame, instruction.span);
         const object = this.pop(frame, instruction.span);
+        if (
+          typeof object === "object" &&
+          object !== null &&
+          object.kind === "dictionary" &&
+          !object.entries.has(index)
+        ) {
+          this.checkCollection(object.entries.size + 1, instruction.span);
+        }
         storeSubscript(object, index, value, instruction.span);
         return;
       }
@@ -603,9 +611,8 @@ export class StackVm {
       const continuation = frame.continuation;
       if (continuation?.kind === "try_body") {
         this.frames.pop();
-        const handler = continuation.handlers.find(
-          ({ typeName }) =>
-            typeName === undefined || typeName === fault.typeName,
+        const handler = continuation.handlers.find(({ typeName }) =>
+          handlerMatches(typeName, fault.typeName),
         );
         if (handler !== undefined) {
           if (handler.name !== undefined)
@@ -717,6 +724,7 @@ export class StackVm {
       parent.globals,
       continuation,
     );
+    frame.activeException = parent.activeException;
     this.frames.push(frame);
     return frame;
   }
@@ -821,6 +829,15 @@ export class StackVm {
   }
 
   private push(frame: Frame, value: RuntimeValue, span?: SourceSpan): void {
+    if (typeof value === "string") this.checkString(value, span);
+    if (isSequence(value)) this.checkCollection(value.values.length, span);
+    if (
+      typeof value === "object" &&
+      value !== null &&
+      value.kind === "dictionary"
+    ) {
+      this.checkCollection(value.entries.size, span);
+    }
     if (frame.stack.length >= this.limits.maxStackSize)
       throw new VmLimitError("stack", span);
     frame.stack.push(value);
@@ -982,6 +999,17 @@ function faultValue(fault: VmRuntimeError): RuntimeNamespace {
       ["message", fault.message],
     ]),
   };
+}
+
+function handlerMatches(
+  typeName: string | undefined,
+  faultTypeName: string,
+): boolean {
+  return (
+    typeName === undefined ||
+    typeName === "Exception" ||
+    typeName === faultTypeName
+  );
 }
 
 function truthy(value: RuntimeValue): boolean {
