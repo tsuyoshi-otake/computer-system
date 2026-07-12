@@ -1,6 +1,10 @@
 import { Player, system, world } from "@minecraft/server";
 
 import {
+  placeMonitorProbe,
+  registerMonitorComponent,
+} from "./monitorComponent.js";
+import {
   givePocketComputer,
   registerPocketComputerComponent,
   startPocketComputerLifecycle,
@@ -17,6 +21,7 @@ const packVersion = "0.1.0";
 system.beforeEvents.startup.subscribe(
   ({ blockComponentRegistry, itemComponentRegistry }): void => {
     registerRedstoneProbeComponent(blockComponentRegistry);
+    registerMonitorComponent(blockComponentRegistry);
     registerPocketComputerComponent(itemComponentRegistry);
   },
 );
@@ -46,7 +51,7 @@ system.afterEvents.scriptEventReceive.subscribe((event): void => {
     case "help":
     case "status":
       event.sourceEntity.sendMessage(
-        "Computer System Phase 0 commands: status, ui, pocket, runtime, storage, speaker, headless",
+        "Computer System Phase 0 commands: status, ui, monitor, pocket, runtime, storage, speaker, headless",
       );
       return;
     case "runtime":
@@ -73,6 +78,9 @@ system.afterEvents.scriptEventReceive.subscribe((event): void => {
       event.sourceEntity.sendMessage(`Pocket Computer granted (${identity}).`);
       return;
     }
+    case "monitor":
+      placeMonitorProbe(event.sourceEntity);
+      return;
     default:
       event.sourceEntity.sendMessage(
         `Unknown Computer System probe: ${command}`,

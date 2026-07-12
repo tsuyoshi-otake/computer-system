@@ -82,7 +82,7 @@ suite.
 
 `Verify:` Run `npm run validate`.
 
-`Expect:` Formatting, lint, type checking, 16 host tests, and the pack build all
+`Expect:` Formatting, lint, type checking, 22 host tests, and the pack build all
 exit successfully.
 
 `Verify:` Set `BDS_HOME` and run `npm run test:bds`.

@@ -296,12 +296,14 @@ function verifySessions(first, second) {
   const firstRuntime = requirePassingRecord(first, "runtime");
   const firstTurtle = requirePassingRecord(first, "turtle");
   const firstIdentity = requirePassingRecord(first, "item_identity");
+  const firstMonitor = requirePassingRecord(first, "monitor");
   const firstSpeaker = requirePassingRecord(first, "speaker");
   const firstRedstone = requirePassingRecord(first, "redstone");
   const secondStorage = requirePassingRecord(second, "storage");
   const secondRuntime = requirePassingRecord(second, "runtime");
   const secondTurtle = requirePassingRecord(second, "turtle");
   const secondIdentity = requirePassingRecord(second, "item_identity");
+  const secondMonitor = requirePassingRecord(second, "monitor");
   const secondSpeaker = requirePassingRecord(second, "speaker");
   const secondRedstone = requirePassingRecord(second, "redstone");
   requirePassingRecord(first, "suite", "complete");
@@ -329,6 +331,21 @@ function verifySessions(first, second) {
   }
   if (secondIdentity.details.previousIdentityPresent !== true) {
     throw new Error("Item identity did not persist across restart.");
+  }
+
+  for (const [name, record] of [
+    ["first monitor", firstMonitor],
+    ["second monitor", secondMonitor],
+  ]) {
+    if (
+      record.details.tilesDiscovered !== 6 ||
+      record.details.cellsWide !== 51 ||
+      record.details.cellsHigh !== 18 ||
+      record.details.coalescedUpdate !== true ||
+      record.details.flushBudgetRespected !== true
+    ) {
+      throw new Error(`${name} did not verify the bounded 3x2 surface.`);
+    }
   }
 
   for (const [name, record] of [
@@ -378,6 +395,8 @@ function verifySessions(first, second) {
     runtimeMinimum: secondRuntime.details.minimum,
     runtimeMaximum: secondRuntime.details.maximum,
     itemIdentityPersisted: secondIdentity.details.previousIdentityPresent,
+    monitorTiles: secondMonitor.details.tilesDiscovered,
+    monitorCells: `${String(secondMonitor.details.cellsWide)}x${String(secondMonitor.details.cellsHigh)}`,
     redstoneInputFaces: secondRedstone.details.inputFacesVerified,
     redstoneOutputMasks: secondRedstone.details.digitalMasksVerified,
     redstoneAnalogLevels: secondRedstone.details.analogLevelsVerified,

@@ -12,6 +12,7 @@ import {
   redstoneProbeIdentifier,
 } from "./redstone-probe-block.mjs";
 import { createPocketComputerItem } from "./pocket-computer-item.mjs";
+import { createMonitorBlock } from "./monitor-block.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const outputRoot = path.join(root, "dist");
@@ -34,6 +35,11 @@ const generatedBlocksDirectory = path.join(behaviorOutput, "blocks");
 const generatedItemsDirectory = path.join(behaviorOutput, "items");
 await mkdir(generatedBlocksDirectory, { recursive: true });
 await mkdir(generatedItemsDirectory, { recursive: true });
+await writeFile(
+  path.join(generatedBlocksDirectory, "monitor.json"),
+  `${JSON.stringify(createMonitorBlock(), null, 2)}\n`,
+  "utf8",
+);
 await writeFile(
   path.join(generatedItemsDirectory, "pocket_computer.json"),
   `${JSON.stringify(createPocketComputerItem(), null, 2)}\n`,

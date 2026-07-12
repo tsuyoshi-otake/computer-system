@@ -104,3 +104,22 @@ covers the real player's item-use interaction and presentation only.
 - Drop and pickup reuse: `NOT_RECORDED` — identity preservation through an item
   entity is covered by BDS, but the player interaction was not separately
   recorded in this manual run.
+
+## Phase 0 Monitor checklist
+
+Run this command while facing south with three blocks of clear space ahead:
+
+```text
+/scriptevent computer_system:probe monitor
+```
+
+Verify:
+
+- A 3x2 black Monitor surface appears three blocks south of the player.
+- Touching the near (north) face reports `monitor_touch north x y` in chat.
+- Touching near the top-left reports coordinates near `1,1`; touching near the
+  bottom-right reports coordinates near `51,18`.
+- Each valid touch opens the Computer System terminal UI fallback.
+
+The BDS suite verifies discovery and update bounds. This manual check covers the
+real block-face coordinates and player-facing fallback interaction.
