@@ -15,7 +15,7 @@ Parent: #1 Blocked by: #2 and #3
 - [ ] Verify the dedicated ComputerCraft-inspired terminal view on the supported
       GDK client at the reference resolution.
 - [x] Model and render 51x19 fixed cells, monospace rows, cursor state, and all
-      16 ComputerCraft foreground palette colors.
+      16 ComputerCraft foreground and background palette colors.
 - [ ] Verify background colors and that neither the terminal nor primary input
       controls scroll at the reference resolution.
 - [x] Coalesce changed cells, bound redraw work, convert submitted lines into VM
@@ -27,8 +27,8 @@ Parent: #1 Blocked by: #2 and #3
 
 ## Automated evidence
 
-- `npm run validate` passes formatting, lint, type checking, 37 test files with
-  135 tests, and the production pack build.
+- `npm run validate` passes formatting, lint, type checking, 38 test files with
+  138 tests, and the production pack build.
 - Lifecycle tests cover boot, scheduling, sleep, event wait, completion,
   shutdown, reboot, terminate, syntax failure, and runtime crash ownership.
 - Identity tests cover transactional reload, block-item-block transfer,
@@ -37,6 +37,9 @@ Parent: #1 Blocked by: #2 and #3
   suppression, checksum validation, and previous-generation recovery.
 - Terminal tests cover the 51x19/16-color contract, a 128-cell flush budget, one
   event per submitted line, and exactly one final event for every close path.
+- Resource Pack UI tests cover 969 uniquely indexed background cells, all 16
+  exact RGB mappings for both background cells and foreground layers, hidden
+  data labels, and fixed primary-control bounds.
 - Pack tests generate both Computer items plus 128 hidden block variants for all
   independent six-face digital output masks.
 

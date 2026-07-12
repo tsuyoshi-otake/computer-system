@@ -15,24 +15,7 @@ export interface TerminalViewHandlers {
 }
 
 const activeSessions = new Map<string, symbol>();
-const foregroundCodes = [
-  "f",
-  "6",
-  "d",
-  "b",
-  "e",
-  "a",
-  "c",
-  "8",
-  "7",
-  "3",
-  "5",
-  "9",
-  "4",
-  "2",
-  "c",
-  "0",
-] as const;
+const paletteSize = 16;
 
 export async function showTerminalView(
   player: Player,
@@ -45,19 +28,24 @@ export async function showTerminalView(
   const presentation = new TerminalPresentation(terminal);
   const cells = Array.from(
     { length: terminal.width * terminal.height },
-    () => ({
-      character: " ",
-      foreground: 0,
-      background: 15,
-    }),
+    (_, index) =>
+      terminal.cell(
+        (index % terminal.width) + 1,
+        Math.floor(index / terminal.width) + 1,
+      ),
   );
-  const output = new ObservableString(render(cells, terminal));
+  const backgrounds = cells.map(
+    (cell) => new ObservableString(cell.background.toString(16)),
+  );
+  const foregrounds = Array.from(
+    { length: paletteSize },
+    (_, color) => new ObservableString(render(cells, terminal, color)),
+  );
   const input = new ObservableString("", { clientWritable: true });
   const session = new ManagedTerminalSession((event): void =>
     dispatch(event, handlers),
   );
   const form = new CustomForm(player, title)
-    .label(output)
     .textField("Input", input, {
       description: "51x19 terminal — submit one line at a time.",
     })
@@ -67,17 +55,28 @@ export async function showTerminalView(
     .button("Terminate", (): void => {
       if (session.requestTermination()) handlers.onTerminate();
       form.close();
-    })
-    .closeButton();
+    });
+  for (const background of backgrounds) form.label(background);
+  for (const foreground of foregrounds) form.label(foreground);
+  form.closeButton();
 
+  let renderedCursor = cursorState(terminal);
   const redrawRun = system.runInterval((): void => {
     presentation.capture();
     const flush = presentation.flush(128);
-    if (flush.changes.length === 0) return;
+    const nextCursor = cursorState(terminal);
+    const cursorChanged = nextCursor !== renderedCursor;
+    if (flush.changes.length === 0 && !cursorChanged) return;
     for (const change of flush.changes) {
       cells[(change.y - 1) * terminal.width + change.x - 1] = change;
+      backgrounds[(change.y - 1) * terminal.width + change.x - 1]?.setData(
+        change.background.toString(16),
+      );
     }
-    output.setData(render(cells, terminal));
+    renderedCursor = nextCursor;
+    for (let color = 0; color < paletteSize; color += 1) {
+      foregrounds[color]?.setData(render(cells, terminal, color));
+    }
   }, 2);
 
   try {
@@ -90,6 +89,10 @@ export async function showTerminalView(
     if (activeSessions.get(player.id) === token)
       activeSessions.delete(player.id);
   }
+}
+
+function cursorState(terminal: TerminalBuffer): string {
+  return `${terminal.cursorX}:${terminal.cursorY}:${terminal.cursorBlink}`;
 }
 
 function dispatch(
@@ -107,24 +110,21 @@ function render(
     background: number;
   }[],
   terminal: TerminalBuffer,
+  foreground: number,
 ): string {
   const rows: string[] = [];
   for (let y = 1; y <= terminal.height; y += 1) {
     let row = "";
-    let previous = -1;
     for (let x = 1; x <= terminal.width; x += 1) {
       const cell = cells[(y - 1) * terminal.width + x - 1]!;
-      if (cell.foreground !== previous) {
-        row += `§${foregroundCodes[cell.foreground]}`;
-        previous = cell.foreground;
-      }
       const cursor =
         terminal.cursorBlink &&
         terminal.cursorX === x &&
         terminal.cursorY === y;
-      row += cursor ? "_" : cell.character;
+      row +=
+        cell.foreground === foreground ? (cursor ? "_" : cell.character) : " ";
     }
-    rows.push(`${row}§r`);
+    rows.push(row);
   }
   return rows.join("\n");
 }

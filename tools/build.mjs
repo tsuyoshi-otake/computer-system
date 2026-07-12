@@ -24,6 +24,7 @@ import {
 } from "./redstone-probe-block.mjs";
 import { createPocketComputerItem } from "./pocket-computer-item.mjs";
 import { createMonitorBlock } from "./monitor-block.mjs";
+import { createComputerTerminalUi } from "./terminal-ui.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const outputRoot = path.join(root, "dist");
@@ -46,6 +47,12 @@ const generatedBlocksDirectory = path.join(behaviorOutput, "blocks");
 const generatedItemsDirectory = path.join(behaviorOutput, "items");
 await mkdir(generatedBlocksDirectory, { recursive: true });
 await mkdir(generatedItemsDirectory, { recursive: true });
+await mkdir(path.join(resourceOutput, "ui"), { recursive: true });
+await writeFile(
+  path.join(resourceOutput, "ui", "computer_terminal.json"),
+  `${JSON.stringify(createComputerTerminalUi(), null, 2)}\n`,
+  "utf8",
+);
 await writeFile(
   path.join(generatedBlocksDirectory, "monitor.json"),
   `${JSON.stringify(createMonitorBlock(), null, 2)}\n`,

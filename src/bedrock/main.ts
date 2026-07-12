@@ -79,9 +79,13 @@ system.afterEvents.scriptEventReceive.subscribe((event): void => {
       );
       return;
     }
-    case "ui":
-      void showTerminalProbe(event.sourceEntity);
+    case "ui": {
+      const player = event.sourceEntity;
+      system.run((): void => {
+        void showTerminalProbe(player);
+      });
       return;
+    }
     case "pocket": {
       const identity = givePocketComputer(event.sourceEntity);
       event.sourceEntity.sendMessage(`Pocket Computer granted (${identity}).`);
