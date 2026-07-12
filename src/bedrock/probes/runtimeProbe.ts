@@ -10,6 +10,10 @@ export interface RuntimeProbeResult {
   readonly ticks: number;
   readonly minimum: number;
   readonly maximum: number;
+  readonly averageTickDurationMs: number;
+  readonly maximumTickDurationMs: number;
+  readonly tickBudgetMs: number;
+  readonly withinTickBudget: boolean;
   readonly error?: string;
 }
 
@@ -24,6 +28,8 @@ export function scheduleRuntimeProbe(
     },
   );
   let ticks = 0;
+  let totalTickDurationMs = 0;
+  let maximumTickDurationMs = 0;
   let completed = false;
 
   const complete = (result: RuntimeProbeResult): void => {
@@ -43,7 +49,11 @@ export function scheduleRuntimeProbe(
 
   const runId = system.runInterval((): void => {
     try {
+      const startedAt = Date.now();
       scheduler.runTick();
+      const tickDurationMs = Date.now() - startedAt;
+      totalTickDurationMs += tickDurationMs;
+      maximumTickDurationMs = Math.max(maximumTickDurationMs, tickDurationMs);
       ticks += 1;
       if (ticks < 40) {
         return;
@@ -54,12 +64,18 @@ export function scheduleRuntimeProbe(
         .map((computer) => computer.executedInstructions);
       const minimum = Math.min(...executionCounts);
       const maximum = Math.max(...executionCounts);
+      const tickBudgetMs = 50;
+      const withinTickBudget = maximumTickDurationMs <= tickBudgetMs;
       complete({
-        passed: minimum === 2_000 && maximum === 2_000,
+        passed: minimum === 2_000 && maximum === 2_000 && withinTickBudget,
         computers: 20,
         ticks,
         minimum,
         maximum,
+        averageTickDurationMs: totalTickDurationMs / ticks,
+        maximumTickDurationMs,
+        tickBudgetMs,
+        withinTickBudget,
       });
     } catch (error: unknown) {
       complete({
@@ -68,6 +84,10 @@ export function scheduleRuntimeProbe(
         ticks,
         minimum: 0,
         maximum: 0,
+        averageTickDurationMs: ticks === 0 ? 0 : totalTickDurationMs / ticks,
+        maximumTickDurationMs,
+        tickBudgetMs: 50,
+        withinTickBudget: false,
         error: error instanceof Error ? error.message : String(error),
       });
     }
@@ -86,7 +106,7 @@ export function startRuntimeProbe(player: Player): void {
   const runId = scheduleRuntimeProbe((result): void => {
     activeRuns.delete(player.id);
     player.sendMessage(
-      `Runtime probe ${result.passed ? "PASS" : "FAIL"}: ${result.computers} computers, ${result.ticks} ticks, min=${result.minimum}, max=${result.maximum}${result.error === undefined ? "." : `, error=${result.error}.`}`,
+      `Runtime probe ${result.passed ? "PASS" : "FAIL"}: ${result.computers} computers, ${result.ticks} ticks, min=${result.minimum}, max=${result.maximum}, avgTickMs=${result.averageTickDurationMs}, maxTickMs=${result.maximumTickDurationMs}, budgetMs=${result.tickBudgetMs}${result.error === undefined ? "." : `, error=${result.error}.`}`,
     );
   });
 

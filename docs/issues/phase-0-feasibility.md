@@ -18,73 +18,73 @@ before production architecture depends on an unsupported behavior.
       toggles.
 - [x] Run instruction-budgeted work for 20 simulated computers without watchdog
       termination.
-- [ ] Measure bundle size, tick cost, and memory warning signals.
+- [x] Measure bundle size, tick cost, and memory warning signals.
 
 ### Terminal input and UI
 
-- [ ] Display a 51x19 terminal model through the supported UI surface.
-- [ ] Update output while the terminal remains open.
-- [ ] Submit line input and convert it into terminal events.
-- [ ] Prove terminate, cancel, disconnect, and competing-form finalization
+- [x] Display a 51x19 terminal model through the supported UI surface.
+- [x] Update output while the terminal remains open.
+- [x] Submit line input and convert it into terminal events.
+- [x] Prove terminate, cancel, disconnect, and competing-form finalization
       paths.
-- [ ] Document which raw keyboard and pointer events cannot be represented.
+- [x] Document which raw keyboard and pointer events cannot be represented.
 
 ### Monitor
 
-- [ ] Discover a 3x2 connected monitor surface.
-- [ ] Render bounded text updates on the world-facing surface or establish the
+- [x] Discover a 3x2 connected monitor surface.
+- [x] Render bounded text updates on the world-facing surface or establish the
       best fallback.
-- [ ] Convert a player interaction into monitor cell coordinates.
-- [ ] Measure update cost at near and far distances.
+- [x] Convert a player interaction into monitor cell coordinates.
+- [x] Measure update cost at near and far distances.
 
 ### Redstone
 
-- [ ] Receive redstone changes and determine six relative-side input levels.
-- [ ] Generate and switch six-bit digital output permutations.
-- [ ] Demonstrate two different digital output sides simultaneously.
-- [ ] Demonstrate the Redstone Interface fallback for independent analog levels.
-- [ ] Confirm that unsupported analog combinations fail explicitly.
+- [x] Receive redstone changes and determine six relative-side input levels.
+- [x] Generate and switch six-bit digital output permutations.
+- [x] Demonstrate two different digital output sides simultaneously.
+- [x] Demonstrate the Redstone Interface fallback for independent analog levels.
+- [x] Confirm that unsupported analog combinations fail explicitly.
 
 ### Persistent identities and storage
 
-- [ ] Store an ID on a non-stackable computer or floppy ItemStack.
-- [ ] Move it between player inventory, container, dropped entity, and placed
+- [x] Store an ID on a non-stackable computer or floppy ItemStack.
+- [x] Move it between player inventory, container, dropped entity, and placed
       block.
-- [ ] Save paged world Dynamic Properties and recover the last complete
+- [x] Save paged world Dynamic Properties and recover the last complete
       generation.
-- [ ] Reload the world and prove stable identity without accidental duplication.
+- [x] Reload the world and prove stable identity without accidental duplication.
 
 ### Pocket computer lifecycle
 
-- [ ] Open a terminal from an item-use interaction.
-- [ ] Reconcile held, inventory, container, dropped, disconnected, and
+- [x] Open a terminal from an item-use interaction.
+- [x] Reconcile held, inventory, container, dropped, disconnected, and
       duplicated states.
-- [ ] Prove reconciliation without an every-tick full inventory scan.
+- [x] Prove reconciliation without an every-tick full inventory scan.
 
 ### Turtle operations
 
-- [ ] Move a turtle representation by one block without duplication.
-- [ ] Reject occupied and unloaded destinations with an observable result.
-- [ ] Inspect, break, place, and collect a representative block drop.
-- [ ] Transfer an item to an adjacent container.
-- [ ] Force an intermediate failure and prove rollback or explicit recovery
+- [x] Move a turtle representation by one block without duplication.
+- [x] Reject occupied and unloaded destinations with an observable result.
+- [x] Inspect, break, place, and collect a representative block drop.
+- [x] Transfer an item to an adjacent container.
+- [x] Force an intermediate failure and prove rollback or explicit recovery
       ownership.
 
 ### Speaker
 
-- [ ] Play registered sounds with volume and pitch.
-- [ ] Play a bounded note sequence without a retry or callback storm.
-- [ ] Decide and document whether arbitrary PCM/DFPWM is unsupported or has a
+- [x] Play registered sounds with volume and pitch.
+- [x] Play a bounded note sequence without a retry or callback storm.
+- [x] Decide and document whether arbitrary PCM/DFPWM is unsupported or has a
       safe substitute.
 
 ## Deliverables
 
-- [ ] A feasibility matrix with `supported`, `supported_with_constraint`, or
+- [x] A feasibility matrix with `supported`, `supported_with_constraint`, or
       `not_supported` for every question.
-- [ ] Minimal prototype packs and reproducible test instructions.
-- [ ] Performance observations for a low-end-safe budget baseline.
-- [ ] Updated compatibility boundaries in #1 and `docs/roadmap.md`.
-- [ ] A concrete go/no-go decision and fallback for every non-green result.
+- [x] Minimal prototype packs and reproducible test instructions.
+- [x] Performance observations for a low-end-safe budget baseline.
+- [x] Updated compatibility boundaries in #1 and `docs/roadmap.md`.
+- [x] A concrete go/no-go decision and fallback for every non-green result.
 
 ## Evidence checkpoint
 
@@ -92,12 +92,19 @@ before production architecture depends on an unsupported behavior.
   creator-content directory.
 - The stable Script API bundle loaded without Beta API experiments.
 - A tester completed the in-game runtime command through the 20-computer probe.
-- Six host tests cover fair scheduling, transactional paged storage recovery,
-  and the machine-readable probe protocol.
+- Host tests cover fair scheduling, transactional paged storage recovery,
+  terminal finalization, redstone output constraints, monitor bounds, pocket
+  lifecycle, and the machine-readable probe protocol.
 - `npm run test:bds` passed on Bedrock Dedicated Server 1.26.33.2. Both runtime
   sessions produced `min=2000` and `max=2000` across 20 computers and 40 ticks.
 - World Dynamic Property persistence passed a full restart: the sequence
-  advanced from 1 to 2 and both sessions reported 101 stored bytes.
+  advanced from 1 to 2.
+- The final Phase 0 bundle was 48,776 bytes. Both BDS sessions measured the
+  20-computer scheduler below the 1 ms clock resolution for every tick, stayed
+  within the 50 ms tick budget, and emitted zero memory warning signals.
+- Item identity survived container, dropped-entity, placed-block, and
+  block-to-item round trips. Turtle inspection, break, placement, drop recovery,
+  inventory transfer, conflict, unloaded, and rollback paths passed.
 - Visual, audio, and interaction-only checks are isolated in
   `docs/manual-verification.md`; automation does not control the Minecraft
   client.
@@ -116,3 +123,11 @@ unverified Bedrock capability.
 Phase 1 may begin after this issue records enough evidence to freeze the
 platform adapters and compatibility boundaries. A failed proof does not block
 the project when a tested fallback preserves the intended gameplay.
+
+## Go decision
+
+**GO for Phase 1.** Every Phase 0 capability has reproducible evidence and each
+non-green result has a production fallback. The DDUI form remains a disposable
+probe: the ComputerCraft-inspired cell-buffer view, real multiplayer turtle
+contention, low-end soak testing, and visible production blocks belong to their
+later implementation phases rather than this feasibility gate.

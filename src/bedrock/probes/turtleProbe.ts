@@ -18,6 +18,9 @@ export interface TurtleProbeResult {
   readonly blockedMoveRejected: boolean;
   readonly conflictRejected: boolean;
   readonly dropRecovered: boolean;
+  readonly representativeBlockBroken: boolean;
+  readonly representativeBlockInspected: boolean;
+  readonly representativeBlockPlaced: boolean;
   readonly inventoryTransferred: boolean;
   readonly rollbackRestored: boolean;
   readonly successfulMove: boolean;
@@ -78,7 +81,10 @@ export function executeTurtleProbe(dimension: Dimension): TurtleProbeResult {
     registry.activeResourceCount === 0;
 
   setBlock(dimension, dropLocation, "minecraft:stone");
+  const representativeBlockInspected =
+    getBlock(dimension, dropLocation).typeId === "minecraft:stone";
   setBlock(dimension, dropLocation, "minecraft:air");
+  const representativeBlockBroken = getBlock(dimension, dropLocation).isAir;
   const droppedEntity = dimension.spawnItem(
     new ItemStack("minecraft:cobblestone", 1),
     offset(dropLocation, { x: 0.5, y: 0.5, z: 0.5 }),
@@ -87,6 +93,9 @@ export function executeTurtleProbe(dimension: Dimension): TurtleProbeResult {
     droppedEntity.getComponent(EntityComponentTypes.Item)?.itemStack.typeId ===
     "minecraft:cobblestone";
   droppedEntity.remove();
+  setBlock(dimension, dropLocation, "minecraft:cobblestone");
+  const representativeBlockPlaced =
+    getBlock(dimension, dropLocation).typeId === "minecraft:cobblestone";
 
   setBlock(dimension, sourceChest, "minecraft:chest");
   setBlock(dimension, targetChest, "minecraft:chest");
@@ -115,6 +124,12 @@ export function executeTurtleProbe(dimension: Dimension): TurtleProbeResult {
   );
   requireCondition(dropRecovered, "Turtle drop could not be recovered.");
   requireCondition(
+    representativeBlockInspected &&
+      representativeBlockBroken &&
+      representativeBlockPlaced,
+    "Turtle representative block operations did not complete.",
+  );
+  requireCondition(
     inventoryTransferred,
     "Turtle inventory transfer did not preserve the stack.",
   );
@@ -123,6 +138,9 @@ export function executeTurtleProbe(dimension: Dimension): TurtleProbeResult {
     blockedMoveRejected,
     conflictRejected,
     dropRecovered,
+    representativeBlockBroken,
+    representativeBlockInspected,
+    representativeBlockPlaced,
     inventoryTransferred,
     rollbackRestored,
     successfulMove,

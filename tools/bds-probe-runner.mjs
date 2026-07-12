@@ -5,6 +5,8 @@ import {
   mkdir,
   readFile,
   readdir,
+  rm,
+  stat,
   writeFile,
 } from "node:fs/promises";
 import os from "node:os";
@@ -42,6 +44,10 @@ if (isWithin(workRoot, sourceRoot) || workRoot === sourceRoot) {
 
 await ensureEmptyDirectory(workRoot);
 await cp(sourceRoot, workRoot, { recursive: true });
+await rm(path.join(workRoot, "worlds", worldName), {
+  force: true,
+  recursive: true,
+});
 await configureServer(workRoot);
 
 console.log(`Preparing isolated Bedrock Dedicated Server at ${workRoot}`);
@@ -50,7 +56,10 @@ await installWorldPacks(workRoot);
 
 const first = await runServer(workRoot, "probe");
 const second = await runServer(workRoot, "probe");
-const summary = verifySessions(first, second);
+const bundle = await stat(
+  path.join(root, "dist", "behavior_pack", "scripts", "main.js"),
+);
+const summary = verifySessions(first, second, bundle.size);
 
 console.log(
   JSON.stringify(
@@ -172,6 +181,7 @@ function runServer(serverRoot, mode) {
       windowsHide: true,
     });
     const records = [];
+    const memoryWarningLines = [];
     const recentLines = [];
     let buffer = "";
     let ready = false;
@@ -217,6 +227,10 @@ function runServer(serverRoot, mode) {
         } else if (diagnosticContinuation > 0 && line.trim() !== "") {
           console.error(`BDS_DIAGNOSTIC ${line}`);
           diagnosticContinuation -= 1;
+        }
+
+        if (isMemoryWarningSignal(line)) {
+          memoryWarningLines.push(line);
         }
 
         if (!ready && /Server started/u.test(line)) {
@@ -286,28 +300,28 @@ function runServer(serverRoot, mode) {
         );
         return;
       }
-      resolve(records);
+      resolve({ records, memoryWarningLines });
     });
   });
 }
 
-function verifySessions(first, second) {
-  const firstStorage = requirePassingRecord(first, "storage");
-  const firstRuntime = requirePassingRecord(first, "runtime");
-  const firstTurtle = requirePassingRecord(first, "turtle");
-  const firstIdentity = requirePassingRecord(first, "item_identity");
-  const firstMonitor = requirePassingRecord(first, "monitor");
-  const firstSpeaker = requirePassingRecord(first, "speaker");
-  const firstRedstone = requirePassingRecord(first, "redstone");
-  const secondStorage = requirePassingRecord(second, "storage");
-  const secondRuntime = requirePassingRecord(second, "runtime");
-  const secondTurtle = requirePassingRecord(second, "turtle");
-  const secondIdentity = requirePassingRecord(second, "item_identity");
-  const secondMonitor = requirePassingRecord(second, "monitor");
-  const secondSpeaker = requirePassingRecord(second, "speaker");
-  const secondRedstone = requirePassingRecord(second, "redstone");
-  requirePassingRecord(first, "suite", "complete");
-  requirePassingRecord(second, "suite", "complete");
+function verifySessions(first, second, bundleBytes) {
+  const firstStorage = requirePassingRecord(first.records, "storage");
+  const firstRuntime = requirePassingRecord(first.records, "runtime");
+  const firstTurtle = requirePassingRecord(first.records, "turtle");
+  const firstIdentity = requirePassingRecord(first.records, "item_identity");
+  const firstMonitor = requirePassingRecord(first.records, "monitor");
+  const firstSpeaker = requirePassingRecord(first.records, "speaker");
+  const firstRedstone = requirePassingRecord(first.records, "redstone");
+  const secondStorage = requirePassingRecord(second.records, "storage");
+  const secondRuntime = requirePassingRecord(second.records, "runtime");
+  const secondTurtle = requirePassingRecord(second.records, "turtle");
+  const secondIdentity = requirePassingRecord(second.records, "item_identity");
+  const secondMonitor = requirePassingRecord(second.records, "monitor");
+  const secondSpeaker = requirePassingRecord(second.records, "speaker");
+  const secondRedstone = requirePassingRecord(second.records, "redstone");
+  requirePassingRecord(first.records, "suite", "complete");
+  requirePassingRecord(second.records, "suite", "complete");
 
   if (firstRuntime.details.minimum !== 2_000) {
     throw new Error("First runtime probe minimum was not 2000.");
@@ -321,6 +335,24 @@ function verifySessions(first, second) {
   if (secondRuntime.details.maximum !== 2_000) {
     throw new Error("Second runtime probe maximum was not 2000.");
   }
+  for (const [name, session, runtime] of [
+    ["first", first, firstRuntime],
+    ["second", second, secondRuntime],
+  ]) {
+    if (
+      runtime.details.withinTickBudget !== true ||
+      typeof runtime.details.maximumTickDurationMs !== "number" ||
+      typeof runtime.details.averageTickDurationMs !== "number" ||
+      runtime.details.maximumTickDurationMs > runtime.details.tickBudgetMs
+    ) {
+      throw new Error(`${name} runtime probe exceeded its tick budget.`);
+    }
+    if (session.memoryWarningLines.length !== 0) {
+      throw new Error(
+        `${name} session emitted memory warning signals: ${session.memoryWarningLines.join(" | ")}`,
+      );
+    }
+  }
   if (secondStorage.details.sequence !== firstStorage.details.sequence + 1) {
     throw new Error(
       "Dynamic Property sequence did not persist across restart.",
@@ -331,6 +363,21 @@ function verifySessions(first, second) {
   }
   if (secondIdentity.details.previousIdentityPresent !== true) {
     throw new Error("Item identity did not persist across restart.");
+  }
+  for (const [name, record] of [
+    ["first identity", firstIdentity],
+    ["second identity", secondIdentity],
+  ]) {
+    for (const detail of [
+      "droppedIdentityPreserved",
+      "placedIdentityPreserved",
+      "roundTripIdentityPreserved",
+      "storedIdentityPreserved",
+    ]) {
+      if (record.details[detail] !== true) {
+        throw new Error(`${name} did not verify ${detail}.`);
+      }
+    }
   }
 
   for (const [name, record] of [
@@ -360,6 +407,9 @@ function verifySessions(first, second) {
       "rollbackRestored",
       "dropRecovered",
       "inventoryTransferred",
+      "representativeBlockBroken",
+      "representativeBlockInspected",
+      "representativeBlockPlaced",
     ]) {
       if (record.details[detail] !== true) {
         throw new Error(`${name} did not verify ${detail}.`);
@@ -390,6 +440,13 @@ function verifySessions(first, second) {
   }
 
   return {
+    bundleBytes,
+    firstAverageTickDurationMs: firstRuntime.details.averageTickDurationMs,
+    firstMaximumTickDurationMs: firstRuntime.details.maximumTickDurationMs,
+    secondAverageTickDurationMs: secondRuntime.details.averageTickDurationMs,
+    secondMaximumTickDurationMs: secondRuntime.details.maximumTickDurationMs,
+    tickBudgetMs: secondRuntime.details.tickBudgetMs,
+    memoryWarningSignals: 0,
     firstStorageSequence: firstStorage.details.sequence,
     secondStorageSequence: secondStorage.details.sequence,
     runtimeMinimum: secondRuntime.details.minimum,
@@ -403,6 +460,12 @@ function verifySessions(first, second) {
     turtleConflictRejected: secondTurtle.details.conflictRejected,
     turtleUnloadedMoveRejected: secondTurtle.details.unloadedMoveRejected,
   };
+}
+
+function isMemoryWarningSignal(line) {
+  return /(?:allocation failed|low memory|memory (?:pressure|warning)|out of memory|watchdog termination)/iu.test(
+    line,
+  );
 }
 
 function requirePassingRecord(records, probe, phase) {

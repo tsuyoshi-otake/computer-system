@@ -49,14 +49,17 @@ Live authentication enabled so no player can join the isolated server.
 The harness was verified against Bedrock Dedicated Server 1.26.33.2. Both
 sessions completed with 20 computers receiving exactly 2,000 instructions over
 40 ticks, and the Dynamic Property sequence advanced from 1 to 2 after restart.
-Both sessions also passed transactional turtle operations, two pitched sound
-calls, six-face redstone input sampling, all 64 independent digital output
-masks, all 16 Redstone Interface analog levels, and simultaneous analog levels 4
-and 12. Turtle probes rejected occupied, unloaded, and conflicting moves without
-leaving an active resource lease. The second session recovered the Pocket
-Computer ItemStack identity written by the first. The custom item is parsed in
-the current direct-component format and is verified as non-stackable before any
-Dynamic Property is written.
+The final Phase 0 bundle was 48,776 bytes. Both sessions measured every
+scheduler tick below the millisecond clock resolution, stayed within the 50 ms
+tick budget, and emitted zero memory warning signals. Both sessions also passed
+transactional turtle operations, two pitched sound calls, six-face redstone
+input sampling, all 64 independent digital output masks, all 16 Redstone
+Interface analog levels, and simultaneous analog levels 4 and 12. Turtle probes
+rejected occupied, unloaded, and conflicting moves without leaving an active
+resource lease. The second session recovered the Pocket Computer ItemStack
+identity written by the first, including placed-block and block-to-item identity
+round trips. The custom item is parsed in the current direct-component format
+and is verified as non-stackable before any Dynamic Property is written.
 
 The arena loader polls a fixed set of required chunks for at most 40 ticks. Each
 redstone output transition settles for at most eight ticks. These bounds prevent
@@ -82,7 +85,7 @@ suite.
 
 `Verify:` Run `npm run validate`.
 
-`Expect:` Formatting, lint, type checking, 22 host tests, and the pack build all
+`Expect:` Formatting, lint, type checking, 33 host tests, and the pack build all
 exit successfully.
 
 `Verify:` Set `BDS_HOME` and run `npm run test:bds`.
@@ -90,7 +93,9 @@ exit successfully.
 `Expect:` Both isolated sessions end in a `suite/PASS` terminal record; the
 second session reports storage sequence 2, persisted item identity, six input
 faces, 64 digital output masks, 16 analog levels, rejected turtle conflict and
-unloaded movement, and runtime minimum/maximum 2,000.
+unloaded movement, and runtime minimum/maximum 2,000. The summary also reports
+the bundle byte count, average and maximum scheduler tick duration, the 50 ms
+budget result, and zero memory warning signals.
 
 `Verify:` Start one turtle operation while holding a lease on its destination,
 then target an unloaded coordinate and inject a failure after world mutation.

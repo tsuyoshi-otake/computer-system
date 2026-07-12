@@ -1,10 +1,21 @@
 import { type Player, system } from "@minecraft/server";
-import { CustomForm, ObservableString } from "@minecraft/server-ui";
+import {
+  CustomForm,
+  type DataDrivenScreenClosedReason,
+  ObservableString,
+} from "@minecraft/server-ui";
+
+import {
+  TerminalSession,
+  type TerminalCloseReason,
+  type TerminalFinalization,
+} from "../../phase0/terminalSession.js";
 
 const terminalWidth = 51;
 const terminalHeight = 19;
 
 export async function showTerminalProbe(player: Player): Promise<void> {
+  const session = new TerminalSession();
   const output = new ObservableString(createTerminalFrame(0, "Ready"));
   const input = new ObservableString("", { clientWritable: true });
   const form = new CustomForm(player, "Computer System Phase 0 Terminal")
@@ -13,10 +24,17 @@ export async function showTerminalProbe(player: Player): Promise<void> {
       description: "Enter one line and press Submit.",
     })
     .button("Submit", (): void => {
-      output.setData(createTerminalFrame(0, `> ${input.getData()}`));
+      const event = session.submitLine(input.getData());
+      if (event === undefined) {
+        return;
+      }
+      output.setData(
+        createTerminalFrame(0, `event:${event.type} > ${event.line}`),
+      );
       input.setData("");
     })
     .button("Terminate", (): void => {
+      session.requestTermination();
       output.setData(createTerminalFrame(0, "Terminated"));
       form.close();
     })
@@ -30,16 +48,48 @@ export async function showTerminalProbe(player: Player): Promise<void> {
 
   try {
     const reason = await form.show();
-    player.sendMessage(
-      `UI probe closed: reason=${String(reason)}, updates=${updates}, inputLength=${input.getData().length}.`,
+    reportFinalization(
+      player,
+      session.finalizeClose(toTerminalCloseReason(reason)),
+      updates,
+      input.getData().length,
     );
   } catch (error: unknown) {
-    player.sendMessage(
-      `UI probe failed: ${error instanceof Error ? error.message : String(error)}`,
+    reportFinalization(
+      player,
+      session.finalizeFailure(error, player.isValid),
+      updates,
+      input.getData().length,
     );
   } finally {
     system.clearRun(updateRun);
   }
+}
+
+function toTerminalCloseReason(
+  reason: DataDrivenScreenClosedReason,
+): TerminalCloseReason {
+  return reason;
+}
+
+function reportFinalization(
+  player: Player,
+  finalization: TerminalFinalization,
+  updates: number,
+  inputLength: number,
+): void {
+  if (!player.isValid) {
+    console.warn(
+      `UI probe finalized: result=${finalization.kind}, updates=${updates}, inputLength=${inputLength}.`,
+    );
+    return;
+  }
+
+  const detail =
+    finalization.detail === undefined ? "" : `, detail=${finalization.detail}`;
+  player.sendMessage(
+    `UI probe finalized: result=${finalization.kind}, updates=${updates}, inputLength=${inputLength}${detail}.`,
+  );
 }
 
 function createTerminalFrame(updates: number, status: string): string {

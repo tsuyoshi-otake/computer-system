@@ -117,6 +117,10 @@ async function executeSuite(runId: string): Promise<void> {
       ticks: runtime.ticks,
       minimum: runtime.minimum,
       maximum: runtime.maximum,
+      averageTickDurationMs: runtime.averageTickDurationMs,
+      maximumTickDurationMs: runtime.maximumTickDurationMs,
+      tickBudgetMs: runtime.tickBudgetMs,
+      withinTickBudget: runtime.withinTickBudget,
       ...(runtime.error === undefined ? {} : { error: runtime.error }),
     });
     if (!runtime.passed) {

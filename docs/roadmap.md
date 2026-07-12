@@ -191,8 +191,11 @@ suppressed error may leave a device accidentally marked as running.
 ## Known compatibility boundaries
 
 - Bedrock UI cannot expose every raw keyboard and mouse event exactly like a
-  Java ComputerCraft terminal.
-- Monitor rendering requires a bounded refresh rate and distance-aware updates.
+  Java ComputerCraft terminal. The production terminal must use an explicit cell
+  buffer and map cancel, disconnect, competing-form, and failure outcomes into
+  VM-visible results.
+- Stable APIs do not expose arbitrary world-facing text rendering. Monitors use
+  a bounded world frame and touch mapping plus the terminal UI fallback.
 - Speakers can play registered sounds and pitched notes, but arbitrary DFPWM or
   PCM streaming is not part of the initial release.
 - A computer block cannot expose six independent analog output strengths with
@@ -228,6 +231,12 @@ suppressed error may leave a device accidentally marked as running.
 - [ ] stable computer IDs and block/item identity transfer
 - [ ] Computer System OS shell and editor
 - [ ] Bedrock terminal UI
+  - dedicated ComputerCraft-inspired 51x19 cell presentation rather than the
+    Phase 0 DDUI probe
+  - fixed cells, monospace glyphs, cursor state, 16-color palette, and primary
+    input controls without scrolling at the reference resolution
+  - coalesced bounded redraws and explicit close/disconnect/competing-form
+    finalization
 - [ ] paged and transactional filesystem persistence
 - [ ] `startup.py`, shutdown, reboot, and crash reporting
 

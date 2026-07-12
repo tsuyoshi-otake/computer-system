@@ -40,10 +40,15 @@ focus, or controller-navigation problem.
 - Input/submit: `PASS` — `hello computer` appeared in the live input status and
   Submit cleared the client-writable field. The transient echo was shorter than
   the capture interval and was not independently captured.
-- Terminate: `PASS` — chat reported `reason=ServerClosed` with an empty final
-  input.
-- Normal close: `PASS` — chat reported `reason=ClientClosed` with an empty final
-  input.
+- Terminate: `PASS` — the client returned `ServerClosed`; the terminal session
+  now reports `result=terminated` with an empty final input.
+- Normal close: `PASS` — the client returned `ClientClosed`; the terminal
+  session now reports `result=cancelled` with an empty final input.
+
+Disconnect and competing-form outcomes are host-tested because deliberately
+disconnecting the player is not required for routine manual verification. An
+invalid player maps to `disconnected`, and `UserBusy` maps to `competing_form`;
+the first terminal result always owns cleanup.
 
 ## Later manual-only checks
 

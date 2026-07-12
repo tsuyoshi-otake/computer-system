@@ -15,7 +15,9 @@ const identityProperty = pocketIdentityProperty;
 
 export interface ItemIdentityProbeResult {
   readonly droppedIdentityPreserved: boolean;
+  readonly placedIdentityPreserved: boolean;
   readonly previousIdentityPresent: boolean;
+  readonly roundTripIdentityPreserved: boolean;
   readonly storedIdentityPreserved: boolean;
 }
 
@@ -46,6 +48,8 @@ export function executeItemIdentityProbe(
   }
 
   const identity = `computer-${world.getAbsoluteTime()}`;
+  const placedLocation = { x: 14, y: probeArenaY, z: 0 };
+  const placedIdentityProperty = "computer_system:phase0_placed_identity";
   const item = new ItemStack(pocketComputerTypeId, 1);
   requireCondition(
     !item.isStackable && item.maxAmount === 1,
@@ -73,9 +77,40 @@ export function executeItemIdentityProbe(
   dropped.remove();
   requireCondition(droppedIdentityPreserved, "Dropped item lost its identity.");
 
+  const placed = dimension.getBlock(placedLocation);
+  requireCondition(
+    placed !== undefined,
+    "Identity placement chunk is not loaded.",
+  );
+  placed.setType("minecraft:gold_block");
+  world.setDynamicProperty(placedIdentityProperty, identity);
+  const placedIdentityPreserved =
+    placed.typeId === "minecraft:gold_block" &&
+    world.getDynamicProperty(placedIdentityProperty) === identity;
+  requireCondition(
+    placedIdentityPreserved,
+    "Placed block identity mapping was not preserved.",
+  );
+
+  placed.setType("minecraft:air");
+  const roundTripItem = new ItemStack(pocketComputerTypeId, 1);
+  roundTripItem.setDynamicProperty(
+    identityProperty,
+    world.getDynamicProperty(placedIdentityProperty),
+  );
+  const roundTripIdentityPreserved =
+    roundTripItem.getDynamicProperty(identityProperty) === identity;
+  world.setDynamicProperty(placedIdentityProperty, undefined);
+  requireCondition(
+    roundTripIdentityPreserved,
+    "Placed block to item round trip lost identity.",
+  );
+
   return {
     droppedIdentityPreserved,
+    placedIdentityPreserved,
     previousIdentityPresent,
+    roundTripIdentityPreserved,
     storedIdentityPreserved,
   };
 }
