@@ -60,6 +60,28 @@ describe("PersistentComputerIdentityService", (): void => {
       physicalKey: "detached:computer-40",
     });
   });
+
+  it("allocates persistent detached identities for portable computers", (): void => {
+    const repository = new MemoryRepository();
+    let service = new PersistentComputerIdentityService(repository);
+    expect(service.createItem("advanced")).toMatchObject({
+      outcome: "placed",
+      computerId: "computer-1",
+      family: "advanced",
+    });
+    expect(service.observation("computer-1")).toEqual({
+      computerId: "computer-1",
+      family: "advanced",
+      form: "item",
+      physicalKey: "detached:computer-1",
+    });
+
+    service = new PersistentComputerIdentityService(repository);
+    expect(service.createItem("standard")).toMatchObject({
+      outcome: "placed",
+      computerId: "computer-2",
+    });
+  });
 });
 
 class MemoryRepository implements ComputerIdentityRepository {

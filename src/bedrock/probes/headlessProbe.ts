@@ -171,5 +171,7 @@ function emit(
   status: "BUSY" | "FAIL" | "PASS",
   details: Readonly<Record<string, boolean | number | string>>,
 ): void {
-  console.warn(formatProbeRecord({ runId, probe, status, details }));
+  const record = formatProbeRecord({ runId, probe, status, details });
+  console.warn(record);
+  for (const player of world.getAllPlayers()) player.sendMessage(record);
 }

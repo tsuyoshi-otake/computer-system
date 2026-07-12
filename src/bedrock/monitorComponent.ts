@@ -11,7 +11,7 @@ import {
   mapMonitorTouch,
 } from "../phase0/monitorSurface.js";
 import { monitorTypeId } from "./probes/monitorProbe.js";
-import { showTerminalProbe } from "./probes/uiProbe.js";
+import { openSelectedComputerTerminal } from "./computerTerminal.js";
 
 export function registerMonitorComponent(
   registry: BlockComponentRegistry,
@@ -73,6 +73,13 @@ function handleMonitorInteraction(
     `monitor_touch north ${String(touch.cell.x)} ${String(touch.cell.y)}`,
   );
   system.run((): void => {
-    if (event.player !== undefined) void showTerminalProbe(event.player);
+    const player = event.player;
+    if (player === undefined) return;
+    void openSelectedComputerTerminal(player).catch((error: unknown) => {
+      if (player.isValid)
+        player.sendMessage(
+          `Monitor terminal failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+    });
   });
 }

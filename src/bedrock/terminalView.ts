@@ -15,7 +15,6 @@ export interface TerminalViewHandlers {
 }
 
 const activeSessions = new Map<string, symbol>();
-const paletteSize = 16;
 
 export async function showTerminalView(
   player: Player,
@@ -34,21 +33,15 @@ export async function showTerminalView(
         Math.floor(index / terminal.width) + 1,
       ),
   );
-  const backgrounds = cells.map(
-    (cell) => new ObservableString(cell.background.toString(16)),
-  );
-  const foregrounds = Array.from(
-    { length: paletteSize },
-    (_, color) => new ObservableString(render(cells, terminal, color)),
-  );
+  const display = new ObservableString(renderDisplay(cells, terminal));
   const input = new ObservableString("", { clientWritable: true });
   const session = new ManagedTerminalSession((event): void =>
     dispatch(event, handlers),
   );
-  const form = new CustomForm(player, title)
-    .textField("Input", input, {
-      description: "51x19 terminal — submit one line at a time.",
-    })
+  const form = new CustomForm(player, title);
+  form
+    .label(display)
+    .textField("Input", input)
     .button("Submit", (): void => {
       if (session.submitLine(input.getData())) input.setData("");
     })
@@ -56,8 +49,6 @@ export async function showTerminalView(
       if (session.requestTermination()) handlers.onTerminate();
       form.close();
     });
-  for (const background of backgrounds) form.label(background);
-  for (const foreground of foregrounds) form.label(foreground);
   form.closeButton();
 
   let renderedCursor = cursorState(terminal);
@@ -69,14 +60,9 @@ export async function showTerminalView(
     if (flush.changes.length === 0 && !cursorChanged) return;
     for (const change of flush.changes) {
       cells[(change.y - 1) * terminal.width + change.x - 1] = change;
-      backgrounds[(change.y - 1) * terminal.width + change.x - 1]?.setData(
-        change.background.toString(16),
-      );
     }
     renderedCursor = nextCursor;
-    for (let color = 0; color < paletteSize; color += 1) {
-      foregrounds[color]?.setData(render(cells, terminal, color));
-    }
+    display.setData(renderDisplay(cells, terminal));
   }, 2);
 
   try {
@@ -103,28 +89,52 @@ function dispatch(
   else handlers.onClosed(event.result.kind, event.result.detail);
 }
 
-function render(
+const formattingCodes = [
+  "f",
+  "6",
+  "d",
+  "b",
+  "e",
+  "a",
+  "d",
+  "8",
+  "7",
+  "3",
+  "5",
+  "9",
+  "6",
+  "2",
+  "c",
+  "0",
+] as const;
+
+function renderDisplay(
   cells: readonly {
     character: string;
     foreground: number;
     background: number;
   }[],
   terminal: TerminalBuffer,
-  foreground: number,
 ): string {
   const rows: string[] = [];
   for (let y = 1; y <= terminal.height; y += 1) {
     let row = "";
+    let renderedColor = -1;
     for (let x = 1; x <= terminal.width; x += 1) {
       const cell = cells[(y - 1) * terminal.width + x - 1]!;
       const cursor =
         terminal.cursorBlink &&
         terminal.cursorX === x &&
         terminal.cursorY === y;
-      row +=
-        cell.foreground === foreground ? (cursor ? "_" : cell.character) : " ";
+      const showBackground = cell.character === " " && cell.background !== 15;
+      const color = showBackground ? cell.background : cell.foreground;
+      if (color !== renderedColor) {
+        row += `§${formattingCodes[color] ?? "f"}`;
+        renderedColor = color;
+      }
+      row += cursor ? "_" : showBackground ? "█" : cell.character;
     }
-    rows.push(row);
+    rows.push(`${row}§r`);
   }
   return rows.join("\n");
 }

@@ -74,6 +74,19 @@ export class PersistentComputerIdentityService {
     return { outcome: "placed", computerId, family, generation };
   }
 
+  createItem(family: ComputerFamily): IdentityPlacementResult {
+    const computerId = this.sequence.next();
+    const result = this.registry.claim({
+      computerId,
+      family,
+      form: "item",
+      physicalKey: detachedKey(computerId),
+    });
+    if (result.outcome === "duplicate") return result;
+    const generation = this.repository.save(this.snapshot());
+    return { outcome: "placed", computerId, family, generation };
+  }
+
   break(physicalKey: string): IdentityPlacementResult | IdentityResult {
     const observation = this.registry
       .snapshot()

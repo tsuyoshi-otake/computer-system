@@ -15,18 +15,21 @@ import {
   type ItemComponentUseOnEvent,
 } from "@minecraft/server";
 
-import { DynamicPropertyIdentityRepository } from "../adapters/storage/dynamicPropertyIdentityRepository.js";
-import { PersistentComputerIdentityService } from "../application/computer/identityPersistence.js";
-import { ComputerRecord } from "../domain/computer/computer.js";
+import { scheduleOwnedFinalization } from "../application/computer/deferredFinalization.js";
 import type { ComputerFamily } from "../domain/computer/identity.js";
 import { redstoneSides } from "../domain/redstone/redstoneState.js";
-import { computerHost, registerComputer } from "./computerHost.js";
-import { showTerminalView } from "./terminalView.js";
+import { computerHost } from "./computerHost.js";
+import {
+  computerIdentityProperty,
+  ensureComputer,
+  identityService,
+} from "./computerRegistry.js";
+import { openComputerTerminal } from "./computerTerminal.js";
 
-export const computerIdentityProperty = "computer_system:computer_id";
+export { computerIdentityProperty } from "./computerRegistry.js";
 const blockComponentId = "computer_system:computer";
 const itemComponentId = "computer_system:computer_item";
-let identities: PersistentComputerIdentityService | undefined;
+const breakingBlocks = new Set<string>();
 let outputCursor = 0;
 
 export function registerComputerComponents(
@@ -37,6 +40,7 @@ export function registerComputerComponents(
     onPlace: ({ block }, parameters): void => {
       const family = familyParameter(parameters);
       const physicalKey = blockKey(block);
+      if (breakingBlocks.has(physicalKey)) return;
       const observation = identityService().atPhysicalKey(physicalKey);
       const result =
         observation === undefined
@@ -98,13 +102,37 @@ function handleBreak(event: BlockComponentPlayerBreakEvent): void {
   const physicalKey = blockKey(event.block);
   const result = identityService().break(physicalKey);
   if (result.outcome !== "placed") return;
-  computerHost.runtime.shutdown(result.computerId, "block_broken");
-  computerHost.flush(result.computerId);
   const player = event.player;
-  if (player === undefined) return;
-  system.run((): void =>
-    giveComputerItem(player, result.computerId, result.family),
-  );
+  scheduleOwnedFinalization(breakingBlocks, physicalKey, {
+    prepare: [
+      (): void => {
+        computerHost.runtime.shutdown(result.computerId, "block_broken");
+      },
+      (): void => {
+        computerHost.flush(result.computerId);
+      },
+    ],
+    schedule: (callback): void => {
+      system.run(callback);
+    },
+    finalize: [
+      (): void => {
+        const residual = blockFromKey(physicalKey);
+        if (residual !== undefined && isComputerBlock(residual.typeId)) {
+          residual.setType("minecraft:air");
+        }
+      },
+      (): void => {
+        if (player?.isValid)
+          giveComputerItem(player, result.computerId, result.family);
+      },
+    ],
+    onFailure: (phase, error): void => {
+      const message = `Computer break ${phase} failed: ${errorMessage(error)}`;
+      console.warn(message);
+      if (player?.isValid) player.sendMessage(message);
+    },
+  });
 }
 
 function handleInteraction(event: BlockComponentPlayerInteractEvent): void {
@@ -115,36 +143,13 @@ function handleInteraction(event: BlockComponentPlayerInteractEvent): void {
     return;
   }
   const record = ensureComputer(observation.computerId, observation.family);
-  if (record.lifecycle.state.kind === "off") {
-    computerHost.runtime.powerOn(record.computerId);
-  }
   system.run((): void => {
     if (event.player === undefined) return;
-    void showTerminalView(
-      event.player,
-      record.terminal,
-      {
-        onLine: (line): void => {
-          computerHost.runtime.queueEvent(
-            record.computerId,
-            "terminal_line",
-            line,
-          );
-        },
-        onTerminate: (): void => {
-          computerHost.runtime.terminate(record.computerId);
-        },
-        onClosed: (kind, detail): void => {
-          computerHost.runtime.queueEvent(
-            record.computerId,
-            "terminal_closed",
-            kind,
-            detail ?? "",
-          );
-        },
-      },
-      record.label ?? `Computer ${record.computerId}`,
-    );
+    const player = event.player;
+    void openComputerTerminal(player, record).catch((error: unknown) => {
+      if (player.isValid)
+        player.sendMessage(`Computer terminal failed: ${errorMessage(error)}`);
+    });
   });
 }
 
@@ -182,20 +187,6 @@ function syncComputerOutputs(): void {
   }
 }
 
-function ensureComputer(
-  computerId: string,
-  family: ComputerFamily,
-): ComputerRecord {
-  const existing = computerHost.get(computerId);
-  if (existing !== undefined) return existing;
-  const restored = computerHost.restore(computerId);
-  if (restored.outcome === "registered") return restored.record;
-  if (restored.outcome === "failed") throw restored.error;
-  const record = new ComputerRecord(computerId, family);
-  registerComputer(record);
-  return record;
-}
-
 function giveComputerItem(
   player: Player,
   computerId: string,
@@ -214,13 +205,6 @@ function giveComputerItem(
     player.dimension.spawnItem(remainder, player.location);
 }
 
-function identityService(): PersistentComputerIdentityService {
-  identities ??= new PersistentComputerIdentityService(
-    new DynamicPropertyIdentityRepository(world),
-  );
-  return identities;
-}
-
 function familyParameter(
   parameters: CustomComponentParameters,
 ): ComputerFamily {
@@ -233,6 +217,17 @@ function familyParameter(
 function blockType(family: ComputerFamily, mask: number): string {
   const name = family === "advanced" ? "advanced_computer" : "computer";
   return `computer_system:${name}_${String(mask).padStart(2, "0")}`;
+}
+
+function isComputerBlock(typeId: string): boolean {
+  return (
+    typeId.startsWith("computer_system:computer_") ||
+    typeId.startsWith("computer_system:advanced_computer_")
+  );
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function blockKey(block: Block): string {

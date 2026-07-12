@@ -22,7 +22,11 @@ import {
   createRedstoneProbeBlock,
   redstoneProbeIdentifier,
 } from "./redstone-probe-block.mjs";
-import { createPocketComputerItem } from "./pocket-computer-item.mjs";
+import {
+  createPocketComputerItem,
+  createPocketComputerTexture,
+  createPocketComputerTextureAtlas,
+} from "./pocket-computer-item.mjs";
 import { createMonitorBlock } from "./monitor-block.mjs";
 import { createComputerTerminalUi } from "./terminal-ui.mjs";
 
@@ -48,6 +52,9 @@ const generatedItemsDirectory = path.join(behaviorOutput, "items");
 await mkdir(generatedBlocksDirectory, { recursive: true });
 await mkdir(generatedItemsDirectory, { recursive: true });
 await mkdir(path.join(resourceOutput, "ui"), { recursive: true });
+await mkdir(path.join(resourceOutput, "textures", "items"), {
+  recursive: true,
+});
 await writeFile(
   path.join(resourceOutput, "ui", "computer_terminal.json"),
   `${JSON.stringify(createComputerTerminalUi(), null, 2)}\n`,
@@ -84,6 +91,15 @@ await writeFile(
   path.join(generatedItemsDirectory, "pocket_computer.json"),
   `${JSON.stringify(createPocketComputerItem(), null, 2)}\n`,
   "utf8",
+);
+await writeFile(
+  path.join(resourceOutput, "textures", "item_texture.json"),
+  `${JSON.stringify(createPocketComputerTextureAtlas(), null, 2)}\n`,
+  "utf8",
+);
+await writeFile(
+  path.join(resourceOutput, "textures", "items", "pocket_computer.png"),
+  createPocketComputerTexture(),
 );
 await Promise.all(
   Array.from({ length: 64 }, async (_, mask) => {

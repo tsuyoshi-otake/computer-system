@@ -8,10 +8,19 @@ import {
 } from "@minecraft/server";
 
 import { PocketSessionLifecycle } from "../phase0/pocketSessionLifecycle.js";
-import { showTerminalProbe } from "./probes/uiProbe.js";
+import {
+  computerIdentityProperty,
+  createPortableComputer,
+  ensureComputer,
+  identityService,
+} from "./computerRegistry.js";
+import {
+  disconnectComputerTerminalPlayer,
+  openComputerTerminal,
+} from "./computerTerminal.js";
 
 export const pocketComputerTypeId = "computer_system:pocket_computer";
-export const pocketIdentityProperty = "computer_system:instance_id";
+export const pocketIdentityProperty = computerIdentityProperty;
 const componentId = "computer_system:pocket_computer";
 const lifecycle = new PocketSessionLifecycle();
 
@@ -25,6 +34,11 @@ export function registerPocketComputerComponent(
         source.sendMessage("This Pocket Computer has no instance identity.");
         return;
       }
+      const observation = identityService().observation(identity);
+      if (observation === undefined) {
+        source.sendMessage("This Pocket Computer identity is unavailable.");
+        return;
+      }
 
       const transition = lifecycle.use({
         instanceId: identity,
@@ -36,7 +50,23 @@ export function registerPocketComputerComponent(
         return;
       }
       system.run((): void => {
-        void showTerminalProbe(source);
+        try {
+          const record = ensureComputer(
+            observation.computerId,
+            observation.family,
+          );
+          void openComputerTerminal(source, record).catch((error: unknown) => {
+            if (source.isValid)
+              source.sendMessage(
+                `Pocket Computer failed: ${errorMessage(error)}`,
+              );
+          });
+        } catch (error: unknown) {
+          if (source.isValid)
+            source.sendMessage(
+              `Pocket Computer failed: ${errorMessage(error)}`,
+            );
+        }
       });
     },
   });
@@ -45,6 +75,7 @@ export function registerPocketComputerComponent(
 export function startPocketComputerLifecycle(): void {
   world.afterEvents.playerLeave.subscribe(({ playerId }): void => {
     lifecycle.disconnect(playerId);
+    disconnectComputerTerminalPlayer(playerId);
   });
 
   world.afterEvents.entityItemDrop.subscribe(({ items }): void => {
@@ -56,20 +87,33 @@ export function startPocketComputerLifecycle(): void {
 }
 
 export function givePocketComputer(player: Player): string {
-  const identity = `pocket-${world.getAbsoluteTime()}-${player.id}`;
+  const record = createPortableComputer("advanced");
   const item = new ItemStack(pocketComputerTypeId, 1);
-  item.setDynamicProperty(pocketIdentityProperty, identity);
+  item.setDynamicProperty(pocketIdentityProperty, record.computerId);
   const inventory = player.getComponent(
     EntityComponentTypes.Inventory,
   )?.container;
-  if (inventory === undefined) {
-    throw new Error("Player inventory is unavailable.");
+  let remainder: ItemStack | undefined;
+  if (
+    inventory !== undefined &&
+    inventory.getItem(player.selectedSlotIndex) === undefined
+  ) {
+    inventory.setItem(player.selectedSlotIndex, item);
+    if (
+      inventory.getItem(player.selectedSlotIndex)?.typeId !==
+      pocketComputerTypeId
+    )
+      throw new Error("Pocket Computer did not reach the selected slot.");
+  } else {
+    remainder = inventory === undefined ? item : inventory.addItem(item);
   }
-  const remainder = inventory.addItem(item);
-  if (remainder !== undefined) {
-    throw new Error("Player inventory is full.");
-  }
-  return identity;
+  if (remainder !== undefined)
+    player.dimension.spawnItem(remainder, player.location);
+  return record.computerId;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function observeDropped(stack: ItemStack | undefined): void {

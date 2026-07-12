@@ -20,7 +20,10 @@ import { registerRedstoneProbeComponent } from "./probes/redstoneProbeComponent.
 import { startRuntimeProbe } from "./probes/runtimeProbe.js";
 import { executeSpeakerProbe } from "./probes/speakerProbe.js";
 import { runStorageProbe } from "./probes/storageProbe.js";
-import { showTerminalProbe } from "./probes/uiProbe.js";
+import {
+  showTerminalProbe,
+  startTerminalCompetitionProbe,
+} from "./probes/uiProbe.js";
 
 const packVersion = "0.1.0";
 
@@ -60,7 +63,7 @@ system.afterEvents.scriptEventReceive.subscribe((event): void => {
     case "help":
     case "status":
       event.sourceEntity.sendMessage(
-        "Computer System Phase 0 commands: status, ui, monitor, pocket, runtime, storage, speaker, headless",
+        "Computer System Phase 0 commands: status, ui, compete, monitor, pocket, runtime, storage, speaker, headless",
       );
       return;
     case "runtime":
@@ -86,9 +89,24 @@ system.afterEvents.scriptEventReceive.subscribe((event): void => {
       });
       return;
     }
+    case "compete": {
+      const player = event.sourceEntity;
+      system.run((): void => startTerminalCompetitionProbe(player));
+      return;
+    }
     case "pocket": {
-      const identity = givePocketComputer(event.sourceEntity);
-      event.sourceEntity.sendMessage(`Pocket Computer granted (${identity}).`);
+      const player = event.sourceEntity;
+      system.run((): void => {
+        try {
+          const identity = givePocketComputer(player);
+          player.sendMessage(`Pocket Computer granted (${identity}).`);
+        } catch (error: unknown) {
+          if (player.isValid)
+            player.sendMessage(
+              `Pocket Computer grant failed: ${error instanceof Error ? error.message : String(error)}`,
+            );
+        }
+      });
       return;
     }
     case "monitor":

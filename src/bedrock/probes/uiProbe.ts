@@ -1,4 +1,4 @@
-import type { Player } from "@minecraft/server";
+import { system, type Player } from "@minecraft/server";
 
 import { TerminalBuffer } from "../../domain/terminal/terminalBuffer.js";
 import { showTerminalView } from "../terminalView.js";
@@ -31,4 +31,56 @@ export async function showTerminalProbe(player: Player): Promise<void> {
     },
     "Computer System Terminal",
   );
+}
+
+export function startTerminalCompetitionProbe(player: Player): void {
+  const runId = `compete-${system.currentTick}`;
+  const counts = { holder: 0, challenger: 0 };
+  const report = (
+    role: keyof typeof counts,
+    kind: string,
+    detail?: string,
+  ): void => {
+    counts[role] += 1;
+    const record = `CS_TERMINAL_COMPETE ${JSON.stringify({
+      runId,
+      role,
+      kind,
+      count: counts[role],
+      ...(detail === undefined ? {} : { detail }),
+    })}`;
+    console.warn(record);
+    if (player.isValid) player.sendMessage(record);
+  };
+
+  void showTerminalView(
+    player,
+    competitionTerminal("holder"),
+    {
+      onLine: (): void => undefined,
+      onTerminate: (): void => undefined,
+      onClosed: (kind, detail): void => report("holder", kind, detail),
+    },
+    "Competition Holder",
+  );
+  system.runTimeout((): void => {
+    void showTerminalView(
+      player,
+      competitionTerminal("challenger"),
+      {
+        onLine: (): void => undefined,
+        onTerminate: (): void => undefined,
+        onClosed: (kind, detail): void => report("challenger", kind, detail),
+      },
+      "Competition Challenger",
+    );
+  }, 10);
+}
+
+function competitionTerminal(role: string): TerminalBuffer {
+  const terminal = new TerminalBuffer();
+  terminal.write(`Competition ${role}`);
+  terminal.setCursorPosition(1, 2);
+  terminal.write("Keep this form open for the competing-form probe.");
+  return terminal;
 }
