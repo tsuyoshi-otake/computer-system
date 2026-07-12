@@ -60,6 +60,26 @@ describe("Bedrock terminal adapters", () => {
     expect(probe).toContain('report("challenger", kind, detail)');
     expect(probe).toContain('report("holder", kind, detail)');
   });
+
+  it("records real-player terminal closure for the isolated BDS disconnect harness", async () => {
+    const [probe, runner, packageJson] = await Promise.all([
+      source("src/bedrock/probes/uiProbe.ts"),
+      source("tools/bds-probe-runner.mjs"),
+      source("package.json"),
+    ]);
+
+    expect(probe).toContain("CS_TERMINAL_CLOSE");
+    expect(runner).toContain('process.argv.includes("--disconnect")');
+    expect(runner).toContain("BDS_DISCONNECT_READY");
+    expect(runner).toContain("verifyDisconnect(session)");
+    expect(runner).toContain("session.terminalCloseRecords.length !== 1");
+    expect(runner).toContain('"runtime"');
+    expect(runner).toContain("resetManagedDirectory(workRoot)");
+    expect(runner).toContain(
+      "const executable = path.join(serverRoot, executableName)",
+    );
+    expect(packageJson).toContain('"test:bds:disconnect"');
+  });
 });
 
 async function source(relative) {

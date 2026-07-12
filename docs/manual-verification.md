@@ -89,10 +89,48 @@ focus, or controller-navigation problem.
 - Normal close: `PASS` — the client returned `ClientClosed`; the terminal
   session now reports `result=cancelled` with an empty final input.
 
-Disconnect and competing-form outcomes are host-tested because deliberately
-disconnecting the player is not required for routine manual verification. An
-invalid player maps to `disconnected`, and `UserBusy` maps to `competing_form`;
-the first terminal result always owns cleanup.
+The mapping of disconnect and competing-form outcomes is host-tested. A real
+disconnect can additionally be verified against an isolated copy of the official
+BDS distribution:
+
+```powershell
+$env:BDS_HOME = "C:\path\to\bedrock-server"
+npm run test:bds:disconnect
+```
+
+Wait for `BDS_DISCONNECT_READY`, add its localhost address and port to the GDK
+client, join, run `/scriptevent computer_system:probe ui`, and leave the server
+while the terminal remains open. The harness passes only when the server logs
+exactly one `CS_TERMINAL_CLOSE` record whose kind is `disconnected`; it then
+stops the isolated server. Set `BDS_PORT` when a fixed UDP port is needed and
+`BDS_WORKDIR` when the generated isolated work directory must be retained at a
+known location. `BDS_WORKDIR` must be empty and outside `BDS_HOME`.
+
+By default, the harness recreates the isolated server at the stable
+`%USERPROFILE%\tmp\computer-system-bds\runtime` path. Windows Firewall therefore
+sees one stable executable path instead of a new timestamped executable on every
+run. Approve that runtime executable once for the required network profile;
+later default runs reuse the same application path. Setting `BDS_WORKDIR`
+overrides this behavior and can require a separate Firewall rule for that custom
+executable path.
+
+To create the rule without waiting for the Windows prompt, open PowerShell as
+Administrator once and run:
+
+```powershell
+$bds = "$env:USERPROFILE\tmp\computer-system-bds\runtime\bedrock_server.exe"
+New-NetFirewallRule `
+  -DisplayName "Computer System BDS Harness" `
+  -Description "Allow the isolated Computer System BDS harness." `
+  -Direction Inbound -Action Allow -Program $bds `
+  -Protocol UDP -Profile Private
+```
+
+Administrative rights are required to add a machine-wide Firewall rule. Keep the
+rule scoped to `Private`; the harness does not require a `Public` network rule.
+
+An invalid player maps to `disconnected`, and `UserBusy` maps to
+`competing_form`; the first terminal result always owns cleanup.
 
 ## Later manual-only checks
 

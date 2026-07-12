@@ -80,8 +80,12 @@ The arena loader polls a fixed set of required chunks for at most 40 ticks. Each
 redstone output transition settles for at most eight ticks. These bounds prevent
 startup races without turning either path into an unbounded retry loop.
 
-Set `BDS_WORKDIR` only when an explicit empty work directory is preferred. The
-runner refuses a non-empty directory and never recursively deletes it.
+The default isolated runtime is the stable
+`%USERPROFILE%\tmp\computer-system-bds\runtime` directory. The runner safely
+recreates this one managed directory on each run, so Windows Firewall can retain
+a single application-path rule. Set `BDS_WORKDIR` only when a different explicit
+empty work directory is preferred. The runner refuses a non-empty custom
+directory and never recursively deletes it.
 
 The remaining player-experience checks are listed in
 [the manual verification checklist](manual-verification.md).

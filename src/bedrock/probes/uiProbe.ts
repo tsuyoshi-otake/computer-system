@@ -25,7 +25,13 @@ export async function showTerminalProbe(player: Player): Promise<void> {
         probeTerminal.write(`> ${line}`);
       },
       onTerminate: (): void => undefined,
-      onClosed: (kind): void => {
+      onClosed: (kind, detail): void => {
+        console.warn(
+          `CS_TERMINAL_CLOSE ${JSON.stringify({
+            kind,
+            ...(detail === undefined ? {} : { detail }),
+          })}`,
+        );
         if (player.isValid) player.sendMessage(`Terminal closed: ${kind}`);
       },
     },
