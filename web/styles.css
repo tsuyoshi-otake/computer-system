@@ -189,11 +189,9 @@ h1 {
   height: 100%;
   min-width: 0;
   min-height: 0;
-  overflow: auto;
+  overflow: hidden;
   padding: 14px 0;
   background: var(--terminal-bg);
-  scrollbar-color: var(--line-strong) transparent;
-  scrollbar-width: thin;
 }
 
 .terminal-output {
@@ -249,7 +247,7 @@ h1 {
   outline: 0 solid transparent;
   background: transparent;
   color: var(--input-color, var(--text));
-  caret-color: var(--green);
+  caret-color: var(--input-color, var(--text));
   pointer-events: auto;
   field-sizing: content;
   line-height: 1.32;

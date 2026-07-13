@@ -141,6 +141,38 @@ export class ShellSession {
     return this.withWorkCycles(result);
   }
 
+  submitDebugCommand(line: string): ShellResult {
+    if (this.vi !== undefined || this.editor !== undefined) {
+      return resultFromStreams(
+        "",
+        "debug: interactive editor session is active\n",
+        2,
+      );
+    }
+    const result = this.submit(line);
+    if (this.vi !== undefined || this.editor !== undefined) {
+      this.vi = undefined;
+      this.editor = undefined;
+      return resultFromStreams(
+        "",
+        "debug: TUI commands are not supported through MCP\n",
+        2,
+      );
+    }
+    if (
+      result.action !== undefined ||
+      result.sleepTicks !== undefined ||
+      result.terminalScreen !== undefined
+    ) {
+      return resultFromStreams(
+        "",
+        "debug: asynchronous and terminal-control commands are not supported through MCP\n",
+        2,
+      );
+    }
+    return result;
+  }
+
   complete(line: string, cursor: number): ShellCompletionResult {
     if (this.vi !== undefined || this.editor !== undefined) {
       return { candidates: [], cursor, value: line };

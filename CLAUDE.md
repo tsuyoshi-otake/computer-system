@@ -68,8 +68,11 @@ The Resource Pack cannot run MCP. Use the local stdio companion in
 `.codex/config.toml`.
 
 The companion exposes status, start, stop, logs, bounded log waits, allowlisted
-commands, and Computer System probes. Preserve the managed debug world for
-interactive development and reset it only for clean-world acceptance.
+commands, Computer System probes, exact-Computer non-TUI shell execution, and
+computer-scoped Web handoff waits. Preserve the managed debug world for
+interactive development and reset it only for clean-world acceptance. MCP shell
+execution must remain inside `ShellSession`; never broaden it into host shell or
+arbitrary BDS command execution.
 
 `BDS_HOME` is a read-only distribution source. Never modify or recursively
 delete it. The default managed work directory is
@@ -103,7 +106,8 @@ The July 2026 live GDK verification established the following:
 - The Web Terminal renders the same terminal snapshot in a full-width browser
   screen. Its semantic input is visually overlaid at the terminal cursor, so
   physical typing appears immediately after the shell prompt instead of in a
-  separate text box.
+  separate text box. Grid negotiation subtracts stage padding and fits both
+  axes; the terminal stage stays scrollbar-free.
 - Physical Enter submits `terminal_line`; Ctrl+C copies selected terminal or
   command text and invokes the bounded interrupt only without a selection;
   bounded plain-text paste never auto-submits; Up and Down navigate local
@@ -118,6 +122,11 @@ The July 2026 live GDK verification established the following:
 - Browser handoff links are one-use and valid for 60 seconds. Browser bearer
   tokens do not pass through BDS logs. Sessions, listeners, polling retries, and
   Bedrock snapshot work are all bounded and end in an explicit final state.
+- `bds_wait_for_web_handoff` owns at most one bounded wait per Computer ID and
+  suppresses auto-open for its matching handoff, preventing one-use URL races.
+  `bds_execute_computer_command` returns bounded stdout, stderr, exit code, and
+  modeled work cycles for one exact Computer. TUI, sleep, and lifecycle-control
+  commands fail explicitly on this debug path.
 - Periodic snapshot work is fixed-batch O(K), without an O(N) allocation per
   pass. Writer input uses an amortized-O(1), deduplicated, attempt-bounded eager
   queue so interactive latency does not inherit the viewer round-robin delay.

@@ -36,8 +36,10 @@ describe("BDS MCP stdio server", () => {
       "bds_stop",
       "bds_run_probe",
       "bds_run_command",
+      "bds_execute_computer_command",
       "bds_get_logs",
       "bds_wait_for_log",
+      "bds_wait_for_web_handoff",
     ]);
     expect(
       listed.tools.find((tool) => tool.name === "bds_stop")?.annotations,

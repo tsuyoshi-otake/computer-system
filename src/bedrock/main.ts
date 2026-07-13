@@ -16,6 +16,7 @@ import {
   registerPocketComputerComponent,
   startPocketComputerLifecycle,
 } from "./pocketComputer.js";
+import { handleDebugCommand } from "./debugCommandBridge.js";
 import { startHeadlessProbeSuite } from "./probes/headlessProbe.js";
 import { registerRedstoneProbeComponent } from "./probes/redstoneProbeComponent.js";
 import { startRuntimeProbe } from "./probes/runtimeProbe.js";
@@ -55,6 +56,10 @@ system.run((): void => {
 
 system.afterEvents.scriptEventReceive.subscribe((event): void => {
   if (handleWebTerminalScriptEvent(event.id, event.message)) return;
+  if (event.id === "computer_system:debug-command") {
+    handleDebugCommand(event.message);
+    return;
+  }
   if (event.id !== "computer_system:probe") {
     return;
   }

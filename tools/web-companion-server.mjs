@@ -20,6 +20,8 @@ const maximumBrowserLaunchWaiters = 4;
 const defaultBrowserLaunchTimeoutMs = 5_000;
 const completionTimeoutMs = 2_000;
 const maximumPendingCompletions = 32;
+const maximumHandoffWaitMs = 120_000;
+const computerIdPattern = /^c-[0-9a-hjkmnp-tv-z]{6}$/u;
 const assetTypes = new Map([
   [".css", "text/css; charset=utf-8"],
   [".html", "text/html; charset=utf-8"],
@@ -58,6 +60,7 @@ export class WebCompanionServer {
     this.browserLaunchDepth = 0;
     this.browserLaunchTail = Promise.resolve();
     this.pendingCompletions = new Map();
+    this.pendingHandoffs = new Map();
     this.nextCompletion = 1;
     this.browserLaunch = {
       enabled: this.browserAutoOpenEnabled,
@@ -127,6 +130,7 @@ export class WebCompanionServer {
     }
     this.store.closeAll("companion_stopped");
     this.failPendingCompletions("Web companion stopped.");
+    this.failPendingHandoffs("Web companion stopped.");
     const server = this.server;
     this.server = undefined;
     if (server !== undefined) {
@@ -162,6 +166,7 @@ export class WebCompanionServer {
       if (state === "idle" || state === "failed") {
         this.store.closeAll(state === "failed" ? "bds_failed" : "bds_stopped");
         this.failPendingCompletions("BDS stopped before completion finished.");
+        this.failPendingHandoffs("BDS stopped before a handoff was issued.");
       }
     });
   }
@@ -180,7 +185,14 @@ export class WebCompanionServer {
         this.store.close(issued.sessionId, "relay_failed");
         throw error;
       }
-      await this.queueBrowserLaunch(handoffUrl);
+      const claimedByMcp = this.resolvePendingHandoff(identity.computerId, {
+        computerId: identity.computerId,
+        expiresAt: issued.handoffExpiresAt,
+        mode: issued.mode,
+        sessionId: issued.sessionId,
+        url: handoffUrl,
+      });
+      if (!claimedByMcp) await this.queueBrowserLaunch(handoffUrl);
       return;
     }
 
@@ -224,6 +236,49 @@ export class WebCompanionServer {
         this.store.close(payload.sessionId, payload.reason ?? "bedrock_closed");
       }
     }
+  }
+
+  waitForHandoff(options = {}) {
+    const computerId = options.computerId;
+    if (typeof computerId !== "string" || !computerIdPattern.test(computerId)) {
+      throw new Error("computerId must use the c-xxxxxx identity format.");
+    }
+    if (!this.started) throw new Error("Web companion is not running.");
+    if (this.pendingHandoffs.has(computerId)) {
+      throw new Error(`A handoff wait is already active for ${computerId}.`);
+    }
+    const timeoutMs = Math.min(
+      positiveInteger(options.timeoutMs ?? 30_000, "Handoff timeout"),
+      maximumHandoffWaitMs,
+    );
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pendingHandoffs.delete(computerId);
+        reject(
+          new Error(
+            `Timed out after ${String(timeoutMs)} ms waiting for a Web Terminal handoff for ${computerId}.`,
+          ),
+        );
+      }, timeoutMs);
+      this.pendingHandoffs.set(computerId, { reject, resolve, timer });
+    });
+  }
+
+  resolvePendingHandoff(computerId, handoff) {
+    const pending = this.pendingHandoffs.get(computerId);
+    if (pending === undefined) return false;
+    this.pendingHandoffs.delete(computerId);
+    clearTimeout(pending.timer);
+    pending.resolve(handoff);
+    return true;
+  }
+
+  failPendingHandoffs(reason) {
+    for (const pending of this.pendingHandoffs.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(new Error(reason));
+    }
+    this.pendingHandoffs.clear();
   }
 
   configureBrowserAutoOpen() {

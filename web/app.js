@@ -446,7 +446,7 @@ function renderTerminal(payload) {
     payload.lifecycle ?? "unknown",
   ).toUpperCase();
   elements.terminalSize.textContent = `${String(terminal.width)} × ${String(terminal.height)}`;
-  fitTerminal(terminal.width);
+  fitTerminal(terminal.width, terminal.height);
   const cursorX = Number.isInteger(terminal.cursor?.x) ? terminal.cursor.x : 1;
   const cursorY = Number.isInteger(terminal.cursor?.y) ? terminal.cursor.y : 1;
   elements.commandForm.style.setProperty(
@@ -737,21 +737,26 @@ async function closeSession() {
 function scheduleTerminalFit() {
   cancelAnimationFrame(resizeFrame);
   resizeFrame = requestAnimationFrame(() => {
-    const width = Number.parseInt(elements.terminalSize.textContent, 10);
-    if (Number.isFinite(width)) fitTerminal(width);
+    const dimensions = /^(\d+)\s*×\s*(\d+)$/u.exec(
+      elements.terminalSize.textContent,
+    );
+    if (dimensions !== null) {
+      fitTerminal(Number(dimensions[1]), Number(dimensions[2]));
+    }
     queueTerminalResize();
   });
 }
 
 function queueTerminalResize() {
   if (sessionClosed || accessMode !== "writer") return;
+  const available = terminalContentSize();
   const width = Math.max(
     51,
-    Math.min(160, Math.floor(elements.terminalStage.clientWidth / (14 * 0.61))),
+    Math.min(160, Math.floor(available.width / (14 * 0.61))),
   );
   const height = Math.max(
     19,
-    Math.min(60, Math.floor(elements.terminalStage.clientHeight / (14 * 1.32))),
+    Math.min(60, Math.floor(available.height / (14 * 1.32))),
   );
   const key = `${String(width)}x${String(height)}`;
   if (key === lastRequestedTerminalSize) return;
@@ -785,20 +790,44 @@ async function drainTerminalResize() {
   }
 }
 
-function fitTerminal(columns) {
-  if (!Number.isFinite(columns) || columns <= 0) return;
-  const available = elements.terminalStage.clientWidth;
+function fitTerminal(columns, rows) {
+  if (
+    !Number.isFinite(columns) ||
+    columns <= 0 ||
+    !Number.isFinite(rows) ||
+    rows <= 0
+  )
+    return;
+  const available = terminalContentSize();
   const maximum = 14;
   const minimum = 9.5;
   const monospaceRatio = 0.61;
   const fitted = Math.max(
     minimum,
-    Math.min(maximum, available / (columns * monospaceRatio)),
+    Math.min(
+      maximum,
+      available.width / (columns * monospaceRatio),
+      available.height / (rows * 1.32),
+    ),
   );
   elements.terminalStage.style.setProperty(
     "--terminal-font-size",
     `${fitted.toFixed(2)}px`,
   );
+}
+
+function terminalContentSize() {
+  const style = getComputedStyle(elements.terminalStage);
+  const horizontalPadding =
+    Number.parseFloat(style.paddingLeft) +
+    Number.parseFloat(style.paddingRight);
+  const verticalPadding =
+    Number.parseFloat(style.paddingTop) +
+    Number.parseFloat(style.paddingBottom);
+  return {
+    height: Math.max(0, elements.terminalStage.clientHeight - verticalPadding),
+    width: Math.max(0, elements.terminalStage.clientWidth - horizontalPadding),
+  };
 }
 
 function fail(message) {

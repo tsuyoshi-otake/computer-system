@@ -63,6 +63,30 @@ describe("ViSession", (): void => {
     });
   });
 
+  it("supports forced write-quit and the normal-mode ZZ shortcut", (): void => {
+    const forced = new ViSession("forced.txt", "before");
+    forced.key("i");
+    forced.key("X");
+    forced.key("Escape");
+    forced.key(":");
+    forced.key("w");
+    forced.key("q");
+    forced.key("!");
+    expect(forced.key("Enter")).toMatchObject({
+      kind: "save",
+      closeAfter: true,
+      contents: "Xbefore",
+    });
+
+    const shortcut = new ViSession("shortcut.txt", "contents");
+    expect(shortcut.key("Z").kind).toBe("continue");
+    expect(shortcut.key("Z")).toMatchObject({
+      kind: "save",
+      closeAfter: true,
+      contents: "contents",
+    });
+  });
+
   it("renders only a fixed viewport for large files", (): void => {
     const vi = new ViSession(
       "large.py",

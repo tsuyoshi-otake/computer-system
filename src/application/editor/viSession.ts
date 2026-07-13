@@ -224,6 +224,19 @@ export class ViSession {
       this.pendingNormal = "d";
       return this.continue("d");
     }
+    if (key === "Z") {
+      if (this.pendingNormal === "Z") {
+        this.pendingNormal = "";
+        return {
+          kind: "save",
+          closeAfter: true,
+          contents: this.contents,
+          screen: this.screen(),
+        };
+      }
+      this.pendingNormal = "Z";
+      return this.continue("Z");
+    }
     this.pendingNormal = "";
     if (key === "h" || key === "ArrowLeft") this.cursorColumn -= 1;
     else if (key === "l" || key === "ArrowRight") this.cursorColumn += 1;
@@ -309,10 +322,10 @@ export class ViSession {
     const command = this.command.trim();
     this.command = "";
     this.modeValue = "normal";
-    if (command === "w" || command === "wq") {
+    if (command === "w" || command === "wq" || command === "wq!") {
       return {
         kind: "save",
-        closeAfter: command === "wq",
+        closeAfter: command !== "w",
         contents: this.contents,
         screen: this.screen(),
       };

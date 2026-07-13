@@ -77,6 +77,12 @@ export function isAllowedBdsCommand(command) {
     return false;
   }
   if (command === "list") return true;
+  if (
+    /^scriptevent computer_system:debug-command d[a-z0-9]+-[a-z0-9]+ c-[0-9a-hjkmnp-tv-z]{6} v[^\s]{1,180}$/u.test(
+      command,
+    )
+  )
+    return true;
 
   const serverProbe = /^scriptevent computer_system:probe ([a-z-]+)$/u.exec(
     command,
@@ -114,6 +120,12 @@ export function isAllowedWebRelayCommand(command) {
     ) ||
     /^scriptevent computer_system:web-input [A-Za-z0-9_-]{12,32} (?:line|keys) [^\s]{0,180}$/u.test(
       command,
+    ) ||
+    /^scriptevent computer_system:web-complete [A-Za-z0-9_-]{12,32} [A-Za-z0-9_-]{6,20} [0-9]{1,3} v[^\s]{0,128}$/u.test(
+      command,
+    ) ||
+    /^scriptevent computer_system:web-resize [A-Za-z0-9_-]{12,32} [0-9]{2,3} [0-9]{2,3}$/u.test(
+      command,
     )
   );
 }
@@ -132,6 +144,8 @@ export class BdsDebugSession {
     this.events = new EventEmitter();
     this.transition = Promise.resolve();
     this.commandTail = Promise.resolve();
+    this.nextDebugRequest = 1;
+    this.pendingDebugCommands = 0;
     this.serverPort = parseBdsPort(this.environment.BDS_MCP_PORT);
     this.worldName = this.environment.BDS_MCP_WORLD ?? defaultWorldName;
     this.sourceRoot = path.resolve(
@@ -228,6 +242,67 @@ export class BdsDebugSession {
     );
     this.commandTail = operation.catch(() => undefined);
     return operation.then(() => ({ command }));
+  }
+
+  async executeComputerCommand(options = {}) {
+    const computerId = options.computerId;
+    const command = options.command;
+    if (
+      typeof computerId !== "string" ||
+      !/^c-[0-9a-hjkmnp-tv-z]{6}$/u.test(computerId)
+    ) {
+      throw new Error("computerId must use the c-xxxxxx identity format.");
+    }
+    if (
+      typeof command !== "string" ||
+      command.length === 0 ||
+      command.length > 128 ||
+      /[\r\n\0]/u.test(command)
+    ) {
+      throw new Error("command must contain 1 to 128 characters on one line.");
+    }
+    if (this.pendingDebugCommands >= 8) {
+      throw new Error("Computer command debug capacity has been reached.");
+    }
+    const encoded = encodeURIComponent(command);
+    if (encoded.length > 180 || /\s/u.test(encoded)) {
+      throw new Error("Encoded command exceeds the 180-character relay limit.");
+    }
+    const timeoutMs = Math.min(
+      asPositiveInteger(options.timeoutMs ?? 10_000),
+      30_000,
+    );
+    const requestId = `d${Date.now().toString(36)}-${this.nextDebugRequest.toString(36)}`;
+    this.nextDebugRequest =
+      this.nextDebugRequest === Number.MAX_SAFE_INTEGER
+        ? 1
+        : this.nextDebugRequest + 1;
+    this.pendingDebugCommands += 1;
+    try {
+      const sent = await this.runCommand(
+        `scriptevent computer_system:debug-command ${requestId} ${computerId} v${encoded}`,
+      );
+      const entry = await this.waitForLog({
+        contains: `"requestId":"${requestId}"`,
+        afterCursor: sent.afterCursor,
+        timeoutMs,
+      });
+      const marker = "CS_DEBUG_COMMAND ";
+      const markerIndex = entry.line.indexOf(marker);
+      if (markerIndex < 0) throw new Error("Malformed debug command response.");
+      const response = JSON.parse(
+        entry.line.slice(markerIndex + marker.length),
+      );
+      if (
+        response.requestId !== requestId ||
+        response.computerId !== computerId
+      ) {
+        throw new Error("Mismatched debug command response.");
+      }
+      return response;
+    } finally {
+      this.pendingDebugCommands -= 1;
+    }
   }
 
   getLogs(options = {}) {

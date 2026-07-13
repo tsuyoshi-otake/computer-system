@@ -52,6 +52,14 @@ No API key or `.env` file is required.
 administration commands, command separators, newlines, and commands longer than
 240 characters.
 
+For non-interactive Computer debugging, call `bds_execute_computer_command` with
+an exact `c-xxxxxx` identity and one shell line. The command executes inside
+that Computer's sandboxed shell and returns `stdout`, `stderr`, `exitCode`, and
+modeled `workCycles`. It cannot reach the host shell or arbitrary BDS commands.
+Input, output, concurrency, and timeout are bounded; vi/editor, sleep,
+shutdown/reboot, and other TUI or asynchronous control flows return an explicit
+unsupported result.
+
 BDS prints `Server started` before Script API world initialization is fully
 settled. The MCP session therefore applies the same bounded one-second startup
 grace period as the established headless runner before it reports `running`.
@@ -75,6 +83,13 @@ serialized through a bounded queue, times out explicitly, and runs at most once
 per handoff. Automatic opening is blocked unless both the listener and published
 origin are loopback. The in-game URL is still emitted before the launch attempt,
 so disabled, blocked, timed-out, and failed launches retain the normal fallback.
+
+An MCP client that needs the URL itself can call `bds_wait_for_web_handoff` with
+the exact `c-xxxxxx` Computer ID before the Pocket Computer is used. The wait is
+bounded to at most 120 seconds and only one wait may own a Computer ID. A
+matching handoff is returned to MCP instead of being sent to browser auto-open,
+avoiding a race to consume the one-use URL. The URL remains absent from BDS logs
+and unrelated Computer IDs cannot satisfy the wait.
 
 The browser input is overlaid at the terminal cursor rather than rendered as a
 separate form field. Physical Enter sends one bounded `terminal_line` event,

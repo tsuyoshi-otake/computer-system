@@ -29,6 +29,11 @@ describe("BDS debug session", () => {
         "execute as @a at @s run scriptevent computer_system:probe ui-nano",
       ),
     ).toBe(true);
+    expect(
+      isAllowedBdsCommand(
+        "scriptevent computer_system:debug-command dabc-1 c-9dwhx6 vwhoami",
+      ),
+    ).toBe(true);
 
     expect(isAllowedBdsCommand("stop")).toBe(false);
     expect(isAllowedBdsCommand("op @a")).toBe(false);
@@ -42,6 +47,11 @@ describe("BDS debug session", () => {
       ),
     ).toBe(false);
     expect(isAllowedBdsCommand("list\nstop")).toBe(false);
+    expect(
+      isAllowedBdsCommand(
+        "scriptevent computer_system:debug-command dabc-1 c-9dwhx6 vwhoami stop",
+      ),
+    ).toBe(false);
   });
 
   it("validates ports without silently accepting trailing text", () => {
@@ -78,10 +88,30 @@ describe("BDS debug session", () => {
         "scriptevent computer_system:web-take-control abcdefghijkl",
       ),
     ).toBe(true);
+    expect(
+      isAllowedWebRelayCommand(
+        "scriptevent computer_system:web-complete abcdefghijkl request1 3 vhel",
+      ),
+    ).toBe(true);
+    expect(
+      isAllowedWebRelayCommand(
+        "scriptevent computer_system:web-resize abcdefghijkl 130 40",
+      ),
+    ).toBe(true);
     expect(isAllowedWebRelayCommand("op @a")).toBe(false);
     expect(
       isAllowedWebRelayCommand(
         "scriptevent computer_system:web-input abcdefghijkl line hi\nstop",
+      ),
+    ).toBe(false);
+    expect(
+      isAllowedWebRelayCommand(
+        "scriptevent computer_system:web-resize abcdefghijkl 130 40 stop",
+      ),
+    ).toBe(false);
+    expect(
+      isAllowedWebRelayCommand(
+        "scriptevent computer_system:web-complete abcdefghijkl request1 cursor vhel",
       ),
     ).toBe(false);
   });

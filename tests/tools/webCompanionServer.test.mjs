@@ -66,6 +66,49 @@ describe("Web companion HTTP server", () => {
     });
   });
 
+  it("delivers a computer-scoped handoff to MCP without racing browser auto-open", async () => {
+    const bds = new FakeBds();
+    const launches = [];
+    const server = new WebCompanionServer({
+      bds,
+      port: 0,
+      autoOpenBrowser: true,
+      browserOpener: async (url) => launches.push(url),
+    });
+    servers.push(server);
+    await server.start();
+
+    const waiting = server.waitForHandoff({
+      computerId: "c-000001",
+      timeoutMs: 1_000,
+    });
+    bds.log(
+      'CS_WEB_SESSION_REQUEST {"requestId":"r1-1","playerId":"player-1","computerId":"c-000001"}',
+    );
+    const handoff = await waiting;
+
+    expect(handoff).toMatchObject({
+      computerId: "c-000001",
+      mode: "writer",
+    });
+    expect(handoff.url).toBe(bds.commands[0].split(" ").at(-1));
+    expect(handoff.expiresAt).toBeGreaterThan(Date.now());
+    expect(launches).toEqual([]);
+  });
+
+  it("bounds and finalizes computer-scoped handoff waits", async () => {
+    const server = new WebCompanionServer({ bds: new FakeBds(), port: 0 });
+    servers.push(server);
+    await server.start();
+
+    await expect(
+      server.waitForHandoff({ computerId: "c-000001", timeoutMs: 10 }),
+    ).rejects.toThrow("Timed out after 10 ms");
+    expect(() =>
+      server.waitForHandoff({ computerId: "invalid", timeoutMs: 10 }),
+    ).toThrow("c-xxxxxx");
+  });
+
   it("blocks non-loopback browser opening while preserving the handoff", async () => {
     const bds = new FakeBds();
     const launches = [];

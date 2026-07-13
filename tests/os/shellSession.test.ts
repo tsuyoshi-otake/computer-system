@@ -38,6 +38,27 @@ describe("Computer System OS shell and editor", (): void => {
     expect(shell.submit("clear").action).toBe("clear");
   });
 
+  it("executes bounded MCP debug commands without entering TUI state", (): void => {
+    const filesystem = new InMemoryFilesystem();
+    const shell = new ShellSession(filesystem);
+
+    expect(shell.submitDebugCommand("echo debug")).toMatchObject({
+      exitCode: 0,
+      stdout: "debug\n",
+      stderr: "",
+    });
+    expect(shell.submitDebugCommand("vi /tmp/debug.txt")).toMatchObject({
+      exitCode: 2,
+      stderr: "debug: TUI commands are not supported through MCP\n",
+    });
+    expect(shell.prompt()).toBe("~$ ");
+    expect(shell.submitDebugCommand("shutdown")).toMatchObject({
+      exitCode: 2,
+      stderr:
+        "debug: asynchronous and terminal-control commands are not supported through MCP\n",
+    });
+  });
+
   it("supports relative paths and BusyBox-style file commands", (): void => {
     const filesystem = new InMemoryFilesystem();
     const shell = new ShellSession(filesystem);

@@ -140,6 +140,35 @@ const tools = [
     },
   },
   {
+    name: "bds_execute_computer_command",
+    title: "Execute Computer shell command",
+    description:
+      "Execute one bounded non-TUI command inside a specific sandboxed Computer and return its stdout, stderr, exit code, and modeled work cycles. This never invokes the host shell or arbitrary BDS administration commands.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        computerId: {
+          type: "string",
+          pattern: "^c-[0-9a-hjkmnp-tv-z]{6}$",
+        },
+        command: { type: "string", minLength: 1, maxLength: 128 },
+        timeoutMs: {
+          type: "integer",
+          minimum: 1,
+          maximum: 30_000,
+        },
+      },
+      required: ["computerId", "command"],
+    },
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: false,
+    },
+  },
+  {
     name: "bds_get_logs",
     title: "Read BDS logs",
     description:
@@ -174,6 +203,34 @@ const tools = [
         timeoutMs: { type: "integer", minimum: 1, maximum: 120_000 },
       },
       required: ["contains"],
+    },
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: false,
+    },
+  },
+  {
+    name: "bds_wait_for_web_handoff",
+    title: "Wait for Web Terminal handoff",
+    description:
+      "Wait for the next one-use Web Terminal handoff for one Computer ID. A matching MCP waiter receives the URL instead of browser auto-open, and the URL is never written to BDS logs.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        computerId: {
+          type: "string",
+          pattern: "^c-[0-9a-hjkmnp-tv-z]{6}$",
+        },
+        timeoutMs: {
+          type: "integer",
+          minimum: 1,
+          maximum: 120_000,
+        },
+      },
+      required: ["computerId"],
     },
     annotations: {
       readOnlyHint: true,
@@ -293,6 +350,11 @@ async function callTool(name, args) {
       requireKeys(args, ["command"]);
       requireString(args.command, "command");
       return toolSuccess(await session.runCommand(args.command));
+    case "bds_execute_computer_command":
+      requireKeys(args, ["computerId", "command", "timeoutMs"]);
+      requireString(args.computerId, "computerId");
+      requireString(args.command, "command");
+      return toolSuccess(await session.executeComputerCommand(args));
     case "bds_get_logs":
       requireKeys(args, ["afterCursor", "limit", "diagnosticsOnly"]);
       return toolSuccess(session.getLogs(args));
@@ -300,6 +362,10 @@ async function callTool(name, args) {
       requireKeys(args, ["contains", "afterCursor", "timeoutMs"]);
       requireString(args.contains, "contains");
       return toolSuccess(await session.waitForLog(args));
+    case "bds_wait_for_web_handoff":
+      requireKeys(args, ["computerId", "timeoutMs"]);
+      requireString(args.computerId, "computerId");
+      return toolSuccess(await webCompanion.waitForHandoff(args));
     default:
       throw new Error(`Unknown tool: ${String(name)}`);
   }

@@ -34,6 +34,18 @@ export type RuntimeCommandResult =
   | { readonly outcome: "missing"; readonly computerId: string }
   | { readonly outcome: "failed"; readonly error: Error };
 
+export type DebugShellCommandResult =
+  | {
+      readonly outcome: "completed";
+      readonly exitCode: number;
+      readonly stderr: string;
+      readonly stdout: string;
+      readonly workCycles: number;
+    }
+  | { readonly outcome: "missing"; readonly computerId: string }
+  | { readonly outcome: "ignored"; readonly reason: "not_running" }
+  | { readonly outcome: "failed"; readonly error: Error };
+
 export class ComputerRuntime {
   private readonly scheduler: RoundRobinScheduler;
   private readonly entries = new Map<string, RuntimeEntry>();
@@ -153,6 +165,31 @@ export class ComputerRuntime {
     cursor: number,
   ): ShellCompletionResult | undefined {
     return this.entries.get(computerId)?.shell?.complete(line, cursor);
+  }
+
+  executeDebugShellCommand(
+    computerId: string,
+    line: string,
+  ): DebugShellCommandResult {
+    const entry = this.entries.get(computerId);
+    if (entry === undefined) return { outcome: "missing", computerId };
+    if (entry.shell === undefined)
+      return { outcome: "ignored", reason: "not_running" };
+    try {
+      const result = entry.shell.submitDebugCommand(line);
+      return {
+        outcome: "completed",
+        exitCode: result.exitCode,
+        stderr: result.stderr,
+        stdout: result.stdout,
+        workCycles: result.workCycles ?? 1,
+      };
+    } catch (error: unknown) {
+      return {
+        outcome: "failed",
+        error: error instanceof Error ? error : new Error(String(error)),
+      };
+    }
   }
 
   resizeTerminal(computerId: string, width: number, height: number): boolean {

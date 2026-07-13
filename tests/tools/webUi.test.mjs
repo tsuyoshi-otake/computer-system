@@ -108,7 +108,13 @@ describe("Web terminal UI", () => {
     ]);
 
     expect(css).toContain("font-size: var(--terminal-font-size)");
-    expect(script).toContain("function fitTerminal(columns)");
+    expect(css).toMatch(/\.terminal-stage\s*\{[^}]*overflow: hidden;/su);
+    expect(css).not.toMatch(/\.terminal-stage\s*\{[^}]*overflow: auto;/su);
+    expect(css).toContain("caret-color: var(--input-color, var(--text))");
+    expect(css).not.toContain("caret-color: var(--green)");
+    expect(script).toContain("function fitTerminal(columns, rows)");
+    expect(script).toContain("function terminalContentSize()");
+    expect(script).toContain("available.height / (rows * 1.32)");
     expect(script).toContain('api("/api/resize"');
     expect(script).toContain("Math.min(160");
     expect(script).toContain("Math.min(60");

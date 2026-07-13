@@ -73,7 +73,10 @@ export class WebSessionStore {
       this.writersByComputer.set(session.computerId, session.sessionId);
     }
     this.handoffs.set(session.handoffCode, session);
-    return this.publicSession(session, { handoffCode: session.handoffCode });
+    return this.publicSession(session, {
+      handoffCode: session.handoffCode,
+      handoffExpiresAt: session.handoffExpiresAt,
+    });
   }
 
   consumeHandoff(code) {

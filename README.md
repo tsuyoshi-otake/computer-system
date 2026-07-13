@@ -18,8 +18,9 @@ are covered by host and Bedrock Dedicated Server verification.
 
 The repository also includes a local stdio MCP companion that can build the
 packs, run an isolated BDS instance, execute allowlisted Computer System probes,
-and return bounded server logs to Codex. The real MCP-to-BDS headless workflow
-passes with zero diagnostics.
+return bounded server logs, acquire a computer-scoped one-use Web handoff, and
+execute bounded non-TUI shell commands inside an exact `c-xxxxxx` Computer. The
+real MCP-to-BDS headless workflow passes with zero diagnostics.
 
 The native in-game terminal remains available as a bounded fallback, but the
 preferred interactive experience is now the local Web Terminal companion. Using
@@ -107,6 +108,14 @@ through MCP. On Windows installations where Minecraft rejects `127.0.0.1` with
 `InitialConnection-13`, use the machine's active LAN IPv4 address instead. See
 [the MCP debugging guide](docs/mcp-debugging.md) for the complete workflow and
 safety constraints.
+
+`bds_execute_computer_command` provides a direct debug path for a specific
+Computer without using its TUI. It returns stdout, stderr, exit code, and
+modeled work cycles from the sandboxed shell; it never invokes host
+PowerShell/Bash or arbitrary BDS administration commands.
+`bds_wait_for_web_handoff` returns the next one-use URL for one exact Computer
+ID while preventing browser auto-open from consuming it first. Both paths bound
+input, concurrency, output, and waits.
 
 ## Browser terminal
 
@@ -202,10 +211,12 @@ limited so shell work cannot become an unbounded server load path. This is a
 sandbox implementation and never invokes host Bash.
 
 `vi <path>` uses Normal, Insert, and Command modes and supports bounded cursor
-movement, `dd`, `x`, undo, `:w`, `:q`, `:wq`, and `:q!`. Python, shell,
-JSON/TOML tokens are highlighted, and indentation rainbow backgrounds are on by
-default. The native terminal remains 51x19; the Web Terminal negotiates a
-viewport up to 160x60 from the available screen and resizes `vi` with it. The
+movement, `dd`, `x`, undo, `:w`, `:q`, `:wq`, `:wq!`, `:q!`, and Shift+ZZ.
+Python, shell, JSON/TOML tokens are highlighted, and indentation rainbow
+backgrounds are on by default. The native terminal remains 51x19; the Web
+Terminal negotiates a viewport up to 160x60 from the available screen and
+resizes `vi` with it. The browser subtracts terminal padding and fits both rows
+and columns, so the terminal surface does not expose an internal scrollbar. The
 browser coalesces up to 16 keys per relay, while the BDS boundary rejects
 batches above 32 keys. Tab performs bounded command/path completion through the
 same writer-authorized relay.
