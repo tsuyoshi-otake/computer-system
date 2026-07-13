@@ -9,6 +9,12 @@ describe("default Computer System OS boot", (): void => {
     runtime.register(record);
     expect(runtime.powerOn(record.computerId).outcome).toBe("accepted");
     runtime.runTick();
+    expect(record.terminal.line(1).trimEnd()).toBe(
+      "Computer System OS 0.2 (tty1)",
+    );
+    expect(record.terminal.line(3).trimEnd()).toBe("~$");
+    expect(record.terminal.cell(1, 1).foreground).toBe(0);
+    expect(record.terminal.cell(1, 3).foreground).toBe(0);
     expect(record.lifecycle.state).toEqual({
       kind: "waiting_event",
       filter: "terminal_line",
@@ -21,5 +27,33 @@ describe("default Computer System OS boot", (): void => {
     runtime.runTick();
     expect(record.filesystem.readFile("/startup.py")).toBe('print("boot")');
     expect(record.lifecycle.state.kind).toBe("waiting_event");
+  });
+
+  it("executes a piped BusyBox command delivered as a terminal event", (): void => {
+    const record = new ComputerRecord("computer-31", "standard");
+    const runtime = new ComputerRuntime();
+    const command =
+      "printf 'alpha\\nbeta\\nalpha\\n' | grep alpha | wc -l > count";
+    runtime.register(record);
+    runtime.powerOn(record.computerId);
+    runtime.runTick();
+
+    runtime.queueEvent(record.computerId, "terminal_line", command);
+    runtime.runTick();
+    runtime.queueEvent(record.computerId, "terminal_line", "cat count");
+    runtime.runTick();
+
+    expect(record.filesystem.readFile("/count")).toBe("      2\n");
+    const rows = record.terminal.snapshot().rows;
+    expect(`${rows[2]!.slice(3)}${rows[3]!}`.slice(0, command.length)).toBe(
+      command,
+    );
+    expect(
+      record.terminal.snapshot().rows.some((line) => line.includes("2")),
+    ).toBe(true);
+    expect(record.lifecycle.state).toEqual({
+      kind: "waiting_event",
+      filter: "terminal_line",
+    });
   });
 });

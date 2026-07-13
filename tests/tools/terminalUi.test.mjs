@@ -1,50 +1,53 @@
+import { access, readFile } from "node:fs/promises";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 
-import {
-  createComputerTerminalUi,
-  terminalHeight,
-  terminalWidth,
-} from "../../tools/terminal-ui.mjs";
+const root = path.resolve(import.meta.dirname, "../..");
 
-describe("computer terminal JSON UI generator", () => {
-  it("keeps the native CustomForm collection connected", () => {
-    const ui = createComputerTerminalUi();
-
-    expect(
-      ui["custom_form@common_dialogs.main_panel_no_buttons"],
-    ).toMatchObject({
-      size: [360, 520],
-      $child_control: "server_form.computer_terminal_panel",
-    });
-    expect(ui.computer_terminal_panel.controls).toEqual([
-      { "controls@server_form.computer_terminal_controls": {} },
-      { "close@server_form.computer_terminal_close": {} },
+describe("Bedrock Core companion Resource Pack", () => {
+  it("registers the matching v0007 modal decoder", async () => {
+    const [definitions, serverForm, modalContainer, input] = await Promise.all([
+      source("packs/resource/ui/_ui_defs.json"),
+      source("packs/resource/ui/server_form.json"),
+      source("packs/resource/ui/core-ui/common/modal_container.json"),
+      source("packs/resource/ui/core-ui/form_components/input.json"),
     ]);
-    expect(ui.computer_terminal_controls.factory.control_ids.label).toBe(
-      "@server_form.custom_label",
+
+    expect(definitions).toContain("ui/core-ui/common/modal_container.json");
+    expect(definitions).toContain("ui/core-ui/form_components/input.json");
+    expect(serverForm).toContain('"$protocol_header": "bcuiv0007"');
+    expect(serverForm).toContain(
+      '"custom_form": "@core_ui_common.modal_container"',
+    );
+    expect(modalContainer).toContain("flow_submit_anchor");
+    expect(modalContainer).toContain("flow_exit_anchor");
+    expect(input).toMatch(
+      /"from_button_id": "button\.menu_ok"[\s\S]*?"to_button_id": "button\.submit_custom_form"[\s\S]*?"mapping_type": "focused"/u,
     );
   });
 
-  it("does not emit the indexed planes rejected by GDK 26.33", () => {
-    const serialized = JSON.stringify(createComputerTerminalUi());
-
-    expect(serialized).not.toContain("collection_index");
-    expect(serialized).not.toContain("computer_terminal_canvas");
-    expect(serialized).not.toContain("computer_terminal_background");
-    expect(serialized).not.toContain("computer_terminal_foreground");
+  it("ships every custom texture referenced by the terminal prototype", async () => {
+    await Promise.all(
+      [
+        "packs/resource/textures/ui/pointer.png",
+        "packs/resource/textures/ui/unstyled.png",
+        "packs/resource/textures/ui/ore-styled/field/background.png",
+        "packs/resource/textures/ui/ore-styled/button/primary/background.png",
+        "packs/resource/textures/ui/ore-styled/button/danger/background.png",
+      ].map((relative) => access(path.join(root, relative))),
+    );
   });
 
-  it("preserves the logical terminal contract and primary control bounds", () => {
-    const ui = createComputerTerminalUi();
+  it("keeps the runtime and decoder provenance together", async () => {
+    const provenance = await source("vendor/bedrock-core-ui-0.9.2/README.md");
+    const license = await source("vendor/bedrock-core-ui-0.9.2/LICENSE");
 
-    expect([terminalWidth, terminalHeight]).toEqual([51, 19]);
-    expect(ui.computer_terminal_controls.max_size).toEqual(["100% - 4px", 490]);
-    expect(
-      ui["computer_terminal_close@common_buttons.light_text_button"],
-    ).toMatchObject({
-      anchor_from: "bottom_middle",
-      anchor_to: "bottom_middle",
-      size: ["100% - 8px", 30],
-    });
+    expect(provenance).toContain("Version: 0.9.2");
+    expect(provenance).toContain("5e87db65007cf554328374aa9aa6363034f3512d");
+    expect(license).toContain("MIT License");
   });
 });
+
+async function source(relative) {
+  return readFile(path.join(root, relative), "utf8");
+}

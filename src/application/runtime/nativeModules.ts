@@ -67,11 +67,16 @@ function createShellModule(
 ): RuntimeNamespace {
   const banner = fn("banner", (positional, keywords) => {
     requireArity(positional, keywords, 0, 0);
-    writeTerminalLines(context.terminal, ["Computer System OS"]);
+    context.terminal.setTextColor(0);
+    writeTerminalLines(context.terminal, [
+      "Computer System OS 0.2 (tty1)",
+      "BusyBox shell 0.2; type 'help' for commands.",
+    ]);
     return null;
   });
   const prompt = fn("prompt", (positional, keywords) => {
     requireArity(positional, keywords, 0, 0);
+    context.terminal.setTextColor(0);
     context.terminal.write(shell.prompt());
     return null;
   });
@@ -101,14 +106,24 @@ function writeTerminalLines(
   lines: readonly string[],
 ): void {
   for (const line of lines) {
-    terminal.write(line);
-    if (terminal.cursorY >= terminal.height) {
-      terminal.scroll(1);
-      terminal.setCursorPosition(1, terminal.height);
-    } else {
-      terminal.setCursorPosition(1, terminal.cursorY + 1);
+    const characters = [...line];
+    let offset = 0;
+    while (offset < characters.length) {
+      if (terminal.cursorX > terminal.width) advanceTerminalLine(terminal);
+      const available = terminal.width - terminal.cursorX + 1;
+      terminal.write(characters.slice(offset, offset + available).join(""));
+      offset += available;
+      if (offset < characters.length) advanceTerminalLine(terminal);
     }
+    advanceTerminalLine(terminal);
   }
+}
+
+function advanceTerminalLine(terminal: TerminalBuffer): void {
+  if (terminal.cursorY >= terminal.height) {
+    terminal.scroll(1);
+    terminal.setCursorPosition(1, terminal.height);
+  } else terminal.setCursorPosition(1, terminal.cursorY + 1);
 }
 
 function createRedstoneModule(redstone: RedstoneState): RuntimeNamespace {

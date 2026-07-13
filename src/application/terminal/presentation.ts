@@ -25,8 +25,10 @@ export const computerCraftPalette = [
 export const productionTerminalContract = {
   width: 51,
   height: 19,
-  primaryControls: ["input", "submit", "terminate", "close"] as const,
+  viewportRows: 7,
+  primaryControls: ["input", "submit", "terminate"] as const,
   primaryControlsScroll: false,
+  dismissal: "system_back",
   palette: computerCraftPalette,
 } as const;
 

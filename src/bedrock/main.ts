@@ -21,10 +21,16 @@ import { startRuntimeProbe } from "./probes/runtimeProbe.js";
 import { executeSpeakerProbe } from "./probes/speakerProbe.js";
 import { runStorageProbe } from "./probes/storageProbe.js";
 import {
+  showCustomTerminalProbe,
+  showNanoProbe,
   showTerminalProbe,
   startTerminalCompetitionProbe,
   startTerminalStreamProbe,
 } from "./probes/uiProbe.js";
+import {
+  handleWebTerminalScriptEvent,
+  startWebTerminalBridge,
+} from "./webTerminalBridge.js";
 
 const packVersion = "0.1.0";
 
@@ -41,10 +47,12 @@ system.run((): void => {
   startComputerHost();
   startComputerComponents();
   startPocketComputerLifecycle();
+  startWebTerminalBridge();
   world.sendMessage(`Computer System Phase 0 loaded (${packVersion}).`);
 });
 
 system.afterEvents.scriptEventReceive.subscribe((event): void => {
+  if (handleWebTerminalScriptEvent(event.id, event.message)) return;
   if (event.id !== "computer_system:probe") {
     return;
   }
@@ -64,7 +72,7 @@ system.afterEvents.scriptEventReceive.subscribe((event): void => {
     case "help":
     case "status":
       event.sourceEntity.sendMessage(
-        "Computer System Phase 0 commands: status, ui, stream, compete, monitor, pocket, runtime, storage, speaker, headless",
+        "Computer System Phase 0 commands: status, ui, ui-custom, ui-nano, stream, compete, monitor, pocket, runtime, storage, speaker, headless",
       );
       return;
     case "runtime":
@@ -88,6 +96,16 @@ system.afterEvents.scriptEventReceive.subscribe((event): void => {
       system.run((): void => {
         void showTerminalProbe(player);
       });
+      return;
+    }
+    case "ui-custom": {
+      const player = event.sourceEntity;
+      system.run((): void => showCustomTerminalProbe(player));
+      return;
+    }
+    case "ui-nano": {
+      const player = event.sourceEntity;
+      system.run((): void => showNanoProbe(player));
       return;
     }
     case "compete": {

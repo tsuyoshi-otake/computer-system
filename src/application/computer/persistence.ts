@@ -2,6 +2,7 @@ import {
   ComputerRecord,
   type ComputerSnapshot,
 } from "../../domain/computer/computer.js";
+import { migrateComputerSnapshot } from "./snapshotMigration.js";
 
 export interface ComputerSnapshotRepository {
   load(computerId: string): ComputerSnapshot | undefined;
@@ -42,7 +43,7 @@ export class ComputerPersistenceService {
     try {
       const snapshot = this.repository.load(computerId);
       if (snapshot === undefined) return { outcome: "missing", computerId };
-      const record = ComputerRecord.restore(snapshot);
+      const record = ComputerRecord.restore(migrateComputerSnapshot(snapshot));
       this.fingerprints.set(computerId, JSON.stringify(snapshot));
       return { outcome: "loaded", record };
     } catch (error: unknown) {

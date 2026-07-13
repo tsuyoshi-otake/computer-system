@@ -28,7 +28,6 @@ import {
   createPocketComputerTextureAtlas,
 } from "./pocket-computer-item.mjs";
 import { createMonitorBlock } from "./monitor-block.mjs";
-import { createComputerTerminalUi } from "./terminal-ui.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const outputRoot = path.join(root, "dist");
@@ -55,11 +54,6 @@ await mkdir(path.join(resourceOutput, "ui"), { recursive: true });
 await mkdir(path.join(resourceOutput, "textures", "items"), {
   recursive: true,
 });
-await writeFile(
-  path.join(resourceOutput, "ui", "computer_terminal.json"),
-  `${JSON.stringify(createComputerTerminalUi(), null, 2)}\n`,
-  "utf8",
-);
 await writeFile(
   path.join(generatedBlocksDirectory, "monitor.json"),
   `${JSON.stringify(createMonitorBlock(), null, 2)}\n`,
@@ -127,6 +121,8 @@ await build({
   entryPoints: [path.join(root, "src", "bedrock", "main.ts")],
   external: ["@minecraft/server", "@minecraft/server-ui"],
   format: "esm",
+  jsx: "automatic",
+  jsxImportSource: "@bedrock-core/ui",
   logLevel: "info",
   outfile: path.join(behaviorOutput, "scripts", "main.js"),
   platform: "neutral",

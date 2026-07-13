@@ -13,17 +13,11 @@ describe("pocket computer item", () => {
     const item = createPocketComputerItem()["minecraft:item"];
     expect(item.description.identifier).toBe(pocketComputerIdentifier);
     expect(item.components["minecraft:max_stack_size"]).toBe(1);
-    expect(item.components["minecraft:food"]).toEqual({
-      can_always_eat: true,
-      nutrition: 0,
-      saturation_modifier: 0,
-    });
+    expect(item.components).not.toHaveProperty("minecraft:food");
     expect(item.components["minecraft:icon"]).toBe(pocketComputerTextureKey);
-    expect(item.components["minecraft:use_animation"]).toBe("drink");
-    expect(item.components["minecraft:use_modifiers"]).toEqual({
-      use_duration: 0.05,
-      movement_modifier: 1,
-    });
+    expect(item.components["minecraft:interact_button"]).toBe("Open Terminal");
+    expect(item.components).not.toHaveProperty("minecraft:use_animation");
+    expect(item.components).not.toHaveProperty("minecraft:use_modifiers");
     expect(item.components["computer_system:pocket_computer"]).toEqual({});
   });
 

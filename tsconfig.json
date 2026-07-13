@@ -4,6 +4,8 @@
     "lib": ["ES2023"],
     "module": "ESNext",
     "moduleResolution": "Bundler",
+    "jsx": "react-jsx",
+    "jsxImportSource": "@bedrock-core/ui",
     "allowImportingTsExtensions": false,
     "esModuleInterop": true,
     "forceConsistentCasingInFileNames": true,
@@ -14,7 +16,26 @@
     "resolveJsonModule": true,
     "skipLibCheck": true,
     "strict": true,
-    "types": ["node"]
+    "types": ["node"],
+    "paths": {
+      "@bedrock-core/flexbox": [
+        "./vendor/bedrock-core-ui-0.9.2/compiled/flexbox/src/index"
+      ],
+      "@bedrock-core/ui": [
+        "./vendor/bedrock-core-ui-0.9.2/compiled/ui-runtime/src/index"
+      ],
+      "@bedrock-core/ui/jsx-runtime": [
+        "./vendor/bedrock-core-ui-0.9.2/compiled/ui-runtime/src/jsx/jsx-runtime"
+      ],
+      "@bedrock-core/ui/jsx-dev-runtime": [
+        "./vendor/bedrock-core-ui-0.9.2/compiled/ui-runtime/src/jsx/jsx-dev-runtime"
+      ]
+    }
   },
-  "include": ["src/**/*.ts", "tests/**/*.ts", "vitest.config.ts"]
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.tsx",
+    "tests/**/*.ts",
+    "vitest.config.ts"
+  ]
 }

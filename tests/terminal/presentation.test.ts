@@ -12,8 +12,10 @@ describe("production terminal presentation", (): void => {
     expect(productionTerminalContract).toMatchObject({
       width: 51,
       height: 19,
-      primaryControls: ["input", "submit", "terminate", "close"],
+      viewportRows: 7,
+      primaryControls: ["input", "submit", "terminate"],
       primaryControlsScroll: false,
+      dismissal: "system_back",
     });
     expect(computerCraftPalette).toHaveLength(16);
     expect(new Set(computerCraftPalette).size).toBe(16);

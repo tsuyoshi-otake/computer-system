@@ -8,16 +8,15 @@ import {
 } from "@minecraft/server";
 
 import { PocketSessionLifecycle } from "../phase0/pocketSessionLifecycle.js";
+import type { ComputerIdentityObservation } from "../domain/computer/identity.js";
 import {
   computerIdentityProperty,
   createPortableComputer,
   ensureComputer,
   identityService,
 } from "./computerRegistry.js";
-import {
-  disconnectComputerTerminalPlayer,
-  openComputerTerminal,
-} from "./computerTerminal.js";
+import { disconnectComputerTerminalPlayer } from "./computerTerminal.js";
+import { requestWebComputerTerminal } from "./webTerminalBridge.js";
 
 export const pocketComputerTypeId = "computer_system:pocket_computer";
 export const pocketIdentityProperty = computerIdentityProperty;
@@ -29,16 +28,9 @@ export function registerPocketComputerComponent(
 ): void {
   registry.registerCustomComponent(componentId, {
     onUse: ({ itemStack, source }): void => {
-      const identity = itemStack?.getDynamicProperty(pocketIdentityProperty);
-      if (typeof identity !== "string") {
-        source.sendMessage("This Pocket Computer has no instance identity.");
-        return;
-      }
-      const observation = identityService().observation(identity);
-      if (observation === undefined) {
-        source.sendMessage("This Pocket Computer identity is unavailable.");
-        return;
-      }
+      const resolved = resolvePocketComputer(source, itemStack);
+      if (resolved === undefined) return;
+      const { identity, observation } = resolved;
 
       const transition = lifecycle.use({
         instanceId: identity,
@@ -55,12 +47,7 @@ export function registerPocketComputerComponent(
             observation.computerId,
             observation.family,
           );
-          void openComputerTerminal(source, record).catch((error: unknown) => {
-            if (source.isValid)
-              source.sendMessage(
-                `Pocket Computer failed: ${errorMessage(error)}`,
-              );
-          });
+          requestWebComputerTerminal(source, record);
         } catch (error: unknown) {
           if (source.isValid)
             source.sendMessage(
@@ -70,6 +57,59 @@ export function registerPocketComputerComponent(
       });
     },
   });
+}
+
+function resolvePocketComputer(
+  player: Player,
+  itemStack: ItemStack | undefined,
+):
+  | {
+      readonly identity: string;
+      readonly observation: ComputerIdentityObservation;
+    }
+  | undefined {
+  const identity = itemStack?.getDynamicProperty(pocketIdentityProperty);
+  if (typeof identity === "string") {
+    const observation = identityService().observation(identity);
+    if (observation === undefined) {
+      player.sendMessage("This Pocket Computer identity is unavailable.");
+      return undefined;
+    }
+    return { identity, observation };
+  }
+
+  const inventory = player.getComponent(
+    EntityComponentTypes.Inventory,
+  )?.container;
+  const selectedItem = inventory?.getItem(player.selectedSlotIndex);
+  if (
+    inventory === undefined ||
+    selectedItem?.typeId !== pocketComputerTypeId
+  ) {
+    player.sendMessage(
+      "Pocket Computer initialization could not find the held item.",
+    );
+    return undefined;
+  }
+
+  try {
+    const record = createPortableComputer("advanced");
+    selectedItem.setDynamicProperty(pocketIdentityProperty, record.computerId);
+    inventory.setItem(player.selectedSlotIndex, selectedItem);
+    const observation = identityService().observation(record.computerId);
+    if (observation === undefined)
+      throw new Error("Pocket Computer identity was not persisted.");
+    player.sendMessage(`Pocket Computer initialized (${record.computerId}).`);
+    return {
+      identity: record.computerId,
+      observation,
+    };
+  } catch (error: unknown) {
+    player.sendMessage(
+      `Pocket Computer initialization failed: ${errorMessage(error)}`,
+    );
+    return undefined;
+  }
 }
 
 export function startPocketComputerLifecycle(): void {

@@ -8,13 +8,16 @@ describe("Bedrock terminal adapters", () => {
   it("adds the terminal header before interactive controls", async () => {
     const terminalView = await source("src/bedrock/terminalView.ts");
     expect(terminalView.indexOf(".label(display)")).toBeLessThan(
-      terminalView.indexOf('.textField("Input", input)'),
+      terminalView.indexOf('.textField("Command line", input)'),
     );
+    expect(terminalView).toContain('.button("Enter"');
+    expect(terminalView).toContain('.button("Ctrl+C"');
+    expect(terminalView).not.toContain("form.closeButton()");
   });
 
   it("maps every terminal palette index to a distinct native formatting color", async () => {
-    const terminalView = await source("src/bedrock/terminalView.ts");
-    const paletteSource = terminalView.match(
+    const viewport = await source("src/application/terminal/viewport.ts");
+    const paletteSource = viewport.match(
       /const formattingCodes = \[([\s\S]*?)\] as const;/u,
     )?.[1];
     const codes = [...(paletteSource ?? "").matchAll(/"([0-9a-f])"/gu)].map(
@@ -33,11 +36,50 @@ describe("Bedrock terminal adapters", () => {
     ]);
 
     expect(computer).toContain("openComputerTerminal");
-    expect(pocket).toContain("openComputerTerminal");
+    expect(pocket).toContain("requestWebComputerTerminal");
+    expect(pocket).toContain("resolvePocketComputer(source, itemStack)");
+    expect(pocket).toContain("Pocket Computer initialized");
+    expect(pocket).toContain(
+      "inventory.setItem(player.selectedSlotIndex, selectedItem)",
+    );
     expect(pocket).not.toContain("showTerminalProbe");
     expect(coordinator).toContain("showTerminalView");
     expect(coordinator).toContain('"terminal_line"');
     expect(coordinator).toContain('"terminal_closed"');
+  });
+
+  it("hands Pocket Computer use to the bounded Web companion bridge", async () => {
+    const [main, pocket, bridge] = await Promise.all([
+      source("src/bedrock/main.ts"),
+      source("src/bedrock/pocketComputer.ts"),
+      source("src/bedrock/webTerminalBridge.ts"),
+    ]);
+
+    expect(main).toContain("startWebTerminalBridge");
+    expect(main).toContain("handleWebTerminalScriptEvent");
+    expect(pocket).toContain("requestWebComputerTerminal(source, record)");
+    expect(bridge).toContain("CS_WEB_SESSION_REQUEST");
+    expect(bridge).toContain("CS_WEB_TERMINAL");
+    expect(bridge).toContain("maxSnapshotsPerPass = 2");
+    expect(bridge).toContain('"terminal_line"');
+    expect(bridge).toContain('"terminal_closed"');
+    expect(bridge).toContain("openFallback");
+  });
+
+  it("keeps the Bedrock Core prototype isolated from the production DDUI coordinator", async () => {
+    const [main, probe, coordinator] = await Promise.all([
+      source("src/bedrock/main.ts"),
+      source("src/bedrock/probes/uiProbe.ts"),
+      source("src/bedrock/computerTerminal.ts"),
+    ]);
+
+    expect(main).toContain('case "ui-custom"');
+    expect(main).toContain('case "ui-nano"');
+    expect(probe).toContain("showCustomTerminalProbe");
+    expect(probe).toContain("showNanoProbe");
+    expect(probe).toContain("showCustomTerminalView");
+    expect(coordinator).toContain("showTerminalView");
+    expect(coordinator).not.toContain("showCustomTerminalView");
   });
 
   it("routes Monitor touch to the latest selected production computer", async () => {

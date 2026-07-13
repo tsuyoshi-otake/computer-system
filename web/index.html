@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <title>Computer System — Web Terminal</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <script type="module" src="/app.js"></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#command-input">Skip to command line</a>
+    <main class="workstation" aria-labelledby="computer-name">
+      <header class="topbar">
+        <div class="identity">
+          <span class="mark" aria-hidden="true">CS</span>
+          <div>
+            <h1 id="computer-name">Computer System</h1>
+            <p id="computer-id">Waiting for secure handoff</p>
+          </div>
+        </div>
+        <div class="connection" role="status" aria-live="polite">
+          <span
+            id="status-light"
+            class="status-light"
+            data-state="loading"
+          ></span>
+          <span id="status-text">CONNECTING</span>
+        </div>
+      </header>
+
+      <section class="terminal-shell" aria-label="Computer terminal">
+        <div id="terminal-stage" class="terminal-stage">
+          <div
+            id="terminal-output"
+            class="terminal-output"
+            role="log"
+            aria-label="Terminal output"
+            aria-live="polite"
+          >
+            <div id="terminal-screen" class="terminal-screen">
+              <p class="system-line">Opening secure terminal session…</p>
+            </div>
+          </div>
+          <form id="command-form" class="command-line" autocomplete="off">
+            <label for="command-input" class="sr-only"
+              >Terminal command line</label
+            >
+            <textarea
+              id="command-input"
+              name="command"
+              rows="1"
+              maxlength="128"
+              spellcheck="false"
+              autocapitalize="off"
+              enterkeyhint="send"
+              aria-describedby="keyboard-help input-state"
+              disabled
+            ></textarea>
+          </form>
+        </div>
+      </section>
+
+      <footer class="statusbar">
+        <p id="keyboard-help">
+          <kbd>Enter</kbd> run <span aria-hidden="true">·</span>
+          <kbd>Ctrl</kbd>+<kbd>C</kbd> interrupt
+          <span aria-hidden="true">·</span> <kbd>Ctrl</kbd>+<kbd>U</kbd> clear
+          <span aria-hidden="true">·</span> <kbd>Ctrl</kbd>+<kbd>D</kbd> logout
+          <span aria-hidden="true">·</span> <kbd>↑</kbd><kbd>↓</kbd> history
+        </p>
+        <button id="reconnect-button" type="button" hidden>Reconnect</button>
+        <span
+          ><span id="input-state">OFFLINE</span> ·
+          <span id="terminal-size">51 × 19</span> ·
+          <span id="lifecycle-state">OFFLINE</span></span
+        >
+      </footer>
+    </main>
+
+    <dialog id="error-dialog" aria-labelledby="error-title">
+      <div class="dialog-code">CONNECTION ERROR</div>
+      <h2 id="error-title">Terminal unavailable</h2>
+      <p id="error-message">
+        This handoff link is invalid, expired, or has already been used.
+      </p>
+      <form method="dialog"><button>Dismiss</button></form>
+    </dialog>
+  </body>
+</html>

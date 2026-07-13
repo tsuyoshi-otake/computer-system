@@ -41,6 +41,43 @@ directories in the locally installed Bedrock GDK client. The deployment root is
 `%APPDATA%\Minecraft Bedrock\users\shared\games\com.mojang`, which is the
 current Windows creator-content location following the UWP-to-GDK migration.
 
+When changing JSON UI under the Resource Pack, increment both the Resource Pack
+header/module version and the Behavior Pack dependency version. Bedrock caches
+server Resource Packs by UUID and version, so reconnecting to a restarted BDS
+can otherwise continue rendering an older UI definition.
+
+JSON UI overrides such as `ui/server_form.json` apply to the legacy form path
+used by APIs such as `ModalFormData`. The reactive `CustomForm` API introduced
+with Data-Driven UI (DDUI) uses a separate client-rendered screen: the 2.1.0 API
+does not expose panel dimensions or font scaling, and the legacy
+`server_form.custom_form` override does not affect it. Keep the DDUI terminal
+when live output is required; switching to a legacy modal form trades that live
+binding for Resource Pack-controlled layout.
+
+For unrestricted desktop width and keyboard-first interaction, use the Web
+Terminal companion. It renders the fixed-cell terminal snapshot in a normal
+browser and positions its semantic input at the terminal cursor, preserving
+physical Enter, Ctrl+C, and history without a separate visible text field. Start
+the combined managed runtime with `npm run dev:bds:web`; see
+[the MCP debugging guide](mcp-debugging.md) for network and security settings.
+
+The Web Terminal and native fallback both send the same `terminal_line` event to
+the Computer System OS. OS 0.2 parses a bounded BusyBox-style command language
+with pipelines, redirects, control operators, quoting, variables, and script
+files. Commands operate only on `InMemoryFilesystem`; they must never be
+implemented by spawning a host shell. Focused verification is:
+
+```powershell
+npx vitest run tests/os/shellSyntax.test.ts tests/os/shellSession.test.ts tests/os/systemBoot.test.ts
+```
+
+`Verify:` Run `printf 'alpha\nbeta\nalpha\n' | grep alpha | wc -l > count`
+through a `terminal_line` event, then run `cat count`.
+
+`Expect:` `/count` contains `      2\n`, the terminal shows `2`, the runtime
+returns to the explicit `waiting_event/terminal_line` state, and no host process
+is created.
+
 ## Headless Bedrock verification
 
 Download and extract the official Bedrock Dedicated Server distribution, then
@@ -90,6 +127,10 @@ directory and never recursively deletes it.
 The remaining player-experience checks are listed in
 [the manual verification checklist](manual-verification.md).
 
+For persistent command execution and log inspection through Codex rather than
+the Minecraft chat UI, use the local
+[Bedrock MCP debug companion](mcp-debugging.md).
+
 After activating both packs in a test world, run:
 
 ```text
@@ -104,8 +145,8 @@ suite.
 
 `Verify:` Run `npm run validate`.
 
-`Expect:` Formatting, lint, type checking, 33 host tests, and the pack build all
-exit successfully.
+`Expect:` Formatting, lint, type checking, all host tests, and the pack build
+all exit successfully.
 
 `Verify:` Set `BDS_HOME` and run `npm run test:bds`.
 

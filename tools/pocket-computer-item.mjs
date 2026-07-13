@@ -14,18 +14,9 @@ export function createPocketComputerItem() {
       components: {
         "computer_system:pocket_computer": {},
         "minecraft:display_name": { value: "Pocket Computer" },
-        "minecraft:food": {
-          can_always_eat: true,
-          nutrition: 0,
-          saturation_modifier: 0,
-        },
         "minecraft:icon": pocketComputerTextureKey,
+        "minecraft:interact_button": "Open Terminal",
         "minecraft:max_stack_size": 1,
-        "minecraft:use_animation": "drink",
-        "minecraft:use_modifiers": {
-          use_duration: 0.05,
-          movement_modifier: 1,
-        },
       },
     },
   };

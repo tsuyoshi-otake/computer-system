@@ -39,7 +39,7 @@ export async function openComputerTerminal(
         );
       },
     },
-    record.label ?? `Computer ${record.computerId}`,
+    `${record.label ?? record.computerId} — shell`,
   );
 }
 

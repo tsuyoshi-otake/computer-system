@@ -1,6 +1,9 @@
 import { system, type Player } from "@minecraft/server";
 
+import { NanoEditorSession } from "../../application/editor/nanoSession.js";
 import { TerminalBuffer } from "../../domain/terminal/terminalBuffer.js";
+import { showCustomNanoView } from "../customNanoView.js";
+import { showCustomTerminalView } from "../customTerminalView.js";
 import { showTerminalView } from "../terminalView.js";
 
 const probeTerminal = new TerminalBuffer();
@@ -44,6 +47,81 @@ export async function showTerminalProbe(player: Player): Promise<void> {
     },
     "Computer System Terminal",
   );
+}
+
+export function showCustomTerminalProbe(player: Player): void {
+  const terminal = new TerminalBuffer();
+  terminal.write("Computer System OS 0.1");
+  terminal.setCursorPosition(1, 2);
+  terminal.write("Bedrock Core UI 0.9.2 prototype");
+  terminal.setCursorPosition(1, 3);
+  terminal.write("Compact modal: no scrolling required.");
+
+  showCustomTerminalView(
+    player,
+    terminal,
+    {
+      onLine: (line): void => {
+        terminal.setCursorBlink(false);
+        terminal.setCursorPosition(1, 4);
+        terminal.clearLine();
+        terminal.write(`~$ ${line}`.slice(0, terminal.width));
+        terminal.setCursorPosition(1, 5);
+        terminal.clearLine();
+        terminal.write(
+          "Command accepted; the form reopened.".slice(0, terminal.width),
+        );
+        terminal.setCursorPosition(1, 6);
+        terminal.clearLine();
+        terminal.write("~$ ");
+        terminal.setCursorBlink(true);
+      },
+      onTerminate: (): void => undefined,
+      onClosed: (kind, detail): void => {
+        const record = `CS_CUSTOM_TERMINAL_CLOSE ${JSON.stringify({
+          kind,
+          ...(detail === undefined ? {} : { detail }),
+        })}`;
+        console.warn(record);
+        if (player.isValid) player.sendMessage(record);
+      },
+    },
+    "COMPUTER — SHELL / CUSTOM UI",
+  );
+}
+
+export function showNanoProbe(player: Player): void {
+  const editor = new NanoEditorSession(
+    "/home/user/startup.lua",
+    [
+      "-- Computer System startup file",
+      'print("Hello from Bedrock")',
+      "",
+      'local side = "back"',
+      "redstone.setOutput(side, true)",
+    ].join("\n"),
+  );
+
+  showCustomNanoView(player, editor, {
+    onSave: (snapshot): void => {
+      const record = `CS_NANO_SAVE ${JSON.stringify({
+        fileName: snapshot.fileName,
+        revision: snapshot.revision,
+        lineCount: snapshot.lines.length,
+      })}`;
+      console.warn(record);
+      if (player.isValid) player.sendMessage(record);
+    },
+    onClosed: (result): void => {
+      const record = `CS_NANO_CLOSE ${JSON.stringify({
+        saved: result.saved,
+        discardedChanges: result.discardedChanges,
+        revision: result.snapshot.revision,
+      })}`;
+      console.warn(record);
+      if (player.isValid) player.sendMessage(record);
+    },
+  });
 }
 
 export function startTerminalCompetitionProbe(player: Player): void {

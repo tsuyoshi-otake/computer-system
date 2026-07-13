@@ -84,6 +84,30 @@ describe("Computer persistence boundary", (): void => {
     expect(loaded.record.terminal.line(1)).toBe("clip");
   });
 
+  it("migrates the persisted legacy shell prompt and green theme", (): void => {
+    const repository = new MemoryRepository();
+    const persistence = new ComputerPersistenceService(repository);
+    const record = new ComputerRecord("computer-11", "standard");
+    record.terminal.setTextColor(5);
+    record.terminal.write("user@computer-11:~$ ");
+    record.terminal.setCursorPosition(1, 2);
+    record.terminal.write("legacy output");
+    record.terminal.setCursorPosition("user@computer-11:~$ ".length + 1, 1);
+
+    expect(persistence.saveIfDirty(record).outcome).toBe("saved");
+    const loaded = new ComputerPersistenceService(repository).load(
+      "computer-11",
+    );
+    expect(loaded.outcome).toBe("loaded");
+    if (loaded.outcome !== "loaded") return;
+
+    expect(loaded.record.terminal.line(1).trimEnd()).toBe("~$");
+    expect(loaded.record.terminal.cell(1, 1).foreground).toBe(0);
+    expect(loaded.record.terminal.cell(1, 2).foreground).toBe(0);
+    expect(loaded.record.terminal.cursorX).toBe(4);
+    expect(loaded.record.terminal.cursorY).toBe(1);
+  });
+
   it("returns explicit missing and failed outcomes", (): void => {
     const repository = new MemoryRepository();
     const persistence = new ComputerPersistenceService(repository);
