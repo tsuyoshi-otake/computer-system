@@ -119,7 +119,12 @@ export function startPocketComputerLifecycle(): void {
   });
 
   world.afterEvents.entityItemDrop.subscribe(({ items }): void => {
-    for (const entity of items) {
+    // GDK 26.33 can surface a single native Entity even though the stable
+    // declaration exposes Entity[]. Normalize both shapes at this adapter
+    // boundary so joining/dropping never terminates the event callback.
+    const droppedEntities = Array.isArray(items) ? items : [items];
+    for (const entity of droppedEntities) {
+      if (entity === undefined) continue;
       const stack = entity.getComponent(EntityComponentTypes.Item)?.itemStack;
       observeDropped(stack);
     }

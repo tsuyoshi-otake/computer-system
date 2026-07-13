@@ -19,13 +19,24 @@
             <p id="computer-id">Waiting for secure handoff</p>
           </div>
         </div>
-        <div class="connection" role="status" aria-live="polite">
-          <span
-            id="status-light"
-            class="status-light"
-            data-state="loading"
-          ></span>
-          <span id="status-text">CONNECTING</span>
+        <div class="topbar-actions">
+          <button
+            id="manual-button"
+            class="manual-button"
+            type="button"
+            aria-haspopup="dialog"
+            aria-controls="manual-dialog"
+          >
+            Manual
+          </button>
+          <div class="connection" role="status" aria-live="polite">
+            <span
+              id="status-light"
+              class="status-light"
+              data-state="loading"
+            ></span>
+            <span id="status-text">CONNECTING</span>
+          </div>
         </div>
       </header>
 
@@ -58,12 +69,20 @@
               disabled
             ></textarea>
           </form>
+          <div
+            id="completion-menu"
+            class="completion-menu"
+            role="status"
+            aria-live="polite"
+            hidden
+          ></div>
         </div>
       </section>
 
       <footer class="statusbar">
         <p id="keyboard-help">
           <kbd>Enter</kbd> run <span aria-hidden="true">·</span>
+          <kbd>Tab</kbd> complete <span aria-hidden="true">·</span>
           <kbd>Ctrl</kbd>+<kbd>C</kbd> interrupt
           <span aria-hidden="true">·</span> <kbd>Ctrl</kbd>+<kbd>U</kbd> clear
           <span aria-hidden="true">·</span> <kbd>Ctrl</kbd>+<kbd>D</kbd> logout
@@ -94,6 +113,45 @@
         >
       </footer>
     </main>
+
+    <dialog
+      id="manual-dialog"
+      class="manual-dialog"
+      aria-labelledby="manual-title"
+    >
+      <header class="manual-header">
+        <div>
+          <div class="manual-series">CS TECHNICAL PUBLICATION · REV 0.4</div>
+          <h2 id="manual-title">Computer System Field Manual</h2>
+        </div>
+        <div class="manual-header-actions">
+          <span id="manual-position" aria-live="polite">01 / 16</span>
+          <form method="dialog">
+            <button aria-label="Close manual">Close</button>
+          </form>
+        </div>
+      </header>
+      <div class="manual-workspace">
+        <aside class="manual-sidebar" aria-label="Manual chapters">
+          <label for="manual-search">Index search</label>
+          <input
+            id="manual-search"
+            type="search"
+            placeholder="instruction, fault, BASIC…"
+            autocomplete="off"
+          />
+          <nav id="manual-toc"></nav>
+        </aside>
+        <article id="manual-page" class="manual-page" tabindex="-1"></article>
+      </div>
+      <footer class="manual-footer">
+        <span>←/→ chapter · Esc close</span>
+        <div>
+          <button id="manual-previous" type="button">Previous</button>
+          <button id="manual-next" type="button">Next</button>
+        </div>
+      </footer>
+    </dialog>
 
     <dialog id="error-dialog" aria-labelledby="error-title">
       <div class="dialog-code">CONNECTION ERROR</div>

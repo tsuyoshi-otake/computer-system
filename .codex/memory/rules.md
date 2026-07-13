@@ -39,3 +39,18 @@
   `Microsoft.MinecraftUWP_8wekyb3d8bbwe!Game`. Immediately launching the
   `C:\XboxGames\...\Minecraft.Windows.exe` path after shutdown can be ignored
   even when no process or crash event remains.
+- Treat interactive terminal completion and viewport resize as writer-owned
+  operations. Validate at HTTP and Bedrock boundaries, serialize per Computer,
+  and cap dimensions/candidates so viewers cannot race shared terminal state.
+- A script loop budget must be shared across nested blocks and function calls.
+  Per-block counters allow multiplicative nested work even when every individual
+  loop appears bounded.
+- Native operations that perform sandbox work must return bounded VM cycle debt;
+  otherwise a low-clock Computer can bypass CPU limits through shell or host
+  adapters. Keep aggregate RAM measurement pressure-triggered so the normal
+  allocation path stays O(1), and scan only reachable runtime objects when
+  reclamation or overflow must be decided.
+- Treat nominal guest CPU identity and host-safe execution scale as separate
+  concepts. Guest executables must be structurally validated at load, have
+  bounded instruction/output/memory paths, and charge measured opcode cycles
+  back to the owning VM rather than executing as unmetered native work.

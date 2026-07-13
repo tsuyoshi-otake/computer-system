@@ -4,6 +4,7 @@ import { createServer } from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { openDefaultBrowser } from "./default-browser-opener.mjs";
 import { WebSessionError, WebSessionStore } from "./web-session-store.mjs";
 
 const projectRoot = path.resolve(
@@ -12,8 +13,13 @@ const projectRoot = path.resolve(
 );
 const requestMarker = "CS_WEB_SESSION_REQUEST ";
 const snapshotMarker = "CS_WEB_TERMINAL ";
+const completionMarker = "CS_WEB_COMPLETION ";
 const finalMarker = "CS_WEB_SESSION_FINAL ";
 const maximumOperationWaitersPerComputer = 8;
+const maximumBrowserLaunchWaiters = 4;
+const defaultBrowserLaunchTimeoutMs = 5_000;
+const completionTimeoutMs = 2_000;
+const maximumPendingCompletions = 32;
 const assetTypes = new Map([
   [".css", "text/css; charset=utf-8"],
   [".html", "text/html; charset=utf-8"],
@@ -28,6 +34,17 @@ export class WebCompanionServer {
     this.port = parsePort(options.port ?? 19_144);
     this.publicHost = options.publicHost ?? this.host;
     this.publicOrigin = normalizePublicOrigin(options.publicOrigin);
+    this.browserAutoOpenEnabled = options.autoOpenBrowser === true;
+    this.browserOpener = options.browserOpener ?? openDefaultBrowser;
+    this.browserLaunchTimeoutMs = positiveInteger(
+      options.browserLaunchTimeoutMs ?? defaultBrowserLaunchTimeoutMs,
+      "Browser launch timeout",
+    );
+    this.writeDiagnostic =
+      options.writeDiagnostic ??
+      ((line) => {
+        process.stderr.write(`${line}\n`);
+      });
     this.assetRoot = options.assetRoot ?? path.join(projectRoot, "web");
     this.store = options.store ?? new WebSessionStore(options.sessionOptions);
     this.server = undefined;
@@ -38,6 +55,20 @@ export class WebCompanionServer {
     this.origin = undefined;
     this.operationDepths = new Map();
     this.operationTails = new Map();
+    this.browserLaunchDepth = 0;
+    this.browserLaunchTail = Promise.resolve();
+    this.pendingCompletions = new Map();
+    this.nextCompletion = 1;
+    this.browserLaunch = {
+      enabled: this.browserAutoOpenEnabled,
+      eligible: false,
+      state: this.browserAutoOpenEnabled ? "blocked" : "disabled",
+      reason: this.browserAutoOpenEnabled ? "not_started" : null,
+      attempts: 0,
+      opened: 0,
+      failed: 0,
+      lastError: null,
+    };
   }
 
   async start() {
@@ -65,6 +96,7 @@ export class WebCompanionServer {
     this.origin =
       this.publicOrigin ??
       `http://${formatHost(this.publicHost)}:${String(actualPort)}`;
+    this.configureBrowserAutoOpen();
     this.started = true;
     this.cleanupTimer = setInterval(() => this.store.expire(), 30_000);
     this.cleanupTimer.unref();
@@ -81,6 +113,7 @@ export class WebCompanionServer {
     this.unsubscribeState = undefined;
     if (this.cleanupTimer !== undefined) clearInterval(this.cleanupTimer);
     this.cleanupTimer = undefined;
+    await this.browserLaunchTail.catch(() => undefined);
     if (this.bds !== undefined) {
       await Promise.allSettled(
         this.store
@@ -93,6 +126,7 @@ export class WebCompanionServer {
       );
     }
     this.store.closeAll("companion_stopped");
+    this.failPendingCompletions("Web companion stopped.");
     const server = this.server;
     this.server = undefined;
     if (server !== undefined) {
@@ -112,6 +146,7 @@ export class WebCompanionServer {
       port: this.server?.address()?.port ?? this.port,
       origin: this.origin ?? null,
       activeSessions: this.store.activeCount(),
+      browserAutoOpen: { ...this.browserLaunch },
     };
   }
 
@@ -126,6 +161,7 @@ export class WebCompanionServer {
     this.unsubscribeState = bds.onState((state) => {
       if (state === "idle" || state === "failed") {
         this.store.closeAll(state === "failed" ? "bds_failed" : "bds_stopped");
+        this.failPendingCompletions("BDS stopped before completion finished.");
       }
     });
   }
@@ -144,6 +180,7 @@ export class WebCompanionServer {
         this.store.close(issued.sessionId, "relay_failed");
         throw error;
       }
+      await this.queueBrowserLaunch(handoffUrl);
       return;
     }
 
@@ -156,12 +193,127 @@ export class WebCompanionServer {
       return;
     }
 
+    const completion = markerPayload(entry.line, completionMarker);
+    if (completion !== undefined) {
+      const payload = JSON.parse(completion);
+      const pending = this.pendingCompletions.get(payload.requestId);
+      if (
+        pending !== undefined &&
+        pending.sessionId === payload.sessionId &&
+        typeof payload.value === "string" &&
+        Number.isSafeInteger(payload.cursor) &&
+        Array.isArray(payload.candidates)
+      ) {
+        clearTimeout(pending.timer);
+        this.pendingCompletions.delete(payload.requestId);
+        pending.resolve({
+          candidates: payload.candidates
+            .filter((value) => typeof value === "string")
+            .slice(0, 64),
+          cursor: payload.cursor,
+          value: payload.value,
+        });
+      }
+      return;
+    }
+
     const final = markerPayload(entry.line, finalMarker);
     if (final !== undefined) {
       const payload = JSON.parse(final);
       if (typeof payload.sessionId === "string") {
         this.store.close(payload.sessionId, payload.reason ?? "bedrock_closed");
       }
+    }
+  }
+
+  configureBrowserAutoOpen() {
+    if (!this.browserAutoOpenEnabled) return;
+    const origin = new URL(this.origin);
+    if (!isLoopbackHost(this.host)) {
+      this.browserLaunch = {
+        ...this.browserLaunch,
+        eligible: false,
+        state: "blocked",
+        reason: "listener_not_loopback",
+      };
+      return;
+    }
+    if (!isLoopbackHost(origin.hostname)) {
+      this.browserLaunch = {
+        ...this.browserLaunch,
+        eligible: false,
+        state: "blocked",
+        reason: "origin_not_loopback",
+      };
+      return;
+    }
+    this.browserLaunch = {
+      ...this.browserLaunch,
+      eligible: true,
+      state: "ready",
+      reason: null,
+    };
+  }
+
+  async queueBrowserLaunch(url) {
+    if (!this.browserLaunch.enabled || !this.browserLaunch.eligible) return;
+    if (this.browserLaunchDepth >= maximumBrowserLaunchWaiters) {
+      this.browserLaunch = {
+        ...this.browserLaunch,
+        state: "failed",
+        failed: this.browserLaunch.failed + 1,
+        lastError: "Browser launch queue capacity was reached.",
+      };
+      this.writeDiagnostic(
+        "Web companion browser launch skipped: queue capacity reached.",
+      );
+      return;
+    }
+
+    this.browserLaunchDepth += 1;
+    this.browserLaunch = {
+      ...this.browserLaunch,
+      attempts: this.browserLaunch.attempts + 1,
+    };
+    const operation = this.browserLaunchTail.then(
+      () => this.launchBrowser(url),
+      () => this.launchBrowser(url),
+    );
+    this.browserLaunchTail = operation.catch(() => undefined);
+    try {
+      await operation;
+    } finally {
+      this.browserLaunchDepth -= 1;
+    }
+  }
+
+  async launchBrowser(url) {
+    this.browserLaunch = {
+      ...this.browserLaunch,
+      state: "opening",
+      lastError: null,
+    };
+    try {
+      await withTimeout(
+        Promise.resolve().then(() => this.browserOpener(url)),
+        this.browserLaunchTimeoutMs,
+        "Default browser launch timed out.",
+      );
+      this.browserLaunch = {
+        ...this.browserLaunch,
+        state: "opened",
+        opened: this.browserLaunch.opened + 1,
+        lastError: null,
+      };
+    } catch (error) {
+      const detail = message(error);
+      this.browserLaunch = {
+        ...this.browserLaunch,
+        state: "failed",
+        failed: this.browserLaunch.failed + 1,
+        lastError: detail,
+      };
+      this.writeDiagnostic(`Web companion browser launch failed: ${detail}`);
     }
   }
 
@@ -192,6 +344,22 @@ export class WebCompanionServer {
       const session = this.store.authenticate(bearerToken(request));
       const body = await readJson(request, 4_096);
       await this.relayInput(session, body);
+      writeJson(response, 202, { outcome: "accepted" });
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/api/complete") {
+      requireSameOrigin(request, this.origin);
+      const session = this.store.authenticate(bearerToken(request));
+      const body = await readJson(request, 4_096);
+      const completion = await this.completeInput(session, body);
+      writeJson(response, 200, completion);
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/api/resize") {
+      requireSameOrigin(request, this.origin);
+      const session = this.store.authenticate(bearerToken(request));
+      const body = await readJson(request, 4_096);
+      await this.resizeTerminal(session, body);
       writeJson(response, 202, { outcome: "accepted" });
       return;
     }
@@ -276,6 +444,30 @@ export class WebCompanionServer {
         );
         return;
       }
+      if (body?.kind === "keys") {
+        if (
+          !Array.isArray(body.value) ||
+          body.value.length === 0 ||
+          body.value.length > 32 ||
+          body.value.some(
+            (key) =>
+              typeof key !== "string" || key.length === 0 || key.length > 32,
+          )
+        ) {
+          throw new WebSessionError("input", "Invalid terminal key batch.");
+        }
+        const encodedKeys = encodeURIComponent(JSON.stringify(body.value));
+        if (encodedKeys.length > 180) {
+          throw new WebSessionError(
+            "input",
+            "Encoded terminal keys are too long.",
+          );
+        }
+        await this.bds.runWebRelay(
+          `scriptevent computer_system:web-input ${active.sessionId} keys ${encodedKeys}`,
+        );
+        return;
+      }
       if (body?.kind !== "line" || typeof body.value !== "string") {
         throw new WebSessionError("input", "Input must be a terminal line.");
       }
@@ -300,6 +492,112 @@ export class WebCompanionServer {
         `scriptevent computer_system:web-input ${active.sessionId} line ${encoded}`,
       );
     });
+  }
+
+  async completeInput(session, body) {
+    return this.serializeComputerOperation(session.computerId, async () => {
+      const active = this.store.authenticate(session.token);
+      if (!this.store.isWriter(active.sessionId)) {
+        throw new WebSessionError(
+          "read_only",
+          "This browser terminal is view only. Take control before completing input.",
+          409,
+        );
+      }
+      if (
+        typeof body?.value !== "string" ||
+        body.value.includes("\0") ||
+        /[\r\n]/u.test(body.value) ||
+        body.value.length > 128 ||
+        !Number.isSafeInteger(body.cursor) ||
+        body.cursor < 0 ||
+        body.cursor > body.value.length
+      ) {
+        throw new WebSessionError("input", "Invalid completion request.");
+      }
+      if (this.pendingCompletions.size >= maximumPendingCompletions) {
+        throw new WebSessionError(
+          "busy",
+          "Too many terminal completions are pending.",
+          503,
+        );
+      }
+      const encoded = encodeURIComponent(body.value);
+      if (encoded.length > 128) {
+        throw new WebSessionError(
+          "input",
+          "Encoded completion input is too long for the BDS relay.",
+        );
+      }
+      const requestId = `c${this.nextCompletion.toString(36).padStart(5, "0")}`;
+      this.nextCompletion =
+        this.nextCompletion === Number.MAX_SAFE_INTEGER
+          ? 1
+          : this.nextCompletion + 1;
+      let resolveCompletion;
+      let rejectCompletion;
+      const completion = new Promise((resolve, reject) => {
+        resolveCompletion = resolve;
+        rejectCompletion = reject;
+      });
+      const timer = setTimeout(() => {
+        this.pendingCompletions.delete(requestId);
+        rejectCompletion(
+          new WebSessionError("timeout", "Terminal completion timed out.", 504),
+        );
+      }, completionTimeoutMs);
+      timer.unref();
+      this.pendingCompletions.set(requestId, {
+        reject: rejectCompletion,
+        resolve: resolveCompletion,
+        sessionId: active.sessionId,
+        timer,
+      });
+      try {
+        await this.bds.runWebRelay(
+          `scriptevent computer_system:web-complete ${active.sessionId} ${requestId} ${String(body.cursor)} v${encoded}`,
+        );
+      } catch (error) {
+        clearTimeout(timer);
+        this.pendingCompletions.delete(requestId);
+        throw error;
+      }
+      return completion;
+    });
+  }
+
+  async resizeTerminal(session, body) {
+    return this.serializeComputerOperation(session.computerId, async () => {
+      const active = this.store.authenticate(session.token);
+      if (!this.store.isWriter(active.sessionId)) {
+        throw new WebSessionError(
+          "read_only",
+          "This browser terminal is view only. Take control before resizing.",
+          409,
+        );
+      }
+      if (
+        !Number.isSafeInteger(body?.width) ||
+        !Number.isSafeInteger(body?.height) ||
+        body.width < 51 ||
+        body.width > 160 ||
+        body.height < 19 ||
+        body.height > 60
+      ) {
+        throw new WebSessionError("input", "Invalid terminal dimensions.");
+      }
+      await this.bds.runWebRelay(
+        `scriptevent computer_system:web-resize ${active.sessionId} ${String(body.width)} ${String(body.height)}`,
+      );
+    });
+  }
+
+  failPendingCompletions(detail) {
+    for (const pending of this.pendingCompletions.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(new WebSessionError("closed", detail, 503));
+    }
+    this.pendingCompletions.clear();
   }
 
   async takeControl(session) {
@@ -392,6 +690,13 @@ export function parsePort(value) {
     throw new RangeError("WEB_COMPANION_PORT must be a valid port.");
   }
   return port;
+}
+
+export function parseBooleanFlag(value, name) {
+  if (value === undefined || value === "" || value === "0" || value === "false")
+    return false;
+  if (value === "1" || value === "true") return true;
+  throw new Error(`${name} must be 1, 0, true, or false.`);
 }
 
 function markerPayload(line, marker) {
@@ -498,6 +803,41 @@ function normalizePublicOrigin(value) {
 
 function formatHost(host) {
   return host.includes(":") && !host.startsWith("[") ? `[${host}]` : host;
+}
+
+function isLoopbackHost(host) {
+  const normalized = host.toLowerCase().replace(/^\[|\]$/gu, "");
+  return (
+    normalized === "localhost" ||
+    normalized === "127.0.0.1" ||
+    normalized === "::1"
+  );
+}
+
+function positiveInteger(value, name) {
+  if (!Number.isInteger(value) || value <= 0) {
+    throw new RangeError(`${name} must be a positive integer.`);
+  }
+  return value;
+}
+
+function withTimeout(operation, timeoutMs, timeoutMessage) {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(
+      () => reject(new Error(timeoutMessage)),
+      timeoutMs,
+    );
+    operation.then(
+      (value) => {
+        clearTimeout(timeout);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timeout);
+        reject(error);
+      },
+    );
+  });
 }
 
 function message(error) {

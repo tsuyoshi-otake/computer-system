@@ -1,10 +1,15 @@
 import type { SourceSpan } from "../../domain/language/source.js";
+import { utf8ByteLength } from "../../domain/text/utf8.js";
 import type {
   CodeObject,
   ExceptionHandlerCode,
   Instruction,
 } from "../../domain/runtime/bytecode.js";
-import { VmLimitError, VmRuntimeError } from "../../domain/runtime/errors.js";
+import {
+  VmLimitError,
+  VmMemoryError,
+  VmRuntimeError,
+} from "../../domain/runtime/errors.js";
 import {
   isObjectValue,
   type ModuleLoader,
@@ -15,6 +20,7 @@ import {
   type RuntimeValue,
   type UserFunction,
   type VmWaitRequest,
+  type VmWorkRequest,
 } from "../../domain/runtime/value.js";
 
 export interface VmLimits {
@@ -22,6 +28,7 @@ export interface VmLimits {
   readonly maxCollectionSize: number;
   readonly maxStackSize: number;
   readonly maxStringLength: number;
+  readonly maxMemoryBytes?: number;
 }
 
 export const defaultVmLimits: VmLimits = {
@@ -29,6 +36,7 @@ export const defaultVmLimits: VmLimits = {
   maxCollectionSize: 4_096,
   maxStackSize: 4_096,
   maxStringLength: 65_536,
+  maxMemoryBytes: 1_048_576,
 };
 
 export type VmState =
@@ -49,18 +57,38 @@ export class StackVm {
   private readonly frames: Frame[];
   private stateValue: VmState = { kind: "ready" };
   private tick = 0;
+  private allocationPressureBytes = 0;
+  private measuredMemoryBytes = 0;
+  private readonly maxMemoryBytes: number;
+  private cycleDebt = 0;
 
   constructor(
     program: RuntimeProgram,
     private readonly moduleLoader: ModuleLoader = () => undefined,
     private readonly limits: VmLimits = defaultVmLimits,
   ) {
+    this.maxMemoryBytes = limits.maxMemoryBytes ?? 1_048_576;
+    if (!Number.isSafeInteger(this.maxMemoryBytes) || this.maxMemoryBytes <= 0)
+      throw new RangeError("maxMemoryBytes must be a positive integer");
     this.globals = new Map(program.globals ?? []);
     this.frames = [this.createFrame(program.code, this.globals, this.globals)];
+    this.measuredMemoryBytes = this.measureMemoryBytes();
+    if (this.measuredMemoryBytes > this.maxMemoryBytes)
+      throw new VmMemoryError();
   }
 
   get state(): VmState {
     return this.stateValue;
+  }
+
+  get memoryUsageBytes(): number {
+    this.measuredMemoryBytes = this.measureMemoryBytes();
+    this.allocationPressureBytes = 0;
+    return this.measuredMemoryBytes;
+  }
+
+  get memoryLimitBytes(): number {
+    return this.maxMemoryBytes;
   }
 
   runSlice(instructionBudget: number): VmSliceResult {
@@ -76,6 +104,15 @@ export class StackVm {
       executedInstructions < instructionBudget &&
       this.stateValue.kind === "ready"
     ) {
+      if (this.cycleDebt > 0) {
+        const paid = Math.min(
+          this.cycleDebt,
+          instructionBudget - executedInstructions,
+        );
+        this.cycleDebt -= paid;
+        executedInstructions += paid;
+        continue;
+      }
       const frame = this.frames.at(-1);
       if (frame === undefined) {
         this.stateValue = { kind: "completed", value: null };
@@ -124,7 +161,14 @@ export class StackVm {
     ) {
       return false;
     }
-    this.resume({ kind: "tuple", values: [name, ...arguments_] });
+    const event = { kind: "tuple" as const, values: [name, ...arguments_] };
+    try {
+      this.resume(event);
+      this.noteAllocation(estimateRuntimeValue(event), undefined);
+    } catch (error: unknown) {
+      this.crash(normalizeFault(error));
+      return false;
+    }
     return true;
   }
 
@@ -145,6 +189,10 @@ export class StackVm {
     switch (instruction.op) {
       case "LOAD_CONST":
         this.push(frame, instruction.value, instruction.span);
+        this.noteAllocation(
+          shallowRuntimeValueSize(instruction.value),
+          instruction.span,
+        );
         return;
       case "LOAD_NAME":
         this.push(
@@ -163,13 +211,12 @@ export class StackVm {
       case "BUILD_TUPLE": {
         this.checkCollection(instruction.count, instruction.span);
         const values = this.popMany(frame, instruction.count, instruction.span);
-        this.push(
-          frame,
+        const collection =
           instruction.op === "BUILD_LIST"
-            ? { kind: "list", values }
-            : { kind: "tuple", values },
-          instruction.span,
-        );
+            ? ({ kind: "list", values } as const)
+            : ({ kind: "tuple", values } as const);
+        this.push(frame, collection, instruction.span);
+        this.noteAllocation(32 + values.length * 8, instruction.span);
         return;
       }
       case "BUILD_DICT": {
@@ -184,16 +231,20 @@ export class StackVm {
           entries.set(values[index]!, values[index + 1]!);
         }
         this.push(frame, { kind: "dictionary", entries }, instruction.span);
+        this.noteAllocation(48 + entries.size * 24, instruction.span);
         return;
       }
       case "BINARY": {
         const right = this.pop(frame, instruction.span);
         const left = this.pop(frame, instruction.span);
-        this.push(
-          frame,
-          this.binary(left, right, instruction.operator, instruction.span),
+        const result = this.binary(
+          left,
+          right,
+          instruction.operator,
           instruction.span,
         );
+        this.push(frame, result, instruction.span);
+        this.noteAllocation(shallowRuntimeValueSize(result), instruction.span);
         return;
       }
       case "UNARY": {
@@ -290,15 +341,16 @@ export class StackVm {
         const value = this.pop(frame, instruction.span);
         const index = this.pop(frame, instruction.span);
         const object = this.pop(frame, instruction.span);
-        if (
+        const growsDictionary =
           typeof object === "object" &&
           object !== null &&
           object.kind === "dictionary" &&
-          !object.entries.has(index)
-        ) {
+          !object.entries.has(index);
+        if (growsDictionary) {
           this.checkCollection(object.entries.size + 1, instruction.span);
         }
         storeSubscript(object, index, value, instruction.span);
+        if (growsDictionary) this.noteAllocation(24, instruction.span);
         return;
       }
       case "FORMAT": {
@@ -306,15 +358,14 @@ export class StackVm {
         const value = parts.map(formatValue).join("");
         this.checkString(value, instruction.span);
         this.push(frame, value, instruction.span);
+        this.noteAllocation(shallowRuntimeValueSize(value), instruction.span);
         return;
       }
       case "GET_ITER": {
         const value = this.pop(frame, instruction.span);
-        this.push(
-          frame,
-          iteratorValue(value, instruction.span),
-          instruction.span,
-        );
+        const iterator = iteratorValue(value, instruction.span);
+        this.push(frame, iterator, instruction.span);
+        this.noteAllocation(estimateRuntimeValue(iterator), instruction.span);
         return;
       }
       case "FOR_ITER": {
@@ -344,16 +395,14 @@ export class StackVm {
           instruction.defaultCount,
           instruction.span,
         );
-        this.push(
-          frame,
-          {
-            kind: "function",
-            prototype: instruction.prototype,
-            defaults,
-            globals: frame.globals,
-          },
-          instruction.span,
-        );
+        const callable = {
+          kind: "function" as const,
+          prototype: instruction.prototype,
+          defaults,
+          globals: frame.globals,
+        };
+        this.push(frame, callable, instruction.span);
+        this.noteAllocation(64 + defaults.length * 8, instruction.span);
         return;
       }
       case "CALL":
@@ -451,7 +500,21 @@ export class StackVm {
     if (callee.kind === "native_function") {
       const result = callee.call(positional, keywords);
       if (isWaitRequest(result)) this.wait(frame, result, instruction.span);
-      else this.push(frame, result, instruction.span);
+      else {
+        const value = isWorkRequest(result) ? result.value : result;
+        this.push(frame, value, instruction.span);
+        this.noteAllocation(estimateRuntimeValue(value), instruction.span);
+        if (isWorkRequest(result)) {
+          if (!Number.isSafeInteger(result.cycles) || result.cycles <= 0) {
+            throw new VmRuntimeError(
+              "ValueError",
+              "Native work cycles must be a positive safe integer",
+              instruction.span,
+            );
+          }
+          this.cycleDebt += result.cycles;
+        }
+      }
       return;
     }
     if (callee.kind !== "function") {
@@ -559,6 +622,36 @@ export class StackVm {
     const parent = this.frames.at(-1);
     if (parent === undefined) this.stateValue = { kind: "completed", value };
     else this.push(parent, value);
+  }
+
+  private noteAllocation(bytes: number, span?: SourceSpan): void {
+    this.allocationPressureBytes += Math.max(0, Math.ceil(bytes));
+    if (
+      this.measuredMemoryBytes + this.allocationPressureBytes <=
+      this.maxMemoryBytes
+    ) {
+      return;
+    }
+    this.measuredMemoryBytes = this.measureMemoryBytes();
+    this.allocationPressureBytes = 0;
+    if (this.measuredMemoryBytes > this.maxMemoryBytes)
+      throw new VmMemoryError(span);
+  }
+
+  private measureMemoryBytes(): number {
+    const seen = new Set<object>();
+    let bytes = 0;
+    for (const frame of this.frames) {
+      bytes += 128 + frame.stack.length * 8 + frame.locals.size * 24;
+      for (const [name, value] of frame.locals) {
+        bytes += utf8Bytes(name) + estimateRuntimeValue(value, seen);
+      }
+      for (const value of frame.stack)
+        bytes += estimateRuntimeValue(value, seen);
+    }
+    if (this.stateValue.kind === "completed")
+      bytes += estimateRuntimeValue(this.stateValue.value, seen);
+    return bytes;
   }
 
   private finishBlock(frame: Frame): void {
@@ -1189,6 +1282,68 @@ function isIterator(value: RuntimeValue): value is RuntimeIterator {
   );
 }
 
+function shallowRuntimeValueSize(value: RuntimeValue): number {
+  if (typeof value === "string") return 16 + utf8Bytes(value);
+  if (typeof value !== "object" || value === null) return 8;
+  switch (value.kind) {
+    case "list":
+    case "tuple":
+    case "iterator":
+      return 32 + value.values.length * 8;
+    case "dictionary":
+      return 48 + value.entries.size * 24;
+    case "namespace":
+      return 48 + value.values.size * 24 + utf8Bytes(value.name);
+    case "function":
+      return 64 + value.defaults.length * 8;
+    case "native_function":
+      return 48 + utf8Bytes(value.name);
+  }
+}
+
+function estimateRuntimeValue(
+  value: RuntimeValue,
+  seen: Set<object> = new Set(),
+): number {
+  if (typeof value === "string") return 16 + utf8Bytes(value);
+  if (typeof value !== "object" || value === null) return 8;
+  if (seen.has(value)) return 8;
+  seen.add(value);
+  let bytes = shallowRuntimeValueSize(value);
+  switch (value.kind) {
+    case "list":
+    case "tuple":
+    case "iterator":
+      for (const item of value.values)
+        bytes += estimateRuntimeValue(item, seen);
+      return bytes;
+    case "dictionary":
+      for (const [key, item] of value.entries) {
+        bytes += estimateRuntimeValue(key, seen);
+        bytes += estimateRuntimeValue(item, seen);
+      }
+      return bytes;
+    case "namespace":
+      for (const [name, item] of value.values) {
+        bytes += utf8Bytes(name) + estimateRuntimeValue(item, seen);
+      }
+      return bytes;
+    case "function":
+      for (const item of value.defaults)
+        bytes += estimateRuntimeValue(item, seen);
+      for (const [name, item] of value.globals) {
+        bytes += utf8Bytes(name) + estimateRuntimeValue(item, seen);
+      }
+      return bytes;
+    case "native_function":
+      return bytes;
+  }
+}
+
+function utf8Bytes(value: string): number {
+  return utf8ByteLength(value);
+}
+
 function isSequence(
   value: RuntimeValue,
 ): value is Extract<RuntimeValue, { kind: "list" | "tuple" }> {
@@ -1200,13 +1355,24 @@ function isSequence(
 }
 
 function isWaitRequest(
-  value: RuntimeValue | VmWaitRequest,
+  value: RuntimeValue | VmWaitRequest | VmWorkRequest,
 ): value is VmWaitRequest {
   return (
     typeof value === "object" &&
     value !== null &&
     "kind" in value &&
     (value.kind === "sleep" || value.kind === "wait_event")
+  );
+}
+
+function isWorkRequest(
+  value: RuntimeValue | VmWaitRequest | VmWorkRequest,
+): value is VmWorkRequest {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "kind" in value &&
+    value.kind === "work"
   );
 }
 

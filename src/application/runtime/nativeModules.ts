@@ -8,6 +8,8 @@ import {
   type NativeFunction,
   type RuntimeNamespace,
   type RuntimeValue,
+  type VmWaitRequest,
+  type VmWorkRequest,
 } from "../../domain/runtime/value.js";
 import { TerminalError } from "../../domain/terminal/terminalBuffer.js";
 import type { TerminalBuffer } from "../../domain/terminal/terminalBuffer.js";
@@ -17,9 +19,17 @@ import {
   type RedstoneState,
 } from "../../domain/redstone/redstoneState.js";
 import { ShellSession } from "../os/shellSession.js";
+import type { ShellResult } from "../os/shellSession.js";
+import type { ViScreen } from "../editor/viSession.js";
+import type { ComputerOsProfile } from "../../domain/computer/computer.js";
+import type { ShellClockSource } from "../os/clock.js";
+import type { ComputerHardwareProfile } from "../../domain/computer/hardware.js";
 
 export interface NativeModuleContext {
+  readonly clock?: ShellClockSource;
   readonly computerId: number;
+  readonly computerName?: string;
+  readonly osProfile?: ComputerOsProfile;
   readonly filesystem: InMemoryFilesystem;
   readonly terminal: TerminalBuffer;
   readonly redstone?: RedstoneState;
@@ -33,18 +43,32 @@ export interface NativeModuleContext {
   readonly shutdown?: () => void;
   readonly reboot?: () => void;
   readonly ticksPerSecond?: number;
+  readonly hardware?: ComputerHardwareProfile;
+  readonly memoryUsageBytes?: () => number;
 }
 
 export interface NativeEnvironment {
   readonly moduleLoader: ModuleLoader;
   readonly modules: ReadonlyMap<string, RuntimeNamespace>;
   readonly globals: ReadonlyMap<string, RuntimeValue>;
+  readonly shell: ShellSession;
 }
 
 export function createNativeEnvironment(
   context: NativeModuleContext,
 ): NativeEnvironment {
-  const shell = new ShellSession(context.filesystem);
+  const shell = new ShellSession(context.filesystem, {
+    clock: context.clock,
+    computerId: context.computerId,
+    computerName: context.computerName,
+    currentTick: context.currentTick,
+    osProfile: context.osProfile,
+    ticksPerSecond: context.ticksPerSecond,
+    hardware: context.hardware,
+    memoryUsageBytes: context.memoryUsageBytes,
+    terminalHeight: context.terminal.height,
+    terminalWidth: context.terminal.width,
+  });
   const modules = new Map<string, RuntimeNamespace>([
     ["os", createOsModule(context)],
     ["term", createTermModule(context.terminal)],
@@ -58,6 +82,7 @@ export function createNativeEnvironment(
     modules,
     moduleLoader: (name) => modules.get(name),
     globals: new Map([["print", createPrint(context.terminal)]]),
+    shell,
   };
 }
 
@@ -65,12 +90,37 @@ function createShellModule(
   shell: ShellSession,
   context: NativeModuleContext,
 ): RuntimeNamespace {
+  const applyResult = (
+    result: ShellResult,
+  ): RuntimeValue | VmWaitRequest | VmWorkRequest => {
+    if (result.terminalScreen !== undefined) {
+      renderTerminalScreen(context.terminal, result.terminalScreen);
+    } else {
+      if (result.action === "clear" || result.resetTerminal) {
+        context.terminal.setTextColor(0);
+        context.terminal.setBackgroundColor(15);
+        context.terminal.clear();
+        context.terminal.setCursorPosition(1, 1);
+      }
+      writeTerminalLines(context.terminal, result.lines);
+    }
+    if (result.action === "shutdown") {
+      requireCapability(context.shutdown, "shutdown")();
+    } else if (result.action === "reboot") {
+      requireCapability(context.reboot, "reboot")();
+    }
+    if (result.sleepTicks !== undefined) {
+      return { kind: "sleep", ticks: result.sleepTicks };
+    }
+    return { kind: "work", cycles: result.workCycles ?? 1, value: null };
+  };
   const banner = fn("banner", (positional, keywords) => {
     requireArity(positional, keywords, 0, 0);
     context.terminal.setTextColor(0);
     writeTerminalLines(context.terminal, [
-      "Computer System OS 0.2 (tty1)",
-      "BusyBox shell 0.2; type 'help' for commands.",
+      "Computer System OS 0.3 (tty1)",
+      "Computer System Bash 0.4; type 'help' for commands.",
+      ...shell.takeStartupLines(),
     ]);
     return null;
   });
@@ -84,21 +134,49 @@ function createShellModule(
     requireArity(positional, keywords, 1, 1);
     const line = stringArgument(positional[0]);
     writeTerminalLines(context.terminal, [line]);
-    const result = shell.submit(line);
-    if (result.action === "clear") {
-      context.terminal.clear();
-      context.terminal.setCursorPosition(1, 1);
-    } else {
-      writeTerminalLines(context.terminal, result.lines);
-    }
-    if (result.action === "shutdown") {
-      requireCapability(context.shutdown, "shutdown")();
-    } else if (result.action === "reboot") {
-      requireCapability(context.reboot, "reboot")();
-    }
-    return null;
+    return applyResult(shell.submit(line));
   });
-  return namespace("shell", { banner, prompt, submit });
+  const keys = fn("keys", (positional, keywords) => {
+    requireArity(positional, keywords, 1, 1);
+    const encoded = stringArgument(positional[0]);
+    let decoded: unknown;
+    try {
+      decoded = JSON.parse(encoded);
+    } catch {
+      throw new VmRuntimeError("ValueError", "Invalid terminal key batch");
+    }
+    if (
+      !Array.isArray(decoded) ||
+      decoded.length > 32 ||
+      decoded.some((key) => typeof key !== "string" || key.length > 32)
+    ) {
+      throw new VmRuntimeError("ValueError", "Invalid terminal key batch");
+    }
+    return applyResult(shell.keys(decoded));
+  });
+  return namespace("shell", { banner, prompt, submit, keys });
+}
+
+export function renderTerminalScreen(
+  terminal: TerminalBuffer,
+  screen: ViScreen,
+): void {
+  terminal.setTextColor(0);
+  terminal.setBackgroundColor(15);
+  terminal.clear();
+  for (let y = 0; y < Math.min(terminal.height, screen.rows.length); y += 1) {
+    const row = screen.rows[y] ?? [];
+    terminal.setCursorPosition(1, y + 1);
+    for (const cell of row.slice(0, terminal.width)) {
+      terminal.setTextColor(cell.foreground);
+      terminal.setBackgroundColor(cell.background);
+      terminal.write(cell.character);
+    }
+  }
+  terminal.setTextColor(0);
+  terminal.setBackgroundColor(15);
+  terminal.setCursorPosition(screen.cursor.x, screen.cursor.y);
+  terminal.setCursorBlink(true);
 }
 
 function writeTerminalLines(

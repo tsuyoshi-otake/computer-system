@@ -1,5 +1,8 @@
 import { compileSource } from "../runtime/compiler.js";
-import { createNativeEnvironment } from "../runtime/nativeModules.js";
+import {
+  createNativeEnvironment,
+  renderTerminalScreen,
+} from "../runtime/nativeModules.js";
 import {
   RoundRobinScheduler,
   type SchedulerLimits,
@@ -9,10 +12,17 @@ import type { ComputerRecord } from "../../domain/computer/computer.js";
 import { numericComputerId } from "../../domain/computer/identity.js";
 import type { RuntimeValue } from "../../domain/runtime/value.js";
 import { defaultSystemBootSource } from "../os/systemPrograms.js";
+import type { ShellClockSource } from "../os/clock.js";
+import type { ShellCompletionResult } from "../os/shellCommands.js";
+import type { ShellSession } from "../os/shellSession.js";
+import { cyclesPerTick } from "../../domain/computer/hardware.js";
+import { defaultVmLimits } from "../runtime/vm.js";
 
 export interface ComputerRuntimeOptions {
+  readonly clock?: ShellClockSource;
   readonly schedulerLimits?: SchedulerLimits;
   readonly defaultBootSource?: string;
+  readonly ticksPerSecond?: number;
 }
 
 export type RuntimeCommandResult =
@@ -28,12 +38,16 @@ export class ComputerRuntime {
   private readonly scheduler: RoundRobinScheduler;
   private readonly entries = new Map<string, RuntimeEntry>();
   private readonly defaultBootSource: string;
+  private readonly clock: ShellClockSource | undefined;
+  private readonly ticksPerSecond: number;
   private nextRuntimeId = 1;
 
   constructor(options: ComputerRuntimeOptions = {}) {
     this.scheduler = new RoundRobinScheduler(options.schedulerLimits);
     this.defaultBootSource =
       options.defaultBootSource ?? defaultSystemBootSource;
+    this.clock = options.clock;
+    this.ticksPerSecond = options.ticksPerSecond ?? 20;
   }
 
   get tickNumber(): number {
@@ -133,15 +147,38 @@ export class ComputerRuntime {
     return this.entries.get(computerId)?.vm?.state;
   }
 
+  completeShellInput(
+    computerId: string,
+    line: string,
+    cursor: number,
+  ): ShellCompletionResult | undefined {
+    return this.entries.get(computerId)?.shell?.complete(line, cursor);
+  }
+
+  resizeTerminal(computerId: string, width: number, height: number): boolean {
+    const entry = this.entries.get(computerId);
+    if (entry === undefined || entry.shell === undefined) return false;
+    entry.record.terminal.resize(width, height);
+    const screen = entry.shell.resize(width, height);
+    if (screen !== undefined)
+      renderTerminalScreen(entry.record.terminal, screen);
+    return true;
+  }
+
   private boot(entry: RuntimeEntry): RuntimeCommandResult {
     try {
       const source = entry.record.filesystem.exists("/startup.py")
         ? entry.record.filesystem.readFile("/startup.py")
         : this.defaultBootSource;
       const environment = createNativeEnvironment({
+        clock: this.clock,
         computerId: numericComputerId(entry.record.computerId),
+        computerName: entry.record.computerId,
+        osProfile: entry.record.osProfile,
         filesystem: entry.record.filesystem,
         terminal: entry.record.terminal,
+        hardware: entry.record.hardware,
+        memoryUsageBytes: () => entry.vm?.memoryUsageBytes ?? 0,
         redstone: entry.record.redstone,
         currentTick: () => this.scheduler.tickNumber,
         queueEvent: (name, ...arguments_) =>
@@ -152,6 +189,7 @@ export class ComputerRuntime {
           this.scheduler.cancelTimer(entry.runtimeId, timerId),
         shutdown: () => this.requestEntryStop(entry, "shutdown", "shutdown"),
         reboot: () => this.requestEntryStop(entry, "reboot", "reboot"),
+        ticksPerSecond: this.ticksPerSecond,
       });
       const vm = new StackVm(
         {
@@ -159,10 +197,19 @@ export class ComputerRuntime {
           globals: environment.globals,
         },
         environment.moduleLoader,
+        {
+          ...defaultVmLimits,
+          maxMemoryBytes: entry.record.hardware.memoryBytes,
+        },
       );
       entry.vm = vm;
+      entry.shell = environment.shell;
       entry.stopIntent = undefined;
-      this.scheduler.add(entry.runtimeId, vm);
+      this.scheduler.add(
+        entry.runtimeId,
+        vm,
+        cyclesPerTick(entry.record.hardware.clockHz, this.ticksPerSecond),
+      );
       entry.record.lifecycle.transition({ kind: "boot_complete" });
       return { outcome: "accepted", state: entry.record.lifecycle.state.kind };
     } catch (error: unknown) {
@@ -227,6 +274,7 @@ export class ComputerRuntime {
   private detach(entry: RuntimeEntry): void {
     this.scheduler.remove(entry.runtimeId);
     entry.vm = undefined;
+    entry.shell = undefined;
     entry.stopIntent = undefined;
   }
 }
@@ -235,6 +283,7 @@ interface RuntimeEntry {
   readonly record: ComputerRecord;
   readonly runtimeId: number;
   vm?: StackVm;
+  shell?: ShellSession;
   stopIntent?: StopIntent;
 }
 

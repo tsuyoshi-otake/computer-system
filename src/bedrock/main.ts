@@ -1,5 +1,6 @@
 import { Player, system, world } from "@minecraft/server";
 
+import { startAlwaysDayController } from "./daylightController.js";
 import { startComputerHost } from "./computerHost.js";
 import {
   registerComputerComponents,
@@ -44,6 +45,7 @@ system.beforeEvents.startup.subscribe(
 );
 
 system.run((): void => {
+  startAlwaysDayController();
   startComputerHost();
   startComputerComponents();
   startPocketComputerLifecycle();

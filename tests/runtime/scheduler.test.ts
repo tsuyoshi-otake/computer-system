@@ -54,6 +54,20 @@ describe("round-robin scheduler", (): void => {
     ).toEqual([10, 10, 10, 10]);
   });
 
+  it("applies mixed per-computer clock credits deterministically", (): void => {
+    const scheduler = new RoundRobinScheduler(limits);
+    scheduler.add(1, vm("while True:\n    pass\n"), 2);
+    scheduler.add(2, vm("while True:\n    pass\n"), 5);
+
+    let result = scheduler.runTick();
+    for (let tick = 1; tick < 10; tick += 1) result = scheduler.runTick();
+
+    expect(
+      result.computers.map(({ executedInstructions }) => executedInstructions),
+    ).toEqual([20, 50]);
+    expect(result.executedInstructions).toBe(7);
+  });
+
   it("resumes sleep and filtered event waits exactly once", (): void => {
     const scheduler = new RoundRobinScheduler(limits);
     const machine = vm("slept = sleep()\nevent = wait_key()\n", {

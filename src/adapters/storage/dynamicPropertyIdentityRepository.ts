@@ -11,6 +11,7 @@ export class DynamicPropertyIdentityRepository implements ComputerIdentityReposi
   constructor(owner: DynamicPropertyOwner, pageCharacterLimit = 24_000) {
     this.store = new TransactionalPagedStore(
       {
+        delete: (key): void => owner.setDynamicProperty(key, undefined),
         get: (key): string | undefined => {
           const value = owner.getDynamicProperty(key);
           if (value === undefined) return undefined;
@@ -18,6 +19,10 @@ export class DynamicPropertyIdentityRepository implements ComputerIdentityReposi
             throw new TypeError(`${key} is not a string`);
           return value;
         },
+        keys: (prefix): readonly string[] =>
+          owner
+            .getDynamicPropertyIds?.()
+            .filter((key) => key.startsWith(prefix)) ?? [],
         set: (key, value): void => owner.setDynamicProperty(key, value),
       },
       "computer_system:identities",

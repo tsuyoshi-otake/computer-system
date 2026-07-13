@@ -1,6 +1,7 @@
 import { world } from "@minecraft/server";
 
 import { formatProbeRecord } from "../../phase0/probeProtocol.js";
+import { inspectAlwaysDayState } from "../daylightController.js";
 import { executeItemIdentityProbe } from "./itemIdentityProbe.js";
 import { executeComputerVerticalProbe } from "./computerVerticalProbe.js";
 import { executeMonitorProbe } from "./monitorProbe.js";
@@ -49,6 +50,18 @@ async function executeSuite(runId: string): Promise<void> {
     } catch (error: unknown) {
       failures += 1;
       emitFailure(runId, "storage", error);
+    }
+
+    try {
+      const daylight = inspectAlwaysDayState();
+      emit(runId, "always_day", daylight.passed ? "PASS" : "FAIL", {
+        daylightCycleEnabled: daylight.daylightCycleEnabled,
+        timeOfDay: daylight.timeOfDay,
+      });
+      if (!daylight.passed) failures += 1;
+    } catch (error: unknown) {
+      failures += 1;
+      emitFailure(runId, "always_day", error);
     }
 
     try {

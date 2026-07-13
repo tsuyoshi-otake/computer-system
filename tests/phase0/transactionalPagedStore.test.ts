@@ -19,6 +19,14 @@ class MemoryPropertyStore implements StringPropertyStore {
     return this.values.get(key);
   }
 
+  public keys(prefix: string): readonly string[] {
+    return [...this.values.keys()].filter((key) => key.startsWith(prefix));
+  }
+
+  public delete(key: string): void {
+    this.values.delete(key);
+  }
+
   public set(key: string, value: string): void {
     this.writes += 1;
     if (this.writes === this.failOnWrite) {
@@ -86,5 +94,25 @@ describe("TransactionalPagedStore", () => {
       recovered: true,
       value: original,
     });
+  });
+
+  it("retains only the current and previous complete generations", () => {
+    const properties = new MemoryPropertyStore();
+    const store = new TransactionalPagedStore(properties, "computer:10", 8);
+
+    for (let version = 1; version <= 5; version += 1) {
+      store.save({ body: `version-${version}`.repeat(3), version });
+    }
+
+    const generationManifests = [...properties.values.keys()].filter((key) =>
+      key.includes(":manifest:"),
+    );
+    expect(generationManifests).toEqual([
+      "computer:10:manifest:4",
+      "computer:10:manifest:5",
+    ]);
+    expect(
+      [...properties.values.keys()].some((key) => /:page:[123]:/u.test(key)),
+    ).toBe(false);
   });
 });

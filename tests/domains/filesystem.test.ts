@@ -104,4 +104,24 @@ describe("in-memory filesystem", (): void => {
     );
     expect(filesystem.exists("/d/overflow")).toBe(false);
   });
+
+  it("tracks revisions, indexed children, and cached capacity without changing on no-ops", (): void => {
+    const filesystem = new InMemoryFilesystem({
+      ...limits,
+      capacityBytes: 10_000,
+      maxEntries: 200,
+    });
+    filesystem.makeDirectory("/target");
+    for (let index = 0; index < 100; index += 1) {
+      filesystem.makeDirectory(`/unrelated-${index}`);
+    }
+    filesystem.writeFile("/target/value", "abc");
+    const revision = filesystem.revision;
+
+    expect(filesystem.list("/target")).toEqual(["value"]);
+    expect(filesystem.getFreeSpace()).toBe(9_997);
+    filesystem.writeFile("/target/value", "abc");
+    filesystem.makeDirectory("/target");
+    expect(filesystem.revision).toBe(revision);
+  });
 });

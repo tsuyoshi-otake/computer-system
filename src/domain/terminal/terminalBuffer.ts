@@ -27,20 +27,33 @@ const defaultSizeLimits: TerminalSizeLimits = { maxWidth: 200, maxHeight: 100 };
 
 export class TerminalBuffer {
   private cells: TerminalCell[];
+  private widthValue: number;
+  private heightValue: number;
   private cursorXValue = 1;
   private cursorYValue = 1;
   private foregroundValue = 0;
   private backgroundValue = 15;
   private cursorBlinkValue = false;
+  private revisionValue = 0;
 
   constructor(
-    readonly width = 51,
-    readonly height = 19,
-    limits: TerminalSizeLimits = defaultSizeLimits,
+    width = 51,
+    height = 19,
+    private readonly limits: TerminalSizeLimits = defaultSizeLimits,
   ) {
     requireDimension(width, limits.maxWidth, "width");
     requireDimension(height, limits.maxHeight, "height");
+    this.widthValue = width;
+    this.heightValue = height;
     this.cells = Array.from({ length: width * height }, () => this.blankCell());
+  }
+
+  get width(): number {
+    return this.widthValue;
+  }
+
+  get height(): number {
+    return this.heightValue;
   }
 
   get cursorX(): number {
@@ -63,30 +76,66 @@ export class TerminalBuffer {
     return this.cursorBlinkValue;
   }
 
+  get revision(): number {
+    return this.revisionValue;
+  }
+
+  resize(width: number, height: number): void {
+    requireDimension(width, this.limits.maxWidth, "width");
+    requireDimension(height, this.limits.maxHeight, "height");
+    if (width === this.width && height === this.height) return;
+    const previous = this.cells;
+    const previousWidth = this.width;
+    const previousHeight = this.height;
+    this.widthValue = width;
+    this.heightValue = height;
+    this.cells = Array.from({ length: width * height }, () => this.blankCell());
+    for (let y = 1; y <= Math.min(previousHeight, height); y += 1) {
+      for (let x = 1; x <= Math.min(previousWidth, width); x += 1) {
+        this.cells[this.index(x, y)] =
+          previous[(y - 1) * previousWidth + x - 1]!;
+      }
+    }
+    this.cursorXValue = Math.min(this.cursorXValue, width + 1);
+    this.cursorYValue = Math.min(this.cursorYValue, height);
+    this.revisionValue += 1;
+  }
+
   setCursorPosition(x: number, y: number): void {
     requireCoordinate(x, this.width, "x");
     requireCoordinate(y, this.height, "y");
+    if (this.cursorXValue === x && this.cursorYValue === y) return;
     this.cursorXValue = x;
     this.cursorYValue = y;
+    this.revisionValue += 1;
   }
 
   setCursorBlink(blink: boolean): void {
+    if (this.cursorBlinkValue === blink) return;
     this.cursorBlinkValue = blink;
+    this.revisionValue += 1;
   }
 
   setTextColor(color: number): void {
-    this.foregroundValue = requireColor(color);
+    const next = requireColor(color);
+    if (this.foregroundValue === next) return;
+    this.foregroundValue = next;
+    this.revisionValue += 1;
   }
 
   setBackgroundColor(color: number): void {
-    this.backgroundValue = requireColor(color);
+    const next = requireColor(color);
+    if (this.backgroundValue === next) return;
+    this.backgroundValue = next;
+    this.revisionValue += 1;
   }
 
   write(text: string): void {
+    if (text.length === 0) return;
+    if (text.includes("\n") || text.includes("\r")) {
+      throw new TerminalError("term.write does not accept line breaks");
+    }
     for (const character of [...text]) {
-      if (character === "\n" || character === "\r") {
-        throw new TerminalError("term.write does not accept line breaks");
-      }
       if (this.cursorXValue <= this.width) {
         this.cells[this.index(this.cursorXValue, this.cursorYValue)] = {
           character,
@@ -96,18 +145,21 @@ export class TerminalBuffer {
       }
       this.cursorXValue += 1;
     }
+    this.revisionValue += 1;
   }
 
   clear(): void {
     this.cells = Array.from({ length: this.width * this.height }, () =>
       this.blankCell(),
     );
+    this.revisionValue += 1;
   }
 
   clearLine(): void {
     for (let x = 1; x <= this.width; x += 1) {
       this.cells[this.index(x, this.cursorYValue)] = this.blankCell();
     }
+    this.revisionValue += 1;
   }
 
   scroll(lines: number): void {
@@ -125,6 +177,7 @@ export class TerminalBuffer {
       }
     }
     this.cells = next;
+    this.revisionValue += 1;
   }
 
   cell(x: number, y: number): TerminalCell {
@@ -202,6 +255,7 @@ export class TerminalBuffer {
     this.cursorXValue = snapshot.cursor.x;
     this.cursorYValue = snapshot.cursor.y;
     this.cursorBlinkValue = snapshot.cursor.blink;
+    this.revisionValue += 1;
   }
 
   private blankCell(): TerminalCell {

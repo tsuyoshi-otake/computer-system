@@ -43,7 +43,7 @@ free = fs.get_free_space()
     expect(terminal.cell(2, 2).foreground).toBe(1);
     expect(filesystem.readFile("/etc/id")).toBe("23");
     expect(vm.globals.get("size")).toBe(2);
-    expect(vm.globals.get("free")).toBe(999_998);
+    expect(vm.globals.get("free")).toBe(filesystem.getFreeSpace());
   });
 
   it("integrates os timers and event waits with the scheduler", (): void => {

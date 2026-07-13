@@ -4,12 +4,21 @@ import { DynamicPropertyComputerRepository } from "../adapters/storage/dynamicPr
 import { ComputerHost } from "../application/computer/computerHost.js";
 import { ComputerPersistenceService } from "../application/computer/persistence.js";
 import { ComputerRuntime } from "../application/computer/computerRuntime.js";
+import type { GameClockSnapshot } from "../application/os/clock.js";
 import type { ComputerRecord } from "../domain/computer/computer.js";
 
 const repository = new DynamicPropertyComputerRepository(world);
 const persistence = new ComputerPersistenceService(repository);
 export const computerHost = new ComputerHost(
-  new ComputerRuntime(),
+  new ComputerRuntime({
+    clock: {
+      currentGameTime: (): GameClockSnapshot => ({
+        absoluteTicks: world.getAbsoluteTime(),
+        timeOfDay: world.getTimeOfDay(),
+      }),
+      currentWallTimeMilliseconds: (): number => Date.now(),
+    },
+  }),
   persistence,
   {
     maxPersistenceChecksPerTick: 4,

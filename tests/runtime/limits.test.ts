@@ -29,6 +29,29 @@ describe("runtime resource limits", (): void => {
     });
   });
 
+  it("charges native work against the same instruction budget", (): void => {
+    const ordinary = new StackVm({
+      code: compileSource("value = charged()\n"),
+      globals: new Map([["charged", nativeFunction("charged", () => 42)]]),
+    });
+    const charged = new StackVm({
+      code: compileSource("value = charged()\n"),
+      globals: new Map([
+        [
+          "charged",
+          nativeFunction("charged", () => ({
+            cycles: 10,
+            kind: "work",
+            value: 42,
+          })),
+        ],
+      ]),
+    });
+
+    expect(runAndCount(charged)).toBe(runAndCount(ordinary) + 10);
+    expect(charged.globals.get("value")).toBe(42);
+  });
+
   it("accepts collection and string boundary values then rejects one beyond", (): void => {
     const collectionBoundary = machine("value = range(8)\n", base);
     run(collectionBoundary);
@@ -99,6 +122,27 @@ describe("runtime resource limits", (): void => {
     expectLimit(calls, "call depth");
   });
 
+  it("enforces aggregate RAM and reclaims unreachable values under pressure", (): void => {
+    const overflow = machine(`value = "${"x".repeat(300)}"\n`, {
+      ...base,
+      maxMemoryBytes: 400,
+      maxStringLength: 1_000,
+    });
+    run(overflow);
+    expect(overflow.state.kind).toBe("crashed");
+    if (overflow.state.kind !== "crashed") return;
+    expect(overflow.state.error.typeName).toBe("MemoryError");
+    expect(overflow.state.error.message).toBe("memory limit exceeded");
+
+    const reclaimed = machine(
+      `value = "${"x".repeat(300)}"\nvalue = None\nother = "${"y".repeat(300)}"\n`,
+      { ...base, maxMemoryBytes: 500, maxStringLength: 1_000 },
+    );
+    run(reclaimed);
+    expect(reclaimed.state.kind).toBe("completed");
+    expect(reclaimed.memoryUsageBytes).toBeLessThanOrEqual(500);
+  });
+
   it("bounds events without altering the accepted prefix", (): void => {
     const events = new BoundedEventQueue(2);
     events.enqueue("first", 1);
@@ -139,6 +183,14 @@ function machine(source: string, limits: VmLimits): StackVm {
 function run(vm: StackVm): void {
   for (let count = 0; count < 100 && vm.state.kind === "ready"; count += 1)
     vm.runSlice(100);
+}
+
+function runAndCount(vm: StackVm): number {
+  let total = 0;
+  for (let count = 0; count < 1_000 && vm.state.kind === "ready"; count += 1)
+    total += vm.runSlice(1).executedInstructions;
+  expect(vm.state.kind).toBe("completed");
+  return total;
 }
 
 function expectLimit(vm: StackVm, name: string): void {

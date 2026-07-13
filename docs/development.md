@@ -60,6 +60,20 @@ browser and positions its semantic input at the terminal cursor, preserving
 physical Enter, Ctrl+C, and history without a separate visible text field. Start
 the combined managed runtime with `npm run dev:bds:web`; see
 [the MCP debugging guide](mcp-debugging.md) for network and security settings.
+Set `WEB_COMPANION_AUTO_OPEN=1` for the loopback-only one-action workflow: using
+a Pocket Computer opens its newly minted handoff in the host's default browser.
+The companion refuses automatic opening when either the listener or published
+origin is non-loopback, and the in-game 60-second URL remains the fallback for
+every blocked or failed launch.
+
+Terminal output remains mouse-selectable. Ctrl+C copies when either output or
+command text is selected and otherwise performs the bounded terminal interrupt.
+Plain-text paste inserts at the command selection, converts line breaks to
+spaces, respects the 128-character command bound, and never submits implicitly.
+Periodic snapshot work processes a fixed-size batch without rebuilding an O(N)
+session array. Writer input additionally requests a deduplicated,
+attempt-bounded snapshot for that session, removing the O(N/K) round-robin wait
+from the interactive path while preserving periodic fairness as a fallback.
 
 New Computers use `c-xxxxxx` identities. The six lowercase Crockford Base32
 characters encode the stable 30-bit value exposed by `os.getComputerID()`.
@@ -76,22 +90,45 @@ a successful takeover demotes the prior writer before later input can pass.
 Closing one view leaves the terminal open; only the final detach emits
 `terminal_closed`. Different Computers have independent writer leases.
 
-The Web Terminal and native fallback both send the same `terminal_line` event to
-the Computer System OS. OS 0.2 parses a bounded BusyBox-style command language
-with pipelines, redirects, control operators, quoting, variables, and script
-files. Commands operate only on `InMemoryFilesystem`; they must never be
-implemented by spawning a host shell. Focused verification is:
+The Web Terminal and native fallback send `terminal_line`; vi additionally uses
+bounded `terminal_keys` batches. Writer-only `web-complete` and `web-resize`
+requests provide command/path completion and negotiate a 51x19 through 160x60
+Web viewport without changing the native fallback contract. OS 0.3 parses a
+bounded Computer System Bash language with pipelines, redirects, control
+operators, quoting, variables, positional parameters, conditionals, loops, and
+functions. The Linux profile owns `/etc`, `/dev`, volatile `/tmp`, `/usr`,
+`/var`, `/home/computer`, identity/time applets, and `/dev/null`. The shared OS
+profile boundary owns path dialects, aliases, boot images, and virtual devices;
+the DOS contract fixture proves drive paths, case-insensitive names, CRLF,
+`DIR`/`TYPE`, and `NUL` without changing Linux semantics. Commands operate only
+on `InMemoryFilesystem`; they must never spawn a host shell. Focused
+verification is:
 
 ```powershell
-npx vitest run tests/os/shellSyntax.test.ts tests/os/shellSession.test.ts tests/os/systemBoot.test.ts
+npx vitest run tests/os tests/editor
 ```
 
 `Verify:` Run `printf 'alpha\nbeta\nalpha\n' | grep alpha | wc -l > count`
 through a `terminal_line` event, then run `cat count`.
 
-`Expect:` `/count` contains `      2\n`, the terminal shows `2`, the runtime
-returns to the explicit `waiting_event/terminal_line` state, and no host process
-is created.
+`Expect:` `/home/computer/count` contains `      2\n`, the terminal shows `2`,
+the runtime returns to explicit unfiltered `waiting_event` ownership for line or
+key input, and no host process is created.
+
+Computer state is stored through World Dynamic Properties; on BDS this is
+physically part of `worlds/<level-name>/db` LevelDB, not SQLite or individual
+host files. A clean persistence check compares the Computer's component revision
+token in O(1). The in-memory filesystem keeps a parent-to-child index and cached
+used-byte count; writes update those values with the mutation. A dirty Computer
+is still committed as a copy-on-write paged JSON generation with a manifest and
+checksum. The current and previous complete generations are retained, older and
+abandoned indexed generations are deleted, and load falls back one generation on
+corruption. SQLite may be implemented later behind `ComputerSnapshotRepository`
+for a non-Bedrock host, but cannot be the Bedrock add-on's direct store because
+Script API has no SQLite/filesystem access. The default capacity is 1,000,000
+UTF-8 bytes, with 256,000 bytes per file and 4,096 entries. Every write enforces
+those limits before commit. `quota` exposes them, while `du` walks one bounded
+snapshot rather than performing repeated recursive directory scans.
 
 ## Headless Bedrock verification
 
@@ -157,6 +194,30 @@ uses `scriptevent computer_system:probe headless` for the complete automated
 suite.
 
 ## Headless verification rubric
+
+Virtual hardware is part of the Computer snapshot. Legacy snapshots receive the
+20 kHz/1 MiB defaults. CPU clock is converted to per-tick VM credit, then the
+global scheduler cap arbitrates mixed-speed Computers in round-robin order.
+Shell native calls return cycle debt to the VM. RAM enforcement scans the live
+object graph only under allocation pressure, keeping the common allocation path
+O(1) while making the uncommon reclamation check O(N) in reachable objects. Disk
+quota remains an independent filesystem concern.
+
+CS486DX programs use a separate verified register-machine executable under the
+same Computer hardware limits. The visible identity is a nominal 486DX 33 MHz;
+the persisted internal clock remains the safe scheduler scale and is not
+presented as physical throughput. `run --stats` is the deterministic
+optimization measurement: compare instruction and opcode-cycle totals, not host
+wall time. Executables are JSON preceded by `CS486\n`, validated again at load,
+and never passed to a host process. Direct execution is capped at 10,000
+instructions per submission and returns exit 124 on a bounded yield.
+
+`Verify:` Run the scheduler, runtime-limit, shell, DOS-profile, and persistence
+tests.
+
+`Expect:` Mixed CPU profiles receive distinct bounded credits, native work
+consumes credits, RAM overflow becomes `MemoryError` and unreachable data is
+reclaimed, Linux/DOS hardware commands agree, and legacy/current snapshots load.
 
 `Verify:` Run `npm run validate`.
 

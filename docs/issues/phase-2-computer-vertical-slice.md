@@ -108,6 +108,23 @@ input, takeover, and close operations share one per-Computer serialization lane.
 Only the final detached browser session emits `terminal_closed`; different
 Computers remain independently writable.
 
+An explicit `WEB_COMPANION_AUTO_OPEN=1` option provides the local one-action
+workflow: using a Pocket Computer opens the newly minted handoff once in the
+host default browser. It is eligible only when the listener and published origin
+are both loopback. Launch work is serialized and bounded, does not use a command
+shell, and never removes the 60-second in-game fallback URL when disabled,
+blocked, or failed.
+
+Output selection and clipboard behavior now follow terminal conventions: Ctrl+C
+copies selected output or command text and interrupts only when no text is
+selected. Plain-text paste is newline-normalized, length-bounded, and never
+auto-submits. The measured five-session command latency was dominated by the
+periodic 5-tick, two-session round-robin. Interactive input now enters a
+deduplicated eager queue with fixed per-tick work and bounded attempts. Periodic
+work no longer materializes all N sessions on every pass; its hot path is O(K)
+for fixed K, while attach/detach retain bounded O(N) maintenance outside the
+tick-critical path.
+
 Host verification covers 500 deterministic ID allocations, injected collisions,
 persistence reload, writer/viewer assignment, takeover, rejected viewer input,
 bounded operation queues, and final-detach ownership. Desktop and 390-pixel
@@ -132,3 +149,61 @@ responsive.
 The terminal remains fixed-cell and usable without primary-control scrolling,
 continuous output stays within its redraw budget, every submitted line becomes
 one VM event, and every close path produces exactly one VM-visible result.
+
+## July 2026 OS profile, persistence, and vi update
+
+The default Linux profile now bootstraps `/etc`, `/dev`, volatile `/tmp`,
+`/usr`, `/var`, and `/home/computer` without overwriting existing configuration.
+Sandbox identity/time and bounded utility applets include `whoami`, `id`,
+`hostname`, `uname`, `date`, `uptime`, `time`, `history`, `sleep`, `test`,
+`seq`, `cut`, `stat`, and `df`. OS-specific paths, aliases, environment, boot
+files, and virtual devices live behind an application profile boundary. A
+minimal DOS fixture proves drive letters, case-insensitive canonical paths, CRLF
+boot files, `DIR`/`TYPE`, and `NUL` without importing DOS behavior into the
+domain core.
+
+`vi` is a bounded Normal/Insert/Command state machine with cursor movement,
+character/line deletion, bounded line-local undo, `:w`, `:q`, `:wq`, and `:q!`.
+The fixed viewport highlights Python, shell, JSON/TOML tokens and four repeating
+indent backgrounds by default. Web input is coalesced into at most 16 keys per
+HTTP/BDS relay and rejected above 32 keys at both transport boundaries.
+
+Persistence remains canonical in World Dynamic Properties/world LevelDB. Clean
+checks compare O(1) component revisions; filesystem directory listing uses a
+parent index and free-space checks use a cached byte total. Dirty snapshots keep
+the checksum-backed copy-on-write protocol while pruning all but the current and
+previous complete generations. SQLite remains a future non-Bedrock repository,
+not a direct Script API dependency.
+
+The shell follow-up adds wall/game/virtual `date` sources, writer-authorized Tab
+completion, Computer System Bash control flow and positional parameters,
+non-destructive `/etc/bash.bashrc` plus `~/.bashrc`, `du`, and `quota`. Web
+sessions negotiate terminal dimensions from 51x19 through 160x60; native GDK
+remains at 51x19. All completion, resize, loop, script, traversal, and output
+paths are bounded. `npm run validate` passed 60 files / 242 tests and the
+production pack build. A preserved-world BDS restart then completed headless run
+`headless-289000` with `failures: 0`.
+
+## July 2026 virtual hardware update
+
+Computer snapshots now persist a validated CPU clock and RAM size, defaulting
+legacy machines to 20 kHz and 1 MiB. CPU clock controls per-tick VM credit under
+the existing global round-robin scheduler cap. MicroPython instructions and
+bounded shell/Bash native work share that credit. Aggregate reachable VM data is
+limited by RAM and fails explicitly with `MemoryError`; pressure-triggered live
+graph measurement permits unreachable values to be reclaimed without adding an
+O(N) scan to every instruction.
+
+Linux reports the same profile through `cpuinfo`, `free`, and dynamic read-only
+`/proc` files. DOS reports it through `CPU`, `MEM`, `SYSTEMINFO`, and `VER`
+while retaining DOS paths and command discovery. Filesystem quota remains
+independent from RAM.
+
+## July 2026 CS486DX toolchain update
+
+Follow-up Issue #12 adds the sandboxed CS486DX toolchain. The visible CPU is a
+nominal 33 MHz 486DX while the existing persisted scheduler scale continues to
+bound BDS work. ASM, BASIC, C, and C++ safe subsets target one validated
+register machine with checked RAM and opcode cycle costs. `run --stats` and
+`objdump` make manual optimization observable without allowing native host
+execution.

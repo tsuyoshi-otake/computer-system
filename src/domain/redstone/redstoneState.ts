@@ -19,9 +19,14 @@ export interface RedstoneInputChange {
 export class RedstoneState {
   private readonly inputPower = new Map<RedstoneSide, number>();
   private outputMaskValue = 0;
+  private revisionValue = 0;
 
   get outputMask(): number {
     return this.outputMaskValue;
+  }
+
+  get revision(): number {
+    return this.revisionValue;
   }
 
   getInput(side: RedstoneSide): boolean {
@@ -56,6 +61,7 @@ export class RedstoneState {
     this.outputMaskValue = enabled
       ? this.outputMaskValue | bit
       : this.outputMaskValue & ~bit;
+    if (previous !== this.outputMaskValue) this.revisionValue += 1;
     return previous !== this.outputMaskValue;
   }
 
@@ -63,7 +69,9 @@ export class RedstoneState {
     if (!Number.isInteger(mask) || mask < 0 || mask > 63) {
       throw new RangeError("Redstone output mask must be between 0 and 63");
     }
+    if (this.outputMaskValue === mask) return;
     this.outputMaskValue = mask;
+    this.revisionValue += 1;
   }
 }
 

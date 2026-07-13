@@ -48,6 +48,24 @@ describe("Bedrock terminal adapters", () => {
     expect(coordinator).toContain('"terminal_closed"');
   });
 
+  it("normalizes the GDK single-entity item-drop shape and keeps the world in daytime", async () => {
+    const [pocket, daylight, main, headless] = await Promise.all([
+      source("src/bedrock/pocketComputer.ts"),
+      source("src/bedrock/daylightController.ts"),
+      source("src/bedrock/main.ts"),
+      source("src/bedrock/probes/headlessProbe.ts"),
+    ]);
+
+    expect(pocket).toContain("Array.isArray(items) ? items : [items]");
+    expect(pocket).not.toContain("for (const entity of items)");
+    expect(daylight).toContain("world.gameRules.doDayLightCycle = false");
+    expect(daylight).toContain("world.setTimeOfDay(TimeOfDay.Day)");
+    expect(daylight).toContain("system.runInterval");
+    expect(daylight).toContain("inspectAlwaysDayState");
+    expect(main).toContain("startAlwaysDayController()");
+    expect(headless).toContain('emit(runId, "always_day"');
+  });
+
   it("hands Pocket Computer use to the bounded Web companion bridge", async () => {
     const [main, pocket, bridge] = await Promise.all([
       source("src/bedrock/main.ts"),
@@ -61,7 +79,13 @@ describe("Bedrock terminal adapters", () => {
     expect(bridge).toContain("CS_WEB_SESSION_REQUEST");
     expect(bridge).toContain("CS_WEB_TERMINAL");
     expect(bridge).toContain("maxSnapshotsPerPass = 2");
+    expect(bridge).toContain("maxEagerSnapshotsPerPass = 4");
+    expect(bridge).toContain("TerminalSnapshotScheduler");
+    expect(bridge).toContain("snapshotScheduler.requestEager");
+    expect(bridge).toContain("snapshotScheduler.takePeriodicBatch");
     expect(bridge).toContain('"terminal_line"');
+    expect(bridge).toContain('"terminal_keys"');
+    expect(bridge).toContain("isTerminalKeyBatch");
     expect(bridge).toContain('"terminal_closed"');
     expect(bridge).toContain("openFallback");
     expect(bridge).toContain("WebTerminalAccessRegistry");

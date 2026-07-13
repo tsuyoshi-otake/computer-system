@@ -63,8 +63,15 @@ export function runVerticalSliceProbe(
   const runtime = new ComputerRuntime();
   runtime.register(record);
   const power = runtime.powerOn(record.computerId);
-  if (power.outcome !== "accepted")
-    throw new Error("Probe computer did not boot");
+  if (power.outcome !== "accepted") {
+    const reason =
+      power.outcome === "failed"
+        ? power.error.message
+        : power.outcome === "ignored"
+          ? power.reason
+          : `missing ${power.computerId}`;
+    throw new Error(`Probe computer did not boot: ${reason}`);
+  }
   runtime.runTick();
   const outputMask = record.redstone.outputMask;
   runtime.terminate(record.computerId);

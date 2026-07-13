@@ -1,6 +1,7 @@
 import { system, world, type Player } from "@minecraft/server";
 
 import type { ComputerRecord } from "../domain/computer/computer.js";
+import { TerminalSnapshotScheduler } from "../application/terminal/terminalSnapshotScheduler.js";
 import {
   WebTerminalAccessRegistry,
   type WebTerminalAccessMode,
@@ -10,12 +11,15 @@ import { openComputerTerminal } from "./computerTerminal.js";
 
 const requestMarker = "CS_WEB_SESSION_REQUEST ";
 const snapshotMarker = "CS_WEB_TERMINAL ";
+const completionMarker = "CS_WEB_COMPLETION ";
 const finalMarker = "CS_WEB_SESSION_FINAL ";
 const requestLifetimeTicks = 200;
 const sessionLifetimeTicks = 36_000;
 const maxPendingRequests = 32;
 const maxActiveSessions = 32;
 const maxSnapshotsPerPass = 2;
+const maxEagerSnapshotsPerPass = 4;
+const maxEagerSnapshotAttempts = 3;
 
 interface PendingRequest {
   readonly computerId: string;
@@ -35,8 +39,12 @@ interface ActiveSession {
 const pendingRequests = new Map<string, PendingRequest>();
 const activeSessions = new Map<string, ActiveSession>();
 const terminalAccess = new WebTerminalAccessRegistry(maxActiveSessions);
+const snapshotScheduler = new TerminalSnapshotScheduler({
+  maximumEagerAttempts: maxEagerSnapshotAttempts,
+  maximumEagerPerPass: maxEagerSnapshotsPerPass,
+  maximumPeriodicPerPass: maxSnapshotsPerPass,
+});
 let nextRequest = 1;
-let snapshotCursor = 0;
 let started = false;
 
 export function requestWebComputerTerminal(
@@ -98,6 +106,12 @@ export function handleWebTerminalScriptEvent(
     case "computer_system:web-input":
       handleInput(message);
       return true;
+    case "computer_system:web-complete":
+      handleCompletion(message);
+      return true;
+    case "computer_system:web-resize":
+      handleResize(message);
+      return true;
     case "computer_system:web-interrupt":
       handleInterrupt(message);
       return true;
@@ -115,6 +129,7 @@ export function handleWebTerminalScriptEvent(
 export function startWebTerminalBridge(): void {
   if (started) return;
   started = true;
+  system.runInterval(emitEagerSnapshots, 1);
   system.runInterval(emitChangedSnapshots, 5);
   system.runInterval(pruneExpiredSessions, 100);
   world.afterEvents.playerLeave.subscribe(({ playerId }): void => {
@@ -165,12 +180,14 @@ function handleResponse(message: string): void {
     sessionId,
   };
   try {
+    snapshotScheduler.attach(sessionId);
     terminalAccess.attach(
       sessionId,
       request.computerId,
       mode as WebTerminalAccessMode,
     );
   } catch {
+    snapshotScheduler.detach(sessionId);
     request.player.sendMessage(
       "Browser terminal session could not be attached. Opening the in-game terminal.",
     );
@@ -188,19 +205,98 @@ function handleResponse(message: string): void {
 }
 
 function handleInput(message: string): void {
-  const match = /^([A-Za-z0-9_-]{12,32}) line ([^\s]{0,180})$/u.exec(message);
+  const match = /^([A-Za-z0-9_-]{12,32}) (line|keys) ([^\s]{0,180})$/u.exec(
+    message,
+  );
   if (match === null) return;
   const session = requireActiveSession(match[1] ?? "");
   if (session === undefined || !terminalAccess.canWrite(session.sessionId))
     return;
-  let line: string;
+  let value: string;
   try {
-    line = decodeURIComponent(match[2] ?? "");
+    value = decodeURIComponent(match[3] ?? "");
   } catch {
     return;
   }
-  if (line.includes("\0") || /[\r\n]/u.test(line) || line.length > 128) return;
-  computerHost.runtime.queueEvent(session.computerId, "terminal_line", line);
+  if (match[2] === "keys") {
+    if (!isTerminalKeyBatch(value)) return;
+    computerHost.runtime.queueEvent(session.computerId, "terminal_keys", value);
+  } else {
+    if (value.includes("\0") || /[\r\n]/u.test(value) || value.length > 128)
+      return;
+    computerHost.runtime.queueEvent(session.computerId, "terminal_line", value);
+  }
+  snapshotScheduler.requestEager(session.sessionId);
+}
+
+function handleCompletion(message: string): void {
+  const match =
+    /^([A-Za-z0-9_-]{12,32}) ([A-Za-z0-9_-]{6,20}) ([0-9]{1,3}) v([^\s]{0,128})$/u.exec(
+      message,
+    );
+  if (match === null) return;
+  const session = requireActiveSession(match[1] ?? "");
+  if (session === undefined || !terminalAccess.canWrite(session.sessionId))
+    return;
+  let value: string;
+  try {
+    value = decodeURIComponent(match[4] ?? "");
+  } catch {
+    return;
+  }
+  const cursor = Number(match[3]);
+  if (
+    value.includes("\0") ||
+    /[\r\n]/u.test(value) ||
+    value.length > 128 ||
+    !Number.isSafeInteger(cursor) ||
+    cursor < 0 ||
+    cursor > value.length
+  ) {
+    return;
+  }
+  const completion = computerHost.runtime.completeShellInput(
+    session.computerId,
+    value,
+    cursor,
+  ) ?? { candidates: [], cursor, value };
+  console.warn(
+    `${completionMarker}${JSON.stringify({
+      ...completion,
+      requestId: match[2],
+      sessionId: session.sessionId,
+    })}`,
+  );
+}
+
+function handleResize(message: string): void {
+  const match = /^([A-Za-z0-9_-]{12,32}) ([0-9]{2,3}) ([0-9]{2,3})$/u.exec(
+    message,
+  );
+  if (match === null) return;
+  const session = requireActiveSession(match[1] ?? "");
+  if (session === undefined || !terminalAccess.canWrite(session.sessionId))
+    return;
+  const width = Number(match[2]);
+  const height = Number(match[3]);
+  if (width < 51 || width > 160 || height < 19 || height > 60) return;
+  if (computerHost.runtime.resizeTerminal(session.computerId, width, height)) {
+    snapshotScheduler.requestEager(session.sessionId);
+  }
+}
+
+function isTerminalKeyBatch(value: string): boolean {
+  try {
+    const keys: unknown = JSON.parse(value);
+    return (
+      Array.isArray(keys) &&
+      keys.length > 0 &&
+      keys.length <= 32 &&
+      keys.every((key) => typeof key === "string" && key.length <= 32)
+    );
+  } catch {
+    return false;
+  }
 }
 
 function handleInterrupt(message: string): void {
@@ -209,6 +305,7 @@ function handleInterrupt(message: string): void {
   const session = requireActiveSession(match[1] ?? "");
   if (session !== undefined && terminalAccess.canWrite(session.sessionId)) {
     computerHost.runtime.terminate(session.computerId);
+    snapshotScheduler.requestEager(session.sessionId);
   }
 }
 
@@ -237,25 +334,28 @@ function requireActiveSession(sessionId: string): ActiveSession | undefined {
 }
 
 function emitChangedSnapshots(): void {
-  const sessions = [...activeSessions.values()];
-  if (sessions.length === 0) {
-    snapshotCursor = 0;
-    return;
-  }
-  const count = Math.min(maxSnapshotsPerPass, sessions.length);
-  for (let offset = 0; offset < count; offset += 1) {
-    const index = (snapshotCursor + offset) % sessions.length;
-    const session = sessions[index];
+  for (const sessionId of snapshotScheduler.takePeriodicBatch()) {
+    const session = activeSessions.get(sessionId);
     if (session !== undefined) emitSnapshot(session, false);
   }
-  snapshotCursor = (snapshotCursor + count) % sessions.length;
 }
 
-function emitSnapshot(session: ActiveSession, force: boolean): void {
+function emitEagerSnapshots(): void {
+  for (const sessionId of snapshotScheduler.takeEagerBatch()) {
+    const session = requireActiveSession(sessionId);
+    if (session === undefined) {
+      snapshotScheduler.completeEager(sessionId, false);
+      continue;
+    }
+    snapshotScheduler.completeEager(sessionId, emitSnapshot(session, false));
+  }
+}
+
+function emitSnapshot(session: ActiveSession, force: boolean): boolean {
   const record = computerHost.get(session.computerId);
   if (record === undefined) {
     finalizeSession(session, "computer_missing");
-    return;
+    return false;
   }
   const serialized = JSON.stringify({
     sessionId: session.sessionId,
@@ -264,9 +364,10 @@ function emitSnapshot(session: ActiveSession, force: boolean): void {
     lifecycle: record.lifecycle.state.kind,
     terminal: record.terminal.snapshot(),
   });
-  if (!force && session.lastSnapshot === serialized) return;
+  if (!force && session.lastSnapshot === serialized) return false;
   session.lastSnapshot = serialized;
   console.warn(`${snapshotMarker}${serialized}`);
+  return true;
 }
 
 function pruneExpiredRequests(): void {
@@ -287,6 +388,7 @@ function pruneExpiredSessions(): void {
 
 function finalizeSession(session: ActiveSession, reason: string): void {
   if (!activeSessions.delete(session.sessionId)) return;
+  snapshotScheduler.detach(session.sessionId);
   const detached = terminalAccess.detach(session.sessionId);
   if (detached.outcome === "detached" && detached.wasLast) {
     computerHost.runtime.queueEvent(

@@ -1,5 +1,7 @@
 export interface StringPropertyStore {
+  delete(key: string): void;
   get(key: string): string | undefined;
+  keys?(prefix: string): readonly string[];
   set(key: string, value: string): void;
 }
 
@@ -93,11 +95,13 @@ export class TransactionalPagedStore {
       schema: 1,
     };
 
+    this.#deleteGeneration(generation);
+    this.#store.set(this.#manifestKey(generation), JSON.stringify(manifest));
     for (const [index, page] of pages.entries()) {
       this.#store.set(this.#pageKey(generation, index), page);
     }
-    this.#store.set(this.#manifestKey(generation), JSON.stringify(manifest));
     this.#store.set(this.#headKey(), String(generation));
+    this.#pruneGenerations(generation);
 
     return generation;
   }
@@ -142,6 +146,40 @@ export class TransactionalPagedStore {
       throw new Error(`Generation ${generation} contains an unexpected value.`);
     }
     return value;
+  }
+
+  #deleteGeneration(generation: number): void {
+    const manifestText = this.#store.get(this.#manifestKey(generation));
+    if (manifestText === undefined) return;
+    try {
+      const manifest: unknown = JSON.parse(manifestText);
+      if (isGenerationManifest(manifest, generation)) {
+        for (let index = 0; index < manifest.pageCount; index += 1) {
+          this.#store.delete(this.#pageKey(generation, index));
+        }
+      }
+    } finally {
+      this.#store.delete(this.#manifestKey(generation));
+    }
+  }
+
+  #pruneGenerations(head: number): void {
+    const manifestPrefix = `${this.#prefix}:manifest:`;
+    const keys = this.#store.keys?.(manifestPrefix);
+    if (keys === undefined) {
+      if (head > 2) this.#deleteGeneration(head - 2);
+      return;
+    }
+    for (const key of keys) {
+      const generation = Number.parseInt(key.slice(manifestPrefix.length), 10);
+      if (
+        Number.isSafeInteger(generation) &&
+        generation > 0 &&
+        generation < head - 1
+      ) {
+        this.#deleteGeneration(generation);
+      }
+    }
   }
 
   #manifestKey(generation: number): string {

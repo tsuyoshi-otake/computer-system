@@ -56,11 +56,17 @@ export interface NativeFunction {
 export type NativeCall = (
   positional: readonly RuntimeValue[],
   keywords: ReadonlyMap<string, RuntimeValue>,
-) => RuntimeValue | VmWaitRequest;
+) => RuntimeValue | VmWaitRequest | VmWorkRequest;
 
 export type VmWaitRequest =
   | { readonly kind: "sleep"; readonly ticks: number }
   | { readonly kind: "wait_event"; readonly filter?: string };
+
+export interface VmWorkRequest {
+  readonly cycles: number;
+  readonly kind: "work";
+  readonly value: RuntimeValue;
+}
 
 export type ModuleLoader = (name: string) => RuntimeNamespace | undefined;
 

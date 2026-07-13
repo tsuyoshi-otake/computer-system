@@ -7,10 +7,11 @@ programs run in a deterministic, sandboxed, MicroPython-compatible VM called
 Computer System Python. Minecraft-specific behavior is implemented by thin
 Bedrock adapters around host-testable domain and application layers.
 
-The active tracking item is GitHub Issue #4, the Phase 2 Bedrock Computer
-vertical slice. Most Phase 2 behavior is implemented and verified. The native
-GDK terminal is a bounded fallback; the preferred interactive terminal is the
-local Web Terminal companion started with `npm run dev:bds:web`.
+GitHub Issue #4 tracks the Phase 2 Bedrock Computer vertical slice. GitHub Issue
+#12 tracks the OS 0.3 shell, CS486 toolchain, Web Terminal, and operator manual
+expansion. Most Phase 2 behavior is implemented and verified. The native GDK
+terminal is a bounded fallback; the preferred interactive terminal is the local
+Web Terminal companion started with `npm run dev:bds:web`.
 
 ## Architecture rules
 
@@ -103,8 +104,10 @@ The July 2026 live GDK verification established the following:
   screen. Its semantic input is visually overlaid at the terminal cursor, so
   physical typing appears immediately after the shell prompt instead of in a
   separate text box.
-- Physical Enter submits `terminal_line`; Ctrl+C invokes the bounded interrupt
-  endpoint; Up and Down navigate local command history.
+- Physical Enter submits `terminal_line`; Ctrl+C copies selected terminal or
+  command text and invokes the bounded interrupt only without a selection;
+  bounded plain-text paste never auto-submits; Up and Down navigate local
+  command history.
 - New identities use a collision-checked `c-xxxxxx` format. The lowercase
   Crockford Base32 payload decodes to the stable 30-bit numeric computer ID;
   legacy identity snapshots are not migrated automatically.
@@ -115,10 +118,24 @@ The July 2026 live GDK verification established the following:
 - Browser handoff links are one-use and valid for 60 seconds. Browser bearer
   tokens do not pass through BDS logs. Sessions, listeners, polling retries, and
   Bedrock snapshot work are all bounded and end in an explicit final state.
+- Periodic snapshot work is fixed-batch O(K), without an O(N) allocation per
+  pass. Writer input uses an amortized-O(1), deduplicated, attempt-bounded eager
+  queue so interactive latency does not inherit the viewer round-robin delay.
+- `WEB_COMPANION_AUTO_OPEN=1` makes one loopback Pocket Computer use open its
+  minted handoff in the host default browser. Non-loopback listeners or origins
+  are blocked, and the in-game URL remains the failure fallback.
 
 Reproduce native Resource Pack UI changes on the real GDK client. For Web
 Terminal changes, run the focused Web tests and verify the connected state,
 inline typing, physical Enter, and disconnect behavior in a real browser.
+
+The Web Terminal includes a searchable 16-chapter field manual. Its canonical
+learning sequence is: orientation, architecture, terminal/vi, Bash,
+filesystem/storage, MicroPython, MicroPython API, Redstone, worked project,
+assembly, BASIC, C/C++, optimization, DOS, diagnostics, and limits/glossary.
+Keep chapter numbers, section numbers, search order, previous/next navigation,
+and the appendix reading paths synchronized. `tests/tools/webManual.test.mjs`
+locks the publication order and chapter/header agreement.
 
 ## Web companion networking
 
@@ -130,13 +147,27 @@ reverse proxy. Never publish the plain HTTP port directly to the Internet.
 
 ## Shell compatibility
 
-The OS 0.2 shell is a bounded BusyBox-compatible subset implemented by
+The OS 0.3 shell is a bounded BusyBox-compatible subset implemented by
 `shellSyntax.ts`, `shellCommands.ts`, and `shellSession.ts`. It supports
 quoting, variables, `$?`, `|`, `<`, `>`, `>>`, `&&`, `||`, `;`, and bounded
 `sh`/`bash` scripts. Pipeline data stays in memory and is capped; script depth
 and line counts are capped; regex-like user input must not introduce an
 unbounded regular expression execution path. Add applets to the sandboxed
 command runtime rather than invoking host tools.
+
+Keep OS-specific behavior behind `osProfile.ts`: path dialect, boot layout,
+environment, aliases, and virtual devices must not leak into the domain
+filesystem. Linux is the default persisted profile; the DOS fixture protects
+future drive-letter, case-insensitive, CRLF, and `NUL` semantics. `vi` uses
+bounded `terminal_keys` batches and renders only its fixed viewport. Syntax and
+indent highlighting must scan no more than the visible columns/rows per redraw.
+
+World Dynamic Properties remain the Bedrock source of truth (physically the
+world LevelDB). Clean persistence checks use component revision tokens, not
+whole-snapshot JSON fingerprints. Retain only the current and previous complete
+paged generations, and preserve the checksum-backed fallback before expanding
+storage features. SQLite belongs only behind the repository boundary for a
+future non-Bedrock host.
 
 ## Development conventions
 
@@ -145,7 +176,8 @@ command runtime rather than invoking host tools.
   requires it.
 - Preserve unrelated working-tree changes.
 - Use English commit messages with a useful description and reference Issue #4
-  while Phase 2 work remains in scope.
+  while Phase 2 work remains in scope. Reference Issue #12 for the OS,
+  toolchain, Web Terminal, and field-manual work it tracks.
 - Keep temporary scripts and work artifacts under `%USERPROFILE%\tmp`, not the
   user home directory root.
 

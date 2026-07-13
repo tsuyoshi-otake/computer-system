@@ -20,12 +20,19 @@ export interface InMemoryFilesystemSnapshot {
 export class InMemoryFilesystem {
   private readonly files = new Map<string, string>();
   private readonly directories = new Set<string>(["/"]);
+  private readonly children = new Map<string, Set<string>>([["/", new Set()]]);
+  private revisionValue = 0;
+  private usedBytesValue = 0;
 
   constructor(readonly limits: FilesystemLimits = defaultFilesystemLimits) {
     for (const [name, value] of Object.entries(limits)) {
       if (!Number.isInteger(value) || value <= 0)
         throw new RangeError(`${name} must be positive`);
     }
+  }
+
+  get revision(): number {
+    return this.revisionValue;
   }
 
   exists(path: string): boolean {
@@ -39,15 +46,7 @@ export class InMemoryFilesystem {
 
   list(path: string): string[] {
     const normalized = this.requireDirectory(path);
-    const prefix = normalized === "/" ? "/" : `${normalized}/`;
-    const names = new Set<string>();
-    for (const candidate of [...this.directories, ...this.files.keys()]) {
-      if (!candidate.startsWith(prefix) || candidate === normalized) continue;
-      const remainder = candidate.slice(prefix.length);
-      const name = remainder.split("/")[0];
-      if (name !== undefined && name.length > 0) names.add(name);
-    }
-    return [...names].sort();
+    return [...(this.children.get(normalized) ?? [])].sort();
   }
 
   makeDirectory(path: string): void {
@@ -64,7 +63,12 @@ export class InMemoryFilesystem {
       throw new FilesystemError("not_directory", `${fileAncestor} is a file`);
     }
     this.checkEntryCount(additions.length);
-    for (const addition of additions) this.directories.add(addition);
+    for (const addition of additions) {
+      this.directories.add(addition);
+      this.children.set(addition, new Set());
+      this.addChild(addition);
+    }
+    if (additions.length > 0) this.revisionValue += 1;
   }
 
   readFile(path: string): string {
@@ -97,13 +101,23 @@ export class InMemoryFilesystem {
       throw new FilesystemError("not_found", `${path} does not exist`);
     const prefix = `${normalized}/`;
     for (const candidate of [...this.files.keys()]) {
-      if (candidate === normalized || candidate.startsWith(prefix))
+      if (candidate === normalized || candidate.startsWith(prefix)) {
+        this.usedBytesValue -= utf8Size(this.files.get(candidate)!);
         this.files.delete(candidate);
+        this.removeChild(candidate);
+      }
     }
-    for (const candidate of [...this.directories]) {
-      if (candidate === normalized || candidate.startsWith(prefix))
-        this.directories.delete(candidate);
+    const removedDirectories = [...this.directories]
+      .filter(
+        (candidate) => candidate === normalized || candidate.startsWith(prefix),
+      )
+      .sort((left, right) => right.length - left.length);
+    for (const candidate of removedDirectories) {
+      this.removeChild(candidate);
+      this.children.delete(candidate);
+      this.directories.delete(candidate);
     }
+    this.revisionValue += 1;
   }
 
   copy(from: string, to: string): void {
@@ -134,7 +148,7 @@ export class InMemoryFilesystem {
   }
 
   getFreeSpace(): number {
-    return this.limits.capacityBytes - this.usedBytes();
+    return this.limits.capacityBytes - this.usedBytesValue;
   }
 
   snapshot(): InMemoryFilesystemSnapshot {
@@ -158,10 +172,15 @@ export class InMemoryFilesystem {
     }
     this.files.clear();
     this.directories.clear();
+    this.children.clear();
     for (const directory of restored.directories)
       this.directories.add(directory);
     for (const [path, contents] of restored.files)
       this.files.set(path, contents);
+    for (const [path, names] of restored.children)
+      this.children.set(path, new Set(names));
+    this.usedBytesValue = restored.usedBytesValue;
+    this.revisionValue += 1;
   }
 
   normalize(path: string): string {
@@ -206,14 +225,17 @@ export class InMemoryFilesystem {
     const size = utf8Size(contents);
     if (size > this.limits.maxFileBytes)
       throw new FilesystemError("file_limit", "File is too large");
-    const previousSize = this.files.has(path)
-      ? utf8Size(this.files.get(path)!)
-      : 0;
-    if (this.usedBytes() - previousSize + size > this.limits.capacityBytes) {
+    const previous = this.files.get(path);
+    if (previous === contents) return;
+    const previousSize = previous === undefined ? 0 : utf8Size(previous);
+    if (this.usedBytesValue - previousSize + size > this.limits.capacityBytes) {
       throw new FilesystemError("capacity", "Filesystem capacity exceeded");
     }
     if (!this.files.has(path)) this.checkEntryCount(1);
     this.files.set(path, contents);
+    if (previous === undefined) this.addChild(path);
+    this.usedBytesValue += size - previousSize;
+    this.revisionValue += 1;
   }
 
   private subtreeSnapshot(path: string, original: string): FilesystemSnapshot {
@@ -268,7 +290,7 @@ export class InMemoryFilesystem {
         (total, [, contents]) => total + utf8Size(contents),
         0,
       );
-      if (this.usedBytes() + addedBytes > this.limits.capacityBytes) {
+      if (this.usedBytesValue + addedBytes > this.limits.capacityBytes) {
         throw new FilesystemError("capacity", "Filesystem capacity exceeded");
       }
     }
@@ -279,11 +301,12 @@ export class InMemoryFilesystem {
     destination: string,
     snapshot: FilesystemSnapshot,
   ): void {
-    for (const path of snapshot.directories) {
-      this.directories.add(this.transferPath(source, destination, path));
-    }
+    for (const path of [...snapshot.directories].sort(
+      (left, right) => left.length - right.length,
+    ))
+      this.makeDirectory(this.transferPath(source, destination, path));
     for (const [path, contents] of snapshot.files) {
-      this.files.set(this.transferPath(source, destination, path), contents);
+      this.writeFile(this.transferPath(source, destination, path), contents);
     }
   }
 
@@ -309,10 +332,21 @@ export class InMemoryFilesystem {
     }
   }
 
-  private usedBytes(): number {
-    let total = 0;
-    for (const contents of this.files.values()) total += utf8Size(contents);
-    return total;
+  private addChild(path: string): void {
+    const parent = parentPath(path);
+    const siblings = this.children.get(parent);
+    if (siblings === undefined) {
+      throw new FilesystemError(
+        "not_found",
+        `Parent directory ${parent} does not exist`,
+      );
+    }
+    siblings.add(baseName(path));
+  }
+
+  private removeChild(path: string): void {
+    if (path === "/") return;
+    this.children.get(parentPath(path))?.delete(baseName(path));
   }
 }
 
@@ -339,6 +373,14 @@ function ancestors(path: string): string[] {
     result.push(current);
   }
   return result;
+}
+
+function parentPath(path: string): string {
+  return path.slice(0, path.lastIndexOf("/")) || "/";
+}
+
+function baseName(path: string): string {
+  return path.slice(path.lastIndexOf("/") + 1);
 }
 
 function utf8Size(value: string): number {

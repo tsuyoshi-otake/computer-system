@@ -26,8 +26,18 @@ preferred interactive experience is now the local Web Terminal companion. Using
 a Pocket Computer requests a short-lived browser link and connects the browser
 directly to the same fixed-cell terminal model. The Web Terminal provides a
 full-width Linux-style screen, inline cursor-positioned input, physical Enter,
-Ctrl+C, and command history without relying on Bedrock's narrow CustomForm
-container.
+selection-aware copy and Ctrl+C, bounded plain-text paste, and command history
+without relying on Bedrock's narrow CustomForm container. Interactive commands
+use a targeted bounded snapshot path, so their visible response does not wait
+for every viewer in the periodic round-robin.
+
+The Web Terminal header also opens a searchable, keyboard-navigable 16-chapter
+field manual. It is organized as a learning path rather than a command cheat
+sheet: machine orientation and architecture; terminal, Bash, and storage;
+MicroPython, its native API, Redstone, and a complete controller exercise;
+assembly, BASIC, C/C++, and optimization; then DOS compatibility, diagnostics,
+and the limits/glossary appendix. Previous/next controls and arrow keys follow
+that publication order.
 
 See [the implementation roadmap](docs/roadmap.md) for the planned compatibility
 scope and executable acceptance criteria.
@@ -105,14 +115,20 @@ reported Minecraft address and port:
 
 ```powershell
 $env:BDS_HOME = "C:\path\to\bedrock-server"
+$env:WEB_COMPANION_AUTO_OPEN = "1"
 npm run dev:bds:web
 ```
 
-Using a Pocket Computer prints a one-use browser link in Minecraft. The link is
-valid for 60 seconds; opening it exchanges the handoff code for a browser-only
-bearer token that is never written to BDS logs. The authenticated session lasts
-at most 30 minutes. If the companion does not answer within 10 seconds, the
-add-on opens the native in-game terminal instead.
+With `WEB_COMPANION_AUTO_OPEN=1`, using a Pocket Computer opens its one-use link
+in the server machine's default browser. Automatic opening is allowed only when
+both the listener and published origin are loopback; it is blocked for LAN and
+Internet origins. Browser launch work is serialized, bounded, and attempted once
+per handoff. The same link is always printed in Minecraft as a 60-second
+fallback when automatic opening is disabled, blocked, or fails. Opening it
+exchanges the handoff code for a browser-only bearer token that is never written
+to BDS logs. The authenticated session lasts at most 30 minutes. If the
+companion does not answer within 10 seconds, the add-on opens the native in-game
+terminal instead.
 
 Each browser link is already bound to one Computer; the companion root page does
 not accept an arbitrary Computer ID. Newly created Computers use compact IDs in
@@ -154,25 +170,78 @@ npm run dev:bds:web
 Do not expose the plain HTTP companion port directly to the Internet. The
 reverse proxy should terminate TLS and forward only to `127.0.0.1:19144`.
 
-## BusyBox-style shell
+## Computer System OS shell
 
 Terminal commands execute inside the Computer System sandbox, never in the host
-Windows or BDS process. The OS 0.2 shell provides a practical BusyBox-style
-subset:
+Windows or BDS process. OS 0.3 boots a non-destructive Linux profile with
+`/etc`, `/dev`, `/tmp`, `/usr`, `/var`, and `/home/computer`. Existing files are
+preserved while `/tmp` is explicitly volatile. A profile boundary separates path
+syntax, boot layout, command aliases, environment, and virtual devices. The
+implemented DOS profile shares the same VM, terminal, filesystem, persistence,
+hardware limits, and CS486 toolchain without Linux conditionals in the domain
+core. It provides drive-letter paths, case-insensitive lookup, CRLF boot files,
+`NUL`/`CON`, and DOS command aliases including `DIR`, `TYPE`, `COPY`, and `VER`.
 
 ```text
-files:  pwd cd ls cat mkdir touch rm cp mv find
-text:   echo printf head tail wc grep sort uniq tr
+files:  pwd cd ls cat mkdir touch rm cp mv find stat df du quota
+text:   echo printf head tail wc grep sort uniq tr cut seq
 shell:  sh bash source env export unset which type
-system: clear edit shutdown reboot exit true false
+info:   whoami id hostname uname date uptime cpuinfo free
+system: clear edit vi history time sleep test [ shutdown reboot exit true false
+toolchain: as cc c++ basic basicc run objdump
 ```
 
 The parser supports single and double quotes, backslash escapes, environment
 variables, `$?`, pipelines (`|`), input/output redirection (`<`, `>`, `>>`), and
-control operators (`&&`, `||`, `;`). `sh file`, `source file`, and
-`bash -c "command"` execute bounded scripts inside the same filesystem. Command
-length, tokens, pipeline stages, script depth/lines, and intermediate output are
-limited so shell work cannot become an unbounded server load path.
+control operators (`&&`, `||`, `;`). Computer System Bash adds shebangs,
+positional parameters, conditionals, bounded loops, functions,
+`break`/`continue`/`return`, and `source`. It loads `/etc/bash.bashrc` and then
+`~/.bashrc` without replacing existing user files. Command length, tokens,
+pipeline stages, script depth/lines/iterations, and intermediate output are
+limited so shell work cannot become an unbounded server load path. This is a
+sandbox implementation and never invokes host Bash.
+
+`vi <path>` uses Normal, Insert, and Command modes and supports bounded cursor
+movement, `dd`, `x`, undo, `:w`, `:q`, `:wq`, and `:q!`. Python, shell,
+JSON/TOML tokens are highlighted, and indentation rainbow backgrounds are on by
+default. The native terminal remains 51x19; the Web Terminal negotiates a
+viewport up to 160x60 from the available screen and resizes `vi` with it. The
+browser coalesces up to 16 keys per relay, while the BDS boundary rejects
+batches above 32 keys. Tab performs bounded command/path completion through the
+same writer-authorized relay.
+
+Computer snapshots remain canonical in Bedrock World Dynamic Properties, which
+BDS stores in the world's LevelDB. Clean persistence checks compare O(1)
+component revisions instead of serializing the whole snapshot. Filesystem child
+lookups use a parent index, capacity is cached, and transactional storage keeps
+only the current and previous complete generations. SQLite is intentionally not
+the BDS source of truth because Bedrock Script API cannot access it directly; a
+future non-Bedrock host can add a SQLite repository behind the same boundary.
+`quota` reports the enforced capacity, per-file, and entry limits; `du` computes
+bounded subtree usage from one filesystem snapshot. `date` defaults to wall UTC,
+with `date --game` and `date --virtual` for Minecraft and deterministic VM time.
+
+Each Computer also has a persisted virtual hardware profile. User-facing CPU
+information identifies a nominal Computer System 486DX at 33 MHz. Its internal
+safe scheduler clock remains persisted separately; the default 20 kHz execution
+scale provides 1,000 VM cycles per 20 Hz server tick, while the scheduler
+retains a global cap and round-robin fairness across Computers. Native shell
+commands and Bash scripts return bounded work-cycle charges, so they cannot
+bypass the CPU budget. The default 1 MiB RAM limit applies to the VM's aggregate
+reachable runtime data and raises `MemoryError` on overflow; unreachable values
+are reclaimed during pressure checks. Linux exposes `cpuinfo`, `free`,
+`/proc/cpuinfo`, and `/proc/meminfo`. The DOS profile exposes `CPU`, `MEM`, and
+`SYSTEMINFO`, and `VER` includes the hardware summary. RAM, persistent disk
+quota, collection size, and output bounds are independent limits.
+
+The sandboxed CS486DX toolchain adds real 32-bit `EAX` through `EBP` registers,
+checked little-endian linear memory, stack/call control flow, terminal CPU
+faults, and instruction-specific cycle costs. `as`, `cc`, `c++`, and `basicc`
+compile safe initial language subsets to the same validated textual executable
+format; `basic` runs BASIC source directly, `run --stats` reports instructions
+and cycles, and `objdump` exposes generated instructions for optimization. No
+frontend invokes a host compiler or native binary. Compile work and execution
+cycles return to the same bounded VM debt used by shell scripts.
 
 Examples:
 

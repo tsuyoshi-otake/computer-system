@@ -10,6 +10,13 @@ import {
 import { requireComputerId, type ComputerFamily } from "./identity.js";
 import { ComputerLifecycle } from "./lifecycle.js";
 import { RedstoneState } from "../redstone/redstoneState.js";
+import {
+  defaultComputerHardware,
+  requireComputerHardware,
+  type ComputerHardwareProfile,
+} from "./hardware.js";
+
+export type ComputerOsProfile = "dos" | "linux";
 
 export interface ComputerSnapshot {
   readonly schema: 1;
@@ -19,6 +26,8 @@ export interface ComputerSnapshot {
   readonly filesystem: InMemoryFilesystemSnapshot;
   readonly terminal: TerminalBufferSnapshot;
   readonly redstoneOutputMask: number;
+  readonly osProfile?: ComputerOsProfile;
+  readonly hardware?: ComputerHardwareProfile;
 }
 
 export interface ComputerRecordOptions {
@@ -26,6 +35,8 @@ export interface ComputerRecordOptions {
   readonly terminalWidth?: number;
   readonly terminalHeight?: number;
   readonly label?: string;
+  readonly osProfile?: ComputerOsProfile;
+  readonly hardware?: ComputerHardwareProfile;
 }
 
 export class ComputerRecord {
@@ -33,7 +44,10 @@ export class ComputerRecord {
   readonly filesystem: InMemoryFilesystem;
   readonly terminal: TerminalBuffer;
   readonly redstone = new RedstoneState();
+  readonly osProfile: ComputerOsProfile;
+  private hardwareValue: ComputerHardwareProfile;
   private labelValue: string | undefined;
+  private metadataRevision = 0;
 
   constructor(
     readonly computerId: string,
@@ -46,6 +60,10 @@ export class ComputerRecord {
       options.terminalWidth ?? 51,
       options.terminalHeight ?? 19,
     );
+    this.osProfile = options.osProfile ?? "linux";
+    this.hardwareValue = requireComputerHardware(
+      options.hardware ?? defaultComputerHardware,
+    );
     this.setLabel(options.label);
   }
 
@@ -57,11 +75,21 @@ export class ComputerRecord {
     return this.redstone.outputMask;
   }
 
+  get hardware(): ComputerHardwareProfile {
+    return this.hardwareValue;
+  }
+
+  get persistenceRevision(): string {
+    return `${this.metadataRevision}:${this.filesystem.revision}:${this.terminal.revision}:${this.redstone.revision}`;
+  }
+
   setLabel(label: string | undefined): void {
     if (label !== undefined && (label.length === 0 || label.length > 32)) {
       throw new Error("Computer label must contain 1..32 characters");
     }
+    if (this.labelValue === label) return;
     this.labelValue = label;
+    this.metadataRevision += 1;
   }
 
   setRedstoneOutputMask(mask: number): void {
@@ -73,6 +101,18 @@ export class ComputerRecord {
     this.redstone.setOutputMask(mask);
   }
 
+  configureHardware(hardware: ComputerHardwareProfile): void {
+    const next = requireComputerHardware(hardware);
+    if (
+      next.clockHz === this.hardwareValue.clockHz &&
+      next.memoryBytes === this.hardwareValue.memoryBytes
+    ) {
+      return;
+    }
+    this.hardwareValue = next;
+    this.metadataRevision += 1;
+  }
+
   snapshot(): ComputerSnapshot {
     return {
       schema: 1,
@@ -82,6 +122,8 @@ export class ComputerRecord {
       filesystem: this.filesystem.snapshot(),
       terminal: this.terminal.snapshot(),
       redstoneOutputMask: this.redstone.outputMask,
+      osProfile: this.osProfile,
+      hardware: this.hardwareValue,
     };
   }
 
@@ -96,6 +138,8 @@ export class ComputerRecord {
       label: snapshot.label,
       terminalWidth: snapshot.terminal.width,
       terminalHeight: snapshot.terminal.height,
+      osProfile: snapshot.osProfile ?? "linux",
+      hardware: snapshot.hardware ?? defaultComputerHardware,
     });
     record.filesystem.restore(snapshot.filesystem);
     record.terminal.restore(snapshot.terminal);

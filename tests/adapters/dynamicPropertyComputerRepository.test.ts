@@ -55,7 +55,12 @@ class MemoryDynamicProperties {
     return this.values.get(identifier);
   }
 
-  setDynamicProperty(identifier: string, value: string): void {
-    this.values.set(identifier, value);
+  getDynamicPropertyIds(): string[] {
+    return [...this.values.keys()];
+  }
+
+  setDynamicProperty(identifier: string, value: string | undefined): void {
+    if (value === undefined) this.values.delete(identifier);
+    else this.values.set(identifier, value);
   }
 }

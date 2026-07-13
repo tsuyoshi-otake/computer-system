@@ -1,3 +1,6 @@
+import { hasCopySelection, insertPastedCommand } from "/terminal-input.js";
+import { manualChapters } from "/manual.js";
+
 const palette = [
   "#f0f0f0",
   "#f2b233",
@@ -28,6 +31,7 @@ const elements = {
   terminalSize: document.querySelector("#terminal-size"),
   commandForm: document.querySelector("#command-form"),
   commandInput: document.querySelector("#command-input"),
+  completionMenu: document.querySelector("#completion-menu"),
   takeControlButton: document.querySelector("#take-control-button"),
   reconnectButton: document.querySelector("#reconnect-button"),
   lifecycleState: document.querySelector("#lifecycle-state"),
@@ -35,6 +39,14 @@ const elements = {
   errorMessage: document.querySelector("#error-message"),
   inputState: document.querySelector("#input-state"),
   accessState: document.querySelector("#access-state"),
+  manualButton: document.querySelector("#manual-button"),
+  manualDialog: document.querySelector("#manual-dialog"),
+  manualToc: document.querySelector("#manual-toc"),
+  manualPage: document.querySelector("#manual-page"),
+  manualSearch: document.querySelector("#manual-search"),
+  manualPosition: document.querySelector("#manual-position"),
+  manualPrevious: document.querySelector("#manual-previous"),
+  manualNext: document.querySelector("#manual-next"),
 };
 
 const tokenStorageKey = "computer-system.web-terminal-token";
@@ -43,13 +55,21 @@ let token =
 let streamGeneration = 0;
 let sessionClosed = false;
 let commandPending = false;
+let completionPending = false;
 let takeoverPending = false;
 let connectionState = "loading";
 let accessMode = "unknown";
+let viActive = false;
+let viKeyPending = false;
 let historyCursor = 0;
 let historyDraft = "";
 let resizeFrame = 0;
+let resizePending = false;
+let pendingTerminalSize;
+let lastRequestedTerminalSize = "";
+let manualChapterIndex = 0;
 const commandHistory = [];
+const viKeyQueue = [];
 
 if (location.hash.length > 1) sessionStorage.setItem(tokenStorageKey, token);
 window.history.replaceState(null, "", `${location.pathname}${location.search}`);
@@ -59,14 +79,34 @@ elements.commandForm.addEventListener("submit", (event) => {
   void sendLine();
 });
 elements.commandInput.addEventListener("keydown", (event) => {
+  if (viActive) {
+    if (
+      event.ctrlKey &&
+      event.key.toLowerCase() === "c" &&
+      hasCopySelection(elements.commandInput, window.getSelection())
+    ) {
+      return;
+    }
+    event.preventDefault();
+    const key = editorKey(event);
+    if (key !== undefined) queueViKeys([key]);
+    return;
+  }
   if (event.key === "Enter" && !event.isComposing) {
     event.preventDefault();
     void sendLine();
     return;
   }
+  if (event.key === "Tab" && !event.isComposing) {
+    event.preventDefault();
+    void completeCommandLine();
+    return;
+  }
   if (event.ctrlKey) {
     const key = event.key.toLowerCase();
     if (key === "c") {
+      if (hasCopySelection(elements.commandInput, window.getSelection()))
+        return;
       event.preventDefault();
       void sendInput({ kind: "interrupt" });
       return;
@@ -98,10 +138,35 @@ elements.commandInput.addEventListener("keydown", (event) => {
   }
 });
 elements.commandInput.addEventListener("input", () => {
+  hideCompletions();
   if (historyCursor === commandHistory.length) {
     historyDraft = elements.commandInput.value;
   }
   elements.commandInput.removeAttribute("aria-invalid");
+});
+elements.commandInput.addEventListener("paste", (event) => {
+  const pastedText = event.clipboardData?.getData("text/plain");
+  if (pastedText === undefined || elements.commandInput.disabled) return;
+  if (viActive) {
+    event.preventDefault();
+    queueViKeys(
+      [...pastedText.replaceAll("\r\n", "\n")].map((key) =>
+        key === "\n" ? "Enter" : key,
+      ),
+    );
+    return;
+  }
+  event.preventDefault();
+  const inserted = insertPastedCommand(
+    elements.commandInput.value,
+    pastedText,
+    elements.commandInput.selectionStart,
+    elements.commandInput.selectionEnd,
+    elements.commandInput.maxLength,
+  );
+  elements.commandInput.value = inserted.value;
+  elements.commandInput.setSelectionRange(inserted.cursor, inserted.cursor);
+  elements.commandInput.dispatchEvent(new Event("input", { bubbles: true }));
 });
 elements.commandInput.addEventListener("focus", () => {
   if (!elements.commandInput.disabled)
@@ -113,6 +178,7 @@ elements.commandInput.addEventListener("blur", () => {
   }
 });
 elements.terminalStage.addEventListener("click", () => {
+  if (window.getSelection()?.isCollapsed === false) return;
   if (!elements.commandInput.disabled) elements.commandInput.focus();
 });
 elements.reconnectButton.addEventListener("click", () => {
@@ -122,6 +188,29 @@ elements.reconnectButton.addEventListener("click", () => {
 elements.takeControlButton.addEventListener("click", () => {
   void takeControl();
 });
+elements.manualButton.addEventListener("click", () => {
+  if (elements.manualDialog.open) return;
+  elements.manualDialog.showModal();
+  renderManualChapter(manualChapterIndex, true);
+});
+elements.manualPrevious.addEventListener("click", () => {
+  renderManualChapter(manualChapterIndex - 1, true);
+});
+elements.manualNext.addEventListener("click", () => {
+  renderManualChapter(manualChapterIndex + 1, true);
+});
+elements.manualSearch.addEventListener("input", renderManualToc);
+elements.manualDialog.addEventListener("keydown", (event) => {
+  if (event.target === elements.manualSearch) return;
+  if (event.key === "ArrowLeft") {
+    event.preventDefault();
+    renderManualChapter(manualChapterIndex - 1, true);
+  } else if (event.key === "ArrowRight") {
+    event.preventDefault();
+    renderManualChapter(manualChapterIndex + 1, true);
+  }
+});
+renderManualToc();
 window.addEventListener("resize", scheduleTerminalFit);
 if (!/^[A-Za-z0-9_-]{20,}$/u.test(token)) {
   fail("This handoff link is invalid, expired, or has already been used.");
@@ -129,11 +218,59 @@ if (!/^[A-Za-z0-9_-]{20,}$/u.test(token)) {
   void bootstrap();
 }
 
+function renderManualToc() {
+  const query = elements.manualSearch.value.trim().toLowerCase();
+  const fragment = document.createDocumentFragment();
+  for (const [index, chapter] of manualChapters.entries()) {
+    const searchable =
+      `${chapter.number} ${chapter.title} ${chapter.summary} ${chapter.html.replace(/<[^>]+>/gu, " ")}`.toLowerCase();
+    if (query.length > 0 && !searchable.includes(query)) continue;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "manual-toc-entry";
+    button.dataset.chapter = chapter.id;
+    if (index === manualChapterIndex)
+      button.setAttribute("aria-current", "page");
+    const number = document.createElement("span");
+    number.textContent = chapter.number;
+    const label = document.createElement("span");
+    const title = document.createElement("b");
+    title.textContent = chapter.title;
+    const summary = document.createElement("small");
+    summary.textContent = chapter.summary;
+    label.append(title, summary);
+    button.append(number, label);
+    button.addEventListener("click", () => renderManualChapter(index, true));
+    fragment.append(button);
+  }
+  elements.manualToc.replaceChildren(fragment);
+  if (elements.manualToc.childElementCount === 0) {
+    const empty = document.createElement("p");
+    empty.className = "manual-empty";
+    empty.textContent = "No chapter matches this index search.";
+    elements.manualToc.append(empty);
+  }
+}
+
+function renderManualChapter(index, focusPage = false) {
+  manualChapterIndex = Math.max(0, Math.min(manualChapters.length - 1, index));
+  const chapter = manualChapters[manualChapterIndex];
+  elements.manualPage.innerHTML = chapter.html;
+  elements.manualPage.scrollTop = 0;
+  elements.manualPosition.textContent = `${chapter.number} / ${String(manualChapters.length).padStart(2, "0")}`;
+  elements.manualPrevious.disabled = manualChapterIndex === 0;
+  elements.manualNext.disabled =
+    manualChapterIndex === manualChapters.length - 1;
+  renderManualToc();
+  if (focusPage) elements.manualPage.focus({ preventScroll: true });
+}
+
 async function bootstrap() {
   setConnection("loading", "AUTHENTICATING");
   try {
     const response = await api("/api/session");
     updateSession(await response.json());
+    scheduleTerminalFit();
     await connectStream();
   } catch (error) {
     fail(errorMessage(error));
@@ -194,6 +331,7 @@ async function consumeEvents(response, generation) {
 }
 
 async function sendLine() {
+  hideCompletions();
   const line = elements.commandInput.value;
   if (commandPending || elements.commandInput.disabled) return;
   const accepted = await sendInput({ kind: "line", value: line });
@@ -206,6 +344,53 @@ async function sendLine() {
     historyDraft = "";
     elements.commandInput.value = "";
   }
+}
+
+async function completeCommandLine() {
+  if (
+    completionPending ||
+    commandPending ||
+    sessionClosed ||
+    viActive ||
+    elements.commandInput.disabled
+  )
+    return;
+  completionPending = true;
+  const original = elements.commandInput.value;
+  const cursor = elements.commandInput.selectionStart;
+  try {
+    const response = await api("/api/complete", {
+      method: "POST",
+      headers: {
+        ...authorizationHeaders(),
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ value: original, cursor }),
+    });
+    const completion = await response.json();
+    if (elements.commandInput.value !== original) return;
+    elements.commandInput.value = completion.value;
+    elements.commandInput.setSelectionRange(
+      completion.cursor,
+      completion.cursor,
+    );
+    if (completion.candidates.length > 1)
+      showCompletions(completion.candidates);
+  } catch (error) {
+    if (error?.status === 409) setInputAvailable(false, "VIEW ONLY");
+  } finally {
+    completionPending = false;
+  }
+}
+
+function showCompletions(candidates) {
+  elements.completionMenu.textContent = candidates.join("  ");
+  elements.completionMenu.hidden = false;
+}
+
+function hideCompletions() {
+  elements.completionMenu.hidden = true;
+  elements.completionMenu.textContent = "";
 }
 
 async function sendInput(payload) {
@@ -248,6 +433,13 @@ async function sendInput(payload) {
 function renderTerminal(payload) {
   const terminal = payload?.terminal;
   if (!Array.isArray(terminal?.rows)) return;
+  viActive = terminal.rows.some((row) =>
+    /^-- (?:COMMAND|INSERT|NORMAL) --/u.test(row.trimStart()),
+  );
+  if (viActive) {
+    elements.commandInput.value = "";
+    elements.inputState.textContent = "EDIT";
+  }
   elements.computerName.textContent = payload.label ?? payload.computerId;
   elements.computerId.textContent = payload.computerId;
   elements.lifecycleState.textContent = String(
@@ -296,6 +488,65 @@ function renderTerminal(payload) {
   });
   elements.terminalScreen.replaceChildren(fragment);
   elements.terminalStage.scrollTop = elements.terminalStage.scrollHeight;
+}
+
+function editorKey(event) {
+  if (event.ctrlKey && event.key === "[") return "Ctrl+[";
+  if (event.ctrlKey || event.altKey || event.metaKey) return undefined;
+  const named = new Set([
+    "ArrowDown",
+    "ArrowLeft",
+    "ArrowRight",
+    "ArrowUp",
+    "Backspace",
+    "Delete",
+    "End",
+    "Enter",
+    "Escape",
+    "Home",
+    "Tab",
+  ]);
+  if (named.has(event.key)) return event.key;
+  return [...event.key].length === 1 ? event.key : undefined;
+}
+
+function queueViKeys(keys) {
+  const available = Math.max(0, 1_024 - viKeyQueue.length);
+  viKeyQueue.push(...keys.slice(0, available));
+  void drainViKeys();
+}
+
+async function drainViKeys() {
+  if (viKeyPending || sessionClosed || accessMode !== "writer") return;
+  viKeyPending = true;
+  try {
+    while (viKeyQueue.length > 0 && !sessionClosed && accessMode === "writer") {
+      let count = Math.min(16, viKeyQueue.length);
+      while (
+        count > 1 &&
+        encodeURIComponent(JSON.stringify(viKeyQueue.slice(0, count))).length >
+          180
+      ) {
+        count -= 1;
+      }
+      const keys = viKeyQueue.splice(0, count);
+      await api("/api/input", {
+        method: "POST",
+        headers: {
+          ...authorizationHeaders(),
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ kind: "keys", value: keys }),
+      });
+    }
+  } catch (error) {
+    viKeyQueue.length = 0;
+    setConnection("offline", "EDITOR INPUT FAILED");
+    elements.errorMessage.textContent = errorMessage(error);
+    if (!elements.errorDialog.open) elements.errorDialog.showModal();
+  } finally {
+    viKeyPending = false;
+  }
 }
 
 function updateSession(session) {
@@ -488,7 +739,50 @@ function scheduleTerminalFit() {
   resizeFrame = requestAnimationFrame(() => {
     const width = Number.parseInt(elements.terminalSize.textContent, 10);
     if (Number.isFinite(width)) fitTerminal(width);
+    queueTerminalResize();
   });
+}
+
+function queueTerminalResize() {
+  if (sessionClosed || accessMode !== "writer") return;
+  const width = Math.max(
+    51,
+    Math.min(160, Math.floor(elements.terminalStage.clientWidth / (14 * 0.61))),
+  );
+  const height = Math.max(
+    19,
+    Math.min(60, Math.floor(elements.terminalStage.clientHeight / (14 * 1.32))),
+  );
+  const key = `${String(width)}x${String(height)}`;
+  if (key === lastRequestedTerminalSize) return;
+  pendingTerminalSize = { height, key, width };
+  void drainTerminalResize();
+}
+
+async function drainTerminalResize() {
+  if (resizePending || pendingTerminalSize === undefined) return;
+  resizePending = true;
+  const requested = pendingTerminalSize;
+  pendingTerminalSize = undefined;
+  try {
+    await api("/api/resize", {
+      method: "POST",
+      headers: {
+        ...authorizationHeaders(),
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        height: requested.height,
+        width: requested.width,
+      }),
+    });
+    lastRequestedTerminalSize = requested.key;
+  } catch {
+    // The current bounded terminal dimensions remain the observable fallback.
+  } finally {
+    resizePending = false;
+    if (pendingTerminalSize !== undefined) void drainTerminalResize();
+  }
 }
 
 function fitTerminal(columns) {

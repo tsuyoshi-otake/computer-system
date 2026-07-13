@@ -54,17 +54,23 @@ export class RoundRobinScheduler {
     return this.tickValue;
   }
 
-  add(id: number, vm: StackVm): void {
+  add(
+    id: number,
+    vm: StackVm,
+    instructionsPerTick = this.limits.instructionsPerComputer,
+  ): void {
     if (!Number.isInteger(id) || id < 0)
       throw new RangeError("Computer ID must be non-negative");
     if (this.computers.has(id))
       throw new Error(`Computer ${id} is already scheduled`);
+    requirePositiveInteger(instructionsPerTick, "instructionsPerTick");
     this.computers.set(id, {
       id,
       vm,
       events: new BoundedEventQueue(this.limits.eventCapacity),
       timers: new BoundedTimerQueue(this.limits.timerCapacity),
       executedInstructions: 0,
+      instructionsPerTick,
     });
     this.order.push(id);
   }
@@ -117,7 +123,7 @@ export class RoundRobinScheduler {
       const computer = this.computers.get(this.order[index]!);
       if (computer === undefined) continue;
       if (computer.vm.state.kind !== "ready") continue;
-      const budget = Math.min(this.limits.instructionsPerComputer, remaining);
+      const budget = Math.min(computer.instructionsPerTick, remaining);
       const result = computer.vm.runSlice(budget);
       computer.executedInstructions += result.executedInstructions;
       remaining -= result.executedInstructions;
@@ -181,6 +187,7 @@ interface ScheduledComputer {
   readonly events: BoundedEventQueue;
   readonly timers: BoundedTimerQueue;
   executedInstructions: number;
+  readonly instructionsPerTick: number;
 }
 
 function requirePositiveInteger(value: number, name: string): void {

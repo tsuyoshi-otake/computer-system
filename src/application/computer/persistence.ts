@@ -17,19 +17,18 @@ export type PersistenceResult =
   | { readonly outcome: "failed"; readonly error: Error };
 
 export class ComputerPersistenceService {
-  private readonly fingerprints = new Map<string, string>();
+  private readonly savedRevisions = new Map<string, string>();
 
   constructor(private readonly repository: ComputerSnapshotRepository) {}
 
   saveIfDirty(record: ComputerRecord): PersistenceResult {
-    const snapshot = record.snapshot();
-    const fingerprint = JSON.stringify(snapshot);
-    if (this.fingerprints.get(record.computerId) === fingerprint) {
+    const revision = record.persistenceRevision;
+    if (this.savedRevisions.get(record.computerId) === revision) {
       return { outcome: "unchanged" };
     }
     try {
-      const generation = this.repository.save(snapshot);
-      this.fingerprints.set(record.computerId, fingerprint);
+      const generation = this.repository.save(record.snapshot());
+      this.savedRevisions.set(record.computerId, revision);
       return { outcome: "saved", generation };
     } catch (error: unknown) {
       return {
@@ -44,7 +43,7 @@ export class ComputerPersistenceService {
       const snapshot = this.repository.load(computerId);
       if (snapshot === undefined) return { outcome: "missing", computerId };
       const record = ComputerRecord.restore(migrateComputerSnapshot(snapshot));
-      this.fingerprints.set(computerId, JSON.stringify(snapshot));
+      this.savedRevisions.set(computerId, record.persistenceRevision);
       return { outcome: "loaded", record };
     } catch (error: unknown) {
       return {

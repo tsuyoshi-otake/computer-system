@@ -62,4 +62,19 @@ describe("terminal cell buffer", (): void => {
     expect(() => terminal.setTextColor(16)).toThrow(TerminalError);
     expect(() => terminal.write("a\nb")).toThrow(TerminalError);
   });
+
+  it("resizes while preserving overlapping cells and respecting bounds", (): void => {
+    const terminal = new TerminalBuffer(3, 2, { maxHeight: 4, maxWidth: 6 });
+    terminal.write("abc");
+    terminal.setCursorPosition(3, 2);
+    terminal.write("z");
+    const revision = terminal.revision;
+
+    terminal.resize(6, 4);
+
+    expect(terminal.line(1).startsWith("abc")).toBe(true);
+    expect(terminal.cell(3, 2).character).toBe("z");
+    expect(terminal.revision).toBe(revision + 1);
+    expect(() => terminal.resize(7, 4)).toThrow(TerminalError);
+  });
 });

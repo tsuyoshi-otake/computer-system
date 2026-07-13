@@ -65,6 +65,11 @@ describe("BDS debug session", () => {
     ).toBe(true);
     expect(
       isAllowedWebRelayCommand(
+        "scriptevent computer_system:web-input abcdefghijkl keys %5B%22i%22%5D",
+      ),
+    ).toBe(true);
+    expect(
+      isAllowedWebRelayCommand(
         "scriptevent computer_system:web-interrupt abcdefghijkl",
       ),
     ).toBe(true);

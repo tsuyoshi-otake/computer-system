@@ -249,8 +249,10 @@ real block-face coordinates and player-facing fallback interaction.
 Use a clean managed debug world for this checklist. Identity snapshot schema 2
 does not migrate the previous sequential `computer-N` registry.
 
-1. Run `npm run dev:bds:web`, connect Minecraft, and use a Pocket Computer.
-2. Confirm the printed one-use link opens a Computer whose identity matches
+1. Set `WEB_COMPANION_AUTO_OPEN=1`, run `npm run dev:bds:web`, connect
+   Minecraft, and use a Pocket Computer.
+2. Confirm the default browser opens without typing the URL and the printed
+   one-use fallback opens a Computer whose identity matches
    `c-[0-9a-hjkmnp-tv-z]{6}` and whose status shows `CONTROL`.
 3. Use the same Pocket Computer again to mint a second link and open it in a
    second browser session.
@@ -267,8 +269,58 @@ does not migrate the previous sequential `computer-N` registry.
 8. Repeat at a 390-pixel viewport and confirm the ownership state, takeover
    action, terminal, and status bar fit without page-level horizontal or
    vertical scrolling.
+9. Start once with automatic opening disabled and once with a non-loopback
+   published host. Confirm no browser process is launched automatically and the
+   printed 60-second fallback remains usable.
+10. Drag-select several terminal rows and press Ctrl+C. Confirm the exact range
+    is copied, the selection remains visible until the next user action, and no
+    interrupt is emitted. Select command-line text and repeat; then press Ctrl+C
+    with no selection and confirm exactly one interrupt.
+11. Paste a single-line command and a multiline command. Confirm insertion
+    occurs at the current selection, line breaks become spaces, the value stops
+    at 128 characters, and neither paste runs a command before physical Enter.
+12. Keep five browser sessions attached, take control in one, and submit three
+    unique `printf latency-N` commands. Measure from Enter to visible output;
+    confirm no command is duplicated and the writer does not wait for the
+    five-session periodic round-robin.
+13. Run `whoami`, `hostname`, `date`, `uptime`, `ls /`, and `ls /dev`. Confirm
+    the identity is the sandbox user `computer`, the hostname is the compact
+    Computer ID, Linux profile directories are present, and `null` is listed but
+    is not an ordinary persisted file.
+14. Type `who` and press Tab, then type `cat /et` and press Tab. Confirm the
+    values become `whoami ` and `cat /etc/` without submitting. Resize the
+    browser and confirm the reported cell size grows above 51x19, stays at or
+    below 160x60, and does not produce duplicate commands.
+15. Run `date`, `date --game`, `date --virtual`, `du -s /home`, and `quota`.
+    Confirm wall UTC, Minecraft time, deterministic VM time, subtree bytes, and
+    enforced capacity/file/entry limits are distinguishable.
+16. Put `export FAVORITE=doraemon` in `~/.bashrc`, restart the Computer, and run
+    `echo $FAVORITE`. Run a Bash script using `$1`, `if`, `for`, and a function;
+    confirm it stays inside the Computer filesystem and loop limits fail
+    explicitly rather than hanging the server.
+17. Run `vi /home/computer/demo.py`, press `i`, enter an indented Python sample,
+    press Escape, and run `:wq`. Confirm Normal/Insert/Command states, Python
+    token colors, four repeating indentation background colors, save, shell
+    restoration, and `cat`/reopen contents. Repeat `:q` with dirty contents and
+    confirm it blocks; use `:q!` and confirm discard.
+18. Restart the Computer. Confirm `/home/computer/demo.py` and `/etc` survive,
+    `/tmp` is empty, and BDS logs contain no persistence failure. Stop BDS
+    before taking a backup of the world LevelDB; restore the copy and confirm
+    the latest complete generation loads.
 
 `Expect:` Every committed identity is compact and stable, viewer input never
 reaches the VM, takeover has one observable winner, a non-final detach does not
 close the shared terminal, and each Computer owns its writer lease
 independently.
+
+## CS486DX toolchain
+
+`Verify:` In the Web Terminal, create a short `.asm`, `.bas`, `.c`, and `.cpp`
+program. Compile them with `as`, `basicc`, `cc`, and `c++`, then use
+`run --stats`, direct `./program` execution, and `objdump`.
+
+`Expect:` All four frontends execute inside the sandbox, `cpuinfo` reports a
+Computer System 486DX at 33 MHz, and stats show deterministic instruction/cycle
+counts. An infinite ASM jump exits with status 124 at the bounded instruction
+limit; invalid memory and corrupted executables report explicit faults without
+affecting BDS.

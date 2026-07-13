@@ -1,7 +1,10 @@
 import readline from "node:readline";
 
 import { BdsDebugSession } from "./bds-debug-session.mjs";
-import { WebCompanionServer } from "./web-companion-server.mjs";
+import {
+  parseBooleanFlag,
+  WebCompanionServer,
+} from "./web-companion-server.mjs";
 
 const protocolVersion = "2025-11-25";
 const serverInfo = {
@@ -16,6 +19,10 @@ const webCompanion = new WebCompanionServer({
   port: process.env.WEB_COMPANION_PORT ?? "19144",
   publicHost: process.env.WEB_COMPANION_PUBLIC_HOST,
   publicOrigin: process.env.WEB_COMPANION_PUBLIC_ORIGIN,
+  autoOpenBrowser: parseBooleanFlag(
+    process.env.WEB_COMPANION_AUTO_OPEN,
+    "WEB_COMPANION_AUTO_OPEN",
+  ),
 });
 await webCompanion.start();
 let initialized = false;

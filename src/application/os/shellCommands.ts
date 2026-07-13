@@ -1,4 +1,21 @@
 import type { InMemoryFilesystem } from "../../domain/filesystem/inMemoryFilesystem.js";
+import { utf8ByteLength } from "../../domain/text/utf8.js";
+import type { OsProfile } from "./osProfile.js";
+import type { ViScreen } from "../editor/viSession.js";
+import type { ShellClockSource } from "./clock.js";
+import type { ComputerHardwareProfile } from "../../domain/computer/hardware.js";
+import type { VirtualDevice } from "./osProfile.js";
+import {
+  cs486NominalClockHz,
+  runCs486,
+  validateCs486Executable,
+  type Cs486Executable,
+} from "../../domain/cpu/cs486.js";
+import { assembleCs486 } from "../toolchain/cs486Assembler.js";
+import {
+  compileCs486Source,
+  type Cs486SourceLanguage,
+} from "../toolchain/highLevelCompilers.js";
 
 export type ShellAction = "clear" | "reboot" | "shutdown";
 
@@ -7,6 +24,27 @@ export interface ShellCommandResult {
   readonly exitCode: number;
   readonly stderr: string;
   readonly stdout: string;
+  readonly sleepTicks?: number;
+  readonly terminalScreen?: ViScreen;
+  readonly resetTerminal?: boolean;
+  readonly workCycles?: number;
+}
+
+export interface ShellCompletionResult {
+  readonly candidates: readonly string[];
+  readonly cursor: number;
+  readonly value: string;
+}
+
+export interface ShellCommandRuntimeOptions {
+  readonly clock: ShellClockSource;
+  readonly computerId: number;
+  readonly computerName: string;
+  readonly currentTick: () => number;
+  readonly profile: OsProfile;
+  readonly ticksPerSecond: number;
+  readonly hardware: ComputerHardwareProfile;
+  readonly memoryUsageBytes: () => number;
 }
 
 export const shellCommandNames = [
@@ -17,6 +55,8 @@ export const shellCommandNames = [
   "clear",
   "cp",
   "dirname",
+  "du",
+  "date",
   "echo",
   "edit",
   "env",
@@ -27,45 +67,126 @@ export const shellCommandNames = [
   "grep",
   "head",
   "help",
+  "hostname",
+  "id",
   "ls",
   "mkdir",
   "mv",
   "printf",
   "pwd",
+  "quota",
   "reboot",
   "rm",
   "sh",
   "shutdown",
   "sort",
+  "sleep",
+  "seq",
+  "stat",
   "source",
   "tail",
   "touch",
   "tr",
   "true",
+  "uname",
   "type",
+  "uptime",
   "uniq",
   "unset",
   "wc",
   "which",
+  "whoami",
+  "vi",
+  "cut",
+  "cpu",
+  "cpuinfo",
+  "df",
+  "free",
+  "mem",
+  "systeminfo",
+  "test",
+  "[",
+  "time",
+  "history",
+  "as",
+  "cc",
+  "c++",
+  "basic",
+  "basicc",
+  "run",
+  "objdump",
 ] as const;
 
 const knownCommands = new Set<string>(shellCommandNames);
 const maximumOutputLength = 256_000;
 
 export class ShellCommandRuntime {
-  private currentDirectory = "/";
-  private previousDirectory = "/";
-  private readonly environment = new Map<string, string>([
-    ["HOME", "/"],
-    ["PATH", "/bin"],
-    ["SHELL", "/bin/bash"],
-    ["TERM", "computer-system"],
-  ]);
+  private readonly bootTick: number;
+  private currentDirectory: string;
+  private previousDirectory: string;
+  private readonly environment: Map<string, string>;
 
-  constructor(private readonly filesystem: InMemoryFilesystem) {}
+  constructor(
+    private readonly filesystem: InMemoryFilesystem,
+    private readonly options: ShellCommandRuntimeOptions,
+  ) {
+    this.bootTick = options.currentTick();
+    this.currentDirectory = options.profile.home;
+    this.previousDirectory = options.profile.home;
+    this.environment = new Map(options.profile.environment);
+  }
 
   get cwd(): string {
     return this.currentDirectory;
+  }
+
+  complete(line: string, cursor: number): ShellCompletionResult {
+    if (
+      line.length > 128 ||
+      !Number.isSafeInteger(cursor) ||
+      cursor < 0 ||
+      cursor > line.length
+    ) {
+      return { candidates: [], cursor, value: line };
+    }
+    const beforeCursor = line.slice(0, cursor);
+    const tokenStart = findCompletionTokenStart(beforeCursor);
+    const token = beforeCursor.slice(tokenStart);
+    if (/['"]/u.test(token)) return { candidates: [], cursor, value: line };
+    const commandPosition = isCommandCompletionPosition(
+      beforeCursor.slice(0, tokenStart),
+    );
+    const candidates = commandPosition
+      ? this.commandCompletions(token)
+      : this.pathCompletions(token);
+    if (candidates.length === 0) return { candidates, cursor, value: line };
+
+    const common = longestCommonPrefix(candidates);
+    const replacement =
+      candidates.length === 1 && !candidates[0]!.endsWith("/")
+        ? `${candidates[0]} `
+        : common;
+    const value = `${line.slice(0, tokenStart)}${replacement}${line.slice(cursor)}`;
+    return {
+      candidates,
+      cursor: tokenStart + replacement.length,
+      value,
+    };
+  }
+
+  get profile(): OsProfile {
+    return this.options.profile;
+  }
+
+  prompt(): string {
+    if (this.options.profile.id === "dos") {
+      return `${this.options.profile.pathDialect.display(this.currentDirectory)}> `;
+    }
+    const display =
+      this.currentDirectory === this.options.profile.home
+        ? "~"
+        : this.options.profile.pathDialect.display(this.currentDirectory);
+    return `${display}$ `;
   }
 
   resolveVariable(name: string, lastExitCode: number): string | undefined {
@@ -73,6 +194,13 @@ export class ShellCommandRuntime {
     if (name === "PWD") return this.currentDirectory;
     if (name === "OLDPWD") return this.previousDirectory;
     return this.environment.get(name);
+  }
+
+  setVariable(name: string, value: string): void {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/u.test(name)) {
+      throw new Error(`${name}: invalid variable name`);
+    }
+    this.environment.set(name, value);
   }
 
   execute(words: readonly string[], stdin: string): ShellCommandResult {
@@ -90,7 +218,8 @@ export class ShellCommandRuntime {
       words = words.slice(assignments);
     }
 
-    const [command = "", ...arguments_] = words;
+    const [requestedCommand = "", ...arguments_] = words;
+    const command = this.canonicalCommand(requestedCommand);
     try {
       const result = this.dispatch(command, arguments_, stdin);
       if (
@@ -106,21 +235,18 @@ export class ShellCommandRuntime {
   }
 
   resolvePath(path: string): string {
-    const expanded =
-      path === "~"
-        ? (this.environment.get("HOME") ?? "/")
-        : path.startsWith("~/")
-          ? `${this.environment.get("HOME") ?? ""}${path.slice(1)}`
-          : path;
     return this.filesystem.normalize(
-      expanded.startsWith("/")
-        ? expanded
-        : `${this.currentDirectory === "/" ? "" : this.currentDirectory}/${expanded}`,
+      this.options.profile.pathDialect.resolve(
+        path,
+        this.currentDirectory,
+        this.environment.get("HOME") ?? this.options.profile.home,
+      ),
     );
   }
 
   isKnownCommand(name: string): boolean {
-    return knownCommands.has(name);
+    const command = this.canonicalCommand(name);
+    return knownCommands.has(command) && this.commandAvailable(command);
   }
 
   private dispatch(
@@ -128,21 +254,32 @@ export class ShellCommandRuntime {
     arguments_: readonly string[],
     stdin: string,
   ): ShellCommandResult {
+    if (command.includes("/") || command.startsWith(".")) {
+      return this.runExecutable([command, ...arguments_]);
+    }
     switch (command) {
       case "help":
         return success(
           [
             "Computer System BusyBox shell",
-            "files: pwd cd ls cat mkdir touch rm cp mv find",
+            "files: pwd cd ls cat mkdir touch rm cp mv find du quota",
             "text: echo printf head tail wc grep sort uniq tr",
             "shell: sh bash source env export unset which type",
-            "system: clear edit shutdown reboot exit true false",
+            "system: clear edit vi shutdown reboot exit true false",
+            "info: whoami id hostname uname date uptime stat df du quota",
+            this.options.profile.id === "dos"
+              ? "hardware: CPU MEM SYSTEMINFO"
+              : "hardware: cpuinfo free /proc/cpuinfo /proc/meminfo",
+            "utility: history time sleep seq cut test [",
+            "toolchain: as cc c++ basic basicc run objdump",
             "syntax: |  >  >>  <  &&  ||  ;  '...'  \"...\"  $VAR  $?",
           ].join("\n") + "\n",
         );
       case "pwd":
         return arguments_.length === 0
-          ? success(`${this.currentDirectory}\n`)
+          ? success(
+              `${this.options.profile.pathDialect.display(this.currentDirectory)}\n`,
+            )
           : usage("pwd");
       case "cd":
         return this.changeDirectory(arguments_);
@@ -188,6 +325,79 @@ export class ShellCommandRuntime {
         return arguments_.length === 1
           ? success(`${parentPath(this.resolvePath(arguments_[0]!))}\n`)
           : usage("dirname <path>");
+      case "whoami":
+        return arguments_.length === 0
+          ? success(`${this.options.profile.username}\n`)
+          : usage("whoami");
+      case "id":
+        return arguments_.length === 0
+          ? success(
+              `uid=0(${this.options.profile.username}) gid=0(${this.options.profile.username}) groups=0(${this.options.profile.username})\n`,
+            )
+          : usage("id");
+      case "hostname":
+        return arguments_.length === 0
+          ? success(`${this.options.computerName}\n`)
+          : usage("hostname");
+      case "uname":
+        return this.uname(arguments_);
+      case "date":
+        return this.date(arguments_);
+      case "cpuinfo":
+        return this.options.profile.id === "linux"
+          ? this.cpuInfo(arguments_)
+          : this.commandNotFound(command);
+      case "free":
+        return this.options.profile.id === "linux"
+          ? this.freeMemory(arguments_)
+          : this.commandNotFound(command);
+      case "cpu":
+        return this.options.profile.id === "dos"
+          ? this.dosCpu(arguments_)
+          : this.commandNotFound(command);
+      case "mem":
+        return this.options.profile.id === "dos"
+          ? this.dosMemory(arguments_)
+          : this.commandNotFound(command);
+      case "systeminfo":
+        return this.options.profile.id === "dos"
+          ? this.dosSystemInfo(arguments_)
+          : this.commandNotFound(command);
+      case "as":
+        return this.compileExecutable("asm", arguments_);
+      case "cc":
+        return this.compileExecutable("c", arguments_);
+      case "c++":
+        return this.compileExecutable("cpp", arguments_);
+      case "basicc":
+        return this.compileExecutable("basic", arguments_);
+      case "basic":
+        return this.runBasic(arguments_);
+      case "run":
+        return this.runExecutable(arguments_);
+      case "objdump":
+        return this.objectDump(arguments_);
+      case "uptime":
+        return arguments_.length === 0
+          ? success(`${this.uptimeSeconds().toFixed(2)} seconds\n`)
+          : usage("uptime");
+      case "sleep":
+        return this.sleep(arguments_);
+      case "seq":
+        return this.sequence(arguments_);
+      case "cut":
+        return this.cut(arguments_, stdin);
+      case "stat":
+        return this.stat(arguments_);
+      case "df":
+        return this.diskFree(arguments_);
+      case "du":
+        return this.diskUsage(arguments_);
+      case "quota":
+        return this.quota(arguments_);
+      case "test":
+      case "[":
+        return this.test(command, arguments_);
       case "env":
       case "export":
         return this.environmentCommand(command, arguments_);
@@ -215,16 +425,13 @@ export class ShellCommandRuntime {
       case "exit":
         return success("logout\n", { action: "shutdown" });
       case "edit":
+      case "vi":
       case "sh":
       case "bash":
       case "source":
         return failure(command, "internal dispatch is unavailable", 125);
       default:
-        return {
-          exitCode: 127,
-          stderr: `bash: ${command}: command not found\n`,
-          stdout: "",
-        };
+        return this.commandNotFound(command);
     }
   }
 
@@ -261,7 +468,8 @@ export class ShellCommandRuntime {
     const sections: string[] = [];
     for (const [index, path] of paths.entries()) {
       const resolved = this.resolvePath(path);
-      if (!this.filesystem.exists(resolved)) {
+      const resolvedDevice = this.virtualDevice(resolved);
+      if (!this.filesystem.exists(resolved) && resolvedDevice === undefined) {
         return failure("ls", `${path}: no such file or directory`);
       }
       const names = this.filesystem.isDirectory(resolved)
@@ -269,6 +477,16 @@ export class ShellCommandRuntime {
             .list(resolved)
             .filter((name) => all || !name.startsWith("."))
         : [baseName(resolved)];
+      if (this.filesystem.isDirectory(resolved)) {
+        for (const devicePath of this.virtualDevicePaths()) {
+          if (parentPath(devicePath) !== resolved) continue;
+          const name = baseName(devicePath);
+          if ((all || !name.startsWith(".")) && !names.includes(name)) {
+            names.push(name);
+          }
+        }
+        names.sort();
+      }
       const prefix = paths.length > 1 ? `${path}:\n` : "";
       const listing = long
         ? names
@@ -276,13 +494,17 @@ export class ShellCommandRuntime {
               const target = this.filesystem.isDirectory(resolved)
                 ? joinPath(resolved, name)
                 : resolved;
-              const kind = this.filesystem.isDirectory(target)
-                ? "dir "
-                : "file";
-              return `${kind} ${String(this.filesystem.getSize(target)).padStart(7)} ${name}`;
+              const device = this.virtualDevice(target) !== undefined;
+              const kind = device
+                ? "dev "
+                : this.filesystem.isDirectory(target)
+                  ? "dir "
+                  : "file";
+              const size = device ? 0 : this.filesystem.getSize(target);
+              return `${kind} ${String(size).padStart(7)} ${this.displayName(name)}`;
             })
             .join("\n")
-        : names.join("  ");
+        : names.map((name) => this.displayName(name)).join("  ");
       sections.push(`${index > 0 ? "\n" : ""}${prefix}${listing}`);
     }
     return success(sections.join("") + "\n");
@@ -303,8 +525,7 @@ export class ShellCommandRuntime {
     const sources = paths.length === 0 ? ["-"] : paths;
     let output = "";
     for (const path of sources) {
-      output +=
-        path === "-" ? stdin : this.filesystem.readFile(this.resolvePath(path));
+      output += path === "-" ? stdin : this.readFile(path);
     }
     if (numbered) {
       output = splitLines(output)
@@ -440,8 +661,7 @@ export class ShellCommandRuntime {
     const sources = parsed.paths.length === 0 ? ["-"] : parsed.paths;
     const sections: string[] = [];
     for (const path of sources) {
-      const input =
-        path === "-" ? stdin : this.filesystem.readFile(this.resolvePath(path));
+      const input = path === "-" ? stdin : this.readFile(path);
       const lines = splitLines(input);
       const selected =
         command === "head"
@@ -478,8 +698,7 @@ export class ShellCommandRuntime {
     }
     const sources = paths.length === 0 ? ["-"] : paths;
     const rows = sources.map((path) => {
-      const input =
-        path === "-" ? stdin : this.filesystem.readFile(this.resolvePath(path));
+      const input = path === "-" ? stdin : this.readFile(path);
       const values = [
         ...(showLines ? [countOccurrences(input, "\n")] : []),
         ...(showWords
@@ -517,8 +736,7 @@ export class ShellCommandRuntime {
     const sources = paths.length === 0 ? ["-"] : paths;
     const matches: string[] = [];
     for (const path of sources) {
-      const input =
-        path === "-" ? stdin : this.filesystem.readFile(this.resolvePath(path));
+      const input = path === "-" ? stdin : this.readFile(path);
       for (const [index, line] of splitLines(input).entries()) {
         const candidate = ignoreCase ? line.toLocaleLowerCase() : line;
         if (candidate.includes(pattern) === invert) continue;
@@ -677,10 +895,15 @@ export class ShellCommandRuntime {
     if (arguments_.length === 0) return usage(`${command} <command ...>`);
     const output: string[] = [];
     for (const name of arguments_) {
-      if (!knownCommands.has(name))
+      const canonical = this.canonicalCommand(name);
+      if (!knownCommands.has(canonical) || !this.commandAvailable(canonical))
         return status(1, "", `${name}: not found\n`);
       output.push(
-        command === "type" ? `${name} is a shell builtin` : `/bin/${name}`,
+        command === "type"
+          ? `${name} is a shell builtin`
+          : this.options.profile.id === "dos"
+            ? `C:\\COMMAND\\${name.toUpperCase()}.COM`
+            : `/usr/bin/${name}`,
       );
     }
     return success(`${output.join("\n")}\n`);
@@ -689,11 +912,697 @@ export class ShellCommandRuntime {
   private readInputs(paths: readonly string[], stdin: string): string {
     if (paths.length === 0) return stdin;
     return paths
-      .map((path) =>
-        path === "-" ? stdin : this.filesystem.readFile(this.resolvePath(path)),
-      )
+      .map((path) => (path === "-" ? stdin : this.readFile(path)))
       .join("");
   }
+
+  readFile(path: string): string {
+    const resolved = this.resolvePath(path);
+    const device = this.virtualDevice(resolved);
+    return device === undefined
+      ? this.filesystem.readFile(resolved)
+      : device.read();
+  }
+
+  writeFile(path: string, contents: string, append = false): void {
+    const resolved = this.resolvePath(path);
+    const device = this.virtualDevice(resolved);
+    if (device !== undefined) {
+      device.write(contents);
+      return;
+    }
+    if (append) this.filesystem.appendFile(resolved, contents);
+    else this.filesystem.writeFile(resolved, contents);
+  }
+
+  currentTick(): number {
+    return this.options.currentTick();
+  }
+
+  ticksPerSecond(): number {
+    return this.options.ticksPerSecond;
+  }
+
+  canonicalCommand(name: string): string {
+    const normalized =
+      this.options.profile.id === "dos" ? name.toLowerCase() : name;
+    return this.options.profile.aliases.get(normalized) ?? normalized;
+  }
+
+  private displayName(name: string): string {
+    return this.options.profile.id === "dos" ? name.toUpperCase() : name;
+  }
+
+  private commandCompletions(prefix: string): string[] {
+    return [
+      ...new Set([
+        ...shellCommandNames,
+        ...this.options.profile.aliases.keys(),
+      ]),
+    ]
+      .filter(
+        (name) =>
+          name.startsWith(prefix) &&
+          this.commandAvailable(this.canonicalCommand(name)),
+      )
+      .sort()
+      .slice(0, 64);
+  }
+
+  private pathCompletions(token: string): string[] {
+    const slash = token.lastIndexOf("/");
+    const directoryToken = slash < 0 ? "." : token.slice(0, slash) || "/";
+    const displayPrefix = slash < 0 ? "" : token.slice(0, slash + 1);
+    const namePrefix = slash < 0 ? token : token.slice(slash + 1);
+    let resolvedDirectory: string;
+    let names: string[];
+    try {
+      resolvedDirectory = this.resolvePath(directoryToken);
+      names = [...this.filesystem.list(resolvedDirectory)];
+    } catch {
+      return [];
+    }
+    for (const devicePath of this.virtualDevicePaths()) {
+      if (parentPath(devicePath) === resolvedDirectory)
+        names.push(baseName(devicePath));
+    }
+    return [...new Set(names)]
+      .filter((name) => name.startsWith(namePrefix))
+      .sort()
+      .slice(0, 64)
+      .map((name) => {
+        const resolved = joinPath(resolvedDirectory, name);
+        const suffix =
+          this.filesystem.exists(resolved) &&
+          this.filesystem.isDirectory(resolved)
+            ? "/"
+            : "";
+        return `${displayPrefix}${name}${suffix}`;
+      });
+  }
+
+  private commandAvailable(command: string): boolean {
+    if (command === "cpuinfo" || command === "free")
+      return this.options.profile.id === "linux";
+    if (command === "cpu" || command === "mem" || command === "systeminfo")
+      return this.options.profile.id === "dos";
+    return true;
+  }
+
+  private commandNotFound(command: string): ShellCommandResult {
+    return {
+      exitCode: 127,
+      stderr:
+        this.options.profile.id === "dos"
+          ? "Bad command or file name\r\n"
+          : `bash: ${command}: command not found\n`,
+      stdout: "",
+    };
+  }
+
+  private virtualDevice(path: string): VirtualDevice | undefined {
+    const configured = this.options.profile.virtualDevices.get(path);
+    if (configured !== undefined) return configured;
+    if (this.options.profile.id !== "linux") return undefined;
+    if (path === "/proc/cpuinfo")
+      return this.readOnlyDevice(path, () => this.linuxCpuInfo());
+    if (path === "/proc/meminfo")
+      return this.readOnlyDevice(path, () => this.linuxMemoryInfo());
+    return undefined;
+  }
+
+  private virtualDevicePaths(): readonly string[] {
+    return [
+      ...this.options.profile.virtualDevices.keys(),
+      ...(this.options.profile.id === "linux"
+        ? ["/proc/cpuinfo", "/proc/meminfo"]
+        : []),
+    ];
+  }
+
+  private readOnlyDevice(path: string, read: () => string): VirtualDevice {
+    return {
+      path,
+      read,
+      write: (): never => {
+        throw new Error(`${path}: read-only virtual file`);
+      },
+    };
+  }
+
+  private linuxCpuInfo(): string {
+    return (
+      [
+        "processor\t: 0",
+        "model name\t: Computer System 486DX",
+        `clock\t\t: ${formatClock(cs486NominalClockHz)}`,
+      ].join("\n") + "\n"
+    );
+  }
+
+  private linuxMemoryInfo(): string {
+    const total = this.options.hardware.memoryBytes;
+    const used = this.usedMemoryBytes();
+    return (
+      [
+        `MemTotal: ${total} B`,
+        `MemUsed:  ${used} B`,
+        `MemFree:  ${total - used} B`,
+      ].join("\n") + "\n"
+    );
+  }
+
+  private usedMemoryBytes(): number {
+    return Math.min(
+      this.options.hardware.memoryBytes,
+      Math.max(0, Math.floor(this.options.memoryUsageBytes())),
+    );
+  }
+
+  private uptimeSeconds(): number {
+    return (
+      (this.options.currentTick() - this.bootTick) / this.options.ticksPerSecond
+    );
+  }
+
+  private uname(arguments_: readonly string[]): ShellCommandResult {
+    if (
+      arguments_.length > 1 ||
+      (arguments_.length === 1 && arguments_[0] !== "-a")
+    ) {
+      return usage("uname [-a]");
+    }
+    const system =
+      this.options.profile.id === "dos"
+        ? `Computer System DOS 0.1 [CPU ${formatClock(
+            cs486NominalClockHz,
+          )}, Memory ${formatBinaryBytes(this.options.hardware.memoryBytes)}]`
+        : "Computer System OS 0.3";
+    return success(
+      arguments_[0] === "-a"
+        ? `${system} ${this.options.computerName} sandbox-vm\n`
+        : `${system}\n`,
+    );
+  }
+
+  private date(arguments_: readonly string[]): ShellCommandResult {
+    const parsed = parseDateArguments(arguments_);
+    if (parsed === undefined)
+      return usage("date [--real|--game|--virtual] [+FORMAT]");
+
+    if (parsed.mode === "game") {
+      const game = this.options.clock.currentGameTime();
+      if (
+        !Number.isFinite(game.absoluteTicks) ||
+        !Number.isFinite(game.timeOfDay)
+      ) {
+        return failure("date", "game clock is unavailable", 1);
+      }
+      const day = Math.floor(Math.max(0, game.absoluteTicks) / 24_000) + 1;
+      const timeOfDay =
+        ((Math.floor(game.timeOfDay) % 24_000) + 24_000) % 24_000;
+      const seconds = Math.floor(((timeOfDay + 6_000) % 24_000) * 3.6);
+      const date = new Date(Date.UTC(2000, 0, day, 0, 0, seconds));
+      if (parsed.format === undefined) {
+        return success(
+          `Minecraft day ${String(day)} ${formatDate(date, "%H:%M:%S")}\n`,
+        );
+      }
+      return success(`${formatDate(date, parsed.format)}\n`);
+    }
+
+    const milliseconds =
+      parsed.mode === "real"
+        ? this.options.clock.currentWallTimeMilliseconds()
+        : Date.UTC(2000, 0, 1) +
+          (this.options.currentTick() / this.options.ticksPerSecond) * 1_000;
+    const date = new Date(milliseconds);
+    if (!Number.isFinite(date.getTime())) {
+      return failure("date", `${parsed.mode} clock is unavailable`, 1);
+    }
+    if (parsed.format === undefined) return success(`${date.toISOString()}\n`);
+    return success(`${formatDate(date, parsed.format)}\n`);
+  }
+
+  private sleep(arguments_: readonly string[]): ShellCommandResult {
+    if (arguments_.length !== 1) return usage("sleep <seconds>");
+    const seconds = Number(arguments_[0]);
+    if (!Number.isFinite(seconds) || seconds < 0 || seconds > 3_600) {
+      return failure("sleep", "seconds must be between 0 and 3600", 2);
+    }
+    return {
+      exitCode: 0,
+      stderr: "",
+      stdout: "",
+      sleepTicks: Math.ceil(seconds * this.options.ticksPerSecond),
+    };
+  }
+
+  private sequence(arguments_: readonly string[]): ShellCommandResult {
+    if (arguments_.length < 1 || arguments_.length > 3)
+      return usage("seq [first [step]] last");
+    const values = arguments_.map(Number);
+    if (values.some((value) => !Number.isFinite(value)))
+      return failure("seq", "arguments must be numbers", 2);
+    const first = values.length === 1 ? 1 : values[0]!;
+    const step = values.length === 3 ? values[1]! : 1;
+    const last = values.at(-1)!;
+    if (step === 0) return failure("seq", "step must not be zero", 2);
+    const count = Math.floor((last - first) / step) + 1;
+    if (count < 0) return success();
+    if (count > 10_000) return failure("seq", "output limit exceeded");
+    return success(
+      `${Array.from({ length: count }, (_, index) => first + index * step).join("\n")}\n`,
+    );
+  }
+
+  private cut(
+    arguments_: readonly string[],
+    stdin: string,
+  ): ShellCommandResult {
+    let delimiter = "\t";
+    let fields: readonly number[] | undefined;
+    const paths: string[] = [];
+    for (let index = 0; index < arguments_.length; index += 1) {
+      const argument = arguments_[index]!;
+      if (argument === "-d") delimiter = arguments_[++index] ?? "";
+      else if (argument === "-f") {
+        const value = arguments_[++index] ?? "";
+        fields = value.split(",").map(Number);
+      } else paths.push(argument);
+    }
+    if (
+      delimiter.length !== 1 ||
+      fields === undefined ||
+      fields.some(
+        (field) => !Number.isSafeInteger(field) || field < 1 || field > 1_000,
+      )
+    ) {
+      return usage("cut [-d delimiter] -f fields [file ...]");
+    }
+    const output = splitLines(this.readInputs(paths, stdin)).map((line) => {
+      const columns = line.split(delimiter);
+      return fields.map((field) => columns[field - 1] ?? "").join(delimiter);
+    });
+    return success(output.length === 0 ? "" : `${output.join("\n")}\n`);
+  }
+
+  private stat(arguments_: readonly string[]): ShellCommandResult {
+    if (arguments_.length !== 1) return usage("stat <path>");
+    const resolved = this.resolvePath(arguments_[0]!);
+    const device = this.virtualDevice(resolved);
+    if (device !== undefined) return success(`device 0 ${arguments_[0]}\n`);
+    if (!this.filesystem.exists(resolved))
+      return failure("stat", `${arguments_[0]}: no such file or directory`);
+    const kind = this.filesystem.isDirectory(resolved) ? "directory" : "file";
+    return success(
+      `${kind} ${this.filesystem.getSize(resolved)} ${arguments_[0]}\n`,
+    );
+  }
+
+  private diskFree(arguments_: readonly string[]): ShellCommandResult {
+    if (arguments_.length > 1) return usage("df [path]");
+    const free = this.filesystem.getFreeSpace();
+    const capacity = this.filesystem.limits.capacityBytes;
+    return success(
+      `Filesystem 1B-blocks Used Available Mounted on\ncomputer-system ${capacity} ${capacity - free} ${free} /\n`,
+    );
+  }
+
+  private compileExecutable(
+    language: Cs486SourceLanguage | "asm",
+    arguments_: readonly string[],
+  ): ShellCommandResult {
+    if (arguments_.length < 1 || arguments_.length > 3)
+      return usage(
+        `${language === "asm" ? "as" : language} <source> [-o output]`,
+      );
+    const sourcePath = arguments_[0]!;
+    const outputIndex = arguments_.indexOf("-o");
+    if (
+      (outputIndex >= 0 && (outputIndex !== 1 || arguments_.length !== 3)) ||
+      (outputIndex < 0 && arguments_.length !== 1)
+    )
+      return usage(
+        `${language === "asm" ? "as" : language} <source> [-o output]`,
+      );
+    const outputPath = outputIndex < 0 ? "a.out" : arguments_[2]!;
+    const source = this.readFile(sourcePath);
+    if (source.length > 128_000)
+      return failure(language, "source limit exceeded");
+    const executable =
+      language === "asm"
+        ? assembleCs486(source)
+        : compileCs486Source(language, source);
+    this.writeFile(outputPath, `CS486\n${JSON.stringify(executable)}`);
+    return {
+      exitCode: 0,
+      stderr: "",
+      stdout: "",
+      workCycles: Math.max(
+        1,
+        Math.ceil(source.length / 4) + executable.instructions.length * 4,
+      ),
+    };
+  }
+
+  private runBasic(arguments_: readonly string[]): ShellCommandResult {
+    if (arguments_.length !== 1) return usage("basic <source.bas>");
+    const source = this.readFile(arguments_[0]!);
+    if (source.length > 128_000)
+      return failure("basic", "source limit exceeded");
+    const executable = compileCs486Source("basic", source);
+    return this.executeCs486(executable, false, Math.ceil(source.length / 4));
+  }
+
+  private runExecutable(arguments_: readonly string[]): ShellCommandResult {
+    const stats = arguments_[0] === "--stats" || arguments_[0] === "-v";
+    const path = arguments_[stats ? 1 : 0];
+    if (path === undefined || arguments_.length !== (stats ? 2 : 1))
+      return usage("run [--stats] <executable>");
+    const encoded = this.readFile(path);
+    if (!encoded.startsWith("CS486\n"))
+      return failure(path, "not a CS486 executable");
+    let executable: unknown;
+    try {
+      executable = JSON.parse(encoded.slice(6));
+    } catch {
+      return failure(path, "invalid executable encoding");
+    }
+    validateCs486Executable(executable);
+    return this.executeCs486(executable, stats);
+  }
+
+  private executeCs486(
+    executable: Cs486Executable,
+    stats: boolean,
+    compileCycles = 0,
+  ): ShellCommandResult {
+    const result = runCs486(executable, {
+      instructionLimit: 10_000,
+      memoryBytes: this.options.hardware.memoryBytes,
+    });
+    const stderr = stats
+      ? `CS486: ${result.executedInstructions} instructions, ${result.cycles} cycles, ${result.state}\n`
+      : result.state === "yielded"
+        ? "CS486: execution limit reached\n"
+        : "";
+    return {
+      exitCode: result.state === "halted" ? 0 : 124,
+      stderr,
+      stdout: result.output,
+      workCycles: Math.min(1_000_000, compileCycles + result.cycles),
+    };
+  }
+
+  private objectDump(arguments_: readonly string[]): ShellCommandResult {
+    if (arguments_.length !== 1) return usage("objdump <executable>");
+    const encoded = this.readFile(arguments_[0]!);
+    if (!encoded.startsWith("CS486\n"))
+      return failure(arguments_[0]!, "not a CS486 executable");
+    const executable: unknown = JSON.parse(encoded.slice(6));
+    validateCs486Executable(executable);
+    return success(
+      executable.instructions
+        .map(
+          (instruction, index) =>
+            `${index.toString(16).padStart(4, "0")} ${JSON.stringify(instruction)}`,
+        )
+        .join("\n") + "\n",
+    );
+  }
+
+  private cpuInfo(arguments_: readonly string[]): ShellCommandResult {
+    return arguments_.length === 0
+      ? success(this.linuxCpuInfo())
+      : usage("cpuinfo");
+  }
+
+  private freeMemory(arguments_: readonly string[]): ShellCommandResult {
+    if (
+      arguments_.length > 1 ||
+      (arguments_[0] !== undefined && arguments_[0] !== "-h")
+    ) {
+      return usage("free [-h]");
+    }
+    const total = this.options.hardware.memoryBytes;
+    const used = this.usedMemoryBytes();
+    const free = total - used;
+    const display = arguments_[0] === "-h" ? formatBinaryBytes : String;
+    return success(
+      `              total        used        free\nMem:     ${display(total).padStart(10)}  ${display(used).padStart(10)}  ${display(free).padStart(10)}\n`,
+    );
+  }
+
+  private dosCpu(arguments_: readonly string[]): ShellCommandResult {
+    if (arguments_.length !== 0) return usage("CPU");
+    return success(
+      [
+        "Computer System 486DX",
+        `Clock speed: ${formatClock(cs486NominalClockHz)}`,
+      ].join("\r\n") + "\r\n",
+    );
+  }
+
+  private dosMemory(arguments_: readonly string[]): ShellCommandResult {
+    const option = arguments_[0]?.toUpperCase();
+    if (
+      arguments_.length > 1 ||
+      (option !== undefined && option !== "/C" && option !== "/P")
+    ) {
+      return usage("MEM [/C | /P]");
+    }
+    if (option === "/P")
+      return failure("MEM", "/P paging is not supported by this terminal", 2);
+    const total = this.options.hardware.memoryBytes;
+    const used = this.usedMemoryBytes();
+    const free = total - used;
+    const lines = [
+      "Computer System DOS Memory",
+      "",
+      `${String(total).padStart(12)} bytes total memory`,
+      `${String(used).padStart(12)} bytes used memory`,
+      `${String(free).padStart(12)} bytes free memory`,
+    ];
+    if (option === "/C")
+      lines.push("", `${String(used).padStart(12)} bytes VM runtime`);
+    return success(`${lines.join("\r\n")}\r\n`);
+  }
+
+  private dosSystemInfo(arguments_: readonly string[]): ShellCommandResult {
+    if (arguments_.length !== 0) return usage("SYSTEMINFO");
+    const capacity = this.filesystem.limits.capacityBytes;
+    const usedDisk = capacity - this.filesystem.getFreeSpace();
+    return success(
+      [
+        `Computer ID: ${this.options.computerName}`,
+        "Operating System: Computer System DOS 0.1",
+        `CPU: Computer System 486DX, ${formatClock(cs486NominalClockHz)}`,
+        `Memory: ${this.options.hardware.memoryBytes} bytes`,
+        `Disk: ${usedDisk} / ${capacity} bytes used`,
+      ].join("\r\n") + "\r\n",
+    );
+  }
+
+  private diskUsage(arguments_: readonly string[]): ShellCommandResult {
+    let includeFiles = false;
+    let summarize = false;
+    const requested: string[] = [];
+    for (const argument of arguments_) {
+      if (argument === "-a") includeFiles = true;
+      else if (argument === "-s") summarize = true;
+      else if (argument.startsWith("-")) {
+        return usage("du [-a|-s] [path ...]");
+      } else requested.push(argument);
+    }
+    if (includeFiles && summarize) return usage("du [-a|-s] [path ...]");
+    if (requested.length > 32) return failure("du", "too many paths", 2);
+
+    const paths = requested.length === 0 ? ["."] : requested;
+    const snapshot = this.filesystem.snapshot();
+    const sizes = new Map<string, number>();
+    for (const [file, contents] of snapshot.files) {
+      const bytes = utf8ByteLength(contents);
+      sizes.set(file, bytes);
+      let directory = parentPath(file);
+      for (;;) {
+        sizes.set(directory, (sizes.get(directory) ?? 0) + bytes);
+        if (directory === "/") break;
+        directory = parentPath(directory);
+      }
+    }
+
+    const output: string[] = [];
+    for (const requestedPath of paths) {
+      const resolved = this.resolvePath(requestedPath);
+      if (!this.filesystem.exists(resolved)) {
+        return failure("du", `${requestedPath}: no such file or directory`);
+      }
+      if (!summarize && this.filesystem.isDirectory(resolved)) {
+        const prefix = resolved === "/" ? "/" : `${resolved}/`;
+        const descendants = snapshot.directories
+          .filter((path) => path.startsWith(prefix))
+          .sort();
+        if (includeFiles) {
+          for (const [file] of snapshot.files) {
+            if (file.startsWith(prefix))
+              output.push(`${sizes.get(file) ?? 0}\t${file}`);
+          }
+        }
+        for (const directory of descendants) {
+          output.push(`${sizes.get(directory) ?? 0}\t${directory}`);
+        }
+      }
+      output.push(`${sizes.get(resolved) ?? 0}\t${requestedPath}`);
+    }
+    return success(`${output.join("\n")}\n`);
+  }
+
+  private quota(arguments_: readonly string[]): ShellCommandResult {
+    if (arguments_.length !== 0) return usage("quota");
+    const capacity = this.filesystem.limits.capacityBytes;
+    const free = this.filesystem.getFreeSpace();
+    const used = capacity - free;
+    return success(
+      `Disk quota: ${used} / ${capacity} bytes used (${free} bytes free)\n` +
+        `Limits: ${this.filesystem.limits.maxFileBytes} bytes/file, ${this.filesystem.limits.maxEntries} entries\n`,
+    );
+  }
+
+  private test(
+    command: "[" | "test",
+    originalArguments: readonly string[],
+  ): ShellCommandResult {
+    const arguments_ = [...originalArguments];
+    if (command === "[") {
+      if (arguments_.pop() !== "]") return failure("[", "missing ]", 2);
+    }
+    if (arguments_.length === 0) return status(1);
+    if (arguments_.length === 1)
+      return status(arguments_[0]!.length === 0 ? 1 : 0);
+    if (arguments_.length === 2) {
+      const [operator, value = ""] = arguments_;
+      if (operator === "-n") return status(value.length > 0 ? 0 : 1);
+      if (operator === "-z") return status(value.length === 0 ? 0 : 1);
+      const path = this.resolvePath(value);
+      if (operator === "-e")
+        return status(
+          this.filesystem.exists(path) || this.virtualDevice(path) !== undefined
+            ? 0
+            : 1,
+        );
+      if (operator === "-f")
+        return status(
+          this.filesystem.exists(path) && !this.filesystem.isDirectory(path)
+            ? 0
+            : 1,
+        );
+      if (operator === "-d")
+        return status(this.filesystem.isDirectory(path) ? 0 : 1);
+      if (operator === "-s")
+        return status(
+          this.filesystem.exists(path) && this.filesystem.getSize(path) > 0
+            ? 0
+            : 1,
+        );
+    }
+    if (arguments_.length === 3) {
+      const [left = "", operator, right = ""] = arguments_;
+      if (operator === "=" || operator === "==")
+        return status(left === right ? 0 : 1);
+      if (operator === "!=") return status(left !== right ? 0 : 1);
+      const leftNumber = Number(left);
+      const rightNumber = Number(right);
+      if (!Number.isFinite(leftNumber) || !Number.isFinite(rightNumber))
+        return failure("test", "integer expression expected", 2);
+      const comparisons = new Map<string, boolean>([
+        ["-eq", leftNumber === rightNumber],
+        ["-ne", leftNumber !== rightNumber],
+        ["-lt", leftNumber < rightNumber],
+        ["-le", leftNumber <= rightNumber],
+        ["-gt", leftNumber > rightNumber],
+        ["-ge", leftNumber >= rightNumber],
+      ]);
+      if (comparisons.has(operator ?? ""))
+        return status(comparisons.get(operator ?? "") ? 0 : 1);
+    }
+    return failure("test", "unsupported expression", 2);
+  }
+}
+
+type DateMode = "game" | "real" | "virtual";
+
+function findCompletionTokenStart(value: string): number {
+  for (let index = value.length - 1; index >= 0; index -= 1) {
+    if (/\s|[;&|<>]/u.test(value[index] ?? "")) return index + 1;
+  }
+  return 0;
+}
+
+function isCommandCompletionPosition(prefix: string): boolean {
+  const separator = Math.max(
+    prefix.lastIndexOf(";"),
+    prefix.lastIndexOf("|"),
+    prefix.lastIndexOf("&"),
+  );
+  return prefix.slice(separator + 1).trim().length === 0;
+}
+
+function longestCommonPrefix(values: readonly string[]): string {
+  let prefix = values[0] ?? "";
+  for (const value of values.slice(1)) {
+    let length = 0;
+    while (
+      length < prefix.length &&
+      length < value.length &&
+      prefix[length] === value[length]
+    ) {
+      length += 1;
+    }
+    prefix = prefix.slice(0, length);
+    if (prefix.length === 0) break;
+  }
+  return prefix;
+}
+
+function parseDateArguments(
+  arguments_: readonly string[],
+): { readonly format?: string; readonly mode: DateMode } | undefined {
+  if (arguments_.length > 2) return undefined;
+  let mode: DateMode = "real";
+  let format: string | undefined;
+  for (const argument of arguments_) {
+    if (argument === "--real") mode = "real";
+    else if (argument === "--game") mode = "game";
+    else if (argument === "--virtual") mode = "virtual";
+    else if (argument.startsWith("+") && format === undefined)
+      format = argument.slice(1);
+    else return undefined;
+  }
+  return { format, mode };
+}
+
+function formatDate(date: Date, format: string): string {
+  return format.replace(/%[sYmdHMS%]/gu, (specifier) => {
+    switch (specifier) {
+      case "%s":
+        return String(Math.floor(date.getTime() / 1_000));
+      case "%Y":
+        return String(date.getUTCFullYear()).padStart(4, "0");
+      case "%m":
+        return String(date.getUTCMonth() + 1).padStart(2, "0");
+      case "%d":
+        return String(date.getUTCDate()).padStart(2, "0");
+      case "%H":
+        return String(date.getUTCHours()).padStart(2, "0");
+      case "%M":
+        return String(date.getUTCMinutes()).padStart(2, "0");
+      case "%S":
+        return String(date.getUTCSeconds()).padStart(2, "0");
+      default:
+        return "%";
+    }
+  });
 }
 
 function success(
@@ -834,6 +1743,20 @@ function utf8Size(value: string): number {
     size += point <= 0x7f ? 1 : point <= 0x7ff ? 2 : point <= 0xffff ? 3 : 4;
   }
   return size;
+}
+
+function formatClock(clockHz: number): string {
+  if (clockHz >= 1_000_000)
+    return `${(clockHz / 1_000_000).toFixed(2).replace(/\.00$/u, "")} MHz`;
+  if (clockHz >= 1_000)
+    return `${(clockHz / 1_000).toFixed(2).replace(/\.00$/u, "")} kHz`;
+  return `${clockHz} Hz`;
+}
+
+function formatBinaryBytes(bytes: number): string {
+  if (bytes >= 1_048_576) return `${(bytes / 1_048_576).toFixed(1)} MiB`;
+  if (bytes >= 1_024) return `${(bytes / 1_024).toFixed(1)} KiB`;
+  return `${bytes} B`;
 }
 
 function globMatches(value: string, pattern: string): boolean {

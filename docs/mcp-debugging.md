@@ -29,6 +29,7 @@ The server uses these optional environment variables:
 | `WEB_COMPANION_PORT`          | `19144`                                             | Web listener TCP port                                          |
 | `WEB_COMPANION_PUBLIC_HOST`   | Listener host                                       | Reachable host used in generated HTTP links                    |
 | `WEB_COMPANION_PUBLIC_ORIGIN` | unset                                               | Complete HTTPS origin advertised behind a reverse proxy        |
+| `WEB_COMPANION_AUTO_OPEN`     | `0`                                                 | Open each loopback handoff once in the host's default browser  |
 
 No API key or `.env` file is required.
 
@@ -67,11 +68,27 @@ URL is already bound to a `c-xxxxxx` Computer identity; the companion root page
 cannot select an arbitrary Computer and the bearer token is never accepted for a
 different identity.
 
+For a one-action local workflow, set `WEB_COMPANION_AUTO_OPEN=1` before starting
+the companion. A Pocket Computer use then opens the freshly minted `/p/...` URL
+in the host's default browser. The launch does not use a command shell, is
+serialized through a bounded queue, times out explicitly, and runs at most once
+per handoff. Automatic opening is blocked unless both the listener and published
+origin are loopback. The in-game URL is still emitted before the launch attempt,
+so disabled, blocked, timed-out, and failed launches retain the normal fallback.
+
 The browser input is overlaid at the terminal cursor rather than rendered as a
 separate form field. Physical Enter sends one bounded `terminal_line` event,
 Ctrl+C invokes the interrupt endpoint, and Up/Down navigate browser-local
 history. Closing the page, session expiry, player disconnect, BDS stop, and
 relay failure each have an explicit finalization path.
+
+When a vi status row is present, the browser prevents the semantic textarea from
+editing locally and coalesces physical keys into batches of at most 16. The HTTP
+companion and Bedrock bridge validate a hard maximum of 32 keys and 180 encoded
+characters before queuing one `terminal_keys` VM event. Paste becomes editor
+keys (newlines become Enter) and remains capped by the 1,024-key browser queue;
+the next terminal snapshot explicitly returns to ordinary line mode after vi
+closes.
 
 The first browser attached to a Computer receives `CONTROL`. Later browser
 sessions are `VIEW ONLY` and cannot send a line or interrupt until **Take
@@ -97,6 +114,9 @@ publish the plain HTTP listener directly.
 - `Verify:` Run `npm run test:web`. `Expect:` One-use handoff, authentication,
   same-origin command submission, terminal streaming, session limits, and
   explicit close behavior pass.
+- `Verify:` Set `WEB_COMPANION_AUTO_OPEN=1`, start the loopback companion, and
+  use one Pocket Computer. `Expect:` The host default browser opens the minted
+  handoff exactly once; the same fallback URL remains visible in Minecraft.
 - `Verify:` Open two one-use links for the same Computer, attempt viewer input,
   choose **Take control**, and retry from both browsers. `Expect:` The second
   session begins `VIEW ONLY`; its first input is rejected; takeover promotes it,

@@ -5,7 +5,8 @@ import { TransactionalPagedStore } from "./transactionalPagedStore.js";
 
 export interface DynamicPropertyOwner {
   getDynamicProperty(identifier: string): unknown;
-  setDynamicProperty(identifier: string, value: string): void;
+  getDynamicPropertyIds?(): string[];
+  setDynamicProperty(identifier: string, value: string | undefined): void;
 }
 
 export interface DynamicPropertyComputerRepositoryOptions {
@@ -38,6 +39,7 @@ export class DynamicPropertyComputerRepository implements ComputerSnapshotReposi
     requireComputerId(computerId);
     return new TransactionalPagedStore(
       {
+        delete: (key): void => this.owner.setDynamicProperty(key, undefined),
         get: (key): string | undefined => {
           const value = this.owner.getDynamicProperty(key);
           if (value === undefined) return undefined;
@@ -46,6 +48,10 @@ export class DynamicPropertyComputerRepository implements ComputerSnapshotReposi
           }
           return value;
         },
+        keys: (prefix): readonly string[] =>
+          this.owner
+            .getDynamicPropertyIds?.()
+            .filter((key) => key.startsWith(prefix)) ?? [],
         set: (key, value): void => {
           this.owner.setDynamicProperty(key, value);
         },
@@ -68,6 +74,14 @@ function isComputerSnapshot(value: unknown): value is ComputerSnapshot {
     candidate.filesystem !== null &&
     typeof candidate.terminal === "object" &&
     candidate.terminal !== null &&
-    typeof candidate.redstoneOutputMask === "number"
+    typeof candidate.redstoneOutputMask === "number" &&
+    (candidate.hardware === undefined ||
+      (typeof candidate.hardware === "object" &&
+        candidate.hardware !== null &&
+        Number.isSafeInteger(candidate.hardware.clockHz) &&
+        Number.isSafeInteger(candidate.hardware.memoryBytes))) &&
+    (candidate.osProfile === undefined ||
+      candidate.osProfile === "linux" ||
+      candidate.osProfile === "dos")
   );
 }

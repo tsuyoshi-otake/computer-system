@@ -10,14 +10,14 @@ describe("default Computer System OS boot", (): void => {
     expect(runtime.powerOn(record.computerId).outcome).toBe("accepted");
     runtime.runTick();
     expect(record.terminal.line(1).trimEnd()).toBe(
-      "Computer System OS 0.2 (tty1)",
+      "Computer System OS 0.3 (tty1)",
     );
     expect(record.terminal.line(3).trimEnd()).toBe("~$");
     expect(record.terminal.cell(1, 1).foreground).toBe(0);
     expect(record.terminal.cell(1, 3).foreground).toBe(0);
     expect(record.lifecycle.state).toEqual({
       kind: "waiting_event",
-      filter: "terminal_line",
+      filter: undefined,
     });
     runtime.queueEvent(record.computerId, "terminal_line", "edit /startup.py");
     runtime.runTick();
@@ -43,7 +43,9 @@ describe("default Computer System OS boot", (): void => {
     runtime.queueEvent(record.computerId, "terminal_line", "cat count");
     runtime.runTick();
 
-    expect(record.filesystem.readFile("/count")).toBe("      2\n");
+    expect(record.filesystem.readFile("/home/computer/count")).toBe(
+      "      2\n",
+    );
     const rows = record.terminal.snapshot().rows;
     expect(`${rows[2]!.slice(3)}${rows[3]!}`.slice(0, command.length)).toBe(
       command,
@@ -53,7 +55,42 @@ describe("default Computer System OS boot", (): void => {
     ).toBe(true);
     expect(record.lifecycle.state).toEqual({
       kind: "waiting_event",
-      filter: "terminal_line",
+      filter: undefined,
+    });
+  });
+
+  it("edits and saves vi content through a bounded terminal key batch", (): void => {
+    const record = new ComputerRecord("computer-32", "standard");
+    const runtime = new ComputerRuntime();
+    runtime.register(record);
+    runtime.powerOn(record.computerId);
+    runtime.runTick();
+
+    runtime.queueEvent(record.computerId, "terminal_line", "vi demo.py");
+    runtime.runTick();
+    expect(record.terminal.line(1)).toContain("VI  /home/computer/demo.py");
+    runtime.queueEvent(
+      record.computerId,
+      "terminal_keys",
+      JSON.stringify([
+        "i",
+        "p",
+        "a",
+        "s",
+        "s",
+        "Escape",
+        ":",
+        "w",
+        "q",
+        "Enter",
+      ]),
+    );
+    runtime.runTick();
+
+    expect(record.filesystem.readFile("/home/computer/demo.py")).toBe("pass");
+    expect(record.lifecycle.state).toEqual({
+      kind: "waiting_event",
+      filter: undefined,
     });
   });
 });

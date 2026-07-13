@@ -12,6 +12,124 @@ afterEach(async () => {
 });
 
 describe("Web companion HTTP server", () => {
+  it("keeps browser opening disabled by default", async () => {
+    const bds = new FakeBds();
+    const launches = [];
+    const server = new WebCompanionServer({
+      bds,
+      port: 0,
+      browserOpener: async (url) => launches.push(url),
+    });
+    servers.push(server);
+    await server.start();
+
+    bds.log(
+      'CS_WEB_SESSION_REQUEST {"requestId":"r1-1","playerId":"player-1","computerId":"c-000001"}',
+    );
+    await until(() => bds.commands.length === 1);
+
+    expect(launches).toEqual([]);
+    expect(server.status().browserAutoOpen).toMatchObject({
+      enabled: false,
+      eligible: false,
+      state: "disabled",
+      attempts: 0,
+    });
+  });
+
+  it("opens each loopback handoff once when explicitly enabled", async () => {
+    const bds = new FakeBds();
+    const launches = [];
+    const server = new WebCompanionServer({
+      bds,
+      port: 0,
+      autoOpenBrowser: true,
+      browserOpener: async (url) => launches.push(url),
+    });
+    servers.push(server);
+    await server.start();
+
+    bds.log(
+      'CS_WEB_SESSION_REQUEST {"requestId":"r1-1","playerId":"player-1","computerId":"c-000001"}',
+    );
+    await until(() => launches.length === 1);
+    const handoffUrl = bds.commands[0].split(" ").at(-1);
+
+    expect(launches).toEqual([handoffUrl]);
+    expect(server.status().browserAutoOpen).toMatchObject({
+      enabled: true,
+      eligible: true,
+      state: "opened",
+      attempts: 1,
+      opened: 1,
+      failed: 0,
+    });
+  });
+
+  it("blocks non-loopback browser opening while preserving the handoff", async () => {
+    const bds = new FakeBds();
+    const launches = [];
+    const server = new WebCompanionServer({
+      bds,
+      host: "127.0.0.1",
+      port: 0,
+      publicHost: "192.0.2.1",
+      autoOpenBrowser: true,
+      browserOpener: async (url) => launches.push(url),
+    });
+    servers.push(server);
+    await server.start();
+
+    bds.log(
+      'CS_WEB_SESSION_REQUEST {"requestId":"r1-1","playerId":"player-1","computerId":"c-000001"}',
+    );
+    await until(() => bds.commands.length === 1);
+
+    expect(launches).toEqual([]);
+    expect(bds.commands[0]).toContain("http://192.0.2.1:");
+    expect(server.status().browserAutoOpen).toMatchObject({
+      enabled: true,
+      eligible: false,
+      state: "blocked",
+      reason: "origin_not_loopback",
+      attempts: 0,
+    });
+  });
+
+  it("keeps the chat handoff usable when browser opening fails", async () => {
+    const bds = new FakeBds();
+    const diagnostics = [];
+    const server = new WebCompanionServer({
+      bds,
+      port: 0,
+      autoOpenBrowser: true,
+      browserOpener: async () => {
+        throw new Error("browser unavailable");
+      },
+      writeDiagnostic: (line) => diagnostics.push(line),
+    });
+    servers.push(server);
+    await server.start();
+
+    bds.log(
+      'CS_WEB_SESSION_REQUEST {"requestId":"r1-1","playerId":"player-1","computerId":"c-000001"}',
+    );
+    await until(() => server.status().browserAutoOpen.failed === 1);
+    const handoffUrl = bds.commands[0].split(" ").at(-1);
+
+    expect((await fetch(handoffUrl, { redirect: "manual" })).status).toBe(302);
+    expect(server.status().browserAutoOpen).toMatchObject({
+      state: "failed",
+      attempts: 1,
+      opened: 0,
+      failed: 1,
+      lastError: "browser unavailable",
+    });
+    expect(diagnostics).toEqual([
+      "Web companion browser launch failed: browser unavailable",
+    ]);
+  });
+
   it("issues a one-use handoff and relays authenticated terminal input", async () => {
     const bds = new FakeBds();
     const server = new WebCompanionServer({
@@ -60,6 +178,73 @@ describe("Web companion HTTP server", () => {
     expect(bds.commands.at(-1)).toMatch(
       /^scriptevent computer_system:web-input [A-Za-z0-9_-]+ line hello%20world$/u,
     );
+
+    const keys = await fetch(`${status.origin}/api/input`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+        Origin: status.origin,
+      },
+      body: JSON.stringify({ kind: "keys", value: ["i", "x", "Escape"] }),
+    });
+    expect(keys.status).toBe(202);
+    expect(bds.commands.at(-1)).toMatch(
+      /^scriptevent computer_system:web-input [A-Za-z0-9_-]+ keys %5B%22i%22%2C%22x%22%2C%22Escape%22%5D$/u,
+    );
+
+    const resize = await fetch(`${status.origin}/api/resize`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+        Origin: status.origin,
+      },
+      body: JSON.stringify({ width: 120, height: 40 }),
+    });
+    expect(resize.status).toBe(202);
+    expect(bds.commands.at(-1)).toMatch(
+      /^scriptevent computer_system:web-resize [A-Za-z0-9_-]+ 120 40$/u,
+    );
+
+    const completionRequest = fetch(`${status.origin}/api/complete`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+        Origin: status.origin,
+      },
+      body: JSON.stringify({ value: "who", cursor: 3 }),
+    });
+    await until(() => bds.commands.at(-1)?.includes("web-complete"));
+    const completionCommand = bds.commands.at(-1).split(" ");
+    bds.log(
+      `CS_WEB_COMPLETION ${JSON.stringify({
+        candidates: ["whoami"],
+        cursor: 7,
+        requestId: completionCommand[3],
+        sessionId: completionCommand[2],
+        value: "whoami ",
+      })}`,
+    );
+    const completion = await completionRequest;
+    expect(completion.status).toBe(200);
+    expect(await completion.json()).toEqual({
+      candidates: ["whoami"],
+      cursor: 7,
+      value: "whoami ",
+    });
+
+    const invalidKeys = await fetch(`${status.origin}/api/input`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+        Origin: status.origin,
+      },
+      body: JSON.stringify({ kind: "keys", value: Array(33).fill("x") }),
+    });
+    expect(invalidKeys.status).toBe(400);
   });
 
   it("accepts snapshots only for issued sessions and blocks cross-origin writes", async () => {
