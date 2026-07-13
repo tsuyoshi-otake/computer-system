@@ -1,15 +1,20 @@
 import {
+  ComputerIdAllocator,
   ComputerIdentityRegistry,
-  ComputerIdSequence,
+  type ComputerIdRandom,
   type ComputerFamily,
   type ComputerIdentityObservation,
   type IdentityResult,
 } from "../../domain/computer/identity.js";
 
 export interface ComputerIdentitySnapshot {
-  readonly schema: 1;
-  readonly nextId: number;
+  readonly schema: 2;
   readonly observations: readonly ComputerIdentityObservation[];
+}
+
+export interface PersistentComputerIdentityServiceOptions {
+  readonly maximumAllocationAttempts?: number;
+  readonly random?: ComputerIdRandom;
 }
 
 export interface ComputerIdentityRepository {
@@ -28,14 +33,20 @@ export type IdentityPlacementResult =
 
 export class PersistentComputerIdentityService {
   private readonly registry = new ComputerIdentityRegistry();
-  private sequence = new ComputerIdSequence();
+  private readonly allocator: ComputerIdAllocator;
 
-  constructor(private readonly repository: ComputerIdentityRepository) {
+  constructor(
+    private readonly repository: ComputerIdentityRepository,
+    options: PersistentComputerIdentityServiceOptions = {},
+  ) {
+    this.allocator = new ComputerIdAllocator(
+      options.random,
+      options.maximumAllocationAttempts,
+    );
     const snapshot = repository.load();
     if (snapshot !== undefined) {
-      if (snapshot.schema !== 1) throw new Error("Unsupported identity schema");
+      if (snapshot.schema !== 2) throw new Error("Unsupported identity schema");
       this.registry.restore(snapshot.observations);
-      this.sequence = new ComputerIdSequence(snapshot.nextId);
     }
   }
 
@@ -44,9 +55,7 @@ export class PersistentComputerIdentityService {
     family: ComputerFamily,
     carriedComputerId?: string,
   ): IdentityPlacementResult {
-    if (carriedComputerId !== undefined)
-      this.sequence.reserve(carriedComputerId);
-    const computerId = carriedComputerId ?? this.sequence.next();
+    const computerId = carriedComputerId ?? this.allocateComputerId();
     const result =
       carriedComputerId === undefined
         ? this.registry.claim({
@@ -75,7 +84,7 @@ export class PersistentComputerIdentityService {
   }
 
   createItem(family: ComputerFamily): IdentityPlacementResult {
-    const computerId = this.sequence.next();
+    const computerId = this.allocateComputerId();
     const result = this.registry.claim({
       computerId,
       family,
@@ -154,10 +163,15 @@ export class PersistentComputerIdentityService {
 
   private snapshot(): ComputerIdentitySnapshot {
     return {
-      schema: 1,
-      nextId: this.sequence.snapshot(),
+      schema: 2,
       observations: this.registry.snapshot(),
     };
+  }
+
+  private allocateComputerId(): string {
+    return this.allocator.next(
+      (computerId) => this.registry.get(computerId) !== undefined,
+    );
   }
 }
 

@@ -62,13 +62,24 @@ Run `npm run dev:bds:web` to start the managed BDS runtime and Web Terminal in a
 single lifecycle. Use a Pocket Computer in Minecraft. The Behavior Pack emits a
 session request, the companion returns a one-use 60-second URL through the
 allowlisted relay, and Minecraft prints that URL to the requesting player.
-Opening the URL connects the browser to the computer's fixed-cell terminal.
+Opening the URL connects the browser to the computer's fixed-cell terminal. The
+URL is already bound to a `c-xxxxxx` Computer identity; the companion root page
+cannot select an arbitrary Computer and the bearer token is never accepted for a
+different identity.
 
 The browser input is overlaid at the terminal cursor rather than rendered as a
 separate form field. Physical Enter sends one bounded `terminal_line` event,
 Ctrl+C invokes the interrupt endpoint, and Up/Down navigate browser-local
 history. Closing the page, session expiry, player disconnect, BDS stop, and
 relay failure each have an explicit finalization path.
+
+The first browser attached to a Computer receives `CONTROL`. Later browser
+sessions are `VIEW ONLY` and cannot send a line or interrupt until **Take
+control** succeeds. Takeover, input, and close operations are serialized through
+a bounded per-Computer queue. The previous writer is demoted when control moves,
+and Bedrock emits `terminal_closed` only after the last browser session for that
+Computer detaches. Sessions attached to different Computers remain independently
+writable.
 
 Loopback use requires no extra published port. LAN clients require TCP 19144 (or
 the configured companion port) in addition to the BDS UDP port. Internet access
@@ -86,6 +97,13 @@ publish the plain HTTP listener directly.
 - `Verify:` Run `npm run test:web`. `Expect:` One-use handoff, authentication,
   same-origin command submission, terminal streaming, session limits, and
   explicit close behavior pass.
+- `Verify:` Open two one-use links for the same Computer, attempt viewer input,
+  choose **Take control**, and retry from both browsers. `Expect:` The second
+  session begins `VIEW ONLY`; its first input is rejected; takeover promotes it,
+  demotes the first session, and only the new writer can submit afterward.
+- `Verify:` Close one of two sessions and then close the final session.
+  `Expect:` The first close does not emit `terminal_closed`; the final close
+  emits exactly one terminal finalization record.
 - `Verify:` Start `npm run dev:bds:web`, use a Pocket Computer, open its link in
   a browser, type `ls` after the visible `~$ ` prompt, and press physical Enter.
   `Expect:` The command appears inline, submits once, and the next prompt

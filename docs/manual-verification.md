@@ -243,3 +243,32 @@ real block-face coordinates and player-facing fallback interaction.
   interaction position.
 - Terminal fallback: `PASS` — a valid Monitor touch opened the Computer System
   terminal UI.
+
+## Web Terminal identity and multi-session checklist
+
+Use a clean managed debug world for this checklist. Identity snapshot schema 2
+does not migrate the previous sequential `computer-N` registry.
+
+1. Run `npm run dev:bds:web`, connect Minecraft, and use a Pocket Computer.
+2. Confirm the printed one-use link opens a Computer whose identity matches
+   `c-[0-9a-hjkmnp-tv-z]{6}` and whose status shows `CONTROL`.
+3. Use the same Pocket Computer again to mint a second link and open it in a
+   second browser session.
+4. Confirm the second session shows `VIEW ONLY`, its inline input is disabled,
+   and the first session remains writable.
+5. Choose **Take control** in the second session. Confirm it changes to
+   `CONTROL`, the first session changes to `VIEW ONLY`, and physical Enter works
+   only in the new writer.
+6. Close either one of the two sessions and confirm the remaining view continues
+   receiving terminal snapshots. Close the last session and confirm exactly one
+   `terminal_closed` record is emitted.
+7. Open a second Computer alongside the first and confirm both Computers can
+   have independent writers.
+8. Repeat at a 390-pixel viewport and confirm the ownership state, takeover
+   action, terminal, and status bar fit without page-level horizontal or
+   vertical scrolling.
+
+`Expect:` Every committed identity is compact and stable, viewer input never
+reaches the VM, takeover has one observable winner, a non-final detach does not
+close the shared terminal, and each Computer owns its writer lease
+independently.

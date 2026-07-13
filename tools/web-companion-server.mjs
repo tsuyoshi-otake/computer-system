@@ -13,6 +13,7 @@ const projectRoot = path.resolve(
 const requestMarker = "CS_WEB_SESSION_REQUEST ";
 const snapshotMarker = "CS_WEB_TERMINAL ";
 const finalMarker = "CS_WEB_SESSION_FINAL ";
+const maximumOperationWaitersPerComputer = 8;
 const assetTypes = new Map([
   [".css", "text/css; charset=utf-8"],
   [".html", "text/html; charset=utf-8"],
@@ -35,6 +36,8 @@ export class WebCompanionServer {
     this.cleanupTimer = undefined;
     this.started = false;
     this.origin = undefined;
+    this.operationDepths = new Map();
+    this.operationTails = new Map();
   }
 
   async start() {
@@ -135,7 +138,7 @@ export class WebCompanionServer {
       const handoffUrl = `${this.origin}/p/${issued.handoffCode}`;
       try {
         await this.bds.runWebRelay(
-          `scriptevent computer_system:web-response ${identity.requestId} ${issued.sessionId} ${handoffUrl}`,
+          `scriptevent computer_system:web-response ${identity.requestId} ${issued.sessionId} ${issued.mode} ${handoffUrl}`,
         );
       } catch (error) {
         this.store.close(issued.sessionId, "relay_failed");
@@ -192,13 +195,17 @@ export class WebCompanionServer {
       writeJson(response, 202, { outcome: "accepted" });
       return;
     }
+    if (request.method === "POST" && url.pathname === "/api/take-control") {
+      requireSameOrigin(request, this.origin);
+      const session = this.store.authenticate(bearerToken(request));
+      const controlled = await this.takeControl(session);
+      writeJson(response, 200, { outcome: "writer", session: controlled });
+      return;
+    }
     if (request.method === "POST" && url.pathname === "/api/close") {
       requireSameOrigin(request, this.origin);
       const session = this.store.authenticate(bearerToken(request));
-      await this.bds.runWebRelay(
-        `scriptevent computer_system:web-close ${session.sessionId}`,
-      );
-      this.store.close(session.sessionId, "browser_closed");
+      await this.closeSession(session);
       writeJson(response, 200, { outcome: "closed" });
       return;
     }
@@ -254,35 +261,93 @@ export class WebCompanionServer {
   }
 
   async relayInput(session, body) {
-    if (body?.kind === "interrupt") {
+    return this.serializeComputerOperation(session.computerId, async () => {
+      const active = this.store.authenticate(session.token);
+      if (!this.store.isWriter(active.sessionId)) {
+        throw new WebSessionError(
+          "read_only",
+          "This browser terminal is view only. Take control before typing.",
+          409,
+        );
+      }
+      if (body?.kind === "interrupt") {
+        await this.bds.runWebRelay(
+          `scriptevent computer_system:web-interrupt ${active.sessionId}`,
+        );
+        return;
+      }
+      if (body?.kind !== "line" || typeof body.value !== "string") {
+        throw new WebSessionError("input", "Input must be a terminal line.");
+      }
+      if (
+        body.value.includes("\0") ||
+        /[\r\n]/u.test(body.value) ||
+        body.value.length > 128
+      ) {
+        throw new WebSessionError(
+          "input",
+          "Terminal input must be one line of at most 128 characters.",
+        );
+      }
+      const encoded = encodeURIComponent(body.value);
+      if (encoded.length > 180) {
+        throw new WebSessionError(
+          "input",
+          "Encoded terminal input is too long for the BDS relay.",
+        );
+      }
       await this.bds.runWebRelay(
-        `scriptevent computer_system:web-interrupt ${session.sessionId}`,
+        `scriptevent computer_system:web-input ${active.sessionId} line ${encoded}`,
       );
-      return;
-    }
-    if (body?.kind !== "line" || typeof body.value !== "string") {
-      throw new WebSessionError("input", "Input must be a terminal line.");
-    }
-    if (
-      body.value.includes("\0") ||
-      /[\r\n]/u.test(body.value) ||
-      body.value.length > 128
-    ) {
+    });
+  }
+
+  async takeControl(session) {
+    return this.serializeComputerOperation(session.computerId, async () => {
+      const active = this.store.authenticate(session.token);
+      if (this.store.isWriter(active.sessionId)) {
+        return this.store.publicSession(active);
+      }
+      await this.bds.runWebRelay(
+        `scriptevent computer_system:web-take-control ${active.sessionId}`,
+      );
+      return this.store.takeControl(active.sessionId);
+    });
+  }
+
+  async closeSession(session) {
+    return this.serializeComputerOperation(session.computerId, async () => {
+      const active = this.store.authenticate(session.token);
+      await this.bds.runWebRelay(
+        `scriptevent computer_system:web-close ${active.sessionId}`,
+      );
+      this.store.close(active.sessionId, "browser_closed");
+    });
+  }
+
+  async serializeComputerOperation(computerId, task) {
+    const depth = (this.operationDepths.get(computerId) ?? 0) + 1;
+    if (depth > maximumOperationWaitersPerComputer) {
       throw new WebSessionError(
-        "input",
-        "Terminal input must be one line of at most 128 characters.",
+        "computer_busy",
+        "Too many terminal operations are waiting for this computer.",
+        429,
       );
     }
-    const encoded = encodeURIComponent(body.value);
-    if (encoded.length > 180) {
-      throw new WebSessionError(
-        "input",
-        "Encoded terminal input is too long for the BDS relay.",
-      );
+    this.operationDepths.set(computerId, depth);
+    const previous = this.operationTails.get(computerId) ?? Promise.resolve();
+    const current = previous.catch(() => undefined).then(task);
+    this.operationTails.set(computerId, current);
+    try {
+      return await current;
+    } finally {
+      const remaining = (this.operationDepths.get(computerId) ?? 1) - 1;
+      if (remaining === 0) this.operationDepths.delete(computerId);
+      else this.operationDepths.set(computerId, remaining);
+      if (this.operationTails.get(computerId) === current) {
+        this.operationTails.delete(computerId);
+      }
     }
-    await this.bds.runWebRelay(
-      `scriptevent computer_system:web-input ${session.sessionId} line ${encoded}`,
-    );
   }
 
   async serveAsset(pathname, response) {

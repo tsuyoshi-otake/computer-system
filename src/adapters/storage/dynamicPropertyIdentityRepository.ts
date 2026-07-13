@@ -37,10 +37,5 @@ export class DynamicPropertyIdentityRepository implements ComputerIdentityReposi
 function isIdentitySnapshot(value: unknown): value is ComputerIdentitySnapshot {
   if (typeof value !== "object" || value === null) return false;
   const candidate = value as Partial<ComputerIdentitySnapshot>;
-  return (
-    candidate.schema === 1 &&
-    Number.isSafeInteger(candidate.nextId) &&
-    (candidate.nextId ?? 0) > 0 &&
-    Array.isArray(candidate.observations)
-  );
+  return candidate.schema === 2 && Array.isArray(candidate.observations);
 }

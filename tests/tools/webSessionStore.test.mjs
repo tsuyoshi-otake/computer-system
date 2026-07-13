@@ -14,7 +14,8 @@ describe("Web terminal session store", () => {
     expect(issued.handoffCode).toMatch(/^[A-Za-z0-9_-]+$/u);
     const consumed = store.consumeHandoff(issued.handoffCode);
     expect(consumed.token).toMatch(/^[A-Za-z0-9_-]{20,}$/u);
-    expect(store.authenticate(consumed.token).computerId).toBe("computer-1");
+    expect(store.authenticate(consumed.token).computerId).toBe("c-000001");
+    expect(consumed.session.mode).toBe("writer");
     expect(() => store.consumeHandoff(issued.handoffCode)).toThrow(
       WebSessionError,
     );
@@ -50,12 +51,70 @@ describe("Web terminal session store", () => {
       store.issue({
         ...identity(),
         requestId: "r1-2",
-        computerId: "computer-2",
+        computerId: "c-000002",
       }),
     ).toThrow(/capacity/u);
     subscription.unsubscribe();
     expect(store.close(issued.sessionId, "test_closed")).toBe(true);
     expect(store.close(issued.sessionId, "duplicate")).toBe(false);
+  });
+
+  it("assigns one writer per computer and serially transfers control", () => {
+    const store = createStore();
+    const first = consume(store, identity());
+    const second = consume(store, {
+      ...identity(),
+      requestId: "r1-2",
+    });
+    const other = consume(store, {
+      ...identity(),
+      requestId: "r1-3",
+      computerId: "c-000002",
+    });
+    const firstListener = vi.fn();
+    const secondListener = vi.fn();
+    store.subscribe(first.token, firstListener);
+    store.subscribe(second.token, secondListener);
+
+    expect(first.session.mode).toBe("writer");
+    expect(second.session.mode).toBe("viewer");
+    expect(other.session.mode).toBe("writer");
+    expect(store.isWriter(first.session.sessionId)).toBe(true);
+    expect(store.isWriter(second.session.sessionId)).toBe(false);
+
+    expect(store.takeControl(second.session.sessionId).mode).toBe("writer");
+    expect(store.isWriter(first.session.sessionId)).toBe(false);
+    expect(store.isWriter(second.session.sessionId)).toBe(true);
+    expect(firstListener).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        type: "state",
+        session: expect.objectContaining({ mode: "viewer" }),
+      }),
+    );
+    expect(secondListener).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        type: "state",
+        session: expect.objectContaining({ mode: "writer" }),
+      }),
+    );
+  });
+
+  it("does not silently promote a viewer when the writer closes", () => {
+    const store = createStore();
+    const first = consume(store, identity());
+    const second = consume(store, {
+      ...identity(),
+      requestId: "r1-2",
+    });
+    expect(store.close(first.session.sessionId, "writer_closed")).toBe(true);
+    expect(store.isWriter(second.session.sessionId)).toBe(false);
+
+    const third = consume(store, {
+      ...identity(),
+      requestId: "r1-3",
+    });
+    expect(third.session.mode).toBe("viewer");
+    expect(store.takeControl(third.session.sessionId).mode).toBe("writer");
   });
 });
 
@@ -72,6 +131,11 @@ function identity() {
   return {
     requestId: "r1-1",
     playerId: "player-1",
-    computerId: "computer-1",
+    computerId: "c-000001",
   };
+}
+
+function consume(store, value) {
+  const issued = store.issue(value);
+  return store.consumeHandoff(issued.handoffCode);
 }

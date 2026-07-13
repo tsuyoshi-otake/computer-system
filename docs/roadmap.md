@@ -226,19 +226,21 @@ suppressed error may leave a device accidentally marked as running.
 
 ### M2: Bedrock Computer vertical slice
 
-- [ ] Behavior Pack and Resource Pack
-- [ ] Computer and Advanced Computer blocks
-- [ ] stable computer IDs and block/item identity transfer
-- [ ] Computer System OS shell and editor
-- [ ] Bedrock terminal UI
+- [x] Behavior Pack and Resource Pack
+- [x] Computer and Advanced Computer blocks
+- [x] stable computer IDs and block/item identity transfer
+- [x] Computer System OS shell and editor
+- [x] Bedrock terminal UI
   - dedicated ComputerCraft-inspired 51x19 cell presentation rather than the
     Phase 0 DDUI probe
   - fixed cells, monospace glyphs, cursor state, 16-color palette, and primary
     input controls without scrolling at the reference resolution
   - coalesced bounded redraws and explicit close/disconnect/competing-form
     finalization
-- [ ] paged and transactional filesystem persistence
-- [ ] `startup.py`, shutdown, reboot, and crash reporting
+  - native GDK CustomForm remains a bounded fallback; the Web Terminal provides
+    the full-width keyboard-first interface and one-writer multi-session control
+- [x] paged and transactional filesystem persistence
+- [x] `startup.py`, shutdown, reboot, and crash reporting
 
 ### M3: Redstone and local peripherals
 

@@ -6,6 +6,7 @@ import {
 } from "../runtime/scheduler.js";
 import { StackVm, type VmState } from "../runtime/vm.js";
 import type { ComputerRecord } from "../../domain/computer/computer.js";
+import { numericComputerId } from "../../domain/computer/identity.js";
 import type { RuntimeValue } from "../../domain/runtime/value.js";
 import { defaultSystemBootSource } from "../os/systemPrograms.js";
 
@@ -238,10 +239,6 @@ interface RuntimeEntry {
 }
 
 type StopIntent = "reboot" | "shutdown";
-
-function numericComputerId(computerId: string): number {
-  return Number.parseInt(computerId.slice("computer-".length), 10);
-}
 
 function failure(error: unknown): RuntimeCommandResult {
   return {

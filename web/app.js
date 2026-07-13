@@ -28,11 +28,13 @@ const elements = {
   terminalSize: document.querySelector("#terminal-size"),
   commandForm: document.querySelector("#command-form"),
   commandInput: document.querySelector("#command-input"),
+  takeControlButton: document.querySelector("#take-control-button"),
   reconnectButton: document.querySelector("#reconnect-button"),
   lifecycleState: document.querySelector("#lifecycle-state"),
   errorDialog: document.querySelector("#error-dialog"),
   errorMessage: document.querySelector("#error-message"),
   inputState: document.querySelector("#input-state"),
+  accessState: document.querySelector("#access-state"),
 };
 
 const tokenStorageKey = "computer-system.web-terminal-token";
@@ -41,7 +43,9 @@ let token =
 let streamGeneration = 0;
 let sessionClosed = false;
 let commandPending = false;
+let takeoverPending = false;
 let connectionState = "loading";
+let accessMode = "unknown";
 let historyCursor = 0;
 let historyDraft = "";
 let resizeFrame = 0;
@@ -104,7 +108,9 @@ elements.commandInput.addEventListener("focus", () => {
     elements.inputState.textContent = "INPUT";
 });
 elements.commandInput.addEventListener("blur", () => {
-  if (!sessionClosed) elements.inputState.textContent = "COMMAND";
+  if (!sessionClosed && accessMode === "writer") {
+    elements.inputState.textContent = "COMMAND";
+  }
 });
 elements.terminalStage.addEventListener("click", () => {
   if (!elements.commandInput.disabled) elements.commandInput.focus();
@@ -112,6 +118,9 @@ elements.terminalStage.addEventListener("click", () => {
 elements.reconnectButton.addEventListener("click", () => {
   elements.reconnectButton.hidden = true;
   void connectStream();
+});
+elements.takeControlButton.addEventListener("click", () => {
+  void takeControl();
 });
 window.addEventListener("resize", scheduleTerminalFit);
 if (!/^[A-Za-z0-9_-]{20,}$/u.test(token)) {
@@ -217,6 +226,11 @@ async function sendInput(payload) {
     accepted = true;
     return true;
   } catch (error) {
+    if (error?.status === 409) {
+      accessMode = "viewer";
+      setInputAvailable(false, "VIEW ONLY");
+      return false;
+    }
     setConnection("offline", "INPUT FAILED");
     elements.commandInput.setAttribute("aria-invalid", "true");
     elements.reconnectButton.hidden = false;
@@ -291,6 +305,13 @@ function updateSession(session) {
   if (session.terminal !== null && session.terminal !== undefined) {
     renderTerminal(session.terminal);
   }
+  if (session.mode === "writer" || session.mode === "viewer") {
+    accessMode = session.mode;
+    setInputAvailable(
+      connectionState === "online",
+      accessMode === "writer" ? "INPUT" : "VIEW ONLY",
+    );
+  }
   if (session.state === "closed" || session.state === "expired") {
     sessionClosed = true;
     sessionStorage.removeItem(tokenStorageKey);
@@ -301,6 +322,7 @@ function updateSession(session) {
       session.finalReason ?? session.state,
     ).toUpperCase();
     setConnection("offline", session.state.toUpperCase());
+    setInputAvailable(false, "OFFLINE");
   }
 }
 
@@ -337,7 +359,9 @@ async function api(path, options = {}) {
   } catch {
     // The bounded fallback message above owns finalization for non-JSON errors.
   }
-  throw new Error(detail);
+  const error = new Error(detail);
+  error.status = response.status;
+  throw error;
 }
 
 function authorizationHeaders() {
@@ -355,9 +379,57 @@ function setConnection(state, label) {
 }
 
 function setInputAvailable(available, state) {
-  elements.commandInput.disabled = !available;
-  elements.inputState.textContent = state;
-  if (available) elements.commandInput.focus();
+  const writable =
+    available &&
+    accessMode === "writer" &&
+    !commandPending &&
+    !takeoverPending &&
+    !sessionClosed;
+  elements.commandInput.disabled = !writable;
+  elements.accessState.dataset.mode = accessMode;
+  elements.accessState.textContent =
+    accessMode === "writer"
+      ? "CONTROL"
+      : accessMode === "viewer"
+        ? "VIEW ONLY"
+        : "WAITING";
+  elements.takeControlButton.hidden = sessionClosed || accessMode !== "viewer";
+  elements.takeControlButton.disabled =
+    connectionState !== "online" || takeoverPending || sessionClosed;
+  elements.inputState.textContent = accessMode === "viewer" ? "LOCKED" : state;
+  if (writable) elements.commandInput.focus();
+}
+
+async function takeControl() {
+  if (
+    sessionClosed ||
+    takeoverPending ||
+    accessMode === "writer" ||
+    connectionState !== "online"
+  ) {
+    return;
+  }
+  takeoverPending = true;
+  elements.takeControlButton.disabled = true;
+  elements.takeControlButton.setAttribute("aria-busy", "true");
+  elements.takeControlButton.textContent = "Taking control…";
+  setInputAvailable(false, "REQUESTING");
+  try {
+    const response = await api("/api/take-control", { method: "POST" });
+    const result = await response.json();
+    updateSession(result.session ?? {});
+  } catch (error) {
+    elements.errorMessage.textContent = errorMessage(error);
+    if (!elements.errorDialog.open) elements.errorDialog.showModal();
+  } finally {
+    takeoverPending = false;
+    elements.takeControlButton.removeAttribute("aria-busy");
+    elements.takeControlButton.textContent = "Take control";
+    setInputAvailable(
+      connectionState === "online",
+      connectionState === "online" ? "INPUT" : "OFFLINE",
+    );
+  }
 }
 
 function editCommandLine(key) {

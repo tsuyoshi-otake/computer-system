@@ -256,7 +256,36 @@ h1 {
 }
 
 .statusbar p {
+  min-width: 0;
   margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#access-state {
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+#access-state[data-mode="writer"] {
+  color: var(--green);
+}
+
+#access-state[data-mode="viewer"] {
+  color: var(--amber);
+}
+
+.status-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 6px;
+  margin-inline: auto 12px;
+}
+
+.status-summary {
+  flex: 0 0 auto;
+  white-space: nowrap;
 }
 
 kbd {
@@ -279,18 +308,22 @@ button {
     background-color var(--motion-fast);
 }
 
-button:hover {
+button:hover:not(:disabled) {
   border-color: var(--green);
   color: var(--green);
 }
 
-button:active {
+button:active:not(:disabled) {
   background: color-mix(in srgb, var(--green) 12%, transparent);
 }
 
 button:disabled {
   cursor: not-allowed;
   opacity: 0.55;
+}
+
+button[aria-busy="true"] {
+  cursor: progress;
 }
 
 button:focus-visible,
@@ -341,6 +374,20 @@ dialog form {
   .mark,
   .statusbar p {
     display: none;
+  }
+
+  .statusbar {
+    justify-content: flex-end;
+    gap: 8px;
+  }
+
+  .status-actions {
+    margin-inline: 0 auto;
+  }
+
+  .status-summary {
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
   .terminal-shell {

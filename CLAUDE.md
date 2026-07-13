@@ -105,6 +105,13 @@ The July 2026 live GDK verification established the following:
   separate text box.
 - Physical Enter submits `terminal_line`; Ctrl+C invokes the bounded interrupt
   endpoint; Up and Down navigate local command history.
+- New identities use a collision-checked `c-xxxxxx` format. The lowercase
+  Crockford Base32 payload decodes to the stable 30-bit numeric computer ID;
+  legacy identity snapshots are not migrated automatically.
+- A Computer has one Web Terminal writer lease. Additional sessions are
+  view-only until **Take control** completes, at which point the previous writer
+  is demoted. Viewer input is rejected at both transport boundaries, and only
+  the final detached session emits `terminal_closed`.
 - Browser handoff links are one-use and valid for 60 seconds. Browser bearer
   tokens do not pass through BDS logs. Sessions, listeners, polling retries, and
   Bedrock snapshot work are all bounded and end in an explicit final state.

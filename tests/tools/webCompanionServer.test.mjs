@@ -23,10 +23,11 @@ describe("Web companion HTTP server", () => {
     const status = await server.start();
 
     bds.log(
-      'CS_WEB_SESSION_REQUEST {"requestId":"r1-1","playerId":"player-1","computerId":"computer-1"}',
+      'CS_WEB_SESSION_REQUEST {"requestId":"r1-1","playerId":"player-1","computerId":"c-000001"}',
     );
     await until(() => bds.commands.length === 1);
     const responseCommand = bds.commands[0];
+    expect(responseCommand.split(" ").at(-2)).toBe("writer");
     const handoffUrl = responseCommand.split(" ").at(-1);
     const handoff = await fetch(handoffUrl, { redirect: "manual" });
     expect(handoff.status).toBe(302);
@@ -41,7 +42,8 @@ describe("Web companion HTTP server", () => {
     });
     expect(sessionResponse.status).toBe(200);
     expect(await sessionResponse.json()).toMatchObject({
-      computerId: "computer-1",
+      computerId: "c-000001",
+      mode: "writer",
       state: "issued",
     });
 
@@ -66,12 +68,10 @@ describe("Web companion HTTP server", () => {
     servers.push(server);
     const status = await server.start();
     bds.log(
-      'CS_WEB_SESSION_REQUEST {"requestId":"r1-1","playerId":"player-1","computerId":"computer-1"}',
+      'CS_WEB_SESSION_REQUEST {"requestId":"r1-1","playerId":"player-1","computerId":"c-000001"}',
     );
     await until(() => bds.commands.length === 1);
-    const [sessionId] = bds.commands[0]
-      .match(/[A-Za-z0-9_-]{12,32}/gu)
-      .slice(-2);
+    const sessionId = bds.commands[0].split(" ")[3];
     const handoffUrl = bds.commands[0].split(" ").at(-1);
     const handoff = await fetch(handoffUrl, { redirect: "manual" });
     const token = handoff.headers.get("location").slice(2);
@@ -79,7 +79,7 @@ describe("Web companion HTTP server", () => {
     bds.log(
       `CS_WEB_TERMINAL ${JSON.stringify({
         sessionId,
-        computerId: "computer-1",
+        computerId: "c-000001",
         label: "Pocket One",
         lifecycle: "running",
         terminal: { width: 51, height: 19, rows: [] },
@@ -106,6 +106,110 @@ describe("Web companion HTTP server", () => {
       body: JSON.stringify({ kind: "line", value: "help" }),
     });
     expect(rejected.status).toBe(403);
+  });
+
+  it("rejects viewer input and transfers one writer lease at a time", async () => {
+    const bds = new FakeBds();
+    const server = new WebCompanionServer({ bds, port: 0 });
+    servers.push(server);
+    const status = await server.start();
+
+    bds.log(
+      'CS_WEB_SESSION_REQUEST {"requestId":"r1-1","playerId":"player-1","computerId":"c-000001"}',
+    );
+    await until(() => bds.commands.length === 1);
+    const first = await consumeResponse(bds.commands[0]);
+    bds.log(
+      'CS_WEB_SESSION_REQUEST {"requestId":"r1-2","playerId":"player-2","computerId":"c-000001"}',
+    );
+    await until(() => bds.commands.length === 2);
+    expect(bds.commands[1].split(" ").at(-2)).toBe("viewer");
+    const second = await consumeResponse(bds.commands[1]);
+
+    const rejected = await post(status.origin, "/api/input", second.token, {
+      kind: "line",
+      value: "blocked",
+    });
+    expect(rejected.status).toBe(409);
+    expect(bds.commands).toHaveLength(2);
+
+    const takeover = await post(
+      status.origin,
+      "/api/take-control",
+      second.token,
+      {},
+    );
+    expect(takeover.status).toBe(200);
+    expect(await takeover.json()).toMatchObject({
+      outcome: "writer",
+      session: { mode: "writer" },
+    });
+    expect(bds.commands[2]).toMatch(
+      /^scriptevent computer_system:web-take-control [A-Za-z0-9_-]+$/u,
+    );
+
+    expect(
+      (
+        await post(status.origin, "/api/input", first.token, {
+          kind: "line",
+          value: "old-writer",
+        })
+      ).status,
+    ).toBe(409);
+    expect(
+      (
+        await post(status.origin, "/api/input", second.token, {
+          kind: "line",
+          value: "new-writer",
+        })
+      ).status,
+    ).toBe(202);
+    expect(bds.commands.at(-1)).toMatch(/ line new-writer$/u);
+  });
+
+  it("serializes and bounds terminal operations per computer", async () => {
+    const server = new WebCompanionServer();
+    let release;
+    const gate = new Promise((resolve) => {
+      release = resolve;
+    });
+    const order = [];
+    const queued = Array.from({ length: 8 }, (_, index) =>
+      server.serializeComputerOperation("c-000001", async () => {
+        order.push(`start-${String(index)}`);
+        if (index === 0) await gate;
+        order.push(`end-${String(index)}`);
+        return index;
+      }),
+    );
+    await until(() => order.length === 1);
+    expect(order).toEqual(["start-0"]);
+    await expect(
+      server.serializeComputerOperation("c-000001", async () => 9),
+    ).rejects.toMatchObject({ code: "computer_busy", status: 429 });
+
+    release();
+    await expect(Promise.all(queued)).resolves.toEqual([
+      0, 1, 2, 3, 4, 5, 6, 7,
+    ]);
+    expect(order).toEqual([
+      "start-0",
+      "end-0",
+      "start-1",
+      "end-1",
+      "start-2",
+      "end-2",
+      "start-3",
+      "end-3",
+      "start-4",
+      "end-4",
+      "start-5",
+      "end-5",
+      "start-6",
+      "end-6",
+      "start-7",
+      "end-7",
+    ]);
   });
 });
 
@@ -142,4 +246,25 @@ async function until(predicate) {
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   throw new Error("Timed out waiting for test condition.");
+}
+
+async function consumeResponse(command) {
+  const response = await fetch(command.split(" ").at(-1), {
+    redirect: "manual",
+  });
+  return {
+    token: response.headers.get("location").slice(2),
+  };
+}
+
+function post(origin, pathname, token, body) {
+  return fetch(`${origin}${pathname}`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+      Origin: origin,
+    },
+    body: JSON.stringify(body),
+  });
 }

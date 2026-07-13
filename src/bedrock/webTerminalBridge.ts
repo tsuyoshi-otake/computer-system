@@ -1,6 +1,10 @@
 import { system, world, type Player } from "@minecraft/server";
 
 import type { ComputerRecord } from "../domain/computer/computer.js";
+import {
+  WebTerminalAccessRegistry,
+  type WebTerminalAccessMode,
+} from "../application/terminal/webTerminalAccess.js";
 import { computerHost } from "./computerHost.js";
 import { openComputerTerminal } from "./computerTerminal.js";
 
@@ -30,6 +34,7 @@ interface ActiveSession {
 
 const pendingRequests = new Map<string, PendingRequest>();
 const activeSessions = new Map<string, ActiveSession>();
+const terminalAccess = new WebTerminalAccessRegistry(maxActiveSessions);
 let nextRequest = 1;
 let snapshotCursor = 0;
 let started = false;
@@ -96,6 +101,9 @@ export function handleWebTerminalScriptEvent(
     case "computer_system:web-interrupt":
       handleInterrupt(message);
       return true;
+    case "computer_system:web-take-control":
+      handleTakeControl(message);
+      return true;
     case "computer_system:web-close":
       handleClose(message);
       return true;
@@ -123,16 +131,21 @@ export function startWebTerminalBridge(): void {
 
 function handleResponse(message: string): void {
   const match =
-    /^(r[a-z0-9]+-[a-z0-9]+) ([A-Za-z0-9_-]{12,32}) (https?:\/\/[^\s]{1,180})$/u.exec(
+    /^(r[a-z0-9]+-[a-z0-9]+) ([A-Za-z0-9_-]{12,32}) (writer|viewer) (https?:\/\/[^\s]{1,180})$/u.exec(
       message,
     );
   if (match === null) return;
-  const [, requestId = "", sessionId = "", url = ""] = match;
+  const [, requestId = "", sessionId = "", mode = "", url = ""] = match;
   const request = pendingRequests.get(requestId);
-  if (request === undefined) return;
-  pendingRequests.delete(requestId);
-  if (!request.player.isValid || request.expiresAtTick <= system.currentTick)
+  if (request === undefined) {
+    rejectSession(sessionId, "request_missing");
     return;
+  }
+  pendingRequests.delete(requestId);
+  if (!request.player.isValid || request.expiresAtTick <= system.currentTick) {
+    rejectSession(sessionId, "request_expired");
+    return;
+  }
 
   pruneExpiredSessions();
   if (activeSessions.size >= maxActiveSessions) {
@@ -141,6 +154,7 @@ function handleResponse(message: string): void {
     );
     const record = computerHost.get(request.computerId);
     if (record !== undefined) openFallback(request.player, record);
+    rejectSession(sessionId, "capacity");
     return;
   }
 
@@ -150,6 +164,21 @@ function handleResponse(message: string): void {
     playerId: request.player.id,
     sessionId,
   };
+  try {
+    terminalAccess.attach(
+      sessionId,
+      request.computerId,
+      mode as WebTerminalAccessMode,
+    );
+  } catch {
+    request.player.sendMessage(
+      "Browser terminal session could not be attached. Opening the in-game terminal.",
+    );
+    const record = computerHost.get(request.computerId);
+    if (record !== undefined) openFallback(request.player, record);
+    rejectSession(sessionId, "attach_failed");
+    return;
+  }
   activeSessions.set(sessionId, session);
   request.player.sendMessage(
     "Open Computer System Web Terminal (valid for 60s):",
@@ -162,7 +191,8 @@ function handleInput(message: string): void {
   const match = /^([A-Za-z0-9_-]{12,32}) line ([^\s]{0,180})$/u.exec(message);
   if (match === null) return;
   const session = requireActiveSession(match[1] ?? "");
-  if (session === undefined) return;
+  if (session === undefined || !terminalAccess.canWrite(session.sessionId))
+    return;
   let line: string;
   try {
     line = decodeURIComponent(match[2] ?? "");
@@ -177,7 +207,16 @@ function handleInterrupt(message: string): void {
   const match = /^([A-Za-z0-9_-]{12,32})$/u.exec(message);
   if (match === null) return;
   const session = requireActiveSession(match[1] ?? "");
-  if (session !== undefined) computerHost.runtime.terminate(session.computerId);
+  if (session !== undefined && terminalAccess.canWrite(session.sessionId)) {
+    computerHost.runtime.terminate(session.computerId);
+  }
+}
+
+function handleTakeControl(message: string): void {
+  const match = /^([A-Za-z0-9_-]{12,32})$/u.exec(message);
+  if (match === null) return;
+  const session = requireActiveSession(match[1] ?? "");
+  if (session !== undefined) terminalAccess.takeControl(session.sessionId);
 }
 
 function handleClose(message: string): void {
@@ -248,15 +287,22 @@ function pruneExpiredSessions(): void {
 
 function finalizeSession(session: ActiveSession, reason: string): void {
   if (!activeSessions.delete(session.sessionId)) return;
-  computerHost.runtime.queueEvent(
-    session.computerId,
-    "terminal_closed",
-    reason,
-    "web",
-  );
+  const detached = terminalAccess.detach(session.sessionId);
+  if (detached.outcome === "detached" && detached.wasLast) {
+    computerHost.runtime.queueEvent(
+      session.computerId,
+      "terminal_closed",
+      reason,
+      "web",
+    );
+  }
   console.warn(
     `${finalMarker}${JSON.stringify({ sessionId: session.sessionId, reason })}`,
   );
+}
+
+function rejectSession(sessionId: string, reason: string): void {
+  console.warn(`${finalMarker}${JSON.stringify({ sessionId, reason })}`);
 }
 
 function openFallback(player: Player, record: ComputerRecord): void {

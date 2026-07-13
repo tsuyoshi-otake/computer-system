@@ -54,7 +54,7 @@
               spellcheck="false"
               autocapitalize="off"
               enterkeyhint="send"
-              aria-describedby="keyboard-help input-state"
+              aria-describedby="keyboard-help input-state access-state"
               disabled
             ></textarea>
           </form>
@@ -69,9 +69,26 @@
           <span aria-hidden="true">·</span> <kbd>Ctrl</kbd>+<kbd>D</kbd> logout
           <span aria-hidden="true">·</span> <kbd>↑</kbd><kbd>↓</kbd> history
         </p>
-        <button id="reconnect-button" type="button" hidden>Reconnect</button>
-        <span
-          ><span id="input-state">OFFLINE</span> ·
+        <div class="status-actions">
+          <button
+            id="take-control-button"
+            type="button"
+            aria-describedby="access-state"
+            hidden
+          >
+            Take control
+          </button>
+          <button id="reconnect-button" type="button" hidden>Reconnect</button>
+        </div>
+        <span class="status-summary"
+          ><span
+            id="access-state"
+            data-mode="unknown"
+            role="status"
+            aria-live="polite"
+            >WAITING</span
+          >
+          · <span id="input-state">OFFLINE</span> ·
           <span id="terminal-size">51 × 19</span> ·
           <span id="lifecycle-state">OFFLINE</span></span
         >

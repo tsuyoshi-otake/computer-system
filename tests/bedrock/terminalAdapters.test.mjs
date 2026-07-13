@@ -64,6 +64,10 @@ describe("Bedrock terminal adapters", () => {
     expect(bridge).toContain('"terminal_line"');
     expect(bridge).toContain('"terminal_closed"');
     expect(bridge).toContain("openFallback");
+    expect(bridge).toContain("WebTerminalAccessRegistry");
+    expect(bridge).toContain("terminalAccess.canWrite");
+    expect(bridge).toContain("detached.wasLast");
+    expect(bridge).toContain("rejectSession");
   });
 
   it("keeps the Bedrock Core prototype isolated from the production DDUI coordinator", async () => {

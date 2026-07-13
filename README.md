@@ -114,6 +114,21 @@ bearer token that is never written to BDS logs. The authenticated session lasts
 at most 30 minutes. If the companion does not answer within 10 seconds, the
 add-on opens the native in-game terminal instead.
 
+Each browser link is already bound to one Computer; the companion root page does
+not accept an arbitrary Computer ID. Newly created Computers use compact IDs in
+the form `c-xxxxxx`, where the six-character lowercase Crockford Base32 payload
+is also the stable 30-bit value returned by `os.getComputerID()`. Allocation
+checks the persisted identity registry and retries collisions up to a fixed
+limit before failing explicitly.
+
+Only one browser session can type into a given Computer at a time. The first
+session receives control, while additional sessions are labeled `VIEW ONLY`. A
+viewer can use **Take control** to atomically demote the previous writer. Input
+and interrupts from viewers are rejected by both the companion and Bedrock
+bridge, and closing one view does not emit `terminal_closed` while another view
+of the same Computer remains active. Different Computers remain independently
+writable.
+
 The default Web Terminal listens only on `127.0.0.1:19144`, so it does not need
 an additional firewall or router rule when Minecraft and the browser run on the
 server machine. For trusted LAN access, expose TCP 19144 explicitly and publish

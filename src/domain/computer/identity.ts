@@ -1,6 +1,12 @@
 export type ComputerFamily = "advanced" | "standard";
 export type ComputerForm = "block" | "item";
 
+const computerIdAlphabet = "0123456789abcdefghjkmnpqrstvwxyz";
+const computerIdPayloadLength = 6;
+const computerIdSpace = 32 ** computerIdPayloadLength;
+const shortComputerIdPattern = /^c-[0-9a-hjkmnp-tv-z]{6}$/u;
+const legacyComputerIdPattern = /^computer-[1-9][0-9]*$/u;
+
 export interface ComputerIdentityObservation {
   readonly computerId: string;
   readonly family: ComputerFamily;
@@ -113,38 +119,76 @@ export class ComputerIdentityRegistry {
   }
 }
 
-export class ComputerIdSequence {
-  private nextValue: number;
+export type ComputerIdRandom = () => number;
 
-  constructor(nextValue = 1) {
-    if (!Number.isSafeInteger(nextValue) || nextValue <= 0)
-      throw new RangeError("Computer ID sequence must be positive");
-    this.nextValue = nextValue;
-  }
-
-  next(): string {
-    return `computer-${this.nextValue++}`;
-  }
-
-  reserve(computerId: string): void {
-    if (!/^computer-[1-9][0-9]*$/u.test(computerId)) {
-      throw new Error(`Invalid computer ID ${computerId}`);
+export class ComputerIdAllocator {
+  constructor(
+    private readonly random: ComputerIdRandom = Math.random,
+    private readonly maximumAttempts = 16,
+  ) {
+    if (!Number.isSafeInteger(maximumAttempts) || maximumAttempts <= 0) {
+      throw new RangeError("Computer ID allocation attempts must be positive");
     }
-    const value = Number.parseInt(computerId.slice("computer-".length), 10);
-    if (!Number.isSafeInteger(value))
-      throw new Error(`Invalid computer ID ${computerId}`);
-    this.nextValue = Math.max(this.nextValue, value + 1);
   }
 
-  snapshot(): number {
-    return this.nextValue;
+  next(isReserved: (computerId: string) => boolean): string {
+    for (let attempt = 0; attempt < this.maximumAttempts; attempt += 1) {
+      const sample = this.random();
+      if (!Number.isFinite(sample) || sample < 0 || sample >= 1) {
+        throw new RangeError(
+          "Computer ID random source must return 0 <= n < 1",
+        );
+      }
+      const computerId = encodeComputerId(Math.floor(sample * computerIdSpace));
+      if (!isReserved(computerId)) return computerId;
+    }
+    throw new Error(
+      `Unable to allocate a unique computer ID after ${String(this.maximumAttempts)} attempts`,
+    );
   }
 }
 
-function validateObservation(observation: ComputerIdentityObservation): void {
-  if (!/^computer-[1-9][0-9]*$/u.test(observation.computerId)) {
-    throw new Error(`Invalid computer ID ${observation.computerId}`);
+export function isComputerId(value: unknown): boolean {
+  return (
+    typeof value === "string" &&
+    (shortComputerIdPattern.test(value) || legacyComputerIdPattern.test(value))
+  );
+}
+
+export function requireComputerId(computerId: string): void {
+  if (!isComputerId(computerId))
+    throw new Error(`Invalid computer ID ${computerId}`);
+}
+
+export function numericComputerId(computerId: string): number {
+  requireComputerId(computerId);
+  if (legacyComputerIdPattern.test(computerId)) {
+    const value = Number.parseInt(computerId.slice("computer-".length), 10);
+    if (!Number.isSafeInteger(value))
+      throw new Error(`Invalid computer ID ${computerId}`);
+    return value;
   }
+  let value = 0;
+  for (const character of computerId.slice(2)) {
+    const digit = computerIdAlphabet.indexOf(character);
+    if (digit < 0) throw new Error(`Invalid computer ID ${computerId}`);
+    value = value * 32 + digit;
+  }
+  return value;
+}
+
+function encodeComputerId(value: number): string {
+  let remaining = value;
+  let payload = "";
+  for (let index = 0; index < computerIdPayloadLength; index += 1) {
+    payload = computerIdAlphabet[remaining % 32]! + payload;
+    remaining = Math.floor(remaining / 32);
+  }
+  return `c-${payload}`;
+}
+
+function validateObservation(observation: ComputerIdentityObservation): void {
+  requireComputerId(observation.computerId);
   if (
     observation.physicalKey.length === 0 ||
     observation.physicalKey.length > 256

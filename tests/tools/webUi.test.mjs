@@ -49,6 +49,24 @@ describe("Web terminal UI", () => {
     expect(script).toContain('elements.inputState.textContent = "WAIT"');
   });
 
+  it("exposes view-only ownership and an explicit bounded takeover action", async () => {
+    const [html, css, script] = await Promise.all([
+      source("web/index.html"),
+      source("web/styles.css"),
+      source("web/app.js"),
+    ]);
+
+    expect(html).toContain('id="access-state"');
+    expect(html).toContain('id="take-control-button"');
+    expect(html).toContain("Take control");
+    expect(css).toContain('#access-state[data-mode="viewer"]');
+    expect(css).toContain('button[aria-busy="true"]');
+    expect(script).toContain('api("/api/take-control"');
+    expect(script).toContain('accessMode === "writer"');
+    expect(script).toContain('accessMode === "viewer" ? "LOCKED" : state');
+    expect(script).toContain("error?.status === 409");
+  });
+
   it("fits fixed terminal columns and keeps disconnected input disabled", async () => {
     const [css, script] = await Promise.all([
       source("web/styles.css"),

@@ -1,9 +1,12 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  ComputerIdSequence,
+  ComputerIdAllocator,
   ComputerIdentityRegistry,
+  numericComputerId,
 } from "../../src/domain/computer/identity.js";
+
+const computerIdSpace = 32 ** 6;
 
 describe("Computer identity registry", (): void => {
   it("preserves identity across block and item round trips", (): void => {
@@ -114,13 +117,35 @@ describe("Computer identity registry", (): void => {
     ).toThrow(/Duplicate restored/u);
   });
 
-  it("allocates stable monotonic IDs and persists the next value", (): void => {
-    const sequence = new ComputerIdSequence();
-    expect([sequence.next(), sequence.next()]).toEqual([
-      "computer-1",
-      "computer-2",
-    ]);
-    const restored = new ComputerIdSequence(sequence.snapshot());
-    expect(restored.next()).toBe("computer-3");
+  it("allocates compact IDs and retries registry collisions", (): void => {
+    const samples = [1, 1, 2];
+    const allocator = new ComputerIdAllocator(
+      () => samples.shift()! / computerIdSpace,
+    );
+    expect(allocator.next(() => false)).toBe("c-000001");
+    expect(allocator.next((computerId) => computerId === "c-000001")).toBe(
+      "c-000002",
+    );
+  });
+
+  it("keeps 500 generated IDs unique and exactly decodes their 30-bit value", (): void => {
+    let value = 0;
+    const allocator = new ComputerIdAllocator(() => value++ / computerIdSpace);
+    const ids = Array.from({ length: 500 }, () => allocator.next(() => false));
+    expect(new Set(ids).size).toBe(500);
+    expect(
+      ids.every((computerId) => /^c-[0-9a-hjkmnp-tv-z]{6}$/u.test(computerId)),
+    ).toBe(true);
+    expect(numericComputerId(ids[0]!)).toBe(0);
+    expect(numericComputerId(ids[499]!)).toBe(499);
+  });
+
+  it("fails explicitly when the random source is invalid or collisions are exhausted", (): void => {
+    expect(() => new ComputerIdAllocator(() => 1).next(() => false)).toThrow(
+      /random source/u,
+    );
+    expect(() => new ComputerIdAllocator(() => 0, 2).next(() => true)).toThrow(
+      /after 2 attempts/u,
+    );
   });
 });

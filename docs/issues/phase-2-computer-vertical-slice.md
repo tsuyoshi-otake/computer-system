@@ -88,7 +88,32 @@ therefore exercises `server_closed`. The `disconnected` adapter result requires
 the form promise to fail while `player.isValid` is false, so its real-client
 check requires a persistent multiplayer host such as BDS; the exact branch and
 single-finalization behavior remain covered by the terminal session tests. BDS
-evidence remains unavailable until `BDS_HOME` is configured.
+later passed the persistent GDK disconnect harness with exactly one
+`disconnected` result while the server remained running.
+
+## July 2026 compact identity and Web Terminal update
+
+New Computers now use collision-checked `c-xxxxxx` identities. The six-character
+lowercase Crockford Base32 payload decodes to the stable 30-bit
+`os.getComputerID()` value. Allocation retries at most 16 times against the
+persisted registry. Snapshot schema 2 intentionally does not migrate the earlier
+sequential identity examples recorded above; those runs remain historical
+evidence only.
+
+The local Web Terminal is the preferred full-width interactive surface. A
+Computer has one writer session and any additional browser sessions are
+view-only. Viewer input is rejected at both the companion and Bedrock boundary.
+The bounded **Take control** transition demotes the previous writer, while
+input, takeover, and close operations share one per-Computer serialization lane.
+Only the final detached browser session emits `terminal_closed`; different
+Computers remain independently writable.
+
+Host verification covers 500 deterministic ID allocations, injected collisions,
+persistence reload, writer/viewer assignment, takeover, rejected viewer input,
+bounded operation queues, and final-detach ownership. Desktop and 390-pixel
+browser checks confirmed a single ownership state, a single takeover action, and
+no page-level overflow. A clean managed debug-world reset remains required for
+real GDK acceptance because legacy identity snapshots are deliberately ignored.
 
 ## Acceptance rubric
 

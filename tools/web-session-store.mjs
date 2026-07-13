@@ -26,6 +26,8 @@ export class WebSessionStore {
     );
     this.sessionsById = new Map();
     this.sessionsByToken = new Map();
+    this.sessionsByComputer = new Map();
+    this.writersByComputer = new Map();
     this.handoffs = new Map();
   }
 
@@ -40,6 +42,7 @@ export class WebSessionStore {
       );
     }
     const now = this.clock();
+    const attached = this.sessionsByComputer.get(identity.computerId);
     const session = {
       sessionId: this.uniqueValue(12, this.sessionsById),
       token: this.uniqueValue(32, this.sessionsByToken),
@@ -47,6 +50,7 @@ export class WebSessionStore {
       requestId: identity.requestId,
       playerId: identity.playerId,
       computerId: identity.computerId,
+      mode: attached === undefined || attached.size === 0 ? "writer" : "viewer",
       state: "issued",
       createdAt: now,
       expiresAt: now + this.sessionTtlMs,
@@ -57,6 +61,17 @@ export class WebSessionStore {
     };
     this.sessionsById.set(session.sessionId, session);
     this.sessionsByToken.set(session.token, session);
+    if (attached === undefined) {
+      this.sessionsByComputer.set(
+        identity.computerId,
+        new Set([session.sessionId]),
+      );
+    } else {
+      attached.add(session.sessionId);
+    }
+    if (session.mode === "writer") {
+      this.writersByComputer.set(session.computerId, session.sessionId);
+    }
     this.handoffs.set(session.handoffCode, session);
     return this.publicSession(session, { handoffCode: session.handoffCode });
   }
@@ -132,6 +147,39 @@ export class WebSessionStore {
     return true;
   }
 
+  isWriter(sessionId) {
+    const session = this.sessionsById.get(sessionId);
+    return (
+      session !== undefined && isActive(session) && session.mode === "writer"
+    );
+  }
+
+  takeControl(sessionId) {
+    const session = this.sessionsById.get(sessionId);
+    if (session === undefined || !isActive(session)) {
+      throw new WebSessionError(
+        "gone",
+        "The browser terminal session is no longer active.",
+        410,
+      );
+    }
+    const previousId = this.writersByComputer.get(session.computerId);
+    if (previousId === sessionId) return this.publicSession(session);
+    const previous =
+      previousId === undefined ? undefined : this.sessionsById.get(previousId);
+    if (previous !== undefined && isActive(previous)) {
+      previous.mode = "viewer";
+      this.emit(previous, {
+        type: "state",
+        session: this.publicSession(previous),
+      });
+    }
+    session.mode = "writer";
+    this.writersByComputer.set(session.computerId, sessionId);
+    this.emit(session, { type: "state", session: this.publicSession(session) });
+    return this.publicSession(session);
+  }
+
   close(sessionId, reason = "closed") {
     const session = this.sessionsById.get(sessionId);
     if (session === undefined || !isActive(session)) return false;
@@ -175,6 +223,7 @@ export class WebSessionStore {
       sessionId: session.sessionId,
       requestId: session.requestId,
       computerId: session.computerId,
+      mode: session.mode,
       state: session.state,
       createdAt: session.createdAt,
       expiresAt: session.expiresAt,
@@ -216,6 +265,13 @@ export class WebSessionStore {
 
   finalize(session, state, reason) {
     if (!isActive(session)) return;
+    const attached = this.sessionsByComputer.get(session.computerId);
+    attached?.delete(session.sessionId);
+    if (attached?.size === 0)
+      this.sessionsByComputer.delete(session.computerId);
+    if (this.writersByComputer.get(session.computerId) === session.sessionId) {
+      this.writersByComputer.delete(session.computerId);
+    }
     session.state = state;
     session.finalReason = reason;
     session.finalizedAt = this.clock();
@@ -234,7 +290,9 @@ function validateIdentity(identity) {
     identity === null ||
     typeof identity !== "object" ||
     !/^r[a-z0-9]+-[a-z0-9]+$/u.test(identity.requestId ?? "") ||
-    !/^computer-[1-9][0-9]*$/u.test(identity.computerId ?? "") ||
+    !/^(?:c-[0-9a-hjkmnp-tv-z]{6}|computer-[1-9][0-9]*)$/u.test(
+      identity.computerId ?? "",
+    ) ||
     typeof identity.playerId !== "string" ||
     identity.playerId.length === 0 ||
     identity.playerId.length > 128

@@ -61,6 +61,21 @@ physical Enter, Ctrl+C, and history without a separate visible text field. Start
 the combined managed runtime with `npm run dev:bds:web`; see
 [the MCP debugging guide](mcp-debugging.md) for network and security settings.
 
+New Computers use `c-xxxxxx` identities. The six lowercase Crockford Base32
+characters encode the stable 30-bit value exposed by `os.getComputerID()`.
+Allocation checks the persisted registry and retries collisions at most 16
+times. Identity snapshot schema 2 intentionally does not migrate the previous
+sequential-ID schema; reset the managed debug world before acceptance testing a
+build that crosses this boundary.
+
+A Computer has one Web Terminal writer lease. The first attached session is the
+writer and additional sessions are viewers. Viewer input and interrupts are
+rejected by both the HTTP companion and the Bedrock bridge. Input, close, and
+**Take control** transitions share one bounded per-Computer operation queue, so
+a successful takeover demotes the prior writer before later input can pass.
+Closing one view leaves the terminal open; only the final detach emits
+`terminal_closed`. Different Computers have independent writer leases.
+
 The Web Terminal and native fallback both send the same `terminal_line` event to
 the Computer System OS. OS 0.2 parses a bounded BusyBox-style command language
 with pipelines, redirects, control operators, quoting, variables, and script

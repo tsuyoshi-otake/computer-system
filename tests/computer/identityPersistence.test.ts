@@ -6,33 +6,35 @@ import {
   type ComputerIdentitySnapshot,
 } from "../../src/application/computer/identityPersistence.js";
 
+const computerIdSpace = 32 ** 6;
+
 describe("PersistentComputerIdentityService", (): void => {
   it("keeps identity through block-item-block and service reloads", (): void => {
     const repository = new MemoryRepository();
-    let service = new PersistentComputerIdentityService(repository);
+    let service = serviceWithIds(repository, 1);
     const placed = service.place("overworld:1,2,3", "standard");
     expect(placed).toMatchObject({
       outcome: "placed",
-      computerId: "computer-1",
+      computerId: "c-000001",
     });
     expect(service.break("overworld:1,2,3")).toMatchObject({
       outcome: "placed",
-      computerId: "computer-1",
+      computerId: "c-000001",
     });
 
-    service = new PersistentComputerIdentityService(repository);
-    expect(
-      service.place("nether:4,5,6", "standard", "computer-1"),
-    ).toMatchObject({
-      outcome: "placed",
-      computerId: "computer-1",
-    });
-    expect(service.observation("computer-1")?.physicalKey).toBe("nether:4,5,6");
+    service = serviceWithIds(repository, 2);
+    expect(service.place("nether:4,5,6", "standard", "c-000001")).toMatchObject(
+      {
+        outcome: "placed",
+        computerId: "c-000001",
+      },
+    );
+    expect(service.observation("c-000001")?.physicalKey).toBe("nether:4,5,6");
   });
 
   it("rejects duplicate carried IDs and family changes", (): void => {
     const repository = new MemoryRepository();
-    const service = new PersistentComputerIdentityService(repository);
+    const service = serviceWithIds(repository, 1);
     service.place("a", "advanced", "computer-9");
     expect(service.place("b", "advanced", "computer-9").outcome).toBe(
       "duplicate",
@@ -45,7 +47,7 @@ describe("PersistentComputerIdentityService", (): void => {
 
   it("rolls failed new and carried placements back to their prior ownership", (): void => {
     const repository = new MemoryRepository();
-    const service = new PersistentComputerIdentityService(repository);
+    const service = serviceWithIds(repository, 1);
     const fresh = service.place("failed:new", "standard");
     if (fresh.outcome !== "placed") return;
     service.rollbackPlacement("failed:new", fresh.computerId, false);
@@ -63,26 +65,38 @@ describe("PersistentComputerIdentityService", (): void => {
 
   it("allocates persistent detached identities for portable computers", (): void => {
     const repository = new MemoryRepository();
-    let service = new PersistentComputerIdentityService(repository);
+    let service = serviceWithIds(repository, 1);
     expect(service.createItem("advanced")).toMatchObject({
       outcome: "placed",
-      computerId: "computer-1",
+      computerId: "c-000001",
       family: "advanced",
     });
-    expect(service.observation("computer-1")).toEqual({
-      computerId: "computer-1",
+    expect(service.observation("c-000001")).toEqual({
+      computerId: "c-000001",
       family: "advanced",
       form: "item",
-      physicalKey: "detached:computer-1",
+      physicalKey: "detached:c-000001",
     });
 
-    service = new PersistentComputerIdentityService(repository);
+    service = serviceWithIds(repository, 2);
     expect(service.createItem("standard")).toMatchObject({
       outcome: "placed",
-      computerId: "computer-2",
+      computerId: "c-000002",
     });
+    expect(repository.snapshot).toMatchObject({ schema: 2 });
+    expect(repository.snapshot).not.toHaveProperty("nextId");
   });
 });
+
+function serviceWithIds(
+  repository: ComputerIdentityRepository,
+  ...values: number[]
+): PersistentComputerIdentityService {
+  let index = 0;
+  return new PersistentComputerIdentityService(repository, {
+    random: () => values[index++]! / computerIdSpace,
+  });
+}
 
 class MemoryRepository implements ComputerIdentityRepository {
   snapshot: ComputerIdentitySnapshot | undefined;

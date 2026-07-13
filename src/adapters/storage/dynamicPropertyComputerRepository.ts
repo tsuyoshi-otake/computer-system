@@ -1,5 +1,6 @@
 import type { ComputerSnapshotRepository } from "../../application/computer/persistence.js";
 import type { ComputerSnapshot } from "../../domain/computer/computer.js";
+import { requireComputerId } from "../../domain/computer/identity.js";
 import { TransactionalPagedStore } from "./transactionalPagedStore.js";
 
 export interface DynamicPropertyOwner {
@@ -52,12 +53,6 @@ export class DynamicPropertyComputerRepository implements ComputerSnapshotReposi
       `${this.prefix}:${computerId}`,
       this.pageCharacterLimit,
     );
-  }
-}
-
-function requireComputerId(computerId: string): void {
-  if (!/^computer-[1-9][0-9]*$/u.test(computerId)) {
-    throw new Error(`Invalid computer ID ${computerId}`);
   }
 }
 

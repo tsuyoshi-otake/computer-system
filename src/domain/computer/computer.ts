@@ -7,7 +7,7 @@ import {
   TerminalBuffer,
   type TerminalBufferSnapshot,
 } from "../terminal/terminalBuffer.js";
-import type { ComputerFamily } from "./identity.js";
+import { requireComputerId, type ComputerFamily } from "./identity.js";
 import { ComputerLifecycle } from "./lifecycle.js";
 import { RedstoneState } from "../redstone/redstoneState.js";
 
@@ -40,9 +40,7 @@ export class ComputerRecord {
     readonly family: ComputerFamily,
     options: ComputerRecordOptions = {},
   ) {
-    if (!/^computer-[1-9][0-9]*$/u.test(computerId)) {
-      throw new Error(`Invalid computer ID ${computerId}`);
-    }
+    requireComputerId(computerId);
     this.filesystem = new InMemoryFilesystem(options.filesystemLimits);
     this.terminal = new TerminalBuffer(
       options.terminalWidth ?? 51,
