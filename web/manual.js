@@ -41,6 +41,7 @@ ls -la /</code></pre></section>`,
     summary: "Registers, memory, cycles, faults",
     html: `
       <header class="manual-page-header"><p class="manual-kicker">Chapter 02 · Hardware model</p><h2>The CS486DX execution core</h2><p class="manual-lead">The visible 33 MHz identity is nominal. A separate persisted scheduler scale bounds actual BDS work and arbitrates multiple Computers fairly.</p></header>
+      <figure class="manual-figure manual-figure--desktop"><img src="/assets/manual/desktop-computer-system.png" alt="Desktop Computer System with a 486DX 33 MHz system unit, monochrome CRT, keyboard, mouse, and floppy drives" loading="lazy" decoding="async"><figcaption><b>Desktop Computer System.</b> The workstation illustration establishes the nominal CS486DX hardware identity. The Minecraft implementation models the machine rather than emulating the pictured host hardware literally.</figcaption></figure>
       <section class="manual-section"><h3>2.1 Register file</h3>
         <table><thead><tr><th>Register</th><th>Conventional use</th><th>Width</th></tr></thead><tbody>
           <tr><td>EAX</td><td>Accumulator and expression result</td><td>32 bit</td></tr><tr><td>EBX</td><td>Secondary operand</td><td>32 bit</td></tr>
@@ -237,6 +238,7 @@ while True:
     summary: "Alternate command and path conventions",
     html: `
       <header class="manual-page-header"><p class="manual-kicker">Chapter 14 · Compatibility profile</p><h2>Operating in the DOS environment</h2><p class="manual-lead">The DOS profile changes presentation, command names, separators, and startup conventions without duplicating the machine core. Filesystem, CPU, RAM, quota, and sandbox rules remain authoritative.</p></header>
+      <figure class="manual-figure manual-figure--portable"><img src="/assets/manual/portable-computer-system.png" alt="Portable Computer System showing a DOS prompt, monochrome LCD, keyboard, trackball, floppy drive, rear ports, and battery pack" loading="lazy" decoding="async"><figcaption><b>Portable Computer System.</b> The DOS-facing concept uses the same nominal 486DX 33 MHz and 4 MB RAM model as the desktop profile; only the operator conventions change.</figcaption></figure>
       <section class="manual-section"><h3>14.1 Correspondence table</h3><table><thead><tr><th>Task</th><th>Linux profile</th><th>DOS profile</th></tr></thead><tbody><tr><td>List</td><td>ls</td><td>DIR</td></tr><tr><td>Read</td><td>cat FILE</td><td>TYPE FILE</td></tr><tr><td>Change directory</td><td>cd /tmp</td><td>CD C:\\TMP</td></tr><tr><td>Copy / move</td><td>cp / mv</td><td>COPY / MOVE</td></tr><tr><td>Remove</td><td>rm</td><td>DEL</td></tr><tr><td>Machine info</td><td>cpuinfo / free</td><td>CPU / MEM</td></tr><tr><td>Version</td><td>uname</td><td>VER</td></tr></tbody></table></section>
       <section class="manual-section manual-grid-2"><div><h3>14.2 Layout</h3><pre><code>C:\\
 ├─ DOS

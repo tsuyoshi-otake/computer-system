@@ -612,6 +612,44 @@ dialog p {
   text-wrap: pretty;
 }
 
+.manual-figure {
+  max-width: 860px;
+  margin: 0 0 32px;
+  padding: clamp(12px, 2.5vw, 24px);
+  border: 1px solid var(--manual-rule);
+  background: var(--manual-paper-dark);
+}
+
+.manual-figure img {
+  display: block;
+  width: auto;
+  max-width: 100%;
+  height: auto;
+  margin: 0 auto;
+  border: 1px solid var(--manual-rule);
+}
+
+.manual-figure--desktop img {
+  max-height: 520px;
+}
+
+.manual-figure--portable img {
+  max-height: 720px;
+}
+
+.manual-figure figcaption {
+  max-width: 720px;
+  margin: 14px auto 0;
+  color: var(--manual-muted);
+  font-size: 12px;
+  line-height: 1.55;
+  text-align: center;
+}
+
+.manual-figure figcaption b {
+  color: var(--manual-ink);
+}
+
 .manual-spec-line {
   display: grid;
   grid-template-columns: repeat(3, auto 1fr);
@@ -876,6 +914,15 @@ dialog form {
 
   .manual-grid-2 {
     grid-template-columns: 1fr;
+  }
+
+  .manual-figure {
+    padding: 10px;
+  }
+
+  .manual-figure--desktop img,
+  .manual-figure--portable img {
+    max-height: none;
   }
 
   .manual-spec-line {

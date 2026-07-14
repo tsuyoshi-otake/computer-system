@@ -9,6 +9,17 @@ MicroPython-compatible language called Computer System Python, while the
 computer lifecycle, terminal, filesystem, events, networking, peripherals,
 pocket computers, and turtles follow ComputerCraft-style behavior.
 
+<table>
+  <tr>
+    <td align="center"><img src="web/assets/manual/desktop-computer-system.png" alt="Desktop Computer System concept sheet showing a 486DX 33 MHz system unit, CRT, keyboard, mouse, and floppy drives" height="400"></td>
+    <td align="center"><img src="web/assets/manual/portable-computer-system.png" alt="Portable Computer System concept sheet showing its DOS terminal, keyboard, trackball, ports, battery, and 486DX 33 MHz specification" height="400"></td>
+  </tr>
+  <tr>
+    <td align="center"><b>Desktop Computer System</b><br>Linux-style workstation concept</td>
+    <td align="center"><b>Portable Computer System</b><br>DOS-style mobile concept</td>
+  </tr>
+</table>
+
 ## Status
 
 The Phase 2 Bedrock Computer vertical slice is implemented. The language, VM,

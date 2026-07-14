@@ -12,6 +12,26 @@ afterEach(async () => {
 });
 
 describe("Web companion HTTP server", () => {
+  it("serves manual PNG illustrations with an image content type", async () => {
+    const server = new WebCompanionServer({
+      bds: new FakeBds(),
+      port: 0,
+      assetRoot: path.resolve(import.meta.dirname, "../../web"),
+    });
+    servers.push(server);
+    const status = await server.start();
+
+    for (const asset of [
+      "desktop-computer-system.png",
+      "portable-computer-system.png",
+    ]) {
+      const response = await fetch(`${status.origin}/assets/manual/${asset}`);
+      expect(response.status).toBe(200);
+      expect(response.headers.get("content-type")).toBe("image/png");
+      expect((await response.arrayBuffer()).byteLength).toBeGreaterThan(1_000);
+    }
+  });
+
   it("keeps browser opening disabled by default", async () => {
     const bds = new FakeBds();
     const launches = [];

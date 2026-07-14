@@ -80,4 +80,22 @@ describe("Web terminal field manual", () => {
       expect(publication).toContain(required);
     }
   });
+
+  it("places accessible machine illustrations in the matching chapters", () => {
+    const architecture = manualChapters.find(({ id }) => id === "architecture");
+    const dos = manualChapters.find(({ id }) => id === "dos-profile");
+
+    expect(architecture?.html).toContain(
+      'src="/assets/manual/desktop-computer-system.png"',
+    );
+    expect(architecture?.html).toContain(
+      'alt="Desktop Computer System with a 486DX 33 MHz system unit',
+    );
+    expect(dos?.html).toContain(
+      'src="/assets/manual/portable-computer-system.png"',
+    );
+    expect(dos?.html).toContain(
+      'alt="Portable Computer System showing a DOS prompt',
+    );
+  });
 });
