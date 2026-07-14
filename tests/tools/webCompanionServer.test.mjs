@@ -409,7 +409,7 @@ describe("Web companion HTTP server", () => {
     expect(rejected.status).toBe(403);
   });
 
-  it("rejects viewer input and transfers one writer lease at a time", async () => {
+  it("gives the newest browser control and rejects the demoted writer", async () => {
     const bds = new FakeBds();
     const server = new WebCompanionServer({ bds, port: 0 });
     servers.push(server);
@@ -424,30 +424,15 @@ describe("Web companion HTTP server", () => {
       'CS_WEB_SESSION_REQUEST {"requestId":"r1-2","playerId":"player-2","computerId":"c-000001"}',
     );
     await until(() => bds.commands.length === 2);
-    expect(bds.commands[1].split(" ").at(-2)).toBe("viewer");
+    expect(bds.commands[1].split(" ").at(-2)).toBe("writer");
     const second = await consumeResponse(bds.commands[1]);
 
     const rejected = await post(status.origin, "/api/input", second.token, {
       kind: "line",
-      value: "blocked",
+      value: "new-writer",
     });
-    expect(rejected.status).toBe(409);
-    expect(bds.commands).toHaveLength(2);
-
-    const takeover = await post(
-      status.origin,
-      "/api/take-control",
-      second.token,
-      {},
-    );
-    expect(takeover.status).toBe(200);
-    expect(await takeover.json()).toMatchObject({
-      outcome: "writer",
-      session: { mode: "writer" },
-    });
-    expect(bds.commands[2]).toMatch(
-      /^scriptevent computer_system:web-take-control [A-Za-z0-9_-]+$/u,
-    );
+    expect(rejected.status).toBe(202);
+    expect(bds.commands.at(-1)).toMatch(/ line new-writer$/u);
 
     expect(
       (
@@ -457,15 +442,6 @@ describe("Web companion HTTP server", () => {
         })
       ).status,
     ).toBe(409);
-    expect(
-      (
-        await post(status.origin, "/api/input", second.token, {
-          kind: "line",
-          value: "new-writer",
-        })
-      ).status,
-    ).toBe(202);
-    expect(bds.commands.at(-1)).toMatch(/ line new-writer$/u);
   });
 
   it("serializes and bounds terminal operations per computer", async () => {

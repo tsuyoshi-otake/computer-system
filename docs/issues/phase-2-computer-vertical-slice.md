@@ -101,12 +101,13 @@ sequential identity examples recorded above; those runs remain historical
 evidence only.
 
 The local Web Terminal is the preferred full-width interactive surface. A
-Computer has one writer session and any additional browser sessions are
-view-only. Viewer input is rejected at both the companion and Bedrock boundary.
-The bounded **Take control** transition demotes the previous writer, while
-input, takeover, and close operations share one per-Computer serialization lane.
-Only the final detached browser session emits `terminal_closed`; different
-Computers remain independently writable.
+Computer has one writer session; every newly opened browser session takes
+control immediately and demotes the previous writer to view-only. Viewer input
+is rejected at both the companion and Bedrock boundary. The bounded **Take
+control** transition lets a demoted session reclaim the lease, while input,
+takeover, and close operations share one per-Computer serialization lane. Only
+the final detached browser session emits `terminal_closed`; different Computers
+remain independently writable.
 
 An explicit `WEB_COMPANION_AUTO_OPEN=1` option provides the local one-action
 workflow: interacting with a Desktop/Advanced block or using a Portable Computer

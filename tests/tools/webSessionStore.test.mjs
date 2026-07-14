@@ -91,9 +91,11 @@ describe("Web terminal session store", () => {
     expect(store.close(issued.sessionId, "duplicate")).toBe(false);
   });
 
-  it("assigns one writer per computer and serially transfers control", () => {
+  it("gives each newly opened session control and demotes the previous writer", () => {
     const store = createStore();
     const first = consume(store, identity());
+    const firstListener = vi.fn();
+    store.subscribe(first.token, firstListener);
     const second = consume(store, {
       ...identity(),
       requestId: "r1-2",
@@ -103,18 +105,12 @@ describe("Web terminal session store", () => {
       requestId: "r1-3",
       computerId: "c-000002",
     });
-    const firstListener = vi.fn();
     const secondListener = vi.fn();
-    store.subscribe(first.token, firstListener);
     store.subscribe(second.token, secondListener);
 
     expect(first.session.mode).toBe("writer");
-    expect(second.session.mode).toBe("viewer");
+    expect(second.session.mode).toBe("writer");
     expect(other.session.mode).toBe("writer");
-    expect(store.isWriter(first.session.sessionId)).toBe(true);
-    expect(store.isWriter(second.session.sessionId)).toBe(false);
-
-    expect(store.takeControl(second.session.sessionId).mode).toBe("writer");
     expect(store.isWriter(first.session.sessionId)).toBe(false);
     expect(store.isWriter(second.session.sessionId)).toBe(true);
     expect(firstListener).toHaveBeenLastCalledWith(
@@ -123,30 +119,34 @@ describe("Web terminal session store", () => {
         session: expect.objectContaining({ mode: "viewer" }),
       }),
     );
+
+    expect(store.takeControl(first.session.sessionId).mode).toBe("writer");
+    expect(store.isWriter(first.session.sessionId)).toBe(true);
+    expect(store.isWriter(second.session.sessionId)).toBe(false);
     expect(secondListener).toHaveBeenLastCalledWith(
       expect.objectContaining({
         type: "state",
-        session: expect.objectContaining({ mode: "writer" }),
+        session: expect.objectContaining({ mode: "viewer" }),
       }),
     );
   });
 
-  it("does not silently promote a viewer when the writer closes", () => {
+  it("keeps the previous session view-only when the current writer closes", () => {
     const store = createStore();
     const first = consume(store, identity());
     const second = consume(store, {
       ...identity(),
       requestId: "r1-2",
     });
-    expect(store.close(first.session.sessionId, "writer_closed")).toBe(true);
-    expect(store.isWriter(second.session.sessionId)).toBe(false);
+    expect(store.close(second.session.sessionId, "writer_closed")).toBe(true);
+    expect(store.isWriter(first.session.sessionId)).toBe(false);
 
     const third = consume(store, {
       ...identity(),
       requestId: "r1-3",
     });
-    expect(third.session.mode).toBe("viewer");
-    expect(store.takeControl(third.session.sessionId).mode).toBe("writer");
+    expect(third.session.mode).toBe("writer");
+    expect(store.isWriter(first.session.sessionId)).toBe(false);
   });
 });
 

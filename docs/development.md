@@ -83,13 +83,13 @@ times. Identity snapshot schema 2 intentionally does not migrate the previous
 sequential-ID schema; reset the managed debug world before acceptance testing a
 build that crosses this boundary.
 
-A Computer has one Web Terminal writer lease. The first attached session is the
-writer and additional sessions are viewers. Viewer input and interrupts are
-rejected by both the HTTP companion and the Bedrock bridge. Input, close, and
-**Take control** transitions share one bounded per-Computer operation queue, so
-a successful takeover demotes the prior writer before later input can pass.
-Closing one view leaves the terminal open; only the final detach emits
-`terminal_closed`. Different Computers have independent writer leases.
+A Computer has one Web Terminal writer lease. Every newly opened session is the
+writer and atomically demotes the previous writer to a viewer. Viewer input and
+interrupts are rejected by both the HTTP companion and the Bedrock bridge.
+Input, close, and **Take control** transitions share one bounded per-Computer
+operation queue, so a successful takeover demotes the prior writer before later
+input can pass. Closing one view leaves the terminal open; only the final detach
+emits `terminal_closed`. Different Computers have independent writer leases.
 
 The Web Terminal sends `terminal_line`; DOS `EDIT` and cross-profile `vi`
 additionally use bounded `terminal_keys` batches. Writer-only `web-complete` and

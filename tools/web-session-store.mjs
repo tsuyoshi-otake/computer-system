@@ -63,7 +63,7 @@ export class WebSessionStore {
       requestId: identity.requestId,
       playerId: identity.playerId,
       computerId: identity.computerId,
-      mode: attached === undefined || attached.size === 0 ? "writer" : "viewer",
+      mode: "viewer",
       state: "issued",
       createdAt: now,
       expiresAt: now + this.sessionTtlMs,
@@ -82,14 +82,13 @@ export class WebSessionStore {
     } else {
       attached.add(session.sessionId);
     }
-    if (session.mode === "writer") {
-      this.writersByComputer.set(session.computerId, session.sessionId);
-    }
     this.handoffs.set(session.handoffCode, session);
-    return this.publicSession(session, {
+    const controlled = this.takeControl(session.sessionId);
+    return {
+      ...controlled,
       handoffCode: session.handoffCode,
       handoffExpiresAt: session.handoffExpiresAt,
-    });
+    };
   }
 
   consumeHandoff(code) {

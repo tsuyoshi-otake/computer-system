@@ -188,12 +188,12 @@ returned by `os.getComputerID()`. Allocation checks the persisted identity
 registry and retries collisions up to a fixed limit before failing explicitly.
 
 Only one browser session can type into a given Computer at a time. The first
-session receives control, while additional sessions are labeled `VIEW ONLY`. A
-viewer can use **Take control** to atomically demote the previous writer. Input
-and interrupts from viewers are rejected by both the companion and Bedrock
-bridge, and closing one view does not emit `terminal_closed` while another view
-of the same Computer remains active. Different Computers remain independently
-writable.
+newly opened session receives `CONTROL` and atomically demotes the previous
+writer to `VIEW ONLY`. A demoted viewer can use **Take control** to reclaim the
+lease. Input and interrupts from viewers are rejected by both the companion and
+Bedrock bridge, and closing one view does not emit `terminal_closed` while
+another view of the same Computer remains active. Different Computers remain
+independently writable.
 
 The BDS Web companion listens on `0.0.0.0:19144` by default and chooses a
 non-virtual LAN IPv4 address for the entry page. Trusted LAN clients therefore

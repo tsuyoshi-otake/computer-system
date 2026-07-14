@@ -272,11 +272,11 @@ does not migrate the previous sequential `computer-N` registry.
    `c-[0-9a-hjkmnp-tv-z]{6}` and whose status shows `CONTROL`.
 3. Use the same Portable Computer System again to mint a second link and open it
    in a second browser session.
-4. Confirm the second session shows `VIEW ONLY`, its inline input is disabled,
-   and the first session remains writable.
-5. Choose **Take control** in the second session. Confirm it changes to
-   `CONTROL`, the first session changes to `VIEW ONLY`, and physical Enter works
-   only in the new writer.
+4. Confirm the second session immediately shows `CONTROL`, the first session
+   changes to `VIEW ONLY`, and physical Enter works only in the second session.
+5. Choose **Take control** in the first session. Confirm it returns to
+   `CONTROL`, the second session changes to `VIEW ONLY`, and physical Enter
+   works only in the reclaimed writer.
 6. Close either one of the two sessions and confirm the remaining view continues
    receiving terminal snapshots. Close the last session and confirm exactly one
    `terminal_closed` record is emitted.

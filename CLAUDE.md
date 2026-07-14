@@ -128,10 +128,11 @@ The July 2026 live GDK verification established the following:
 - New identities use a collision-checked `c-xxxxxx` format. The lowercase
   Crockford Base32 payload decodes to the stable 30-bit numeric computer ID;
   legacy identity snapshots are not migrated automatically.
-- A Computer has one Web Terminal writer lease. Additional sessions are
-  view-only until **Take control** completes, at which point the previous writer
-  is demoted. Viewer input is rejected at both transport boundaries, and only
-  the final detached session emits `terminal_closed`.
+- A Computer has one Web Terminal writer lease. Each newly opened session takes
+  control immediately and demotes the previous writer to view-only. A demoted
+  session may use **Take control** to reclaim the lease. Viewer input is
+  rejected at both transport boundaries, and only the final detached session
+  emits `terminal_closed`.
 - Each Computer derives a permanent four-digit browser connection number from
   its stable identity. A machine interaction activates that number once for two
   minutes; invalid guesses are rate-limited per client and simultaneous code

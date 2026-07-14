@@ -127,13 +127,13 @@ keys (newlines become Enter) and remains capped by the 1,024-key browser queue;
 the next terminal snapshot explicitly returns to ordinary line mode after vi
 closes.
 
-The first browser attached to a Computer receives `CONTROL`. Later browser
-sessions are `VIEW ONLY` and cannot send a line or interrupt until **Take
-control** succeeds. Takeover, input, and close operations are serialized through
-a bounded per-Computer queue. The previous writer is demoted when control moves,
-and Bedrock emits `terminal_closed` only after the last browser session for that
-Computer detaches. Sessions attached to different Computers remain independently
-writable.
+Every newly opened browser session receives `CONTROL` and atomically demotes the
+previous writer to `VIEW ONLY`. A demoted session cannot send a line or
+interrupt until **Take control** succeeds. Takeover, input, and close operations
+are serialized through a bounded per-Computer queue. The previous writer is
+demoted when control moves, and Bedrock emits `terminal_closed` only after the
+last browser session for that Computer detaches. Sessions attached to different
+Computers remain independently writable.
 
 LAN clients require TCP 19144 (or the configured companion port) in addition to
 the BDS UDP port. Internet access must use an HTTPS reverse proxy: bind the
@@ -154,10 +154,10 @@ the TLS endpoint. Do not publish the plain HTTP listener directly.
   use one Portable Computer System. `Expect:` The host default browser opens the
   minted handoff exactly once; the same fallback URL remains visible in
   Minecraft.
-- `Verify:` Open two one-use links for the same Computer, attempt viewer input,
-  choose **Take control**, and retry from both browsers. `Expect:` The second
-  session begins `VIEW ONLY`; its first input is rejected; takeover promotes it,
-  demotes the first session, and only the new writer can submit afterward.
+- `Verify:` Open two activations for the same Computer and attempt input from
+  both browsers. `Expect:` The second session begins in `CONTROL`, the first is
+  atomically demoted to `VIEW ONLY`, and only the new writer can submit. Choose
+  **Take control** in the first browser and confirm the lease moves back.
 - `Verify:` Close one of two sessions and then close the final session.
   `Expect:` The first close does not emit `terminal_closed`; the final close
   emits exactly one terminal finalization record.
