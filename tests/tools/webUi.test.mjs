@@ -145,10 +145,11 @@ describe("Web terminal UI", () => {
     expect(script).toContain('error?.code === "out_of_range"');
   });
 
-  it("fits and requests bounded terminal dimensions while keeping disconnected input disabled", async () => {
-    const [css, script] = await Promise.all([
+  it("fits a fixed 80x25 hardware grid while keeping disconnected input disabled", async () => {
+    const [css, script, layout] = await Promise.all([
       source("web/styles.css"),
       source("web/app.js"),
+      source("web/terminal-layout.js"),
     ]);
 
     expect(css).toContain("font-size: var(--terminal-font-size)");
@@ -158,10 +159,21 @@ describe("Web terminal UI", () => {
     expect(css).not.toContain("caret-color: var(--green)");
     expect(script).toContain("function fitTerminal(columns, rows)");
     expect(script).toContain("function terminalContentSize()");
-    expect(script).toContain("available.height / (rows * 1.32)");
+    expect(script).toContain("function ensureHardwareTextMode()");
+    expect(script).toContain("new ResizeObserver(scheduleTerminalFit)");
     expect(script).toContain('api("/api/resize"');
-    expect(script).toContain("Math.min(160");
-    expect(script).toContain("Math.min(60");
+    expect(script).toContain("const hardwareTextColumns = 80");
+    expect(script).toContain("const hardwareTextRows = 25");
+    expect(script).toContain("maximumPixels: 48");
+    expect(layout).toContain("availableWidth / (columns * monospaceRatio)");
+    expect(layout).toContain("availableHeight / (rows * lineHeightRatio)");
+    const scheduledFit =
+      /function scheduleTerminalFit\(\)[\s\S]+?(?=async function ensureHardwareTextMode)/u.exec(
+        script,
+      )?.[0] ?? "";
+    expect(scheduledFit).not.toContain("/api/resize");
+    expect(script).not.toContain("Math.min(160");
+    expect(script).not.toContain("Math.min(60");
     expect(script).toContain('setInputAvailable(false, "OFFLINE")');
     expect(script).toContain('connectionState === "online"');
     expect(script).toContain('api("/api/close"');

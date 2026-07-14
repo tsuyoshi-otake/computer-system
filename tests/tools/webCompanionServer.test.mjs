@@ -383,7 +383,7 @@ describe("Web companion HTTP server", () => {
       /^scriptevent computer_system:web-input [A-Za-z0-9_-]+ keys %5B%22i%22%2C%22x%22%2C%22Escape%22%5D$/u,
     );
 
-    const resize = await fetch(`${status.origin}/api/resize`, {
+    const invalidResize = await fetch(`${status.origin}/api/resize`, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${token}`,
@@ -392,9 +392,20 @@ describe("Web companion HTTP server", () => {
       },
       body: JSON.stringify({ width: 120, height: 40 }),
     });
+    expect(invalidResize.status).toBe(400);
+
+    const resize = await fetch(`${status.origin}/api/resize`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+        Origin: status.origin,
+      },
+      body: JSON.stringify({ width: 80, height: 25 }),
+    });
     expect(resize.status).toBe(202);
     expect(bds.commands.at(-1)).toMatch(
-      /^scriptevent computer_system:web-resize [A-Za-z0-9_-]+ 120 40$/u,
+      /^scriptevent computer_system:web-resize [A-Za-z0-9_-]+ 80 25$/u,
     );
 
     const completionRequest = fetch(`${status.origin}/api/complete`, {

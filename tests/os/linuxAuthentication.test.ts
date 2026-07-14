@@ -18,9 +18,7 @@ describe("CS-Linux authentication", (): void => {
     const filesystem = new InMemoryFilesystem();
     const shell = linuxShell(filesystem);
 
-    expect(shell.takeStartupLines()).toContain(
-      "CS-Linux first boot: set the computer administrator password.",
-    );
+    expect(shell.takeStartupLines()).toEqual([]);
     expect(shell.prompt()).toBe("New password: ");
     expect(shell.isSecretInput()).toBe(true);
     expect(shell.complete("ec", 2).candidates).toEqual([]);
@@ -52,6 +50,7 @@ describe("CS-Linux authentication", (): void => {
     initial.submit("correct-horse");
 
     const shell = linuxShell(filesystem);
+    expect(shell.takeStartupLines()).toEqual([]);
     expect(shell.prompt()).toBe("Password: ");
     expect(shell.submitDebugCommand("whoami").stderr).toContain(
       "login is required",
@@ -70,7 +69,7 @@ describe("CS-Linux authentication", (): void => {
       requireLogin: true,
     });
     expect(shell.isSecretInput()).toBe(false);
-    expect(shell.prompt()).toBe("C:\\USERS\\COMPUTER> ");
+    expect(shell.prompt()).toBe("C:\\> ");
   });
 });
 

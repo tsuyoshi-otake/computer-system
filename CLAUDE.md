@@ -113,8 +113,9 @@ The July 2026 live GDK verification established the following:
 - The Web Terminal renders the same terminal snapshot in a full-width browser
   screen. Its semantic input is visually overlaid at the terminal cursor, so
   physical typing appears immediately after the shell prompt instead of in a
-  separate text box. Grid negotiation subtracts stage padding and fits both
-  axes; the terminal stage stays scrollbar-free.
+  separate text box. Each writer session normalizes the guest hardware text mode
+  to 80x25 once; CSS scaling subtracts stage padding and fits both axes without
+  mutating cell geometry, and the stage stays scrollbar-free.
 - Physical Enter submits `terminal_line`; Ctrl+C copies selected terminal or
   command text and invokes the bounded interrupt only without a selection;
   bounded plain-text paste never auto-submits; Up and Down navigate local
@@ -237,6 +238,43 @@ language-specific CPU engine. Profile migration may rewrite only an exactly
 recognized former default and must leave every customized OS or hardware field
 unchanged.
 
+`CpuMemoryHierarchy` is transient per shared CS process and must remain O(1) per
+instruction/access with fixed storage. CS386SX has no L1 or L2; even-addressed
+32-bit data uses two 16-bit bus transfers and odd-addressed data uses three.
+CS486DX and CS486DX2 use a cold 8 KiB four-way unified L1 with 16-byte lines and
+write-through stores; CS486DX2 additionally uses a 256 KiB external L2. Do not
+persist cache tags, recency, prefetch state, or counters. Neither CPU has
+dynamic branch prediction: count taken control transfers as deterministic
+pipeline or prefetch flushes. Keep `run --stats`, CPU identity output, CSBIOS,
+tests, and the manual synchronized with L1/L2 hits and misses, bus transfers,
+unaligned accesses, pipeline flushes, and the default SIMM descriptions.
+
+Each Computer also persists one versioned display-profile ID. Portable selects
+`portable-vga-256k`; Desktop selects `desktop-vga-512k`; Advanced Desktop
+selects `advanced-vga-512k`. All profiles stop at 640x480. Portable supports
+80x25 text, 320x200x8, and 640x480x4 with 256 KiB VRAM on an 800x480 physical
+LCD. Both desktops add 640x480x8 with 512 KiB VRAM on a 640x480 Monitor. Keep
+framebuffer bytes transient: `DisplayDevice` allocates VRAM on POST, releases it
+at power-off, marks dirty tiles in O(1), and drains a fixed-capacity ring in
+bounded O(D) batches. Never add display revision or framebuffer data to the
+World Dynamic Property persistence revision.
+
+Power-on owns one observable CSBIOS handoff: `powerOn()` enters `post` and
+renders the actual profile in 80x25; the next runtime step clears POST, enters
+`text`, and lets the guest run. CS-DOS starts with only its OS identity, one
+blank line, and `C:\>`; CS-Linux starts with only its OS identity, one blank
+line, and the password or shell prompt. Neither profile prints a simulated
+`tty1` or startup shell-version banner. Syntax/runtime failure terminates
+display state as `faulted`; shutdown and reboot finalization release VRAM
+explicitly. The current text TerminalBuffer remains the Web source of truth.
+`ComputerDisplayDeltaBroker` is the sole destructive dirty-tile drain owner. It
+drains once per Computer, publishes the same immutable update to all attached
+consumers, gives late consumers a complete queued keyframe, increments epochs on
+mode/device replacement, and releases its entry after the final detach. Keep its
+per-pass Computer, tile, and byte budgets fixed. The next graphics increment is
+to connect this broker to a Web Canvas adapter; never serialize or drain a
+framebuffer separately for every Web session.
+
 Authored machine plates live in `web/assets/machines/`; CPU identification
 plates live in `web/assets/cpu/`. Manual Chapter 2 serves both sets directly.
 The build derives bounded transparent 256 px item icons from the four machine
@@ -267,16 +305,18 @@ to the same process.
 Keep OS-specific behavior behind `osProfile.ts`: path dialect, boot layout,
 environment, aliases, and virtual devices must not leak into the domain
 filesystem. Linux is the default persisted profile; the DOS fixture protects
-drive-letter, case-insensitive, CRLF, and `NUL` semantics, and Portable Computer
-Systems select DOS explicitly. DOS startup processes at most 64 `CONFIG.SYS`
-lines and 256 lines per batch, with depth 8, explicit failure, and a modeled
-conventional/UMB/XMS layout. Only the built-in HIMEM/EMM386 and
-`DOS=HIGH|LOW,UMB|NOUMB` contract may affect that layout; never claim native
-drivers, paging, BIOS/DOS interrupts, TSRs, or `.COM`/`.EXE` execution. DOS
-`EDIT` and cross-profile `vi` use writer-owned bounded `terminal_keys` batches
-and render only their fixed viewports. Every menu, search, save, exit, failure,
-and resize branch must return an explicit editor state. Syntax and indent
-highlighting must scan no more than the visible columns/rows per redraw.
+drive-letter, case-insensitive, strict 8.3, CRLF, and `NUL` semantics, and
+Portable Computer Systems select DOS explicitly. New DOS volumes start at `C:\>`
+and do not create a Linux-like `C:\USERS` hierarchy. DOS startup processes at
+most 64 `CONFIG.SYS` lines and 256 lines per batch, with depth 8, explicit
+failure, and a modeled conventional/UMB/XMS layout. Only the built-in
+HIMEM/EMM386 and `DOS=HIGH|LOW,UMB|NOUMB` contract may affect that layout; never
+claim native drivers, paging, BIOS/DOS interrupts, TSRs, or `.COM`/`.EXE`
+execution. DOS `EDIT` and cross-profile `vi` use writer-owned bounded
+`terminal_keys` batches and render only their fixed viewports. Every menu,
+search, save, exit, failure, and resize branch must return an explicit editor
+state. Syntax and indent highlighting must scan no more than the visible
+columns/rows per redraw.
 
 World Dynamic Properties remain the Bedrock source of truth (physically the
 world LevelDB). Clean persistence checks use component revision tokens, not

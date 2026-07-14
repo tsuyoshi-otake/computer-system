@@ -77,11 +77,8 @@ export class LinuxAuthentication {
   startupLines(): readonly string[] {
     switch (this.state.kind) {
       case "login":
-        return ["CS-Linux login required for user computer."];
       case "setup-new":
-        return [
-          "CS-Linux first boot: set the computer administrator password.",
-        ];
+        return [];
       case "unavailable":
         return ["CS-Linux login unavailable: /etc/shadow is invalid."];
       default:

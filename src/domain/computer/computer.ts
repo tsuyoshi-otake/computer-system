@@ -13,11 +13,17 @@ import { RedstoneState } from "../redstone/redstoneState.js";
 import {
   defaultComputerHardwareForFamily,
   defaultComputerHardware,
+  portableComputerHardware,
   requireComputerHardware,
   restoreComputerHardware,
   type ComputerHardwareProfile,
   type ComputerHardwareSnapshot,
 } from "./hardware.js";
+import { DisplayDevice } from "../display/displayDevice.js";
+import {
+  requireDisplayProfileId,
+  type DisplayProfileId,
+} from "../display/displayProfile.js";
 
 const legacyDefaultClockHz = 20_000;
 
@@ -33,6 +39,7 @@ export interface ComputerSnapshot {
   readonly redstoneOutputMask: number;
   readonly osProfile?: ComputerOsProfile;
   readonly hardware?: ComputerHardwareSnapshot;
+  readonly displayProfileId?: DisplayProfileId;
 }
 
 export interface ComputerRecordOptions {
@@ -42,6 +49,7 @@ export interface ComputerRecordOptions {
   readonly label?: string;
   readonly osProfile?: ComputerOsProfile;
   readonly hardware?: ComputerHardwareProfile;
+  readonly displayProfileId?: DisplayProfileId;
 }
 
 export class ComputerRecord {
@@ -51,6 +59,8 @@ export class ComputerRecord {
   readonly redstone = new RedstoneState();
   private osProfileValue: ComputerOsProfile;
   private hardwareValue: ComputerHardwareProfile;
+  private displayProfileIdValue: DisplayProfileId;
+  private displayValue: DisplayDevice;
   private labelValue: string | undefined;
   private metadataRevision = 0;
 
@@ -69,6 +79,10 @@ export class ComputerRecord {
     this.hardwareValue = requireComputerHardware(
       options.hardware ?? defaultComputerHardwareForFamily(family),
     );
+    this.displayProfileIdValue = requireDisplayProfileId(
+      options.displayProfileId ?? defaultDisplayProfileForFamily(family),
+    );
+    this.displayValue = new DisplayDevice(this.displayProfileIdValue);
     this.setLabel(options.label);
   }
 
@@ -86,6 +100,14 @@ export class ComputerRecord {
 
   get hardware(): ComputerHardwareProfile {
     return this.hardwareValue;
+  }
+
+  get display(): DisplayDevice {
+    return this.displayValue;
+  }
+
+  get displayProfileId(): DisplayProfileId {
+    return this.displayProfileIdValue;
   }
 
   get persistenceRevision(): string {
@@ -112,30 +134,44 @@ export class ComputerRecord {
 
   configureHardware(hardware: ComputerHardwareProfile): void {
     this.configureSystemProfile({
+      displayProfileId: this.displayProfileIdValue,
       hardware,
       osProfile: this.osProfileValue,
     });
   }
 
   configureOsProfile(osProfile: ComputerOsProfile): void {
-    this.configureSystemProfile({ hardware: this.hardwareValue, osProfile });
+    this.configureSystemProfile({
+      displayProfileId: this.displayProfileIdValue,
+      hardware: this.hardwareValue,
+      osProfile,
+    });
   }
 
   configureSystemProfile(profile: {
+    readonly displayProfileId: DisplayProfileId;
     readonly hardware: ComputerHardwareProfile;
     readonly osProfile: ComputerOsProfile;
   }): void {
     const next = requireComputerHardware(profile.hardware);
+    const nextDisplayProfileId = requireDisplayProfileId(
+      profile.displayProfileId,
+    );
     if (
       profile.osProfile === this.osProfileValue &&
       next.cpuModel === this.hardwareValue.cpuModel &&
       next.clockHz === this.hardwareValue.clockHz &&
-      next.memoryBytes === this.hardwareValue.memoryBytes
+      next.memoryBytes === this.hardwareValue.memoryBytes &&
+      nextDisplayProfileId === this.displayProfileIdValue
     ) {
       return;
     }
     this.osProfileValue = profile.osProfile;
     this.hardwareValue = next;
+    if (nextDisplayProfileId !== this.displayProfileIdValue) {
+      this.displayProfileIdValue = nextDisplayProfileId;
+      this.displayValue = new DisplayDevice(nextDisplayProfileId);
+    }
     this.metadataRevision += 1;
   }
 
@@ -150,6 +186,7 @@ export class ComputerRecord {
       redstoneOutputMask: this.redstone.outputMask,
       osProfile: this.osProfileValue,
       hardware: this.hardwareValue,
+      displayProfileId: this.displayProfileIdValue,
     };
   }
 
@@ -166,12 +203,34 @@ export class ComputerRecord {
       terminalHeight: snapshot.terminal.height,
       osProfile: snapshot.osProfile ?? "linux",
       hardware: restoreSnapshotHardware(snapshot.hardware),
+      displayProfileId:
+        snapshot.displayProfileId ??
+        legacyDisplayProfile(snapshot, snapshot.family),
     });
     record.filesystem.restore(snapshot.filesystem);
     record.terminal.restore(snapshot.terminal);
     record.setRedstoneOutputMask(snapshot.redstoneOutputMask);
     return record;
   }
+}
+
+function defaultDisplayProfileForFamily(
+  family: ComputerFamily,
+): DisplayProfileId {
+  return family === "advanced" ? "advanced-vga-512k" : "desktop-vga-512k";
+}
+
+function legacyDisplayProfile(
+  snapshot: ComputerSnapshot,
+  family: ComputerFamily,
+): DisplayProfileId {
+  const hardware = snapshot.hardware;
+  return snapshot.osProfile === "dos" &&
+    hardware?.cpuModel === portableComputerHardware.cpuModel &&
+    hardware.clockHz === portableComputerHardware.clockHz &&
+    hardware.memoryBytes === portableComputerHardware.memoryBytes
+    ? "portable-vga-256k"
+    : defaultDisplayProfileForFamily(family);
 }
 
 function restoreSnapshotHardware(

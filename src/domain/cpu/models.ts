@@ -9,8 +9,19 @@ export interface CpuModelSpecification {
   readonly id: CpuModel;
   readonly maximumMemoryBytes: number;
   readonly nominalClockHz: number;
+  readonly microarchitecture: CpuMicroarchitectureSpecification;
   readonly runtimeName: string;
   readonly supportsMicroPython: boolean;
+}
+
+export interface CpuMicroarchitectureSpecification {
+  readonly branchPrediction: "none";
+  readonly cacheLineBytes: 16;
+  readonly externalCacheBytes: 0 | 262_144;
+  readonly l1CacheBytes: 0 | 8_192;
+  readonly mainMemoryTransferCycles: number;
+  readonly memoryModules: string;
+  readonly pipeline: "five-stage" | "prefetch-overlap";
 }
 
 const specifications: Readonly<Record<CpuModel, CpuModelSpecification>> = {
@@ -21,6 +32,15 @@ const specifications: Readonly<Record<CpuModel, CpuModelSpecification>> = {
     id: "cs386sx",
     maximumMemoryBytes: 16 * 1_048_576,
     nominalClockHz: 16_000_000,
+    microarchitecture: {
+      branchPrediction: "none",
+      cacheLineBytes: 16,
+      externalCacheBytes: 0,
+      l1CacheBytes: 0,
+      mainMemoryTransferCycles: 2,
+      memoryModules: "2 x 1 MiB 30-pin SIMM DRAM",
+      pipeline: "prefetch-overlap",
+    },
     runtimeName: "CS386SX",
     supportsMicroPython: false,
   },
@@ -31,6 +51,15 @@ const specifications: Readonly<Record<CpuModel, CpuModelSpecification>> = {
     id: "cs486dx",
     maximumMemoryBytes: 64 * 1_048_576,
     nominalClockHz: 33_000_000,
+    microarchitecture: {
+      branchPrediction: "none",
+      cacheLineBytes: 16,
+      externalCacheBytes: 0,
+      l1CacheBytes: 8_192,
+      mainMemoryTransferCycles: 3,
+      memoryModules: "4 x 512 KiB 30-pin SIMM DRAM",
+      pipeline: "five-stage",
+    },
     runtimeName: "CS486DX",
     supportsMicroPython: true,
   },
@@ -41,6 +70,15 @@ const specifications: Readonly<Record<CpuModel, CpuModelSpecification>> = {
     id: "cs486dx2",
     maximumMemoryBytes: 64 * 1_048_576,
     nominalClockHz: 66_000_000,
+    microarchitecture: {
+      branchPrediction: "none",
+      cacheLineBytes: 16,
+      externalCacheBytes: 262_144,
+      l1CacheBytes: 8_192,
+      mainMemoryTransferCycles: 6,
+      memoryModules: "2 x 4 MiB 72-pin SIMM DRAM",
+      pipeline: "five-stage",
+    },
     runtimeName: "CS486DX2",
     supportsMicroPython: true,
   },

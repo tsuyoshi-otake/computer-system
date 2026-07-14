@@ -24,7 +24,7 @@ describe("OS profile boundary", (): void => {
       osProfile: "dos",
     });
 
-    expect(shell.prompt()).toBe("C:\\USERS\\COMPUTER> ");
+    expect(shell.prompt()).toBe("C:\\> ");
     const directory = shell.submit("DIR C:\\").stdout;
     expect(directory).toContain("Volume in drive C is CS-DOS\r\n");
     expect(directory).toContain("Directory of C:\\\r\n");

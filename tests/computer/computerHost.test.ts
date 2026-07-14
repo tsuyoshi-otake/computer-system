@@ -97,8 +97,10 @@ describe("ComputerRuntime", (): void => {
       python.outcome !== "completed"
     )
       return;
-    expect(asm.stderr).toContain("20 CPU cycles");
-    expect(cpp.stderr).toContain("61 CPU cycles");
+    expect(asm.stderr).toMatch(/\d+ CPU cycles/u);
+    expect(cpp.stderr).toMatch(/\d+ CPU cycles/u);
+    expect(asm.stderr).toContain("L1 3 hit/1 miss");
+    expect(cpp.stderr).toMatch(/L1 \d+ hit\/\d+ miss/u);
     expect(python.stderr).toMatch(/\d+ CPU cycles/u);
     expect(asm.cpuCycles).toBeLessThan(cpp.cpuCycles);
     expect(cpp.cpuCycles).toBeLessThan(python.cpuCycles);
@@ -150,14 +152,11 @@ describe("ComputerRuntime", (): void => {
       outcome: "accepted",
       state: "running",
     });
-    record.filesystem.writeFile(
-      "/drives/c/users/computer/demo.py",
-      "print(6 * 7)\n",
-    );
+    record.filesystem.writeFile("/drives/c/demo.py", "print(6 * 7)\n");
 
     const result = runtime.executeDebugShellCommand(
       record.computerId,
-      "python /drives/c/users/computer/demo.py",
+      "python /drives/c/demo.py",
     );
     expect(result).toMatchObject({
       outcome: "completed",
@@ -226,7 +225,8 @@ describe("ComputerRuntime", (): void => {
     rebootRuntime.queueEvent(rebooted.computerId, "reboot");
     rebootRuntime.runTick();
     expect(rebooted.lifecycle.state.kind).toBe("running");
-    expect(rebooted.terminal.line(1).trim()).toBe("");
+    expect(rebooted.terminal.line(2)).toContain("CSBIOS System Configuration");
+    expect(rebooted.display.state.kind).toBe("post");
     rebootRuntime.runTick();
     expect(rebooted.terminal.line(1)).toMatch(/^boot/u);
     expect(

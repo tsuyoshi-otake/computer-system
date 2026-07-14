@@ -1,5 +1,40 @@
 # Manual verification
 
+## CSBIOS and display-profile host gate
+
+Run the deterministic microarchitecture checks:
+
+```powershell
+npx vitest run tests/runtime/memoryHierarchy.test.ts tests/runtime/cs486.test.ts
+```
+
+`Expect:` CS386SX odd dwords add one 16-bit bus transfer; CS486 repeated
+16-byte-line access produces L1 hits; DX2 can hit its external L2 after a
+four-way L1 eviction; taken branches record pipeline flushes; every new process
+starts with cold caches.
+
+Run before attempting live graphics work:
+
+```powershell
+npm run test -- --run tests/domains/display.test.ts tests/computer/hardwareProfiles.test.ts tests/os/systemBoot.test.ts
+```
+
+- `Verify:` Inspect the focused test result. `Expect:` Portable has 256 KiB VRAM
+  and rejects 640x480x8; both desktops have 512 KiB and accept it; no guest mode
+  exceeds 640x480.
+- `Verify:` Power-on assertions run before the first runtime tick. `Expect:` An
+  80x25 CSBIOS frame reports the actual CPU, RAM, panel, and VRAM profile.
+- `Verify:` Advance one runtime tick for DOS and Linux. `Expect:` POST is
+  cleared exactly once. CS-DOS shows its identity, a blank line, and `C:\>`;
+  CS-Linux shows its identity, a blank line, and the password or shell prompt.
+  Neither profile shows a tty label or startup shell banner.
+- `Verify:` Inspect a saved Computer snapshot. `Expect:` It contains a compact
+  `displayProfileId` and no VRAM, framebuffer, dirty-tile, or palette payload.
+
+The current live Web Terminal remains text-backed. Canvas rendering,
+Computer-scoped delta fan-out, and guest graphics APIs require their own focused
+and real-browser acceptance before claiming playable Web graphics.
+
 Most Computer System behavior is verified by host tests or the headless Bedrock
 Dedicated Server harness. Manual testing is reserved for behavior that depends
 on a real player's visual, audio, or interaction experience.
@@ -335,8 +370,9 @@ does not migrate the previous sequential `computer-N` registry.
     is not an ordinary persisted file.
 14. Type `who` and press Tab, then type `cat /et` and press Tab. Confirm the
     values become `whoami ` and `cat /etc/` without submitting. Resize the
-    browser and confirm the reported cell size grows above 51x19, stays at or
-    below 160x60, and does not produce duplicate commands.
+    browser and confirm the reported cell size remains 80x25, the glyphs scale
+    to fit both axes without a scrollbar, and no duplicate resize relay or
+    command is produced.
 15. Run `date`, `date --game`, `date --virtual`, `du -s /home`, and `quota`.
     Confirm wall UTC, Minecraft time, deterministic VM time, subtree bytes, and
     enforced capacity/file/entry limits are distinguishable.

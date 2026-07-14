@@ -18,6 +18,9 @@ describe("CS486DX shell toolchain", (): void => {
     expect(measured.stderr).toMatch(
       /4 instructions, \d+ CPU cycles, \d+\.\d{3} us at 33 MHz, halted/u,
     );
+    expect(measured.stderr).toMatch(
+      /memory: L1 \d+ hit\/\d+ miss, L2 \d+ hit\/\d+ miss, \d+ bus transfers, \d+ unaligned, \d+ pipeline flushes/u,
+    );
     expect(shell.submit("objdump /sum").stdout).toContain('"op":"add"');
   });
 
@@ -76,7 +79,10 @@ describe("CS486DX shell toolchain", (): void => {
 
     expect(linux.submit("cpuinfo").stdout).toContain("Computer System 486DX");
     expect(linux.submit("cpuinfo").stdout).toContain("33 MHz");
+    expect(linux.submit("cpuinfo").stdout).toContain("l1 cache\t: 8 KiB");
+    expect(linux.submit("cpuinfo").stdout).toContain("pipeline\t: five-stage");
     expect(dos.submit("CPU").stdout).toContain("33 MHz");
+    expect(dos.submit("CPU").stdout).toContain("L1 cache: 8 KiB");
     expect(dos.submit("SYSTEMINFO").stdout).toContain("Computer System 486DX");
   });
 

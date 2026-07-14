@@ -23,6 +23,7 @@ export interface OsProfile {
   readonly aliases: ReadonlyMap<string, string>;
   readonly environment: ReadonlyMap<string, string>;
   readonly home: string;
+  readonly initialDirectory: string;
   readonly id: ComputerOsProfile;
   readonly identity: OsIdentity;
   readonly pathDialect: PathDialect;
@@ -61,7 +62,7 @@ const dosPathDialect: PathDialect = {
   },
   resolve: (path, currentDirectory, home) => {
     const expanded = path === "~" ? home : path.replaceAll("\\", "/");
-    if (expanded.startsWith("/drives/")) return canonicalize(expanded, true);
+    if (expanded.startsWith("/drives/")) return canonicalizeDosPath(expanded);
     if (/^nul$/iu.test(expanded)) return "/drives/c/nul";
     if (/^con$/iu.test(expanded)) return "/drives/c/con";
     const drive = /^([A-Za-z]):(?:\/(.*))?$/u.exec(expanded);
@@ -71,7 +72,7 @@ const dosPathDialect: PathDialect = {
           ? `/drives/c${expanded}`
           : `${currentDirectory}/${expanded}`
         : `/drives/${drive[1]!.toLowerCase()}/${drive[2] ?? ""}`;
-    return canonicalize(rooted, true);
+    return canonicalizeDosPath(rooted);
   },
 };
 
@@ -101,6 +102,7 @@ const linuxProfile: OsProfile = {
   version: 1,
   username: "computer",
   home: "/home/computer",
+  initialDirectory: "/home/computer",
   pathDialect: linuxPathDialect,
   aliases: new Map(),
   environment: new Map([
@@ -198,7 +200,8 @@ const dosProfile: OsProfile = {
   identity: getOsIdentity("dos"),
   version: 1,
   username: "COMPUTER",
-  home: "/drives/c/users/computer",
+  home: "/drives/c",
+  initialDirectory: "/drives/c",
   pathDialect: dosPathDialect,
   aliases: new Map([
     ["chdir", "cd"],
@@ -217,7 +220,6 @@ const dosProfile: OsProfile = {
     ["ver", "uname"],
   ]),
   environment: new Map([
-    ["HOME", "/drives/c/users/computer"],
     ["PATH", "C:\\DOS;C:\\COMMAND"],
     ["PROMPT", "$P$G"],
     ["SHELL", "C:\\COMMAND.COM"],
@@ -235,7 +237,6 @@ const dosProfile: OsProfile = {
       "/drives/c/command",
       "/drives/c/dos",
       "/drives/c/temp",
-      "/drives/c/users/computer",
     ]);
     resetDirectory(filesystem, "/drives/c/temp");
     ensureFile(
@@ -310,4 +311,29 @@ function canonicalize(path: string, caseInsensitive: boolean): string {
     segments.push(caseInsensitive ? source.toLowerCase() : source);
   }
   return `/${segments.join("/")}`;
+}
+
+const dosShortNamePattern =
+  /^[A-Za-z0-9!#$%&'()@^_`{}~-]{1,8}(?:\.[A-Za-z0-9!#$%&'()@^_`{}~-]{1,3})?$/u;
+
+function canonicalizeDosPath(path: string): string {
+  const canonical = canonicalize(path, true);
+  const drive = /^\/drives\/[a-z](?:\/(.*))?$/u.exec(canonical);
+  if (drive === null) throw new DosPathError();
+  const tail = drive[1];
+  if (
+    tail !== undefined &&
+    tail.length > 0 &&
+    tail.split("/").some((segment) => !dosShortNamePattern.test(segment))
+  ) {
+    throw new DosPathError();
+  }
+  return canonical;
+}
+
+export class DosPathError extends Error {
+  constructor() {
+    super("Invalid filename or extension.");
+    this.name = "DosPathError";
+  }
 }

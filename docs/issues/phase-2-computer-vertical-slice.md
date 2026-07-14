@@ -185,11 +185,11 @@ not a direct Script API dependency.
 The shell follow-up adds wall/game/virtual `date` sources, writer-authorized Tab
 completion, Computer System Bash control flow and positional parameters,
 non-destructive `/etc/bash.bashrc` plus `~/.bashrc`, `du`, and `quota`. Web
-sessions negotiate terminal dimensions from 51x19 through 160x60; native GDK
-remains at 51x19. All completion, resize, loop, script, traversal, and output
-paths are bounded. `npm run validate` passed 60 files / 242 tests and the
-production pack build. A preserved-world BDS restart then completed headless run
-`headless-289000` with `failures: 0`.
+sessions normalize the hardware text grid to fixed 80x25 and use CSS scaling;
+native GDK remains at 51x19. All completion, resize, loop, script, traversal,
+and output paths are bounded. `npm run validate` passed 60 files / 242 tests and
+the production pack build. A preserved-world BDS restart then completed headless
+run `headless-289000` with `failures: 0`.
 
 ## July 2026 virtual hardware update
 

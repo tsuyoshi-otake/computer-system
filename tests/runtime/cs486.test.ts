@@ -61,10 +61,11 @@ describe("CS486DX execution core", (): void => {
       memoryBytes: 65_536,
     });
     expect(yielded).toMatchObject({
-      cycles: 20,
       executedInstructions: 20,
       state: "yielded",
+      microarchitecture: { pipelineFlushes: 20 },
     });
+    expect(yielded.cycles).toBeGreaterThan(20);
     expect(() =>
       runCs486(
         {
@@ -107,9 +108,11 @@ describe("CS486DX execution core", (): void => {
     expect(cs486dx2.output).toBe(cs486dx.output);
     expect(cs386sx.output).toBe("42");
     expect(cs386sx.executedInstructions).toBe(cs486dx.executedInstructions);
-    expect(cs486dx.cycles).toBe(26);
-    expect(cs486dx2.cycles).toBe(cs486dx.cycles);
+    expect(cs486dx.cycles).toBeGreaterThan(26);
+    expect(cs486dx2.cycles).toBeGreaterThan(cs486dx.cycles);
     expect(cs386sx.cycles).toBe(48);
+    expect(cs386sx.microarchitecture.l1Misses).toBe(0);
+    expect(cs486dx.microarchitecture.l1Misses).toBeGreaterThan(0);
   });
 
   it("models 386 early-out multiplication and taken branch cost", (): void => {

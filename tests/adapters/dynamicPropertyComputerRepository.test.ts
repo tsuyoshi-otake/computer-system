@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { DynamicPropertyComputerRepository } from "../../src/adapters/storage/dynamicPropertyComputerRepository.js";
 import { ComputerPersistenceService } from "../../src/application/computer/persistence.js";
 import { ComputerRecord } from "../../src/domain/computer/computer.js";
+import type { ComputerSnapshot } from "../../src/domain/computer/computer.js";
 
 describe("DynamicPropertyComputerRepository", (): void => {
   it("pages and restores a computer snapshot using namespaced properties", (): void => {
@@ -27,6 +28,7 @@ describe("DynamicPropertyComputerRepository", (): void => {
     expect(loaded.record.filesystem.readFile("/startup.py")).toBe(
       "print('persisted')".repeat(20),
     );
+    expect(loaded.record.displayProfileId).toBe("advanced-vga-512k");
     expect(
       [...owner.values.keys()].filter((key) => key.includes(":page:")).length,
     ).toBeGreaterThan(1);
@@ -45,6 +47,20 @@ describe("DynamicPropertyComputerRepository", (): void => {
     owner.values.set("computer_system:computer:computer-12:head", 4);
     expect(() => repository.load("computer-12")).toThrow(/not a string/u);
     expect(() => repository.load("../unsafe")).toThrow(/Invalid computer ID/u);
+  });
+
+  it("rejects an unsupported persisted display profile", (): void => {
+    const owner = new MemoryDynamicProperties();
+    const repository = new DynamicPropertyComputerRepository(owner);
+    const invalid = {
+      ...new ComputerRecord("computer-18", "standard").snapshot(),
+      displayProfileId: "host-gpu-unbounded",
+    } as unknown as ComputerSnapshot;
+
+    repository.save(invalid);
+    expect(() => repository.load("computer-18")).toThrow(
+      /No complete storage generation/u,
+    );
   });
 });
 

@@ -2,6 +2,7 @@ import type { ComputerSnapshotRepository } from "../../application/computer/pers
 import type { ComputerSnapshot } from "../../domain/computer/computer.js";
 import { requireComputerId } from "../../domain/computer/identity.js";
 import { isCpuModel } from "../../domain/cpu/models.js";
+import { isDisplayProfileId } from "../../domain/display/displayProfile.js";
 import { TransactionalPagedStore } from "./transactionalPagedStore.js";
 
 export interface DynamicPropertyOwner {
@@ -85,6 +86,8 @@ function isComputerSnapshot(value: unknown): value is ComputerSnapshot {
         Number.isSafeInteger(candidate.hardware.memoryBytes))) &&
     (candidate.osProfile === undefined ||
       candidate.osProfile === "linux" ||
-      candidate.osProfile === "dos")
+      candidate.osProfile === "dos") &&
+    (candidate.displayProfileId === undefined ||
+      isDisplayProfileId(candidate.displayProfileId))
   );
 }

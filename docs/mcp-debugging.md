@@ -68,6 +68,18 @@ Input, output, concurrency, and timeout are bounded; vi/editor, sleep,
 shutdown/reboot, and other TUI or asynchronous control flows return an explicit
 unsupported result.
 
+Use `run --stats <program>` through this tool when comparing guest code. The
+returned `stderr` preserves the CPU model line and the L1/L2 hit/miss, bus
+transfer, unaligned-access, and pipeline-flush counters. This makes alignment
+and locality benchmarks reproducible through MCP without scraping the Web
+Terminal. CS-Linux authentication remains enforced: log in normally before using
+the debug command. CS-DOS has no login gate.
+
+Only one managed BDS may own a UDP port pair. When a development server is
+already using `19142`/`19143`, set `BDS_MCP_PORT` to a free port whose following
+port is also free; use a distinct `WEB_COMPANION_PORT` as well. Do not start two
+BDS processes against the same work directory or world concurrently.
+
 For a bounded Computer System Python comparison, pass `python <file>` or
 `micropython <file>` through the same tool. This MCP-only form compiles and runs
 the file with the target Computer's filesystem, hardware profile, and RAM limit.
@@ -153,8 +165,8 @@ limits remain enforced. Do not publish the plain HTTP listener directly.
 ## Verification rubric
 
 - `Verify:` Run `npm run test:mcp`. `Expect:` MCP initialization, tool
-  discovery, status output, command allowlisting, and explicit idle-state tests
-  pass.
+  discovery, status output, command allowlisting, explicit idle-state tests, and
+  lossless `run --stats` microarchitecture output pass.
 - `Verify:` Run `npm run validate`. `Expect:` Formatting, lint, type checking,
   host tests, and the pack build all pass.
 - `Verify:` Run `npm run test:web`. `Expect:` One-use handoff, authentication,

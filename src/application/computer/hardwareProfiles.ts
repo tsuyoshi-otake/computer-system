@@ -49,6 +49,7 @@ export function applyPortableComputerProfile(
   if (hasPortableProfile(record)) return "unchanged";
   if (!newlyCreated && !hasLegacyPortableDefaults(record)) return "unchanged";
   record.configureSystemProfile({
+    displayProfileId: "portable-vga-256k",
     hardware: portableComputerHardware,
     osProfile: "dos",
   });
@@ -58,6 +59,7 @@ export function applyPortableComputerProfile(
 function hasPortableProfile(record: ComputerRecord): boolean {
   return (
     record.osProfile === "dos" &&
+    record.displayProfileId === "portable-vga-256k" &&
     sameHardware(record.hardware, portableComputerHardware)
   );
 }

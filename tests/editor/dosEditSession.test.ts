@@ -135,9 +135,9 @@ describe("DosEditSession", (): void => {
     const filesystem = new InMemoryFilesystem();
     const shell = new ShellSession(filesystem, { osProfile: "dos" });
 
-    shell.submit("EDIT C:\\COLLISION");
+    shell.submit("EDIT C:\\COLLIDE");
     shell.keys(["X"]);
-    filesystem.makeDirectory("/drives/c/collision");
+    filesystem.makeDirectory("/drives/c/collide");
     const failed = shell.keys(["Alt+f", "x", "y"]);
 
     expect(failed.resetTerminal).toBeUndefined();

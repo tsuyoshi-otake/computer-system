@@ -13,7 +13,7 @@ import {
   type ComputerHardwareProfile,
 } from "../../domain/computer/hardware.js";
 import { createVirtualShellClock, type ShellClockSource } from "./clock.js";
-import { getOsProfile } from "./osProfile.js";
+import { DosPathError, getOsProfile } from "./osProfile.js";
 import { LinuxAuthentication } from "./linuxAuthentication.js";
 import { DosEditSession } from "../editor/dosEditSession.js";
 import type { EditorResult, EditorScreen } from "../editor/editorScreen.js";
@@ -378,18 +378,27 @@ export class ShellSession {
         } catch (error: unknown) {
           return {
             exitCode: 1,
-            stderr: `${expanded.words[0] ?? "bash"}: ${message(error)}\n`,
+            stderr: this.commandError(expanded.words[0] ?? "shell", error),
             stdout: "",
           };
         }
       }
 
-      const executed = this.executeCommand(
-        expanded,
-        stdin,
-        depth,
-        pipeline.commands.length === 1,
-      );
+      let executed: ShellCommandResult;
+      try {
+        executed = this.executeCommand(
+          expanded,
+          stdin,
+          depth,
+          pipeline.commands.length === 1,
+        );
+      } catch (error: unknown) {
+        return {
+          exitCode: 1,
+          stderr: this.commandError(expanded.words[0] ?? "shell", error),
+          stdout: "",
+        };
+      }
       stderr += executed.stderr;
       exitCode = executed.exitCode;
       action = executed.action;
@@ -412,7 +421,7 @@ export class ShellSession {
           );
           stdout = "";
         } catch (error: unknown) {
-          stderr += `${expanded.words[0] ?? "bash"}: ${message(error)}\n`;
+          stderr += this.commandError(expanded.words[0] ?? "shell", error);
           exitCode = 1;
           stdout = "";
         }
@@ -437,6 +446,13 @@ export class ShellSession {
       ...(terminalScreen === undefined ? {} : { terminalScreen }),
       ...(resetTerminal ? { resetTerminal: true } : {}),
     };
+  }
+
+  private commandError(command: string, error: unknown): string {
+    if (this.commands.profile.id === "dos" && error instanceof DosPathError) {
+      return "Invalid filename or extension.\r\n";
+    }
+    return `${command}: ${message(error)}\n`;
   }
 
   private expandCommand(command: ShellCommandNode): ShellCommandNode {

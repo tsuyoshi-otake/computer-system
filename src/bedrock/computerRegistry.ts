@@ -66,6 +66,7 @@ export function ensurePortableComputer(
   }
   if (restored.outcome === "failed") throw restored.error;
   const record = new ComputerRecord(computerId, family, {
+    displayProfileId: "portable-vga-256k",
     hardware: portableComputerHardware,
     osProfile: "dos",
   });

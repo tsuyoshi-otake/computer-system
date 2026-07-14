@@ -163,4 +163,47 @@ describe("BDS debug session", () => {
     });
     expect(() => session.runCommand("list")).toThrow(/not running/u);
   });
+
+  it("preserves run --stats microarchitecture output in MCP responses", async () => {
+    class StatsSession extends BdsDebugSession {
+      async runCommand(command) {
+        this.command = command;
+        return { command, afterCursor: 41 };
+      }
+
+      async waitForLog(options) {
+        const requestId = options.contains.match(/"requestId":"([^"]+)"/u)?.[1];
+        return {
+          line: `CS_DEBUG_COMMAND ${JSON.stringify({
+            requestId,
+            computerId: "c-00696j",
+            status: "completed",
+            exitCode: 0,
+            stdout: "",
+            stderr:
+              "CS386SX: 3 instructions, 21 CPU cycles, 1.313 us at 16 MHz, halted\\r\\nmemory: L1 0 hit/0 miss, L2 0 hit/0 miss, 14 bus transfers, 2 unaligned, 0 pipeline flushes\\r\\n",
+            cpuCycles: 40,
+          })}`,
+        };
+      }
+    }
+
+    const session = new StatsSession({
+      environment: { BDS_HOME: "C:/not-accessed-by-debug-command" },
+    });
+    const response = await session.executeComputerCommand({
+      computerId: "c-00696j",
+      command: "run --stats C:\\UNALIGN",
+    });
+
+    expect(session.command).toMatch(
+      /^scriptevent computer_system:debug-command d[^ ]+ c-00696j vrun%20--stats%20C%3A%5CUNALIGN$/u,
+    );
+    expect(response).toMatchObject({
+      status: "completed",
+      exitCode: 0,
+      cpuCycles: 40,
+    });
+    expect(response.stderr).toContain("14 bus transfers, 2 unaligned");
+  });
 });

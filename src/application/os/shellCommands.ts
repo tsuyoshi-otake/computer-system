@@ -1,6 +1,6 @@
 import type { InMemoryFilesystem } from "../../domain/filesystem/inMemoryFilesystem.js";
 import { utf8ByteLength } from "../../domain/text/utf8.js";
-import type { OsProfile } from "./osProfile.js";
+import { DosPathError, type OsProfile } from "./osProfile.js";
 import type { EditorScreen } from "../editor/editorScreen.js";
 import type { ShellClockSource } from "./clock.js";
 import type { ComputerHardwareProfile } from "../../domain/computer/hardware.js";
@@ -12,6 +12,7 @@ import {
   type Cs486Executable,
 } from "../../domain/cpu/cs486.js";
 import { cpuModelSpecification } from "../../domain/cpu/models.js";
+import type { CpuMicroarchitectureStats } from "../../domain/cpu/memoryHierarchy.js";
 import { cpuCyclesToMicroseconds } from "../../domain/cpu/timing.js";
 import {
   assembleCs486,
@@ -206,8 +207,8 @@ export class ShellCommandRuntime {
     private readonly options: ShellCommandRuntimeOptions,
   ) {
     this.bootTick = options.currentTick();
-    this.currentDirectory = options.profile.home;
-    this.previousDirectory = options.profile.home;
+    this.currentDirectory = options.profile.initialDirectory;
+    this.previousDirectory = options.profile.initialDirectory;
     this.environment = new Map(options.profile.environment);
   }
 
@@ -356,9 +357,7 @@ export class ShellCommandRuntime {
       for (const candidateName of names) {
         const candidate = hasDirectory
           ? this.resolvePath(candidateName)
-          : this.filesystem.normalize(
-              joinPath(directory, candidateName.toLowerCase()),
-            );
+          : this.resolvePath(joinPath(directory, candidateName.toLowerCase()));
         if (
           this.filesystem.exists(candidate) &&
           !this.filesystem.isDirectory(candidate)
@@ -413,6 +412,9 @@ export class ShellCommandRuntime {
       }
       return result;
     } catch (error: unknown) {
+      if (this.options.profile.id === "dos" && error instanceof DosPathError) {
+        return status(1, "", "Invalid filename or extension.\r\n");
+      }
       return failure(command, message(error));
     }
   }
@@ -1805,6 +1807,12 @@ export class ShellCommandRuntime {
         `address size\t: ${String(cpu.addressBits)} bit`,
         `data bus\t: ${String(cpu.dataBusBits)} bit`,
         `clock\t\t: ${formatClock(this.options.hardware.clockHz)}`,
+        `l1 cache\t: ${formatCacheBytes(cpu.microarchitecture.l1CacheBytes)}`,
+        `l2 cache\t: ${formatCacheBytes(cpu.microarchitecture.externalCacheBytes)}`,
+        `cache line\t: ${String(cpu.microarchitecture.cacheLineBytes)} bytes`,
+        `pipeline\t: ${cpu.microarchitecture.pipeline}`,
+        `branch predictor: ${cpu.microarchitecture.branchPrediction}`,
+        `memory modules\t: ${cpu.microarchitecture.memoryModules}`,
         "execution mode\t: protected sandbox",
         "paging\t\t: unavailable",
       ].join("\n") + "\n"
@@ -2335,8 +2343,9 @@ export class ShellCommandRuntime {
     const runtimeName = cpuModelSpecification(
       this.options.hardware.cpuModel,
     ).runtimeName;
+    const newline = this.options.profile.id === "dos" ? "\r\n" : "\n";
     const stderr = stats
-      ? `${runtimeName}: ${result.executedInstructions} instructions, ${result.cycles} CPU cycles, ${cpuCyclesToMicroseconds(result.cycles, this.options.hardware.clockHz).toFixed(3)} us at ${formatClock(this.options.hardware.clockHz)}, ${result.state}\n`
+      ? `${runtimeName}: ${result.executedInstructions} instructions, ${result.cycles} CPU cycles, ${cpuCyclesToMicroseconds(result.cycles, this.options.hardware.clockHz).toFixed(3)} us at ${formatClock(this.options.hardware.clockHz)}, ${result.state}${newline}${formatMicroarchitectureStats(result.microarchitecture)}${newline}`
       : result.state === "yielded"
         ? `${runtimeName}: execution limit reached\n`
         : "";
@@ -2460,6 +2469,12 @@ export class ShellCommandRuntime {
         `Address size: ${String(cpu.addressBits)} bit`,
         `Data bus: ${String(cpu.dataBusBits)} bit`,
         `Clock speed: ${formatClock(this.options.hardware.clockHz)}`,
+        `L1 cache: ${formatCacheBytes(cpu.microarchitecture.l1CacheBytes)}`,
+        `External L2 cache: ${formatCacheBytes(cpu.microarchitecture.externalCacheBytes)}`,
+        `Cache line: ${String(cpu.microarchitecture.cacheLineBytes)} bytes`,
+        `Pipeline: ${cpu.microarchitecture.pipeline}`,
+        `Branch prediction: ${cpu.microarchitecture.branchPrediction}`,
+        `Memory modules: ${cpu.microarchitecture.memoryModules}`,
         "Execution modes: real, protected, virtual-8086 compatibility",
         "Current mode: protected sandbox",
       ].join("\r\n") + "\r\n",
@@ -2686,6 +2701,10 @@ export class ShellCommandRuntime {
         `CPU: ${cpu.displayName}, ${formatClock(this.options.hardware.clockHz)}`,
         `Data bus: ${String(cpu.dataBusBits)} bit`,
         `Memory: ${this.options.hardware.memoryBytes} bytes`,
+        `Memory modules: ${cpu.microarchitecture.memoryModules}`,
+        `L1 cache: ${formatCacheBytes(cpu.microarchitecture.l1CacheBytes)}`,
+        `External L2 cache: ${formatCacheBytes(cpu.microarchitecture.externalCacheBytes)}`,
+        `Pipeline: ${cpu.microarchitecture.pipeline}`,
         `Disk: ${usedDisk} / ${capacity} bytes used`,
       ].join("\r\n") + "\r\n",
     );
@@ -3553,6 +3572,16 @@ function formatBinaryBytes(bytes: number): string {
   if (bytes >= 1_048_576) return `${(bytes / 1_048_576).toFixed(1)} MiB`;
   if (bytes >= 1_024) return `${(bytes / 1_024).toFixed(1)} KiB`;
   return `${bytes} B`;
+}
+
+function formatCacheBytes(bytes: number): string {
+  return bytes === 0 ? "none" : formatBinaryBytes(bytes).replace(".0", "");
+}
+
+function formatMicroarchitectureStats(
+  stats: CpuMicroarchitectureStats,
+): string {
+  return `memory: L1 ${String(stats.l1Hits)} hit/${String(stats.l1Misses)} miss, L2 ${String(stats.l2Hits)} hit/${String(stats.l2Misses)} miss, ${String(stats.busTransfers)} bus transfers, ${String(stats.unalignedAccesses)} unaligned, ${String(stats.pipelineFlushes)} pipeline flushes`;
 }
 
 function globMatches(value: string, pattern: string): boolean {

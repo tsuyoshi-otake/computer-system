@@ -328,7 +328,7 @@ function handleResize(message: string): void {
     return;
   const width = Number(match[2]);
   const height = Number(match[3]);
-  if (width < 51 || width > 160 || height < 19 || height > 60) return;
+  if (width !== 80 || height !== 25) return;
   if (computerHost.runtime.resizeTerminal(session.computerId, width, height)) {
     snapshotScheduler.requestEager(session.sessionId);
   }

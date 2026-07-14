@@ -120,11 +120,24 @@ function createShellModule(
   const banner = fn("banner", (positional, keywords) => {
     requireArity(positional, keywords, 0, 0);
     context.terminal.setTextColor(0);
-    writeTerminalLines(context.terminal, [
-      `${formatOsIdentity(getOsIdentity(context.osProfile ?? "linux"))} (tty1)`,
-      "Computer System Bash 0.4; type 'help' for commands.",
-      ...shell.takeStartupLines(),
-    ]);
+    context.terminal.setBackgroundColor(15);
+    context.terminal.clear();
+    context.terminal.setCursorPosition(1, 1);
+    const osProfile = context.osProfile ?? "linux";
+    writeTerminalLines(
+      context.terminal,
+      osProfile === "dos"
+        ? [
+            formatOsIdentity(getOsIdentity(osProfile)),
+            "",
+            ...shell.takeStartupLines(),
+          ]
+        : [
+            formatOsIdentity(getOsIdentity(osProfile)),
+            "",
+            ...shell.takeStartupLines(),
+          ],
+    );
     return null;
   });
   const prompt = fn("prompt", (positional, keywords) => {

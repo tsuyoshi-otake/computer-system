@@ -60,7 +60,10 @@ describe("Computer persistence boundary", (): void => {
       cpuModel: "cs486dx",
       memoryBytes: 2_097_152,
     });
+    expect(loaded.record.displayProfileId).toBe("advanced-vga-512k");
+    expect(loaded.record.display.state).toEqual({ kind: "off" });
     expect(Object.keys(repository.load("computer-7")!)).not.toContain("vm");
+    expect(Object.keys(repository.load("computer-7")!)).not.toContain("vram");
   });
 
   it("deduplicates clean saves and writes exactly once after a mutation", (): void => {
@@ -77,6 +80,23 @@ describe("Computer persistence boundary", (): void => {
     expect(persistence.saveIfDirty(record).outcome).toBe("saved");
     expect(snapshot).toHaveBeenCalledTimes(1);
     expect(save).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps volatile framebuffer writes outside the persistence revision", (): void => {
+    const repository = new MemoryRepository();
+    const persistence = new ComputerPersistenceService(repository);
+    const record = new ComputerRecord("computer-80", "standard");
+    expect(persistence.saveIfDirty(record).outcome).toBe("saved");
+
+    record.display.transition({ kind: "enter_post" });
+    record.display.transition({
+      kind: "select_mode",
+      modeId: "vga-640x480x8",
+    });
+    record.display.writePixel(10, 10, 42);
+
+    expect(persistence.saveIfDirty(record)).toEqual({ outcome: "unchanged" });
+    expect(record.snapshot()).not.toHaveProperty("vram");
   });
 
   it("restores a cursor that advanced beyond the visible terminal width", (): void => {
@@ -140,6 +160,7 @@ describe("Computer persistence boundary", (): void => {
   it("persists DOS selection and defaults legacy snapshots to Linux", (): void => {
     const repository = new MemoryRepository();
     const dos = new ComputerRecord("computer-14", "standard", {
+      displayProfileId: "portable-vga-256k",
       hardware: portableComputerHardware,
       osProfile: "dos",
     });
@@ -151,6 +172,7 @@ describe("Computer persistence boundary", (): void => {
     if (loadedDos.outcome === "loaded") {
       expect(loadedDos.record.osProfile).toBe("dos");
       expect(loadedDos.record.hardware).toEqual(portableComputerHardware);
+      expect(loadedDos.record.displayProfileId).toBe("portable-vga-256k");
     }
 
     const linux = new ComputerRecord("computer-15", "standard").snapshot();
@@ -166,6 +188,44 @@ describe("Computer persistence boundary", (): void => {
         cpuModel: "cs486dx",
         memoryBytes: 2_097_152,
       });
+      expect(loadedLegacy.record.displayProfileId).toBe("desktop-vga-512k");
+    }
+  });
+
+  it("infers the Portable display only for an exact legacy DOS CS386SX snapshot", (): void => {
+    const repository = new MemoryRepository();
+    const legacyPortable = new ComputerRecord("computer-81", "advanced", {
+      hardware: portableComputerHardware,
+      osProfile: "dos",
+    }).snapshot();
+    repository.save({ ...legacyPortable, displayProfileId: undefined });
+
+    const loaded = new ComputerPersistenceService(repository).load(
+      "computer-81",
+    );
+    expect(loaded.outcome).toBe("loaded");
+    if (loaded.outcome === "loaded") {
+      expect(loaded.record.displayProfileId).toBe("portable-vga-256k");
+    }
+
+    for (const [computerId, hardware] of [
+      ["computer-84", { ...portableComputerHardware, clockHz: 15_000_000 }],
+      ["computer-85", { ...portableComputerHardware, memoryBytes: 1_048_576 }],
+    ] as const) {
+      const customized = new ComputerRecord(computerId, "advanced", {
+        hardware,
+        osProfile: "dos",
+      }).snapshot();
+      repository.save({ ...customized, displayProfileId: undefined });
+      const loadedCustomized = new ComputerPersistenceService(repository).load(
+        computerId,
+      );
+      expect(loadedCustomized.outcome).toBe("loaded");
+      if (loadedCustomized.outcome === "loaded") {
+        expect(loadedCustomized.record.displayProfileId).toBe(
+          "advanced-vga-512k",
+        );
+      }
     }
   });
 });

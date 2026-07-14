@@ -74,15 +74,31 @@ describe("DOS profile contract", (): void => {
 
     expect(shell.submit("CD C:\\DOS").exitCode).toBe(0);
     expect(shell.submit("PWD").lines).toEqual(["C:\\DOS"]);
-    expect(
-      shell.submit("ECHO VALUE > C:\\Users\\Computer\\Mixed.TXT").exitCode,
-    ).toBe(0);
-    expect(shell.submit("TYPE c:\\USERS\\COMPUTER\\mixed.txt").lines).toEqual([
-      "VALUE",
-    ]);
+    expect(shell.submit("ECHO VALUE > C:\\Mixed.TXT").exitCode).toBe(0);
+    expect(shell.submit("TYPE c:\\mixed.txt").lines).toEqual(["VALUE"]);
     expect(filesystem.readFile("/drives/c/autoexec.bat")).toContain("\r\n");
     expect(shell.submit("ECHO ignored > NUL").exitCode).toBe(0);
     expect(filesystem.exists("/drives/c/nul")).toBe(false);
+  });
+
+  it("enforces DOS 8.3 names without silently truncating them", (): void => {
+    const filesystem = new InMemoryFilesystem();
+    const shell = new ShellSession(filesystem, { osProfile: "dos" });
+
+    expect(shell.submit("ECHO VALUE > C:\\README.TXT").exitCode).toBe(0);
+    expect(shell.submit("TYPE C:\\README.TXT").stdout).toBe("VALUE\r\n");
+
+    const longBase = shell.submit("ECHO BAD > C:\\TOOLONGNM.TXT");
+    expect(longBase).toMatchObject({
+      exitCode: 1,
+      stderr: "Invalid filename or extension.\r\n",
+    });
+    const longExtension = shell.submit("TYPE C:\\README.TEXT");
+    expect(longExtension).toMatchObject({
+      exitCode: 1,
+      stderr: "Invalid filename or extension.\r\n",
+    });
+    expect(filesystem.exists("/drives/c/toolongnm.txt")).toBe(false);
   });
 
   it("persists the selected profile independently of Linux defaults", (): void => {
@@ -196,13 +212,9 @@ describe("DOS profile contract", (): void => {
         "}",
       ].join("\n"),
     );
-    expect(shell.submit("C++ C:\\answer.cpp -O C:\\answer-cpp").exitCode).toBe(
-      0,
-    );
-    expect(shell.submit("C:\\answer-cpp").stdout).toBe("42\n");
-    expect(shell.submit("RUN --STATS C:\\answer-cpp").stderr).toContain(
-      "CS386SX",
-    );
+    expect(shell.submit("C++ C:\\answer.cpp -O C:\\anscpp").exitCode).toBe(0);
+    expect(shell.submit("C:\\anscpp").stdout).toBe("42\n");
+    expect(shell.submit("RUN --STATS C:\\anscpp").stderr).toContain("CS386SX");
   });
 
   it("loads bounded CONFIG.SYS and AUTOEXEC.BAT DOS essentials", (): void => {
@@ -241,7 +253,7 @@ describe("DOS profile contract", (): void => {
     expect(shell.submit("SET MODE").lines).toEqual(["MODE=PORTABLE"]);
     expect(shell.submit("SET CONFIG_FILES").lines).toEqual(["CONFIG_FILES=40"]);
     expect(shell.submit("PATH").lines).toEqual(["PATH=C:\\TOOLS;C:\\DOS"]);
-    expect(shell.prompt()).toBe("[C]C:\\USERS\\COMPUTER> ");
+    expect(shell.prompt()).toBe("[C]C:\\> ");
   });
 
   it("runs CRLF batch files from PATH with arguments and ERRORLEVEL", (): void => {
@@ -294,13 +306,10 @@ describe("DOS profile contract", (): void => {
     const filesystem = new InMemoryFilesystem();
     const shell = new ShellSession(filesystem, { osProfile: "dos" });
     filesystem.writeFile(
-      "/drives/c/users/computer/large.bat",
+      "/drives/c/large.bat",
       Array.from({ length: 257 }, () => "REM bounded").join("\r\n"),
     );
-    filesystem.writeFile(
-      "/drives/c/users/computer/loop.bat",
-      "@ECHO OFF\r\nLOOP\r\n",
-    );
+    filesystem.writeFile("/drives/c/loop.bat", "@ECHO OFF\r\nLOOP\r\n");
 
     expect(shell.submit("LARGE")).toMatchObject({ exitCode: 1 });
     expect(shell.submit("LARGE").stderr).toContain("batch line limit exceeded");

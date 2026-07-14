@@ -92,9 +92,10 @@ input can pass. Closing one view leaves the terminal open; only the final detach
 emits `terminal_closed`. Different Computers have independent writer leases.
 
 The Web Terminal sends `terminal_line`; DOS `EDIT` and cross-profile `vi`
-additionally use bounded `terminal_keys` batches. Writer-only `web-complete` and
-`web-resize` requests provide command/path completion and negotiate a 51x19
-through 160x60 Web viewport without changing the native fallback contract.
+additionally use bounded `terminal_keys` batches. Writer-only `web-complete`
+provides command/path completion. The compatibility `web-resize` boundary
+accepts only 80x25 and normalizes that fixed hardware text mode once per writer
+session; later browser resizes change CSS scale, never guest cell geometry.
 CS-Linux 1.0 parses a bounded Computer System Bash language with pipelines,
 redirects, control operators, quoting, variables, positional parameters,
 conditionals, loops, and functions. Production first boot requires password
@@ -103,10 +104,10 @@ setup twice and later boots require login; the salted record is stored in
 completion. The Linux profile owns `/etc`, `/dev`, volatile `/tmp`, `/usr`,
 `/var`, `/home/computer`, identity/time applets, and `/dev/null`. The shared OS
 profile boundary owns path dialects, aliases, boot images, and virtual devices;
-the DOS contract fixture proves drive paths, case-insensitive names, CRLF,
-`DIR`/`TYPE`, and `NUL` without changing Linux semantics. Commands operate only
-on `InMemoryFilesystem`; they must never spawn a host shell. Focused
-verification is:
+the DOS contract fixture proves drive paths, case-insensitive strict 8.3 names,
+the root `C:\>` startup directory, CRLF, `DIR`/`TYPE`, and `NUL` without
+changing Linux semantics. Commands operate only on `InMemoryFilesystem`; they
+must never spawn a host shell. Focused verification is:
 
 ```powershell
 npx vitest run tests/os tests/editor
@@ -244,6 +245,36 @@ MiB, and Portable snapshots use CS386SX at 16 MHz/2 MiB. Exactly recognized
 former defaults migrate to their family profile; customized hardware remains
 authoritative. CPU clock is converted to per-tick CPU-cycle credit, then the
 global scheduler cap arbitrates mixed-speed Computers in round-robin order.
+
+`CpuMemoryHierarchy` is recreated cold for every shared CS process. CS386SX has
+no cache and charges two 16-bit transfers for even dwords or three for odd
+dwords. CS486DX/DX2 use a fixed 8 KiB four-way unified L1 with 16-byte lines and
+write-through stores; DX2 adds a fixed 256 KiB external L2. Tags, recency,
+prefetch state, and counters are transient and O(1) per access. Taken control
+flow records a deterministic prefetch/pipeline flush; no profile claims dynamic
+branch prediction. Keep exact alignment, locality, eviction, cold-start, and
+branch-direction tests whenever timing changes.
+
+Display hardware is a separate versioned snapshot field. Portable uses
+`portable-vga-256k`; Standard Desktop uses `desktop-vga-512k`; Advanced Desktop
+uses `advanced-vga-512k`. All modes stop at 640x480. The Portable's 800x480 LCD
+is a physical presentation surface, not a guest resolution. `DisplayDevice`
+allocates its 256/512 KiB VRAM lazily when CSBIOS enters POST, clears only the
+new active frame on a mode change, and releases VRAM at power-off. Its fixed
+dirty ring bounds both tile count and payload bytes; write marking is O(1) and a
+batch drain is O(D). Do not include framebuffer revision or data in
+`ComputerRecord.persistenceRevision`, snapshot JSON, or Dynamic Properties.
+
+`ComputerRuntime.powerOn()` leaves an observable 80x25 CSBIOS POST frame. The
+next `runTick()` owns the single handoff to text mode and guest execution. Every
+error branch faults the display explicitly, while completed shutdown/reboot
+releases it. Host tests must verify the minimal post-handoff screens: CS-DOS
+identity, blank line, and `C:\>`; CS-Linux identity, blank line, and its
+password or shell prompt. Neither OS prints a simulated tty name or startup
+shell banner. The graphics Web protocol is intentionally later: generate each
+Computer delta once and fan it out to sessions instead of serializing a full
+640x480 framebuffer per viewer.
+
 Python-generated CS486 instructions, managed-runtime syscalls, native calls, and
 other CS486 execution all return deterministic cycle debt to the same process.
 RAM enforcement scans the live object graph only under allocation pressure,

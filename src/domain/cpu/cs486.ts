@@ -12,6 +12,10 @@ import {
   type CpuModel,
 } from "./models.js";
 import {
+  CpuMemoryHierarchy,
+  type CpuMicroarchitectureStats,
+} from "./memoryHierarchy.js";
+import {
   isTerminalCpuProcessState,
   type CpuProcess,
   type CpuProcessSliceResult,
@@ -42,6 +46,7 @@ export interface Cs486RunResult {
   readonly output: string;
   readonly registers: Readonly<Record<Cs486Register, number>>;
   readonly state: "halted" | "yielded";
+  readonly microarchitecture: CpuMicroarchitectureStats;
 }
 
 export interface Cs486SyscallContext {
@@ -118,6 +123,7 @@ export function runCs486(
     output: process.output,
     registers: process.registers,
     state: process.state.kind === "completed" ? "halted" : "yielded",
+    microarchitecture: process.microarchitectureStats,
   };
 }
 
@@ -130,6 +136,7 @@ export class Cs486Process implements CpuProcess {
   private readonly memory: DataView;
   private readonly registerValues = new Int32Array(cs486RegisterNames.length);
   private readonly cpuModel: CpuModel;
+  private readonly memoryHierarchy: CpuMemoryHierarchy;
   private readonly memoryBytes: number;
   private stateValue: CpuProcessState = { kind: "ready" };
   private instructionPointer = 0;
@@ -150,6 +157,7 @@ export class Cs486Process implements CpuProcess {
   ) {
     validateCs486Executable(executable);
     this.cpuModel = options.cpuModel ?? defaultCpuModel;
+    this.memoryHierarchy = new CpuMemoryHierarchy(this.cpuModel);
     this.memoryBytes = Math.min(
       options.memoryBytes,
       16 * 1_024 * 1_024,
@@ -200,6 +208,10 @@ export class Cs486Process implements CpuProcess {
         32 +
         (this.options.externalMemoryUsageBytes?.() ?? 0),
     );
+  }
+
+  get microarchitectureStats(): CpuMicroarchitectureStats {
+    return this.memoryHierarchy.stats;
   }
 
   get hasPendingCpuCycles(): boolean {
@@ -294,34 +306,48 @@ export class Cs486Process implements CpuProcess {
   }
 
   private executeNext(): number | undefined {
-    const instruction = this.executable.instructions[this.instructionPointer];
+    const instructionIndex = this.instructionPointer;
+    const instruction = this.executable.instructions[instructionIndex];
     if (instruction === undefined) {
       this.complete();
       return undefined;
     }
     this.instructionPointer += 1;
-    const cycles = instructionCycleCost(this.cpuModel, instruction, {
-      branchTaken: this.branchTaken(instruction),
-      multiplier:
-        instruction.op === "mul" ? this.read(instruction.source) : undefined,
-    });
+    const branchTaken = this.branchTaken(instruction);
+    let cycles =
+      instructionCycleCost(this.cpuModel, instruction, {
+        branchTaken,
+        multiplier:
+          instruction.op === "mul" ? this.read(instruction.source) : undefined,
+      }) + this.memoryHierarchy.fetchInstruction(instructionIndex);
+    this.memoryHierarchy.recordControlTransfer(
+      branchTaken === true ||
+        instruction.op === "call" ||
+        instruction.op === "ret",
+    );
     switch (instruction.op) {
       case "mov":
         this.write(instruction.destination, this.read(instruction.source));
         break;
-      case "load":
+      case "load": {
+        const address = this.address(instruction.address);
+        cycles += this.memoryHierarchy.accessData(address, "read");
         this.write(
           instruction.destination,
-          this.memory.getInt32(this.address(instruction.address), true),
+          this.memory.getInt32(address, true),
         );
         break;
-      case "store":
+      }
+      case "store": {
+        const address = this.address(instruction.address);
+        cycles += this.memoryHierarchy.accessData(address, "write");
         this.memory.setInt32(
-          this.address(instruction.address),
+          address,
           this.readRegister(instruction.source),
           true,
         );
         break;
+      }
       case "add":
         this.write(
           instruction.destination,
@@ -426,18 +452,25 @@ export class Cs486Process implements CpuProcess {
         if (this.compared >= 0) this.instructionPointer = instruction.target;
         break;
       case "push":
-        this.push(this.read(instruction.source));
+        cycles += this.push(this.read(instruction.source));
         break;
-      case "pop":
-        this.write(instruction.destination, this.pop());
+      case "pop": {
+        const popped = this.pop();
+        cycles += popped.cycles;
+        this.write(instruction.destination, popped.value);
         break;
-      case "call":
-        this.push(this.instructionPointer);
+      }
+      case "call": {
+        cycles += this.push(this.instructionPointer);
         this.instructionPointer = instruction.target;
         break;
-      case "ret":
-        this.instructionPointer = this.pop();
+      }
+      case "ret": {
+        const popped = this.pop();
+        cycles += popped.cycles;
+        this.instructionPointer = popped.value;
         break;
+      }
       case "syscall": {
         const handler = this.options.syscallHandler;
         if (handler === undefined)
@@ -445,13 +478,26 @@ export class Cs486Process implements CpuProcess {
             "UnsupportedError",
             `syscall ${instruction.name} is unavailable`,
           );
+        let syscallMemoryCycles = 0;
         const result = handler(instruction.name, {
           memoryLimitBytes: this.memoryBytes,
-          readInt32: (address) =>
-            this.memory.getInt32(this.checkedAddress(address), true),
+          readInt32: (address) => {
+            address = this.checkedAddress(address);
+            syscallMemoryCycles += this.memoryHierarchy.accessData(
+              address,
+              "read",
+            );
+            return this.memory.getInt32(address, true);
+          },
           readRegister: (register) => this.readRegister(register),
-          writeInt32: (address, value) =>
-            this.memory.setInt32(this.checkedAddress(address), value | 0, true),
+          writeInt32: (address, value) => {
+            address = this.checkedAddress(address);
+            syscallMemoryCycles += this.memoryHierarchy.accessData(
+              address,
+              "write",
+            );
+            this.memory.setInt32(address, value | 0, true);
+          },
           writeRegister: (register, value) => this.write(register, value),
         });
         const extraCycles = result.cycles ?? 0;
@@ -464,8 +510,8 @@ export class Cs486Process implements CpuProcess {
             "ResourceLimitError",
             "invalid syscall cycle charge",
           );
-        this.applySyscallResult(result);
-        return cycles + extraCycles;
+        const transitionCycles = this.applySyscallResult(result);
+        return cycles + extraCycles + syscallMemoryCycles + transitionCycles;
       }
       case "print": {
         const value =
@@ -532,10 +578,10 @@ export class Cs486Process implements CpuProcess {
     return value;
   }
 
-  private applySyscallResult(result: Cs486SyscallResult): void {
+  private applySyscallResult(result: Cs486SyscallResult): number {
     switch (result.kind) {
       case "continue":
-        return;
+        return 0;
       case "jump":
         if (
           !Number.isSafeInteger(result.target) ||
@@ -547,8 +593,9 @@ export class Cs486Process implements CpuProcess {
             "invalid syscall jump target",
           );
         this.instructionPointer = result.target;
-        return;
-      case "call":
+        this.memoryHierarchy.recordControlTransfer(true);
+        return 0;
+      case "call": {
         if (
           !Number.isSafeInteger(result.target) ||
           result.target < 0 ||
@@ -558,12 +605,17 @@ export class Cs486Process implements CpuProcess {
             "ExecutableFormatError",
             "invalid syscall call target",
           );
-        this.push(this.instructionPointer);
+        this.memoryHierarchy.recordControlTransfer(true);
+        const callCycles = this.push(this.instructionPointer);
         this.instructionPointer = result.target;
-        return;
-      case "return":
-        this.instructionPointer = this.pop();
-        return;
+        return callCycles;
+      }
+      case "return": {
+        this.memoryHierarchy.recordControlTransfer(true);
+        const popped = this.pop();
+        this.instructionPointer = popped.value;
+        return popped.cycles;
+      }
       case "sleep":
         if (!Number.isSafeInteger(result.ticks) || result.ticks < 0)
           throw new Cs486Fault(
@@ -575,31 +627,35 @@ export class Cs486Process implements CpuProcess {
           kind: "sleeping",
           wakeTick: this.tick + result.ticks,
         };
-        return;
+        return 0;
       case "wait_event":
         this.pendingResume = result.resume;
         this.stateValue = { kind: "waiting_event", filter: result.filter };
-        return;
+        return 0;
       case "complete":
         this.pendingResume = undefined;
         this.stateValue = { kind: "completed", value: result.value };
+        return 0;
     }
   }
 
-  private push(value: number): void {
+  private push(value: number): number {
     const next = this.readRegister("esp") - 4;
     if (next < 0) throw new Cs486Fault("StackOverflowError", "stack overflow");
+    const cycles = this.memoryHierarchy.accessData(next, "write");
     this.memory.setInt32(next, value, true);
     this.write("esp", next);
+    return cycles;
   }
 
-  private pop(): number {
+  private pop(): { readonly cycles: number; readonly value: number } {
     const current = this.readRegister("esp");
     if (current < 0 || current + 4 > this.memoryBytes)
       throw new Cs486Fault("StackUnderflowError", "stack underflow");
+    const cycles = this.memoryHierarchy.accessData(current, "read");
     const value = this.memory.getInt32(current, true);
     this.write("esp", current + 4);
-    return value;
+    return { cycles, value };
   }
 
   private complete(): void {

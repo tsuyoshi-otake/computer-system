@@ -23,6 +23,7 @@ import {
 } from "../../domain/computer/hardware.js";
 import { cpuModelSpecification } from "../../domain/cpu/models.js";
 import { cpuCyclesToMicroseconds } from "../../domain/cpu/timing.js";
+import { clearCsBiosForOs, renderCsBiosPost } from "./csBios.js";
 
 export interface ComputerRuntimeOptions {
   readonly clock?: ShellClockSource;
@@ -126,6 +127,7 @@ export class ComputerRuntime {
   }
 
   runTick(): void {
+    this.completePendingBootHandoffs();
     this.scheduler.runTick();
     const reboot: RuntimeEntry[] = [];
     for (const entry of this.entries.values()) {
@@ -145,6 +147,10 @@ export class ComputerRuntime {
       } else if (state.kind === "waiting_event") {
         this.syncEventWait(entry, state.filter);
       } else if (state.kind === "crashed") {
+        entry.record.display.transition({
+          kind: "fault",
+          message: state.error.message.slice(0, 256) || "guest runtime fault",
+        });
         entry.record.lifecycle.transition({
           kind: "crash",
           message: state.error.message,
@@ -157,9 +163,11 @@ export class ComputerRuntime {
         });
         this.detach(entry);
         entry.record.lifecycle.transition({ kind: "stopped" });
+        entry.record.display.transition({ kind: "power_off" });
       } else if (state.kind === "terminated") {
         const intent = entry.stopIntent ?? "shutdown";
         this.detach(entry);
+        entry.record.display.transition({ kind: "power_off" });
         if (intent === "reboot") {
           entry.record.lifecycle.transition({ kind: "reboot_ready" });
           reboot.push(entry);
@@ -308,7 +316,14 @@ export class ComputerRuntime {
 
   resizeTerminal(computerId: string, width: number, height: number): boolean {
     const entry = this.entries.get(computerId);
-    if (entry === undefined || entry.shell === undefined) return false;
+    if (
+      entry === undefined ||
+      entry.shell === undefined ||
+      width !== 80 ||
+      height !== 25
+    ) {
+      return false;
+    }
     entry.record.terminal.resize(width, height);
     const screen = entry.shell.resize(width, height);
     if (screen !== undefined)
@@ -318,10 +333,16 @@ export class ComputerRuntime {
 
   private boot(entry: RuntimeEntry): RuntimeCommandResult {
     try {
-      entry.record.terminal.setTextColor(0);
-      entry.record.terminal.setBackgroundColor(15);
-      entry.record.terminal.clear();
-      entry.record.terminal.setCursorPosition(1, 1);
+      if (entry.record.display.state.kind === "faulted") {
+        entry.record.display.transition({ kind: "reset" });
+      } else if (entry.record.display.state.kind !== "off") {
+        entry.record.display.transition({ kind: "power_off" });
+      }
+      const post = entry.record.display.transition({ kind: "enter_post" });
+      if (post.outcome !== "changed") {
+        throw new Error(`Unable to start CSBIOS POST: ${post.outcome}`);
+      }
+      renderCsBiosPost(entry.record);
       const supportsMicroPython = cpuModelSpecification(
         entry.record.hardware.cpuModel,
       ).supportsMicroPython;
@@ -362,6 +383,7 @@ export class ComputerRuntime {
       entry.vm = vm;
       entry.shell = environment.shell;
       entry.stopIntent = undefined;
+      entry.pendingBootHandoff = true;
       this.scheduler.add(
         entry.runtimeId,
         vm,
@@ -378,6 +400,11 @@ export class ComputerRuntime {
       entry.record.lifecycle.transition({
         kind: "crash",
         message: normalized.message,
+      });
+      entry.pendingBootHandoff = false;
+      entry.record.display.transition({
+        kind: "fault",
+        message: normalized.message.slice(0, 256) || "CSBIOS boot failure",
       });
       return { outcome: "failed", error: normalized };
     }
@@ -436,6 +463,30 @@ export class ComputerRuntime {
     entry.vm = undefined;
     entry.shell = undefined;
     entry.stopIntent = undefined;
+    entry.pendingBootHandoff = false;
+  }
+
+  private completePendingBootHandoffs(): void {
+    for (const entry of this.entries.values()) {
+      if (entry.pendingBootHandoff !== true) continue;
+      try {
+        clearCsBiosForOs(entry.record.terminal, entry.record.display);
+        entry.pendingBootHandoff = false;
+      } catch (error: unknown) {
+        const normalized =
+          error instanceof Error ? error : new Error(String(error));
+        entry.pendingBootHandoff = false;
+        entry.record.display.transition({
+          kind: "fault",
+          message: normalized.message.slice(0, 256) || "CSBIOS handoff failure",
+        });
+        entry.record.lifecycle.transition({
+          kind: "crash",
+          message: normalized.message,
+        });
+        this.detach(entry);
+      }
+    }
   }
 }
 
@@ -445,6 +496,7 @@ interface RuntimeEntry {
   vm?: CpuProcess;
   shell?: ShellSession;
   stopIntent?: StopIntent;
+  pendingBootHandoff?: boolean;
 }
 
 type StopIntent = "reboot" | "shutdown";

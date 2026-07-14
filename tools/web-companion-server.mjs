@@ -682,12 +682,13 @@ export class WebCompanionServer {
       if (
         !Number.isSafeInteger(body?.width) ||
         !Number.isSafeInteger(body?.height) ||
-        body.width < 51 ||
-        body.width > 160 ||
-        body.height < 19 ||
-        body.height > 60
+        body.width !== 80 ||
+        body.height !== 25
       ) {
-        throw new WebSessionError("input", "Invalid terminal dimensions.");
+        throw new WebSessionError(
+          "input",
+          "Web Terminal text mode is fixed at 80x25.",
+        );
       }
       await this.bds.runWebRelay(
         `scriptevent computer_system:web-resize ${active.sessionId} ${String(body.width)} ${String(body.height)}`,

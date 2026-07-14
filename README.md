@@ -58,7 +58,7 @@ menus, cursor navigation, insert/overwrite modes, bounded undo and search,
 F2/Ctrl+S save, and an explicit Save/Discard/Cancel exit state. `vi` remains the
 syntax-highlighted modal editor for Linux and DOS; Linux deliberately does not
 expose `EDIT`. Both editors use the same writer-owned bounded key transport and
-resize with the negotiated Web Terminal grid.
+render inside the fixed 80x25 Web Terminal hardware text grid.
 
 The Web Terminal header also opens a searchable, keyboard-navigable 16-chapter
 field manual. It is organized as a learning path rather than a command cheat
@@ -246,22 +246,25 @@ later boots stop at `Password:` until it matches. The bounded salted SHA-256
 record is stored in `/etc/shadow`, never the plaintext, and Web input is masked,
 excluded from local history, and excluded from completion. Three failed attempts
 incur a two-second guest delay. Every OS boot resets only the terminal display
-buffer before printing one banner; persisted files and `/etc/shadow` remain
-intact. The interactive account is UID/GID 1000; root owns system paths, while
-mode, UID, GID, modification time, symbolic links, and hard-link groups persist
-with backward-compatible filesystem snapshots. A profile boundary separates path
-syntax, boot layout, command aliases, environment, and virtual devices. The
-implemented DOS profile shares the same terminal, filesystem, persistence,
-hardware limits, and checked CS executable/toolchain abstractions without Linux
-conditionals in the domain core. It provides drive-letter paths,
-case-insensitive lookup, CRLF boot files, `NUL`/`CON`, and DOS command aliases.
-DOS-facing commands use CRLF and DOS-specific status/error text rather than
-leaking Linux applet output. The implemented compatibility surface includes
-`DIR`, `TYPE`, `COPY`, `DEL`/ `ERASE`, `MD`, `RD`, `MOVE`, `REN`/`RENAME`,
-`TREE`, `VOL`, `VER`, `TIME`, `TIMER`, `DOSKEY /HISTORY`, and `MEM /F`. Computer
-System DOS 6.2 (`CS-DOS 6.2`) reads a bounded `CONFIG.SYS` and runs
-`AUTOEXEC.BAT`; `SET`, `PATH`, `PROMPT`, `REM`, `@ECHO OFF`, `%0`…`%9`, `%VAR%`,
-and `%ERRORLEVEL%` are supported. Unsupported boot directives fail visibly.
+buffer before printing the minimal OS identity and prompt; persisted files and
+`/etc/shadow` remain intact. The interactive account is UID/GID 1000; root owns
+system paths, while mode, UID, GID, modification time, symbolic links, and
+hard-link groups persist with backward-compatible filesystem snapshots. A
+profile boundary separates path syntax, boot layout, command aliases,
+environment, and virtual devices. The implemented DOS profile shares the same
+terminal, filesystem, persistence, hardware limits, and checked CS
+executable/toolchain abstractions without Linux conditionals in the domain core.
+It starts at `C:\>` without creating a Linux-like `C:\USERS` hierarchy and
+provides drive-letter paths, case-insensitive strict 8.3 names, CRLF boot files,
+`NUL`/`CON`, and DOS command aliases. Invalid long names fail explicitly instead
+of being silently truncated. DOS-facing commands use CRLF and DOS-specific
+status/error text rather than leaking Linux applet output. The implemented
+compatibility surface includes `DIR`, `TYPE`, `COPY`, `DEL`/ `ERASE`, `MD`,
+`RD`, `MOVE`, `REN`/`RENAME`, `TREE`, `VOL`, `VER`, `TIME`, `TIMER`,
+`DOSKEY /HISTORY`, and `MEM /F`. Computer System DOS 6.2 (`CS-DOS 6.2`) reads a
+bounded `CONFIG.SYS` and runs `AUTOEXEC.BAT`; `SET`, `PATH`, `PROMPT`, `REM`,
+`@ECHO OFF`, `%0`…`%9`, `%VAR%`, and `%ERRORLEVEL%` are supported. Unsupported
+boot directives fail visibly.
 
 ```text
 files:  pwd cd ls cat mkdir rmdir touch rm cp mv ln readlink realpath find stat
@@ -300,9 +303,10 @@ input or output ceilings.
 Normal mode. Bounded controls include `I`/`A`, `o`/`O`, `gg`/`G`, page movement,
 `dd`, `x`, undo, `:w`, `:q`, `:wq`, `:wq!`, `:q!`, Shift+ZZ, and `ZQ`. Python,
 shell, JSON/TOML tokens are highlighted, and indentation rainbow backgrounds are
-on by default. The native terminal remains 51x19; the Web Terminal negotiates a
-viewport up to 160x60 from the available screen and resizes `vi` with it. The
-browser subtracts terminal padding and fits both rows and columns, so the
+on by default. The native terminal remains 51x19; each Web writer session
+normalizes the guest text mode to 80x25 once, then scales the same fixed grid to
+the available browser viewport without changing the Computer's cell geometry.
+The browser subtracts terminal padding and fits both rows and columns, so the
 terminal surface does not expose an internal scrollbar. The browser coalesces up
 to 16 keys per relay, while the BDS boundary rejects batches above 32 keys. Tab
 performs bounded command/path completion through the same writer-authorized
@@ -331,13 +335,56 @@ Each Computer also has a persisted virtual hardware profile. Desktop Computer
 Systems default to a Computer System 486DX at 33 MHz with 2 MiB RAM. Advanced
 Desktop Computer Systems use a Computer System 486DX2 at 66 MHz with 8 MiB RAM.
 Portable Computer Systems default to DOS on a Computer System 386SX at 16 MHz
-with 2 MiB RAM. At 20 server ticks per second those profiles receive at most
-1,650,000, 3,300,000, and 800,000 modeled CPU cycles per tick respectively,
-while the scheduler retains the same global cap and round-robin fairness across
-Computers. The 386SX profile uses Intel 80386-derived instruction clocks,
-value-dependent early-out multiplication, taken/not-taken branch costs, and
-explicit penalties for four-byte RAM and stack transfers over its 16-bit data
-bus. Timing dispatch remains O(1) per instruction.
+with 2 MiB RAM. Their versioned display profiles share an 80x25 VGA text mode,
+320x200 with 256 colors, and a maximum 640x480 guest resolution. Portable uses
+256 KiB VRAM and reaches 640x480 with 16 planar colors; Desktop and Advanced
+Desktop use 512 KiB VRAM and also expose 640x480 with 256 indexed colors. The
+Portable's physical 800x480 LCD centers the 640x480 guest image with 80-pixel
+side bars by default; 800x480 is not a guest video mode. At 20 server ticks per
+second those profiles receive at most 1,650,000, 3,300,000, and 800,000 modeled
+CPU cycles per tick respectively, while the scheduler retains the same global
+cap and round-robin fairness across Computers. The 386SX profile uses Intel
+80386-derived instruction clocks, value-dependent early-out multiplication,
+taken/not-taken branch costs, and explicit penalties for four-byte RAM and stack
+transfers over its 16-bit data bus. Timing dispatch remains O(1) per
+instruction.
+
+Power-on now exposes an original 80x25 **CSBIOS System Configuration** POST
+frame before the first runtime step hands the display to the selected OS. POST
+values come from the actual CPU, clock, RAM, display, VRAM, and disk-quota
+profiles. CS-DOS enters at a minimal `C:\>` prompt; CS-Linux prints only its OS
+identity, a blank separator, and the password or shell prompt. Neither profile
+advertises a simulated `tty1` or shell-version banner. VRAM is allocated lazily
+at POST and released at power-off. Only the compact display-profile identifier
+is persisted in World Dynamic Properties: framebuffer bytes and dirty queues are
+volatile and never become high-frequency LevelDB writes. Graphics writes use a
+fixed-capacity dirty-tile ring with O(1) marking and bounded O(D) drains. A
+Computer-scoped delta broker owns that destructive drain exactly once and fans
+the immutable state, keyframe, or delta update out to every attached consumer.
+Late consumers queue a complete second keyframe; mode and display replacement
+advance a stream epoch; final detach releases all broker state. Computers,
+tiles, and payload bytes are independently capped per pass, keeping work at
+O(D+S) for emitted dirty tiles and subscribed sessions. Web Canvas delivery and
+guest graphics APIs are the next staged increment; the current Web Terminal
+continues to present the text terminal.
+
+The shared CS process also models a deterministic, fixed-capacity memory
+hierarchy. CS386SX has no on-chip cache: its 16-bit external bus performs two
+transfers for an even-addressed 32-bit operand and three for an odd-addressed
+operand. Its default 2 MiB memory is identified as two 1 MiB 30-pin SIMM DRAM
+modules. CS486DX and CS486DX2 use a cold 8 KiB, four-way unified L1 with 16-byte
+lines and write-through stores. Advanced CS486DX2 adds a modeled 256 KiB
+external L2 and identifies two 4 MiB 72-pin SIMMs; standard CS486DX identifies
+four 512 KiB 30-pin SIMMs and no L2. Cache contents and counters are transient
+per process and never enter persistence. Access, replacement, alignment, and
+timing selection remain O(1).
+
+Neither model claims dynamic branch prediction. CS486 control flow uses a
+simplified five-stage refill penalty, while CS386SX preserves its prefetch
+overlap and distinct taken/not-taken costs. `run --stats` reports L1/L2 hits and
+misses, bus transfers, unaligned dwords, and pipeline flushes in addition to
+instructions, CPU cycles, and virtual time. Thus alignment, cache-line locality,
+loop layout, and branch reduction produce observable deterministic results.
 
 On CS486DX and CS486DX2 desktop machines, Computer System Python compiles
 branches, calls, returns, and waits to the same validated process representation

@@ -1,5 +1,6 @@
 import { hasCopySelection, insertPastedCommand } from "/terminal-input.js";
 import { manualChapters } from "/manual.js";
+import { calculateFixedGridFontSize } from "/terminal-layout.js";
 
 const palette = [
   "#f0f0f0",
@@ -56,6 +57,8 @@ const elements = {
 
 const tokenStorageKey = "computer-system.web-terminal-token";
 const codeStorageKey = "computer-system.web-terminal-code";
+const hardwareTextColumns = 80;
+const hardwareTextRows = 25;
 const queryCode = new URLSearchParams(location.search).get("computer") ?? "";
 let token =
   location.hash.slice(1) || sessionStorage.getItem(tokenStorageKey) || "";
@@ -77,9 +80,8 @@ let editorKeyPending = false;
 let historyCursor = 0;
 let historyDraft = "";
 let resizeFrame = 0;
-let resizePending = false;
-let pendingTerminalSize;
-let lastRequestedTerminalSize = "";
+let hardwareTextModePending = false;
+let hardwareTextModeConfirmed = false;
 let manualChapterIndex = 0;
 const commandHistory = [];
 const editorKeyQueue = [];
@@ -240,6 +242,12 @@ elements.manualDialog.addEventListener("keydown", (event) => {
 });
 renderManualToc();
 window.addEventListener("resize", scheduleTerminalFit);
+if (typeof ResizeObserver === "function") {
+  new ResizeObserver(scheduleTerminalFit).observe(elements.terminalStage);
+}
+if (document.fonts?.ready !== undefined) {
+  void document.fonts.ready.then(scheduleTerminalFit);
+}
 if (!/^[A-Za-z0-9_-]{20,}$/u.test(token) && /^[0-9]{4}$/u.test(queryCode)) {
   void reconnectWithCode(queryCode);
 } else if (!/^[A-Za-z0-9_-]{20,}$/u.test(token)) {
@@ -302,6 +310,7 @@ async function bootstrap() {
   try {
     const response = await api("/api/session");
     updateSession(await response.json());
+    ensureHardwareTextMode();
     scheduleTerminalFit();
     await connectStream();
   } catch (error) {
@@ -510,7 +519,7 @@ function renderTerminal(payload) {
     payload.lifecycle ?? "unknown",
   ).toUpperCase();
   elements.terminalSize.textContent = `${String(terminal.width)} × ${String(terminal.height)}`;
-  fitTerminal(terminal.width, terminal.height);
+  fitTerminal(hardwareTextColumns, hardwareTextRows);
   const cursorX = Number.isInteger(terminal.cursor?.x) ? terminal.cursor.x : 1;
   const cursorY = Number.isInteger(terminal.cursor?.y) ? terminal.cursor.y : 1;
   elements.commandForm.style.setProperty(
@@ -808,6 +817,7 @@ async function takeControl() {
     const response = await api("/api/take-control", { method: "POST" });
     const result = await response.json();
     updateSession(result.session ?? {});
+    ensureHardwareTextMode();
   } catch (error) {
     showError(errorMessage(error));
   } finally {
@@ -878,38 +888,20 @@ async function closeSession() {
 function scheduleTerminalFit() {
   cancelAnimationFrame(resizeFrame);
   resizeFrame = requestAnimationFrame(() => {
-    const dimensions = /^(\d+)\s*×\s*(\d+)$/u.exec(
-      elements.terminalSize.textContent,
-    );
-    if (dimensions !== null) {
-      fitTerminal(Number(dimensions[1]), Number(dimensions[2]));
-    }
-    queueTerminalResize();
+    fitTerminal(hardwareTextColumns, hardwareTextRows);
   });
 }
 
-function queueTerminalResize() {
-  if (sessionClosed || accessMode !== "writer") return;
-  const available = terminalContentSize();
-  const width = Math.max(
-    51,
-    Math.min(160, Math.floor(available.width / (14 * 0.61))),
-  );
-  const height = Math.max(
-    19,
-    Math.min(60, Math.floor(available.height / (14 * 1.32))),
-  );
-  const key = `${String(width)}x${String(height)}`;
-  if (key === lastRequestedTerminalSize) return;
-  pendingTerminalSize = { height, key, width };
-  void drainTerminalResize();
-}
-
-async function drainTerminalResize() {
-  if (resizePending || pendingTerminalSize === undefined) return;
-  resizePending = true;
-  const requested = pendingTerminalSize;
-  pendingTerminalSize = undefined;
+async function ensureHardwareTextMode() {
+  if (
+    sessionClosed ||
+    accessMode !== "writer" ||
+    hardwareTextModePending ||
+    hardwareTextModeConfirmed
+  ) {
+    return;
+  }
+  hardwareTextModePending = true;
   try {
     await api("/api/resize", {
       method: "POST",
@@ -918,16 +910,15 @@ async function drainTerminalResize() {
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        height: requested.height,
-        width: requested.width,
+        height: hardwareTextRows,
+        width: hardwareTextColumns,
       }),
     });
-    lastRequestedTerminalSize = requested.key;
+    hardwareTextModeConfirmed = true;
   } catch {
-    // The current bounded terminal dimensions remain the observable fallback.
+    // A later explicit reconnect or Take control action may retry once.
   } finally {
-    resizePending = false;
-    if (pendingTerminalSize !== undefined) void drainTerminalResize();
+    hardwareTextModePending = false;
   }
 }
 
@@ -940,20 +931,19 @@ function fitTerminal(columns, rows) {
   )
     return;
   const available = terminalContentSize();
-  const maximum = 14;
-  const minimum = 9.5;
-  const monospaceRatio = 0.61;
-  const fitted = Math.max(
-    minimum,
-    Math.min(
-      maximum,
-      available.width / (columns * monospaceRatio),
-      available.height / (rows * 1.32),
-    ),
-  );
+  const fitted = calculateFixedGridFontSize({
+    availableHeight: available.height,
+    availableWidth: available.width,
+    columns,
+    lineHeightRatio: 1.32,
+    maximumPixels: 48,
+    monospaceRatio: 0.61,
+    rows,
+  });
+  if (fitted.kind === "unmeasurable") return;
   elements.terminalStage.style.setProperty(
     "--terminal-font-size",
-    `${fitted.toFixed(2)}px`,
+    `${fitted.pixels.toFixed(2)}px`,
   );
 }
 
@@ -1073,6 +1063,7 @@ function acceptConnection(nextToken, code) {
   }
   reconnectGeneration += 1;
   token = nextToken;
+  hardwareTextModeConfirmed = false;
   sessionStorage.setItem(tokenStorageKey, token);
   rememberConnectionCode(code);
   sessionClosed = false;

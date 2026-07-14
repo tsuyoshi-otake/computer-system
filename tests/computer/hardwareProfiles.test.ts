@@ -29,6 +29,10 @@ describe("Computer hardware profiles", (): void => {
       cpuModel: "cs486dx2",
       memoryBytes: 8_388_608,
     });
+    expect(standard.displayProfileId).toBe("desktop-vga-512k");
+    expect(standard.display.videoMemoryBytes).toBe(512 * 1_024);
+    expect(advanced.displayProfileId).toBe("advanced-vga-512k");
+    expect(advanced.display.videoMemoryBytes).toBe(512 * 1_024);
     expect(hardwareCpuCyclesPerTick(standard.hardware.clockHz, 20)).toBe(
       1_650_000,
     );
@@ -85,6 +89,8 @@ describe("Computer hardware profiles", (): void => {
       cpuModel: "cs386sx",
       memoryBytes: 2_097_152,
     });
+    expect(record.displayProfileId).toBe("portable-vga-256k");
+    expect(record.display.videoMemoryBytes).toBe(256 * 1_024);
     expect(hardwareCpuCyclesPerTick(record.hardware.clockHz, 20)).toBe(800_000);
   });
 
@@ -123,6 +129,16 @@ describe("Computer hardware profiles", (): void => {
     expect(applyPortableComputerProfile(restored)).toBe("migrated");
     expect(restored.osProfile).toBe("dos");
     expect(restored.hardware).toEqual(portableComputerHardware);
+    expect(restored.displayProfileId).toBe("portable-vga-256k");
+  });
+
+  it("preserves an explicitly customized display profile", (): void => {
+    const record = new ComputerRecord("c-000109", "standard", {
+      displayProfileId: "portable-vga-256k",
+    });
+
+    expect(applyStationaryComputerProfile(record)).toBe("unchanged");
+    expect(record.displayProfileId).toBe("portable-vga-256k");
   });
 
   it("enforces the 386SX 24-bit physical address ceiling", (): void => {

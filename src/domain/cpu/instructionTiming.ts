@@ -20,10 +20,13 @@ export function instructionCycleCost(
 ): number {
   return model === "cs386sx"
     ? cs386sxInstructionCycleCost(instruction, context)
-    : cs486dxInstructionCycleCost(instruction);
+    : cs486dxInstructionCycleCost(instruction, context);
 }
 
-function cs486dxInstructionCycleCost(instruction: Cs486Instruction): number {
+function cs486dxInstructionCycleCost(
+  instruction: Cs486Instruction,
+  context: InstructionTimingContext = {},
+): number {
   switch (instruction.op) {
     case "load":
     case "store":
@@ -38,6 +41,15 @@ function cs486dxInstructionCycleCost(instruction: Cs486Instruction): number {
     case "call":
     case "ret":
       return 3;
+    case "jmp":
+      return 3;
+    case "je":
+    case "jne":
+    case "jl":
+    case "jle":
+    case "jg":
+    case "jge":
+      return context.branchTaken === true ? 3 : 1;
     case "syscall":
       return 8;
     case "print":
