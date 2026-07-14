@@ -1,13 +1,14 @@
-import { compileSource } from "../runtime/compiler.js";
 import {
   createNativeEnvironment,
   renderTerminalScreen,
 } from "../runtime/nativeModules.js";
+import { createPythonCs486Program } from "../runtime/pythonCs486.js";
 import {
   RoundRobinScheduler,
   type SchedulerLimits,
 } from "../runtime/scheduler.js";
-import { StackVm, type VmState } from "../runtime/vm.js";
+import type { CpuProcessState } from "../../domain/runtime/cpuProcess.js";
+import type { CpuProcess } from "../../domain/runtime/cpuProcess.js";
 import type { ComputerRecord } from "../../domain/computer/computer.js";
 import { numericComputerId } from "../../domain/computer/identity.js";
 import type { RuntimeValue } from "../../domain/runtime/value.js";
@@ -18,7 +19,6 @@ import type { ShellCompletionResult } from "../os/shellCommands.js";
 import type { ShellSession } from "../os/shellSession.js";
 import { hardwareCpuCyclesPerTick } from "../../domain/computer/hardware.js";
 import { cpuCyclesToMicroseconds } from "../../domain/cpu/timing.js";
-import { defaultVmLimits } from "../runtime/vm.js";
 
 export interface ComputerRuntimeOptions {
   readonly clock?: ShellClockSource;
@@ -164,7 +164,7 @@ export class ComputerRuntime {
     for (const entry of reboot) this.boot(entry);
   }
 
-  vmState(computerId: string): VmState | undefined {
+  vmState(computerId: string): CpuProcessState | undefined {
     return this.entries.get(computerId)?.vm?.state;
   }
 
@@ -220,19 +220,16 @@ export class ComputerRuntime {
       hardware: entry.record.hardware,
       memoryUsageBytes: () => 0,
       currentTick: () => this.scheduler.tickNumber,
+      shell: entry.shell,
       ticksPerSecond: this.ticksPerSecond,
     });
-    const vm = new StackVm(
-      {
-        code: compileSource(source, path),
-        globals: environment.globals,
-      },
-      environment.moduleLoader,
-      {
-        ...defaultVmLimits,
-        maxMemoryBytes: entry.record.hardware.memoryBytes,
-      },
-    );
+    const vm = createPythonCs486Program({
+      environment,
+      filesystem: entry.record.filesystem,
+      memoryBytes: entry.record.hardware.memoryBytes,
+      path,
+      source,
+    }).process;
     const maximumCpuCycles = 100_000_000;
     let cpuCycles = 0;
     let instructions = 0;
@@ -276,8 +273,8 @@ export class ComputerRuntime {
       stdout,
       stderr:
         cpuCycles >= maximumCpuCycles
-          ? `MicroPython: CPU cycle limit ${String(maximumCpuCycles)} exceeded\n`
-          : "MicroPython: waits and asynchronous work are not supported through MCP\n",
+          ? `Python/CS486: CPU cycle limit ${String(maximumCpuCycles)} exceeded\n`
+          : "Python/CS486: waits and asynchronous work are not supported through MCP\n",
       cpuCycles,
     };
   }
@@ -318,17 +315,13 @@ export class ComputerRuntime {
         reboot: () => this.requestEntryStop(entry, "reboot", "reboot"),
         ticksPerSecond: this.ticksPerSecond,
       });
-      const vm = new StackVm(
-        {
-          code: compileSource(source, "/startup.py"),
-          globals: environment.globals,
-        },
-        environment.moduleLoader,
-        {
-          ...defaultVmLimits,
-          maxMemoryBytes: entry.record.hardware.memoryBytes,
-        },
-      );
+      const vm = createPythonCs486Program({
+        environment,
+        filesystem: entry.record.filesystem,
+        memoryBytes: entry.record.hardware.memoryBytes,
+        path: "/startup.py",
+        source,
+      }).process;
       entry.vm = vm;
       entry.shell = environment.shell;
       entry.stopIntent = undefined;
@@ -412,7 +405,7 @@ export class ComputerRuntime {
 interface RuntimeEntry {
   readonly record: ComputerRecord;
   readonly runtimeId: number;
-  vm?: StackVm;
+  vm?: CpuProcess;
   shell?: ShellSession;
   stopIntent?: StopIntent;
 }
@@ -425,7 +418,7 @@ function pythonStats(
   state: string,
 ): string {
   const microseconds = cpuCyclesToMicroseconds(cpuCycles);
-  return `MicroPython: ${String(instructions)} bytecode instructions, ${String(cpuCycles)} CPU cycles, ${microseconds.toFixed(3)} us at 33 MHz, ${state}\n`;
+  return `Python/CS486: ${String(instructions)} machine instructions, ${String(cpuCycles)} CPU cycles, ${microseconds.toFixed(3)} us at 33 MHz, ${state}\n`;
 }
 
 function failure(error: unknown): RuntimeCommandResult {

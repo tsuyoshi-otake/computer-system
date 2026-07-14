@@ -1,12 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { compileSource } from "../../src/application/runtime/compiler.js";
 import { createNativeEnvironment } from "../../src/application/runtime/nativeModules.js";
 import { RoundRobinScheduler } from "../../src/application/runtime/scheduler.js";
-import { StackVm } from "../../src/application/runtime/vm.js";
 import { InMemoryFilesystem } from "../../src/domain/filesystem/inMemoryFilesystem.js";
 import type { RuntimeValue } from "../../src/domain/runtime/value.js";
 import { TerminalBuffer } from "../../src/domain/terminal/terminalBuffer.js";
+import { PythonCs486Harness } from "../runtime/pythonCs486Harness.js";
 
 describe("independently specified ComputerCraft-style compatibility", (): void => {
   it("supports camelCase terminal and filesystem aliases and color bit masks", (): void => {
@@ -17,9 +16,8 @@ describe("independently specified ComputerCraft-style compatibility", (): void =
       terminal,
       filesystem,
     });
-    const vm = new StackVm(
-      {
-        code: compileSource(`
+    const vm = new PythonCs486Harness(
+      `
 import term
 import fs
 term.setCursorPos(1, 1)
@@ -33,11 +31,10 @@ fs.makeDir("/rom")
 fs.writeFile("/rom/startup.py", "pass")
 present = fs.exists("/rom/startup.py")
 bytes = fs.getSize("/rom/startup.py")
-`),
-      },
-      environment.moduleLoader,
+`,
+      { environment, filesystem, terminal },
     );
-    vm.runSlice(1_000);
+    vm.runCpuSlice(1_000_000);
 
     expect(vm.state).toEqual({ kind: "completed", value: null });
     expect(terminal.line(1)).toBe("port    ");
@@ -66,18 +63,20 @@ bytes = fs.getSize("/rom/startup.py")
       ): void => scheduler.queueEvent(17, name, ...arguments_),
     };
     const environment = createNativeEnvironment(context);
-    const vm = new StackVm(
-      {
-        code: compileSource(`
+    const vm = new PythonCs486Harness(
+      `
 import os
 identity = os.getComputerID()
 os.queueEvent("portable", identity)
 event = os.pullEvent("portable")
-`),
+`,
+      {
+        environment,
+        filesystem: context.filesystem,
+        terminal: context.terminal,
       },
-      environment.moduleLoader,
     );
-    scheduler.add(17, vm);
+    scheduler.add(17, vm.program.process);
     scheduler.runTick();
     scheduler.runTick();
 

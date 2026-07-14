@@ -117,10 +117,11 @@ PowerShell/Bash or arbitrary BDS administration commands.
 ID while preventing browser auto-open from consuming it first. Both paths bound
 input, concurrency, output, and waits. The MCP-only `python <file>` and
 `micropython <file>` forms run a bounded source file with the target Computer's
-MicroPython-compatible VM, filesystem, hardware profile, and RAM limit. They
-reject waits and long-running work. MicroPython bytecode instructions are
-reported separately from their deterministic 486DX-equivalent CPU-cycle cost;
-`run --stats` uses the same CPU-cycle and 33 MHz virtual-time units.
+MicroPython-compatible language, filesystem, hardware profile, and RAM limit.
+Python is compiled to CS486 control flow and an allowlisted managed-runtime
+syscall ABI; there is no separate Python VM. MCP execution rejects waits and
+long-running work and reports CS486 machine instructions, CPU cycles, and the
+same 33 MHz virtual-time units as `run --stats`.
 
 ## Browser terminal
 
@@ -241,17 +242,19 @@ Each Computer also has a persisted virtual hardware profile. User-facing CPU
 information and the execution model identify a Computer System 486DX at 33 MHz.
 At 20 server ticks per second, one Computer receives at most 1,650,000 modeled
 CPU cycles per tick, while the scheduler retains the same global cap and
-round-robin fairness across Computers. Computer System Python bytecodes use a
-stable, operation-specific 486DX-equivalent cost; collection and call costs
-scale with their input size. Native shell commands and Bash scripts return
-bounded CPU-cycle charges, so they cannot bypass the same budget. Snapshots
-created with the former 20 kHz default migrate to 33 MHz when restored. The
-default 1 MiB RAM limit applies to the VM's aggregate reachable runtime data and
-raises `MemoryError` on overflow; unreachable values are reclaimed during
-pressure checks. Linux exposes `cpuinfo`, `free`, `/proc/cpuinfo`, and
-`/proc/meminfo`. The DOS profile exposes `CPU`, `MEM`, and `SYSTEMINFO`, and
-`VER` includes the hardware summary. RAM, persistent disk quota, collection
-size, and output bounds are independent limits.
+round-robin fairness across Computers. Computer System Python compiles branches,
+calls, returns, and waits to the CS486 process and uses bounded `python`
+syscalls for managed values and native modules. Collection and call costs scale
+with their input size. Native shell commands and Bash scripts currently use the
+separate shell interpreter but return bounded CPU-cycle charges, so they cannot
+bypass the same budget. Snapshots created with the former 20 kHz default migrate
+to 33 MHz when restored. The default 1 MiB RAM limit applies to the VM's
+aggregate reachable runtime data and raises `MemoryError` on overflow;
+unreachable values are reclaimed during pressure checks. Linux exposes
+`cpuinfo`, `free`, `/proc/cpuinfo`, and `/proc/meminfo`. The DOS profile exposes
+`CPU`, `MEM`, and `SYSTEMINFO`, and `VER` includes the hardware summary. RAM,
+persistent disk quota, collection size, and output bounds are independent
+limits.
 
 The sandboxed CS486DX toolchain adds real 32-bit `EAX` through `EBP` registers,
 checked little-endian linear memory, stack/call control flow, terminal CPU
@@ -264,14 +267,19 @@ object-relative data size; `ld` resolves them into the existing validated
 `objdump` inspect both formats. C and C++ support external and defined
 zero-argument integer functions plus statement-boundary `asm("...")`; inline
 assembly rejects labels, control flow, stack operations, and ESP/EBP access.
-`basic` runs BASIC source directly, while `run --stats` reports instructions,
-CPU cycles, and virtual microseconds at 33 MHz. No frontend invokes a host
-compiler, linker, or native binary. Dynamic/shared libraries remain a follow-up
-on the versioned object and ABI foundation. Compile, link, and execution work
-return to the same bounded CPU-cycle debt used by shell scripts. MCP's
-`cpuCycles` field uses this unit across ASM, C, C++, BASIC, and MicroPython;
-bytecode or machine-instruction counts remain diagnostic values, not timing
-units.
+Python resolves same-directory modules followed by `/lib/python` and
+`/usr/lib/computer-system/python` (or `C:\LIB\PYTHON` in DOS). A `.py` module is
+compiled and initialized once; a versioned `.o` `CS486OBJ` module exposes its
+global zero-argument integer functions as Python attributes and executes them in
+the same CS486 process with EAX returns. For example,
+`cc -c fastmath.c -o fastmath.o` beside a script enables `import fastmath`.
+Missing, circular, oversized, corrupt, or ABI-incompatible imports fail
+explicitly. `basic` runs BASIC source directly, while `run --stats` reports
+instructions, CPU cycles, and virtual microseconds at 33 MHz. No frontend
+invokes a host compiler, linker, or native binary. General dynamic/shared
+libraries remain a follow-up on the versioned object and ABI foundation. MCP's
+`cpuCycles` field uses one unit across ASM, C, C++, BASIC, and Python;
+machine-instruction counts remain diagnostic values, not timing units.
 
 The Bedrock pack includes placeable `Computer` and `Advanced Computer` items
 (`computer_system:computer_item` and `computer_system:advanced_computer_item`).

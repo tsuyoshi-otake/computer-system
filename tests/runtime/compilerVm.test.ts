@@ -1,48 +1,47 @@
 import { describe, expect, it } from "vitest";
 
-import { compileSource } from "../../src/application/runtime/compiler.js";
-import {
-  StackVm,
-  type VmLimits,
-  type VmState,
-} from "../../src/application/runtime/vm.js";
+import { createNativeEnvironment } from "../../src/application/runtime/nativeModules.js";
+import type { PythonRuntimeLimits } from "../../src/application/runtime/pythonLimits.js";
+import type { CpuProcessState } from "../../src/domain/runtime/cpuProcess.js";
+import { InMemoryFilesystem } from "../../src/domain/filesystem/inMemoryFilesystem.js";
 import {
   namespace,
   nativeFunction,
   type RuntimeValue,
 } from "../../src/domain/runtime/value.js";
+import { TerminalBuffer } from "../../src/domain/terminal/terminalBuffer.js";
+import { PythonCs486Harness, runPythonCs486 } from "./pythonCs486Harness.js";
 
-const generousLimits: VmLimits = {
+const generousLimits: PythonRuntimeLimits = {
   maxCallDepth: 64,
   maxCollectionSize: 4_096,
   maxStackSize: 4_096,
   maxStringLength: 65_536,
 };
 
-function run(source: string, limits: VmLimits = generousLimits): StackVm {
-  const vm = new StackVm({ code: compileSource(source) }, undefined, limits);
-  for (
-    let slices = 0;
-    slices < 1_000 && vm.state.kind === "ready";
-    slices += 1
-  ) {
-    vm.runSlice(100);
-  }
-  return vm;
+function run(
+  source: string,
+  limits: PythonRuntimeLimits = generousLimits,
+): PythonCs486Harness {
+  return runPythonCs486(source, { limits });
 }
 
-function expectCompleted(vm: StackVm): void {
+function expectCompleted(vm: PythonCs486Harness): void {
   expect(vm.state).toEqual({ kind: "completed", value: null });
 }
 
-function expectCrash(vm: StackVm, typeName: string, message: RegExp): void {
+function expectCrash(
+  vm: PythonCs486Harness,
+  typeName: string,
+  message: RegExp,
+): void {
   expect(vm.state.kind).toBe("crashed");
   if (vm.state.kind !== "crashed") return;
   expect(vm.state.error.typeName).toBe(typeName);
   expect(vm.state.error.message).toMatch(message);
 }
 
-describe("bytecode compiler and stack VM", (): void => {
+describe("Computer System Python CS486 compiler and runtime", (): void => {
   it("executes functions, defaults, branches, loops, and collection mutation", (): void => {
     const vm = run(`
 def adjust(value, amount=2):
@@ -168,7 +167,7 @@ while value < 5:
   });
 
   it("halts a slice at its instruction budget without losing readiness", (): void => {
-    const vm = new StackVm({ code: compileSource("while True:\n    pass\n") });
+    const vm = new PythonCs486Harness("while True:\n    pass\n");
     const slice = vm.runSlice(7);
 
     expect(slice.executedInstructions).toBe(7);
@@ -225,15 +224,27 @@ while value < 5:
         return null;
       }),
     });
-    const vm = new StackVm(
-      {
-        code: compileSource(`
+    const filesystem = new InMemoryFilesystem();
+    const terminal = new TerminalBuffer();
+    const base = createNativeEnvironment({
+      computerId: 1,
+      filesystem,
+      terminal,
+    });
+    const vm = new PythonCs486Harness(
+      `
 import os
 os.record(os.sleep())
 os.record(os.wait_event())
-`),
+`,
+      {
+        environment: {
+          ...base,
+          modules: new Map([...base.modules, ["os", os]]),
+        },
+        filesystem,
+        terminal,
       },
-      (name) => (name === "os" ? os : undefined),
     );
 
     expect(runUntilNotReady(vm)).toEqual({ kind: "sleeping", wakeTick: 2 });
@@ -250,7 +261,7 @@ os.record(os.wait_event())
   });
 });
 
-function runUntilNotReady(vm: StackVm): VmState {
+function runUntilNotReady(vm: PythonCs486Harness): CpuProcessState {
   for (let slices = 0; slices < 100 && vm.state.kind === "ready"; slices += 1) {
     vm.runSlice(100);
   }

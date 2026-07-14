@@ -1,12 +1,14 @@
 import { describe, expect, it } from "vitest";
 
-import { compileSource } from "../../src/application/runtime/compiler.js";
+import { createNativeEnvironment } from "../../src/application/runtime/nativeModules.js";
 import {
   RoundRobinScheduler,
   type SchedulerLimits,
 } from "../../src/application/runtime/scheduler.js";
-import { StackVm } from "../../src/application/runtime/vm.js";
 import { nativeFunction } from "../../src/domain/runtime/value.js";
+import { InMemoryFilesystem } from "../../src/domain/filesystem/inMemoryFilesystem.js";
+import { TerminalBuffer } from "../../src/domain/terminal/terminalBuffer.js";
+import { PythonCs486Harness } from "./pythonCs486Harness.js";
 
 const limits: SchedulerLimits = {
   eventCapacity: 8,
@@ -135,9 +137,20 @@ describe("round-robin scheduler", (): void => {
 function vm(
   source: string,
   globals: Readonly<Record<string, ReturnType<typeof nativeFunction>>> = {},
-): StackVm {
-  return new StackVm({
-    code: compileSource(source),
-    globals: new Map(Object.entries(globals)),
+): PythonCs486Harness {
+  const filesystem = new InMemoryFilesystem();
+  const terminal = new TerminalBuffer();
+  const base = createNativeEnvironment({
+    computerId: 1,
+    filesystem,
+    terminal,
+  });
+  return new PythonCs486Harness(source, {
+    environment: {
+      ...base,
+      globals: new Map([...base.globals, ...Object.entries(globals)]),
+    },
+    filesystem,
+    terminal,
   });
 }

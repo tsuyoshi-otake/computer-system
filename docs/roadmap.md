@@ -36,7 +36,7 @@ Computer / VM / filesystem / terminal / peripheral domains
 Major components:
 
 - computer registry and lifecycle manager
-- Python lexer, parser, bytecode compiler, and stack VM
+- Python lexer and parser with a shared CS486 compiler/runtime backend
 - fair instruction-budgeted scheduler
 - bounded event and timer queues
 - terminal cell buffer and Bedrock terminal view

@@ -54,3 +54,9 @@
   concepts. Guest executables must be structurally validated at load, have
   bounded instruction/output/memory paths, and charge measured opcode cycles
   back to the owning VM rather than executing as unmetered native work.
+- Reuse an already-booted `ShellSession` when constructing a secondary native
+  environment for MCP/debug execution. Constructing another session re-runs the
+  OS boot profile and can erase volatile paths such as `/tmp` between a compile
+  command and the program that consumes its output. — Evidence: the Computer
+  host integration test compiles `/tmp/fastmath.o`, imports it from Python, and
+  observes `42` without losing the object during debug-environment creation.

@@ -1,4 +1,12 @@
 import { computerNominalClockHz } from "./timing.js";
+import {
+  isTerminalCpuProcessState,
+  type CpuProcess,
+  type CpuProcessSliceResult,
+  type CpuProcessState,
+} from "../runtime/cpuProcess.js";
+import { VmRuntimeError } from "../runtime/errors.js";
+import type { RuntimeValue } from "../runtime/value.js";
 
 export const cs486NominalClockHz = computerNominalClockHz;
 
@@ -57,6 +65,7 @@ export type Cs486Instruction =
   | { readonly op: "pop"; readonly destination: Cs486Register }
   | { readonly op: "call"; readonly target: number }
   | { readonly op: "ret" | "halt" }
+  | { readonly op: "syscall"; readonly name: string }
   | { readonly op: "print"; readonly source: Cs486Operand | string };
 
 export interface Cs486Executable {
@@ -78,6 +87,42 @@ export interface Cs486RunResult {
   readonly state: "halted" | "yielded";
 }
 
+export interface Cs486SyscallContext {
+  readonly memoryLimitBytes: number;
+  readInt32(address: number): number;
+  readRegister(register: Cs486Register): number;
+  writeInt32(address: number, value: number): void;
+  writeRegister(register: Cs486Register, value: number): void;
+}
+
+export type Cs486SyscallResult =
+  | { readonly kind: "continue"; readonly cycles?: number }
+  | { readonly kind: "jump"; readonly target: number; readonly cycles?: number }
+  | { readonly kind: "call"; readonly target: number; readonly cycles?: number }
+  | { readonly kind: "return"; readonly cycles?: number }
+  | {
+      readonly kind: "sleep";
+      readonly ticks: number;
+      readonly cycles?: number;
+      readonly resume?: (value: RuntimeValue) => void;
+    }
+  | {
+      readonly kind: "wait_event";
+      readonly filter?: string;
+      readonly cycles?: number;
+      readonly resume?: (value: RuntimeValue) => void;
+    }
+  | {
+      readonly kind: "complete";
+      readonly value: RuntimeValue;
+      readonly cycles?: number;
+    };
+
+export type Cs486SyscallHandler = (
+  name: string,
+  context: Cs486SyscallContext,
+) => Cs486SyscallResult;
+
 export class Cs486Fault extends Error {
   constructor(
     readonly typeName: string,
@@ -95,221 +140,508 @@ export function runCs486(
   executable: Cs486Executable,
   options: { readonly memoryBytes: number; readonly instructionLimit?: number },
 ): Cs486RunResult {
-  validateCs486Executable(executable);
   const instructionLimit = options.instructionLimit ?? 100_000;
   if (!Number.isSafeInteger(instructionLimit) || instructionLimit <= 0)
     throw new RangeError("CS486 instruction limit must be positive");
-  const memoryBytes = Math.min(options.memoryBytes, 16 * 1_024 * 1_024);
-  if (!Number.isSafeInteger(memoryBytes) || memoryBytes < 64 * 1_024)
-    throw new RangeError("CS486 requires at least 64 KiB RAM");
-  if ((executable.dataBytes ?? 0) > memoryBytes)
+  const process = new Cs486Process(executable, options);
+  const slice = process.runInstructionSlice(instructionLimit);
+  if (process.state.kind === "crashed") {
     throw new Cs486Fault(
-      "MemoryAccessError",
-      "executable data exceeds available RAM",
+      process.state.error.typeName,
+      process.state.error.message,
     );
-
-  const memory = new DataView(new ArrayBuffer(memoryBytes));
-  const registers = new Int32Array(cs486RegisterNames.length);
-  registers[indexOf("esp")] = memoryBytes;
-  registers[indexOf("ebp")] = memoryBytes;
-  let ip = 0;
-  let compared = 0;
-  let cycles = 0;
-  let executedInstructions = 0;
-  let output = "";
-
-  const read = (operand: Cs486Operand): number =>
-    operand.kind === "immediate"
-      ? operand.value | 0
-      : registers[indexOf(operand.register)]!;
-  const write = (register: Cs486Register, value: number): void => {
-    registers[indexOf(register)] = value | 0;
+  }
+  return {
+    cycles: slice.cpuCycles,
+    executedInstructions: slice.executedInstructions,
+    output: process.output,
+    registers: process.registers,
+    state: process.state.kind === "completed" ? "halted" : "yielded",
   };
-  const address = (operand: Cs486Operand): number => {
-    const value = read(operand);
-    if (!Number.isInteger(value) || value < 0 || value + 4 > memoryBytes)
+}
+
+/**
+ * Resumable CS486 execution state. The scheduler charges instruction cycles in
+ * bounded slices; an instruction may incur debt beyond the current slice and
+ * that debt is paid before another instruction is allowed to execute.
+ */
+export class Cs486Process implements CpuProcess {
+  private readonly memory: DataView;
+  private readonly registerValues = new Int32Array(cs486RegisterNames.length);
+  private readonly memoryBytes: number;
+  private stateValue: CpuProcessState = { kind: "ready" };
+  private instructionPointer = 0;
+  private compared = 0;
+  private cycleDebt = 0;
+  private tick = 0;
+  private outputValue = "";
+  private pendingResume: ((value: RuntimeValue) => void) | undefined;
+
+  constructor(
+    private readonly executable: Cs486Executable,
+    private readonly options: {
+      readonly externalMemoryUsageBytes?: () => number;
+      readonly memoryBytes: number;
+      readonly syscallHandler?: Cs486SyscallHandler;
+    },
+  ) {
+    validateCs486Executable(executable);
+    this.memoryBytes = Math.min(options.memoryBytes, 16 * 1_024 * 1_024);
+    if (
+      !Number.isSafeInteger(this.memoryBytes) ||
+      this.memoryBytes < 64 * 1_024
+    )
+      throw new RangeError("CS486 requires at least 64 KiB RAM");
+    if ((executable.dataBytes ?? 0) > this.memoryBytes)
+      throw new Cs486Fault(
+        "MemoryAccessError",
+        "executable data exceeds available RAM",
+      );
+    this.memory = new DataView(new ArrayBuffer(this.memoryBytes));
+    this.write("esp", this.memoryBytes);
+    this.write("ebp", this.memoryBytes);
+  }
+
+  get state(): CpuProcessState {
+    return this.stateValue;
+  }
+
+  get output(): string {
+    return this.outputValue;
+  }
+
+  get registers(): Readonly<Record<Cs486Register, number>> {
+    return Object.fromEntries(
+      cs486RegisterNames.map((name, index) => [
+        name,
+        this.registerValues[index]!,
+      ]),
+    ) as Record<Cs486Register, number>;
+  }
+
+  get memoryLimitBytes(): number {
+    return this.memoryBytes;
+  }
+
+  get memoryUsageBytes(): number {
+    const stackBytes = this.memoryBytes - this.readRegister("esp");
+    return Math.max(
+      0,
+      (this.executable.dataBytes ?? 0) +
+        stackBytes +
+        32 +
+        (this.options.externalMemoryUsageBytes?.() ?? 0),
+    );
+  }
+
+  get hasPendingCpuCycles(): boolean {
+    return this.cycleDebt > 0;
+  }
+
+  runCpuSlice(cpuCycleBudget: number): CpuProcessSliceResult {
+    if (!Number.isSafeInteger(cpuCycleBudget) || cpuCycleBudget <= 0)
+      throw new RangeError("CPU cycle budget must be a positive safe integer");
+    if (this.stateValue.kind !== "ready" && this.cycleDebt === 0)
+      return { cpuCycles: 0, executedInstructions: 0, state: this.stateValue };
+
+    let cpuCycles = 0;
+    let executedInstructions = 0;
+    while (
+      cpuCycles < cpuCycleBudget &&
+      (this.stateValue.kind === "ready" || this.cycleDebt > 0)
+    ) {
+      if (this.cycleDebt > 0) {
+        const paid = Math.min(this.cycleDebt, cpuCycleBudget - cpuCycles);
+        this.cycleDebt -= paid;
+        cpuCycles += paid;
+        continue;
+      }
+      if (this.stateValue.kind !== "ready") break;
+      try {
+        const cycles = this.executeNext();
+        if (cycles === undefined) break;
+        executedInstructions += 1;
+        this.cycleDebt += cycles;
+      } catch (error: unknown) {
+        this.crash(error);
+      }
+    }
+    return { cpuCycles, executedInstructions, state: this.stateValue };
+  }
+
+  runInstructionSlice(instructionBudget: number): CpuProcessSliceResult {
+    if (!Number.isSafeInteger(instructionBudget) || instructionBudget <= 0)
+      throw new RangeError("instructionBudget must be a positive safe integer");
+    if (this.stateValue.kind !== "ready")
+      return { cpuCycles: 0, executedInstructions: 0, state: this.stateValue };
+    let cpuCycles = 0;
+    let executedInstructions = 0;
+    while (
+      executedInstructions < instructionBudget &&
+      this.stateValue.kind === "ready"
+    ) {
+      try {
+        const cycles = this.executeNext();
+        if (cycles === undefined) break;
+        cpuCycles += cycles;
+        executedInstructions += 1;
+      } catch (error: unknown) {
+        this.crash(error);
+      }
+    }
+    return { cpuCycles, executedInstructions, state: this.stateValue };
+  }
+
+  advanceTick(tick: number): CpuProcessState {
+    if (!Number.isInteger(tick) || tick < this.tick)
+      throw new RangeError("CPU process tick must advance monotonically");
+    this.tick = tick;
+    if (this.stateValue.kind === "sleeping" && tick >= this.stateValue.wakeTick)
+      this.resume(null);
+    return this.stateValue;
+  }
+
+  deliverEvent(name: string, ...arguments_: readonly RuntimeValue[]): boolean {
+    if (
+      this.stateValue.kind !== "waiting_event" ||
+      (this.stateValue.filter !== undefined && this.stateValue.filter !== name)
+    )
+      return false;
+    this.resume({ kind: "tuple", values: [name, ...arguments_] });
+    return this.state.kind !== "crashed";
+  }
+
+  terminate(reason = "terminated"): CpuProcessState {
+    if (!isTerminalCpuProcessState(this.stateValue)) {
+      this.pendingResume = undefined;
+      this.stateValue = { kind: "terminated", reason };
+    }
+    return this.stateValue;
+  }
+
+  fail(error: VmRuntimeError): CpuProcessState {
+    if (!isTerminalCpuProcessState(this.stateValue))
+      this.stateValue = { kind: "crashed", error };
+    return this.stateValue;
+  }
+
+  private executeNext(): number | undefined {
+    const instruction = this.executable.instructions[this.instructionPointer];
+    if (instruction === undefined) {
+      this.complete();
+      return undefined;
+    }
+    this.instructionPointer += 1;
+    const cycles = cycleCost(instruction);
+    switch (instruction.op) {
+      case "mov":
+        this.write(instruction.destination, this.read(instruction.source));
+        break;
+      case "load":
+        this.write(
+          instruction.destination,
+          this.memory.getInt32(this.address(instruction.address), true),
+        );
+        break;
+      case "store":
+        this.memory.setInt32(
+          this.address(instruction.address),
+          this.readRegister(instruction.source),
+          true,
+        );
+        break;
+      case "add":
+        this.write(
+          instruction.destination,
+          this.readRegister(instruction.destination) +
+            this.read(instruction.source),
+        );
+        break;
+      case "sub":
+        this.write(
+          instruction.destination,
+          this.readRegister(instruction.destination) -
+            this.read(instruction.source),
+        );
+        break;
+      case "mul":
+        this.write(
+          instruction.destination,
+          Math.imul(
+            this.readRegister(instruction.destination),
+            this.read(instruction.source),
+          ),
+        );
+        break;
+      case "div": {
+        const divisor = this.read(instruction.source);
+        if (divisor === 0)
+          throw new Cs486Fault("DivisionByZeroError", "division by zero");
+        this.write(
+          instruction.destination,
+          Math.trunc(this.readRegister(instruction.destination) / divisor),
+        );
+        break;
+      }
+      case "mod": {
+        const divisor = this.read(instruction.source);
+        if (divisor === 0)
+          throw new Cs486Fault("DivisionByZeroError", "division by zero");
+        this.write(
+          instruction.destination,
+          this.readRegister(instruction.destination) % divisor,
+        );
+        break;
+      }
+      case "and":
+        this.write(
+          instruction.destination,
+          this.readRegister(instruction.destination) &
+            this.read(instruction.source),
+        );
+        break;
+      case "or":
+        this.write(
+          instruction.destination,
+          this.readRegister(instruction.destination) |
+            this.read(instruction.source),
+        );
+        break;
+      case "xor":
+        this.write(
+          instruction.destination,
+          this.readRegister(instruction.destination) ^
+            this.read(instruction.source),
+        );
+        break;
+      case "shl":
+        this.write(
+          instruction.destination,
+          this.readRegister(instruction.destination) <<
+            (this.read(instruction.source) & 31),
+        );
+        break;
+      case "shr":
+        this.write(
+          instruction.destination,
+          this.readRegister(instruction.destination) >>
+            (this.read(instruction.source) & 31),
+        );
+        break;
+      case "cmp":
+        this.compared =
+          this.readRegister(instruction.left) - this.read(instruction.right);
+        break;
+      case "jmp":
+        this.instructionPointer = instruction.target;
+        break;
+      case "je":
+        if (this.compared === 0) this.instructionPointer = instruction.target;
+        break;
+      case "jne":
+        if (this.compared !== 0) this.instructionPointer = instruction.target;
+        break;
+      case "jl":
+        if (this.compared < 0) this.instructionPointer = instruction.target;
+        break;
+      case "jle":
+        if (this.compared <= 0) this.instructionPointer = instruction.target;
+        break;
+      case "jg":
+        if (this.compared > 0) this.instructionPointer = instruction.target;
+        break;
+      case "jge":
+        if (this.compared >= 0) this.instructionPointer = instruction.target;
+        break;
+      case "push":
+        this.push(this.read(instruction.source));
+        break;
+      case "pop":
+        this.write(instruction.destination, this.pop());
+        break;
+      case "call":
+        this.push(this.instructionPointer);
+        this.instructionPointer = instruction.target;
+        break;
+      case "ret":
+        this.instructionPointer = this.pop();
+        break;
+      case "syscall": {
+        const handler = this.options.syscallHandler;
+        if (handler === undefined)
+          throw new Cs486Fault(
+            "UnsupportedError",
+            `syscall ${instruction.name} is unavailable`,
+          );
+        const result = handler(instruction.name, {
+          memoryLimitBytes: this.memoryBytes,
+          readInt32: (address) =>
+            this.memory.getInt32(this.checkedAddress(address), true),
+          readRegister: (register) => this.readRegister(register),
+          writeInt32: (address, value) =>
+            this.memory.setInt32(this.checkedAddress(address), value | 0, true),
+          writeRegister: (register, value) => this.write(register, value),
+        });
+        const extraCycles = result.cycles ?? 0;
+        if (
+          !Number.isSafeInteger(extraCycles) ||
+          extraCycles < 0 ||
+          extraCycles > 100_000_000
+        )
+          throw new Cs486Fault(
+            "ResourceLimitError",
+            "invalid syscall cycle charge",
+          );
+        this.applySyscallResult(result);
+        return cycles + extraCycles;
+      }
+      case "print": {
+        const value =
+          typeof instruction.source === "string"
+            ? instruction.source
+            : String(this.read(instruction.source));
+        this.outputValue += value;
+        if (this.outputValue.length > maximumOutputBytes)
+          throw new Cs486Fault("OutputLimitError", "output limit exceeded");
+        break;
+      }
+      case "halt":
+        this.complete();
+        break;
+    }
+    return cycles;
+  }
+
+  private read(operand: Cs486Operand): number {
+    return operand.kind === "immediate"
+      ? operand.value | 0
+      : this.readRegister(operand.register);
+  }
+
+  private readRegister(register: Cs486Register): number {
+    return this.registerValues[indexOf(register)]!;
+  }
+
+  private write(register: Cs486Register, value: number): void {
+    this.registerValues[indexOf(register)] = value | 0;
+  }
+
+  private address(operand: Cs486Operand): number {
+    return this.checkedAddress(this.read(operand));
+  }
+
+  private checkedAddress(value: number): number {
+    if (!Number.isInteger(value) || value < 0 || value + 4 > this.memoryBytes)
       throw new Cs486Fault(
         "MemoryAccessError",
         `address ${value} is outside RAM`,
       );
     return value;
-  };
-  const push = (value: number): void => {
-    const next = registers[indexOf("esp")]! - 4;
-    if (next < 0) throw new Cs486Fault("StackOverflowError", "stack overflow");
-    memory.setInt32(next, value, true);
-    registers[indexOf("esp")] = next;
-  };
-  const pop = (): number => {
-    const current = registers[indexOf("esp")]!;
-    if (current < 0 || current + 4 > memoryBytes)
-      throw new Cs486Fault("StackUnderflowError", "stack underflow");
-    const value = memory.getInt32(current, true);
-    registers[indexOf("esp")] = current + 4;
-    return value;
-  };
+  }
 
-  while (ip < executable.instructions.length) {
-    if (executedInstructions >= instructionLimit) return result("yielded");
-    const instruction = executable.instructions[ip++]!;
-    executedInstructions += 1;
-    cycles += cycleCost(instruction);
-    switch (instruction.op) {
-      case "mov":
-        write(instruction.destination, read(instruction.source));
-        break;
-      case "load":
-        write(
-          instruction.destination,
-          memory.getInt32(address(instruction.address), true),
-        );
-        break;
-      case "store":
-        memory.setInt32(
-          address(instruction.address),
-          registers[indexOf(instruction.source)]!,
-          true,
-        );
-        break;
-      case "add":
-        write(
-          instruction.destination,
-          readRegister(instruction.destination) + read(instruction.source),
-        );
-        break;
-      case "sub":
-        write(
-          instruction.destination,
-          readRegister(instruction.destination) - read(instruction.source),
-        );
-        break;
-      case "mul":
-        write(
-          instruction.destination,
-          Math.imul(
-            readRegister(instruction.destination),
-            read(instruction.source),
-          ),
-        );
-        break;
-      case "div": {
-        const divisor = read(instruction.source);
-        if (divisor === 0)
-          throw new Cs486Fault("DivisionByZeroError", "division by zero");
-        write(
-          instruction.destination,
-          Math.trunc(readRegister(instruction.destination) / divisor),
-        );
-        break;
-      }
-      case "mod": {
-        const divisor = read(instruction.source);
-        if (divisor === 0)
-          throw new Cs486Fault("DivisionByZeroError", "division by zero");
-        write(
-          instruction.destination,
-          readRegister(instruction.destination) % divisor,
-        );
-        break;
-      }
-      case "and":
-        write(
-          instruction.destination,
-          readRegister(instruction.destination) & read(instruction.source),
-        );
-        break;
-      case "or":
-        write(
-          instruction.destination,
-          readRegister(instruction.destination) | read(instruction.source),
-        );
-        break;
-      case "xor":
-        write(
-          instruction.destination,
-          readRegister(instruction.destination) ^ read(instruction.source),
-        );
-        break;
-      case "shl":
-        write(
-          instruction.destination,
-          readRegister(instruction.destination) <<
-            (read(instruction.source) & 31),
-        );
-        break;
-      case "shr":
-        write(
-          instruction.destination,
-          readRegister(instruction.destination) >>
-            (read(instruction.source) & 31),
-        );
-        break;
-      case "cmp":
-        compared = readRegister(instruction.left) - read(instruction.right);
-        break;
-      case "jmp":
-        ip = instruction.target;
-        break;
-      case "je":
-        if (compared === 0) ip = instruction.target;
-        break;
-      case "jne":
-        if (compared !== 0) ip = instruction.target;
-        break;
-      case "jl":
-        if (compared < 0) ip = instruction.target;
-        break;
-      case "jle":
-        if (compared <= 0) ip = instruction.target;
-        break;
-      case "jg":
-        if (compared > 0) ip = instruction.target;
-        break;
-      case "jge":
-        if (compared >= 0) ip = instruction.target;
-        break;
-      case "push":
-        push(read(instruction.source));
-        break;
-      case "pop":
-        write(instruction.destination, pop());
-        break;
+  private applySyscallResult(result: Cs486SyscallResult): void {
+    switch (result.kind) {
+      case "continue":
+        return;
+      case "jump":
+        if (
+          !Number.isSafeInteger(result.target) ||
+          result.target < 0 ||
+          result.target >= this.executable.instructions.length
+        )
+          throw new Cs486Fault(
+            "ExecutableFormatError",
+            "invalid syscall jump target",
+          );
+        this.instructionPointer = result.target;
+        return;
       case "call":
-        push(ip);
-        ip = instruction.target;
-        break;
-      case "ret":
-        ip = pop();
-        break;
-      case "print": {
-        const value =
-          typeof instruction.source === "string"
-            ? instruction.source
-            : String(read(instruction.source));
-        output += value;
-        if (output.length > maximumOutputBytes)
-          throw new Cs486Fault("OutputLimitError", "output limit exceeded");
-        break;
-      }
-      case "halt":
-        return result("halted");
+        if (
+          !Number.isSafeInteger(result.target) ||
+          result.target < 0 ||
+          result.target >= this.executable.instructions.length
+        )
+          throw new Cs486Fault(
+            "ExecutableFormatError",
+            "invalid syscall call target",
+          );
+        this.push(this.instructionPointer);
+        this.instructionPointer = result.target;
+        return;
+      case "return":
+        this.instructionPointer = this.pop();
+        return;
+      case "sleep":
+        if (!Number.isSafeInteger(result.ticks) || result.ticks < 0)
+          throw new Cs486Fault(
+            "ValueError",
+            "sleep ticks must be non-negative",
+          );
+        this.pendingResume = result.resume;
+        this.stateValue = {
+          kind: "sleeping",
+          wakeTick: this.tick + result.ticks,
+        };
+        return;
+      case "wait_event":
+        this.pendingResume = result.resume;
+        this.stateValue = { kind: "waiting_event", filter: result.filter };
+        return;
+      case "complete":
+        this.pendingResume = undefined;
+        this.stateValue = { kind: "completed", value: result.value };
     }
   }
-  return result("halted");
 
-  function readRegister(register: Cs486Register): number {
-    return registers[indexOf(register)]!;
+  private push(value: number): void {
+    const next = this.readRegister("esp") - 4;
+    if (next < 0) throw new Cs486Fault("StackOverflowError", "stack overflow");
+    this.memory.setInt32(next, value, true);
+    this.write("esp", next);
   }
-  function result(state: "halted" | "yielded"): Cs486RunResult {
-    return {
-      cycles,
-      executedInstructions,
-      output,
-      registers: Object.fromEntries(
-        cs486RegisterNames.map((name, index) => [name, registers[index]!]),
-      ) as Record<Cs486Register, number>,
-      state,
-    };
+
+  private pop(): number {
+    const current = this.readRegister("esp");
+    if (current < 0 || current + 4 > this.memoryBytes)
+      throw new Cs486Fault("StackUnderflowError", "stack underflow");
+    const value = this.memory.getInt32(current, true);
+    this.write("esp", current + 4);
+    return value;
+  }
+
+  private complete(): void {
+    if (!isTerminalCpuProcessState(this.stateValue))
+      this.stateValue = { kind: "completed", value: this.readRegister("eax") };
+  }
+
+  private resume(value: RuntimeValue): void {
+    const resume = this.pendingResume;
+    this.pendingResume = undefined;
+    if (resume === undefined) {
+      this.crash(new VmRuntimeError("RuntimeError", "no syscall owns resume"));
+      return;
+    }
+    try {
+      resume(value);
+      this.stateValue = { kind: "ready" };
+    } catch (error: unknown) {
+      this.crash(error);
+    }
+  }
+
+  private crash(error: unknown): void {
+    if (isTerminalCpuProcessState(this.stateValue)) return;
+    this.pendingResume = undefined;
+    const fault =
+      error instanceof Cs486Fault
+        ? new VmRuntimeError(error.typeName, error.message)
+        : error instanceof VmRuntimeError
+          ? error
+          : new VmRuntimeError(
+              "RuntimeError",
+              error instanceof Error ? error.message : String(error),
+            );
+    this.stateValue = { kind: "crashed", error: fault };
   }
 }
 
@@ -371,6 +703,10 @@ export function validateCs486Executable(
       isCs486Operand(candidateInstruction[name]);
     let valid = false;
     if (op === "halt" || op === "ret") valid = true;
+    else if (op === "syscall")
+      valid =
+        typeof candidateInstruction.name === "string" &&
+        /^[a-z][a-z0-9_.]{0,63}$/u.test(candidateInstruction.name);
     else if (
       op === "jmp" ||
       op === "je" ||
@@ -454,6 +790,8 @@ function cycleCost(instruction: Cs486Instruction): number {
     case "call":
     case "ret":
       return 3;
+    case "syscall":
+      return 8;
     case "print":
       return (
         8 +

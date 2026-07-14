@@ -7,7 +7,9 @@ Parent: #1 Blocked by: #2
 - [x] Create the TypeScript, formatting, lint, type-check, Vitest, and build
       setup.
 - [x] Define acyclic domain, application, and adapter boundaries.
-- [x] Implement the Python lexer, parser, AST, bytecode compiler, and stack VM.
+- [x] Implement the original Python lexer, parser, AST, bytecode compiler, and
+      stack VM. (The bytecode VM was later retired by Issue #13 in favor of the
+      shared CS486 backend.)
 - [x] Implement instruction, stack, collection, string, event, and timer limits.
 - [x] Implement fair round-robin scheduling and explicit VM wait states.
 - [x] Implement terminal buffer and in-memory filesystem domains.

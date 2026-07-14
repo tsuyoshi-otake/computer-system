@@ -1,12 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { compileSource } from "../../src/application/runtime/compiler.js";
 import { createNativeEnvironment } from "../../src/application/runtime/nativeModules.js";
 import { RoundRobinScheduler } from "../../src/application/runtime/scheduler.js";
-import { StackVm } from "../../src/application/runtime/vm.js";
 import { InMemoryFilesystem } from "../../src/domain/filesystem/inMemoryFilesystem.js";
 import { TerminalBuffer } from "../../src/domain/terminal/terminalBuffer.js";
 import { RedstoneState } from "../../src/domain/redstone/redstoneState.js";
+import { PythonCs486Harness } from "./pythonCs486Harness.js";
 
 describe("initial native modules", (): void => {
   it("exposes allowlisted os, term, and fs operations to programs", (): void => {
@@ -17,9 +16,8 @@ describe("initial native modules", (): void => {
       terminal,
       filesystem,
     });
-    const vm = new StackVm(
-      {
-        code: compileSource(`
+    const vm = new PythonCs486Harness(
+      `
 import os
 import term
 import fs
@@ -31,9 +29,12 @@ fs.make_dir("/etc")
 fs.write_file("/etc/id", "23")
 size = fs.get_size("/etc/id")
 free = fs.get_free_space()
-`),
+`,
+      {
+        environment,
+        filesystem,
+        terminal,
       },
-      environment.moduleLoader,
     );
 
     run(vm);
@@ -66,20 +67,22 @@ free = fs.get_free_space()
       cancelTimer: (id) => scheduler.cancelTimer(5, id),
       ticksPerSecond: 20,
     });
-    const vm = new StackVm(
-      {
-        code: compileSource(`
+    const vm = new PythonCs486Harness(
+      `
 import os
 timer_id = os.start_timer(0.1)
 timer_event = os.pull_event("timer")
 os.queue_event("custom", 9)
 custom_event = os.pull_event("custom")
 elapsed = os.clock()
-`),
+`,
+      {
+        environment,
+        filesystem,
+        terminal,
       },
-      environment.moduleLoader,
     );
-    scheduler.add(5, vm);
+    scheduler.add(5, vm.program.process);
 
     scheduler.runTick();
     expect(vm.state).toEqual({ kind: "waiting_event", filter: "timer" });
@@ -102,24 +105,27 @@ elapsed = os.clock()
   });
 
   it("rejects modules and host capabilities outside the explicit surface", (): void => {
+    const filesystem = new InMemoryFilesystem();
+    const terminal = new TerminalBuffer();
     const environment = createNativeEnvironment({
       computerId: 1,
-      terminal: new TerminalBuffer(),
-      filesystem: new InMemoryFilesystem(),
+      terminal,
+      filesystem,
     });
-    const importVm = new StackVm(
-      { code: compileSource("import host\n") },
-      environment.moduleLoader,
-    );
+    const importVm = new PythonCs486Harness("import host\n", {
+      environment,
+      filesystem,
+      terminal,
+    });
     run(importVm);
     expect(importVm.state.kind).toBe("crashed");
     if (importVm.state.kind === "crashed") {
       expect(importVm.state.error.typeName).toBe("ImportError");
     }
 
-    const capabilityVm = new StackVm(
-      { code: compileSource('import os\nos.queue_event("hidden")\n') },
-      environment.moduleLoader,
+    const capabilityVm = new PythonCs486Harness(
+      'import os\nos.queue_event("hidden")\n',
+      { environment, filesystem, terminal },
     );
     run(capabilityVm);
     expect(capabilityVm.state.kind).toBe("crashed");
@@ -131,23 +137,23 @@ elapsed = os.clock()
   it("exposes validated six-sided redstone input and digital output", (): void => {
     const redstone = new RedstoneState();
     redstone.setInput("left", 12);
+    const filesystem = new InMemoryFilesystem();
+    const terminal = new TerminalBuffer();
     const environment = createNativeEnvironment({
       computerId: 2,
-      terminal: new TerminalBuffer(),
-      filesystem: new InMemoryFilesystem(),
+      terminal,
+      filesystem,
       redstone,
     });
-    const vm = new StackVm(
-      {
-        code: compileSource(`
+    const vm = new PythonCs486Harness(
+      `
 import redstone
 level = redstone.get_analog_input("left")
 active = redstone.get_input("left")
 redstone.set_output("right", active)
 output = redstone.get_output("right")
-`),
-      },
-      environment.moduleLoader,
+`,
+      { environment, filesystem, terminal },
     );
     run(vm);
     expect(vm.state.kind).toBe("completed");
@@ -157,7 +163,11 @@ output = redstone.get_output("right")
   });
 });
 
-function run(vm: StackVm): void {
-  for (let count = 0; count < 100 && vm.state.kind === "ready"; count += 1)
-    vm.runSlice(100);
+function run(vm: PythonCs486Harness): void {
+  for (
+    let count = 0;
+    count < 100 && (vm.state.kind === "ready" || vm.hasPendingCpuCycles);
+    count += 1
+  )
+    vm.runCpuSlice(100_000);
 }

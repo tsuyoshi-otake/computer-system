@@ -35,14 +35,14 @@ describe("ComputerRuntime", (): void => {
       stdout: "42\n",
     });
     expect(result.outcome === "completed" && result.stderr).toMatch(
-      /^MicroPython: \d+ bytecode instructions, \d+ CPU cycles, \d+\.\d{3} us at 33 MHz/u,
+      /^Python\/CS486: \d+ machine instructions, \d+ CPU cycles, \d+\.\d{3} us at 33 MHz/u,
     );
     if (result.outcome === "completed") {
       expect(result.cpuCycles).toBeGreaterThan(20);
     }
   });
 
-  it("reports comparable CPU cycles across ASM, C++, and MicroPython", (): void => {
+  it("reports comparable CPU cycles across ASM, C++, and Python/CS486", (): void => {
     const record = computer("c-000002", "import os\nos.pull_event()\n");
     const runtime = runtimeWith(record);
     runtime.powerOn(record.computerId);
@@ -101,6 +101,41 @@ describe("ComputerRuntime", (): void => {
     expect(python.stderr).toMatch(/\d+ CPU cycles/u);
     expect(asm.cpuCycles).toBeLessThan(cpp.cpuCycles);
     expect(cpp.cpuCycles).toBeLessThan(python.cpuCycles);
+  });
+
+  it("imports a C object from Python through the MCP debug path", (): void => {
+    const record = computer("c-000003", "import os\nos.pull_event()\n");
+    const runtime = runtimeWith(record);
+    runtime.powerOn(record.computerId);
+    record.filesystem.writeFile(
+      "/tmp/fastmath.c",
+      "int answer(){\nreturn 42;\n}\n",
+    );
+    record.filesystem.writeFile(
+      "/tmp/use_fastmath.py",
+      "import fastmath\nprint(fastmath.answer())\n",
+    );
+
+    expect(
+      runtime.executeDebugShellCommand(
+        record.computerId,
+        "cc -c /tmp/fastmath.c -o /tmp/fastmath.o",
+      ),
+    ).toMatchObject({ outcome: "completed", exitCode: 0 });
+    const result = runtime.executeDebugShellCommand(
+      record.computerId,
+      "python /tmp/use_fastmath.py",
+    );
+
+    expect(result).toMatchObject({
+      outcome: "completed",
+      exitCode: 0,
+      stdout: "42\n",
+    });
+    if (result.outcome === "completed") {
+      expect(result.stderr).toMatch(/^Python\/CS486:/u);
+      expect(result.cpuCycles).toBeGreaterThan(0);
+    }
   });
 
   it("yields infinite work and synchronizes sleep and event waits", (): void => {

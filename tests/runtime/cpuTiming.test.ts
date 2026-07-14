@@ -4,13 +4,8 @@ import {
   computerNominalClockHz,
   cpuCyclesPerTick,
   cpuCyclesToMicroseconds,
-  pythonBytecodeCpuCycles,
 } from "../../src/domain/cpu/timing.js";
-
-const span = {
-  end: { column: 1, line: 1, offset: 0 },
-  start: { column: 1, line: 1, offset: 0 },
-};
+import { PythonCs486Harness } from "./pythonCs486Harness.js";
 
 describe("shared CPU timing", (): void => {
   it("derives one 20 Hz tick and virtual time from the 33 MHz clock", (): void => {
@@ -18,25 +13,27 @@ describe("shared CPU timing", (): void => {
     expect(cpuCyclesToMicroseconds(33)).toBe(1);
   });
 
-  it("charges Python bytecode by operation and linear input size", (): void => {
-    const load = pythonBytecodeCpuCycles({
-      op: "LOAD_CONST",
-      span,
-      value: 42,
-    });
-    const call0 = pythonBytecodeCpuCycles({
-      argumentNames: [],
-      op: "CALL",
-      span,
-    });
-    const call3 = pythonBytecodeCpuCycles({
-      argumentNames: [undefined, undefined, undefined],
-      op: "CALL",
-      span,
-    });
+  it("charges Python as CS486 instructions and linear syscall work", (): void => {
+    const noArguments = cycles("def pick():\n    return 1\nvalue = pick()\n");
+    const threeArguments = cycles(
+      "def pick(a, b, c):\n    return a\nvalue = pick(1, 2, 3)\n",
+    );
 
-    expect(load).toBeGreaterThan(20);
-    expect(call0).toBeGreaterThan(load);
-    expect(call3 - call0).toBe(3 * 192);
+    expect(noArguments).toBeGreaterThan(20);
+    expect(threeArguments).toBeGreaterThan(noArguments);
   });
 });
+
+function cycles(source: string): number {
+  const machine = new PythonCs486Harness(source);
+  let total = 0;
+  for (
+    let count = 0;
+    count < 100 &&
+    (machine.state.kind === "ready" || machine.hasPendingCpuCycles);
+    count += 1
+  )
+    total += machine.runCpuSlice(100_000).cpuCycles;
+  expect(machine.state.kind).toBe("completed");
+  return total;
+}

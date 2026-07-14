@@ -379,6 +379,7 @@ class SourceCompiler {
           "pop",
           "push",
           "ret",
+          "syscall",
         ].includes(op) ||
         /\b(?:esp|ebp)\b/iu.test(instruction) ||
         instruction.includes(":")

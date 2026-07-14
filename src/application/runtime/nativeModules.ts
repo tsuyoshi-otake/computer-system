@@ -4,7 +4,6 @@ import { VmRuntimeError } from "../../domain/runtime/errors.js";
 import {
   namespace,
   nativeFunction,
-  type ModuleLoader,
   type NativeFunction,
   type RuntimeNamespace,
   type RuntimeValue,
@@ -45,10 +44,10 @@ export interface NativeModuleContext {
   readonly ticksPerSecond?: number;
   readonly hardware?: ComputerHardwareProfile;
   readonly memoryUsageBytes?: () => number;
+  readonly shell?: ShellSession;
 }
 
 export interface NativeEnvironment {
-  readonly moduleLoader: ModuleLoader;
   readonly modules: ReadonlyMap<string, RuntimeNamespace>;
   readonly globals: ReadonlyMap<string, RuntimeValue>;
   readonly shell: ShellSession;
@@ -57,18 +56,20 @@ export interface NativeEnvironment {
 export function createNativeEnvironment(
   context: NativeModuleContext,
 ): NativeEnvironment {
-  const shell = new ShellSession(context.filesystem, {
-    clock: context.clock,
-    computerId: context.computerId,
-    computerName: context.computerName,
-    currentTick: context.currentTick,
-    osProfile: context.osProfile,
-    ticksPerSecond: context.ticksPerSecond,
-    hardware: context.hardware,
-    memoryUsageBytes: context.memoryUsageBytes,
-    terminalHeight: context.terminal.height,
-    terminalWidth: context.terminal.width,
-  });
+  const shell =
+    context.shell ??
+    new ShellSession(context.filesystem, {
+      clock: context.clock,
+      computerId: context.computerId,
+      computerName: context.computerName,
+      currentTick: context.currentTick,
+      osProfile: context.osProfile,
+      ticksPerSecond: context.ticksPerSecond,
+      hardware: context.hardware,
+      memoryUsageBytes: context.memoryUsageBytes,
+      terminalHeight: context.terminal.height,
+      terminalWidth: context.terminal.width,
+    });
   const modules = new Map<string, RuntimeNamespace>([
     ["os", createOsModule(context)],
     ["term", createTermModule(context.terminal)],
@@ -80,7 +81,6 @@ export function createNativeEnvironment(
   ]);
   return {
     modules,
-    moduleLoader: (name) => modules.get(name),
     globals: new Map([["print", createPrint(context.terminal)]]),
     shell,
   };

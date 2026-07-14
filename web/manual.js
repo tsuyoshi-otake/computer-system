@@ -89,12 +89,12 @@ halt</code></pre></section>
   {
     id: "micropython",
     number: "06",
-    title: "MicroPython",
-    summary: "Boot program and native modules",
+    title: "MicroPython on CS486",
+    summary: "Boot, imports, and native modules",
     html: `
-      <header class="manual-page-header"><p class="manual-kicker">Chapter 06 · Application VM</p><h2>Computer System MicroPython</h2><p class="manual-lead">The deterministic MicroPython-compatible VM is the Computer's boot environment. Source in <code>/startup.py</code> starts when the Computer powers on.</p></header>
+      <header class="manual-page-header"><p class="manual-kicker">Chapter 06 · CS486 language runtime</p><h2>Computer System MicroPython</h2><p class="manual-lead">The MicroPython-compatible language compiles to the same resumable CS486 process as C, C++, ASM, and BASIC. Source in <code>/startup.py</code> starts when the Computer powers on; there is no separate Python VM.</p></header>
       <section class="manual-section manual-grid-2"><div><h3>6.1 Edit and boot</h3><pre><code>vi /startup.py
-        reboot</code></pre><p>Normal completion powers the program down. Infinite work remains preemptible by the VM scheduler.</p></div><div><h3>6.2 Core language</h3><p>Variables, integers, strings, booleans, lists, tuples, dictionaries, functions, imports, conditionals, loops, exceptions, formatting, and bounded built-ins are compiled to stack bytecode.</p></div></section>
+        reboot</code></pre><p>Normal completion powers the program down. Infinite work remains preemptible by the common CS486 scheduler.</p></div><div><h3>6.2 Core language</h3><p>Variables, numbers, strings, booleans, lists, tuples, dictionaries, functions, imports, conditionals, loops, exceptions, formatting, and bounded built-ins compile to CS486 call/jump control flow and allowlisted managed-runtime syscalls.</p></div></section>
       <section class="manual-section"><h3>6.3 Native modules</h3><table><thead><tr><th>Module</th><th>Purpose</th><th>Representative calls</th></tr></thead><tbody>
         <tr><td>os</td><td>Identity, time, events, timers, lifecycle</td><td>get_computer_id, clock, sleep, pull_event, queue_event, shutdown, reboot</td></tr>
         <tr><td>term</td><td>Fixed-cell terminal</td><td>write, clear, set_cursor_pos, set_text_color</td></tr>
@@ -102,7 +102,16 @@ halt</code></pre></section>
         <tr><td>redstone</td><td>Six-sided digital / analog I/O</td><td>get_input, get_analog_input, set_output</td></tr>
         <tr><td>shell</td><td>Terminal shell adapter</td><td>banner, prompt, submit, keys</td></tr>
       </tbody></table></section>
-      <section class="manual-section"><h3>6.4 Event-driven output</h3><pre><code>import os
+      <section class="manual-section"><h3>6.4 Python modules</h3><pre><code># /home/computer/main.py
+import helper
+print(helper.answer())</code></pre><p>Module lookup checks the importing file's directory, then <code>/lib/python</code> and <code>/usr/lib/computer-system/python</code>. DOS also uses <code>C:\\LIB\\PYTHON</code>. A <code>.py</code> module initializes once. Missing, circular, oversized, and failed imports stop with <code>ImportError</code>.</p></section>
+      <section class="manual-section"><h3>6.5 Import a C or C++ object</h3><pre><code>cc -c fastmath.c -o fastmath.o
+python main.py
+
+# main.py
+import fastmath
+print(fastmath.answer())</code></pre><p>A sibling <code>CS486OBJ</code> file or one in a Python library directory becomes a module. Its global functions use the current zero-argument integer ABI and return through EAX. The function executes inside the calling Python CS486 process, so its instructions, cycles, faults, and RAM accesses use the same limits. This is sandboxed static extension loading, not a host DLL or shared object.</p></section>
+      <section class="manual-section"><h3>6.6 Event-driven output</h3><pre><code>import os
 import redstone
 
 while True:
@@ -126,7 +135,7 @@ while True:
         ~/.bashrc</code></pre><p>Files are created non-destructively and loaded in that order.</p></div><div><h3>4.4 Example</h3><pre><code>for name in alpha beta alpha; do
   echo "$name"
 done | sort | uniq</code></pre></div></section>
-      <aside class="manual-callout"><b>Cost ownership</b><p>Commands, script lines, loop iterations, and output create bounded cycle debt. The shell cannot become a free execution path around the CPU model.</p></aside>`,
+      <aside class="manual-callout"><b>Cost ownership</b><p>Commands, script lines, loop iterations, and output create bounded cycle debt. The shell cannot become a free execution path around the CPU model. Interactive command dispatch and <code>.sh</code> scripts currently use the bounded shell interpreter; unlike Python, scripts have not yet moved to CS486 instructions.</p></aside>`,
   },
   {
     id: "basic",
@@ -164,11 +173,11 @@ run --stats program</code></pre></section>
   return 0;
 }</code></pre></section>
       <section class="manual-section"><h3>12.4 What the compiler emits</h3><p>Expressions use EAX as the result register, EBX as a secondary operand, and PUSH/POP for intermediate values. Variables occupy checked 32-bit words from low memory. Inspect exact output with <code>objdump</code>.</p></section>
-      <section class="manual-section"><h3>12.5 Objects and static linking</h3><pre><code>cc -c main.c -o main.o
+      <section class="manual-section"><h3>12.5 Objects, static linking, and Python imports</h3><pre><code>cc -c main.c -o main.o
 as -c fast.asm -o fast.o
 nm main.o
 ld main.o fast.o -o program
-run --stats program</code></pre><p>The versioned <code>CS486OBJ</code> format carries symbols, relocations, and object-relative data size. <code>extern int fast();</code> imports a zero-argument function; a C/C++ definition or <code>global fast</code> ASM label exports it. The callee returns its integer in EAX. Duplicate and unresolved symbols stop the link.</p></section>
+run --stats program</code></pre><p>The versioned <code>CS486OBJ</code> format carries symbols, relocations, and object-relative data size. <code>extern int fast();</code> imports a zero-argument function; a C/C++ definition or <code>global fast</code> ASM label exports it. The callee returns its integer in EAX. Duplicate and unresolved symbols stop the link. Placing a valid object beside a Python script or in a Python library directory also permits <code>import fast</code>; every imported machine instruction is charged to the caller.</p></section>
       <section class="manual-section"><h3>12.6 Restricted inline assembly</h3><pre><code>int answer = 0;
 asm("mov eax, 6");
 asm("mul eax, 7");

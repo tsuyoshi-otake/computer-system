@@ -198,12 +198,12 @@ suite.
 Virtual hardware is part of the Computer snapshot. Legacy snapshots receive the
 33 MHz/1 MiB defaults; snapshots that stored the former 20 kHz default migrate
 to 33 MHz. CPU clock is converted to per-tick CPU-cycle credit, then the global
-scheduler cap arbitrates mixed-speed Computers in round-robin order. Python
-bytecodes, native calls, and CS486 execution all return deterministic
-486DX-equivalent cycle debt to the VM. RAM enforcement scans the live object
-graph only under allocation pressure, keeping the common allocation path O(1)
-while making the uncommon reclamation check O(N) in reachable objects. Disk
-quota remains an independent filesystem concern.
+scheduler cap arbitrates mixed-speed Computers in round-robin order. Python-
+generated CS486 instructions, managed-runtime syscalls, native calls, and other
+CS486 execution all return deterministic cycle debt to the same process. RAM
+enforcement scans the live object graph only under allocation pressure, keeping
+the common allocation path O(1) while making the uncommon reclamation check O(N)
+in reachable objects. Disk quota remains an independent filesystem concern.
 
 CS486DX programs use a separate verified register-machine executable under the
 same Computer hardware limits and CPU-cycle budget. The persisted and visible
@@ -224,6 +224,16 @@ integer in EAX. Inline C/C++ assembly is a statement-boundary escape hatch and
 rejects labels, branches, calls, stack operations, and ESP/EBP access. Dynamic
 loading remains deliberately unsupported until this ABI has stable field
 evidence.
+
+Computer System Python no longer uses a bytecode VM. `pythonCs486.ts` resolves a
+bounded module graph, compiles Python control flow to CS486 instructions, and
+uses the allowlisted `python` syscall for managed values and native modules.
+Same-directory `.py` files and the Linux/DOS Python library paths initialize at
+most once. A valid `CS486OBJ` `.o` file can be imported as a static extension;
+its global zero-argument functions execute in the caller's CS486 process and
+return an integer in EAX. Module discovery and linking are linear in source,
+modules, symbols, and relocations; missing, circular, oversized, corrupt, and
+ABI-incompatible imports terminate explicitly.
 
 `Verify:` Run the scheduler, runtime-limit, shell, DOS-profile, and persistence
 tests.

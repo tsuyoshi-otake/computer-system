@@ -176,6 +176,13 @@ function parseInstruction(
     arity(0);
     return { op };
   }
+  if (op === "syscall") {
+    arity(1);
+    const name = arguments_[0]!;
+    if (!/^[a-z][a-z0-9_.]{0,63}$/u.test(name))
+      throw new Cs486CompileError(`invalid syscall ${name}`, line);
+    return { op, name };
+  }
   if (["jmp", "je", "jne", "jl", "jle", "jg", "jge", "call"].includes(op)) {
     arity(1);
     const target = labels.get(arguments_[0]!);

@@ -8,14 +8,16 @@ enabled = true
 required = false
 startup_timeout_sec = 15
 tool_timeout_sec = 180
-env_vars = ["BDS_HOME", "BDS_MCP_WORKDIR", "BDS_MCP_PORT", "BDS_MCP_WORLD", "WEB_COMPANION_AUTO_OPEN"]
+env_vars = ["BDS_HOME", "BDS_MCP_WORKDIR", "BDS_MCP_PORT", "BDS_MCP_WORLD", "WEB_COMPANION_HOST", "WEB_COMPANION_PORT", "WEB_COMPANION_PUBLIC_HOST", "WEB_COMPANION_PUBLIC_ORIGIN", "WEB_COMPANION_AUTO_OPEN"]
 enabled_tools = [
   "bds_status",
   "bds_start",
   "bds_stop",
   "bds_run_probe",
   "bds_run_command",
+  "bds_execute_computer_command",
   "bds_get_logs",
   "bds_wait_for_log",
+  "bds_wait_for_web_handoff",
 ]
 default_tools_approval_mode = "auto"

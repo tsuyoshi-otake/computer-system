@@ -99,9 +99,11 @@ const linuxProfile: OsProfile = {
       "/dev",
       "/etc",
       "/home/computer",
+      "/lib/python",
       "/proc",
       "/tmp",
       "/usr/bin",
+      "/usr/lib/computer-system/python",
       "/var/log",
     ]);
     resetDirectory(filesystem, "/tmp");
@@ -169,6 +171,7 @@ const dosProfile: OsProfile = {
     ensureDirectories(filesystem, [
       "/drives/c/command",
       "/drives/c/dos",
+      "/drives/c/lib/python",
       "/drives/c/temp",
       "/drives/c/users/computer",
     ]);

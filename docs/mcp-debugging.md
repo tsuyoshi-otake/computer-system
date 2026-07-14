@@ -60,13 +60,13 @@ Input, output, concurrency, and timeout are bounded; vi/editor, sleep,
 shutdown/reboot, and other TUI or asynchronous control flows return an explicit
 unsupported result.
 
-For a bounded MicroPython comparison, pass `python <file>` or
+For a bounded Computer System Python comparison, pass `python <file>` or
 `micropython <file>` through the same tool. This MCP-only form compiles and runs
 the file with the target Computer's filesystem, hardware profile, and RAM limit.
 It rejects waits and long-running work after a fixed cycle ceiling. Returned
-bytecode instruction counts are diagnostic only. The `cpuCycles` field is a
+machine-instruction counts are diagnostic only. The `cpuCycles` field is a
 deterministic 486DX-equivalent cost shared with ASM, C, C++, and BASIC;
-`run --stats` and MicroPython diagnostics also convert it to virtual
+`run --stats` and Python/CS486 diagnostics also convert it to virtual
 microseconds at 33 MHz. Do not use host wall-clock time for language rankings.
 
 BDS prints `Server started` before Script API world initialization is fully

@@ -3,8 +3,12 @@ import {
   BoundedTimerQueue,
 } from "../../domain/runtime/events.js";
 import { VmRuntimeError } from "../../domain/runtime/errors.js";
+import type {
+  CpuProcess,
+  CpuProcessState,
+} from "../../domain/runtime/cpuProcess.js";
 import type { RuntimeValue } from "../../domain/runtime/value.js";
-import type { StackVm, VmState } from "./vm.js";
+import { computerNominalClockHz } from "../../domain/cpu/timing.js";
 
 export interface SchedulerLimits {
   readonly eventCapacity: number;
@@ -23,7 +27,7 @@ export const defaultSchedulerLimits: SchedulerLimits = {
 export interface ScheduledComputerView {
   readonly cpuCycles: number;
   readonly id: number;
-  readonly state: VmState;
+  readonly state: CpuProcessState;
   readonly executedInstructions: number;
 }
 
@@ -55,7 +59,7 @@ export class RoundRobinScheduler {
 
   add(
     id: number,
-    vm: StackVm,
+    process: CpuProcess,
     cpuCyclesPerTick = this.limits.cpuCyclesPerComputer,
   ): void {
     if (!Number.isInteger(id) || id < 0)
@@ -65,7 +69,7 @@ export class RoundRobinScheduler {
     requirePositiveInteger(cpuCyclesPerTick, "cpuCyclesPerTick");
     this.computers.set(id, {
       id,
-      vm,
+      process,
       events: new BoundedEventQueue(this.limits.eventCapacity),
       timers: new BoundedTimerQueue(this.limits.timerCapacity),
       cpuCycles: 0,
@@ -100,12 +104,12 @@ export class RoundRobinScheduler {
     return this.requireComputer(id).timers.cancel(timerId);
   }
 
-  terminate(id: number, reason = "terminated"): VmState {
-    return this.requireComputer(id).vm.terminate(reason);
+  terminate(id: number, reason = "terminated"): CpuProcessState {
+    return this.requireComputer(id).process.terminate(reason);
   }
 
-  state(id: number): VmState {
-    return this.requireComputer(id).vm.state;
+  state(id: number): CpuProcessState {
+    return this.requireComputer(id).process.state;
   }
 
   runTick(): SchedulerTickResult {
@@ -124,12 +128,12 @@ export class RoundRobinScheduler {
       const computer = this.computers.get(this.order[index]!);
       if (computer === undefined) continue;
       if (
-        computer.vm.state.kind !== "ready" &&
-        !computer.vm.hasPendingCpuCycles
+        computer.process.state.kind !== "ready" &&
+        !computer.process.hasPendingCpuCycles
       )
         continue;
       const budget = Math.min(computer.cpuCyclesPerTick, remaining);
-      const result = computer.vm.runCpuSlice(budget);
+      const result = computer.process.runCpuSlice(budget);
       computer.cpuCycles += result.cpuCycles;
       computer.executedInstructions += result.executedInstructions;
       executedInstructions += result.executedInstructions;
@@ -144,7 +148,7 @@ export class RoundRobinScheduler {
         : [
             {
               id,
-              state: computer.vm.state,
+              state: computer.process.state,
               cpuCycles: computer.cpuCycles,
               executedInstructions: computer.executedInstructions,
             },
@@ -159,19 +163,19 @@ export class RoundRobinScheduler {
   }
 
   private prepare(computer: ScheduledComputer): void {
-    computer.vm.advanceTick(this.tickValue);
+    computer.process.advanceTick(this.tickValue);
     try {
       for (const timer of computer.timers.takeDue(this.tickValue)) {
         computer.events.enqueue("timer", timer.id);
       }
-      if (computer.vm.state.kind === "waiting_event") {
-        const event = computer.events.take(computer.vm.state.filter);
+      if (computer.process.state.kind === "waiting_event") {
+        const event = computer.events.take(computer.process.state.filter);
         if (event !== undefined) {
-          computer.vm.deliverEvent(event.name, ...event.arguments);
+          computer.process.deliverEvent(event.name, ...event.arguments);
         }
       }
     } catch (error: unknown) {
-      computer.vm.fail(
+      computer.process.fail(
         error instanceof VmRuntimeError
           ? error
           : new VmRuntimeError(
@@ -193,7 +197,7 @@ export class RoundRobinScheduler {
 interface ScheduledComputer {
   cpuCycles: number;
   readonly id: number;
-  readonly vm: StackVm;
+  readonly process: CpuProcess;
   readonly events: BoundedEventQueue;
   readonly timers: BoundedTimerQueue;
   executedInstructions: number;
@@ -204,4 +208,3 @@ function requirePositiveInteger(value: number, name: string): void {
   if (!Number.isInteger(value) || value <= 0)
     throw new RangeError(`${name} must be positive`);
 }
-import { computerNominalClockHz } from "../../domain/cpu/timing.js";

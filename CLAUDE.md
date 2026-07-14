@@ -2,16 +2,19 @@
 
 ## Project overview
 
-Computer System is a ComputerCraft-inspired Minecraft Bedrock Add-On. User
-programs run in a deterministic, sandboxed, MicroPython-compatible VM called
-Computer System Python. Minecraft-specific behavior is implemented by thin
-Bedrock adapters around host-testable domain and application layers.
+Computer System is a ComputerCraft-inspired Minecraft Bedrock Add-On. Computer
+System Python is a deterministic, sandboxed, MicroPython-compatible language
+compiled to the shared CS486DX process; it has no dedicated Python VM.
+Minecraft-specific behavior is implemented by thin Bedrock adapters around
+host-testable domain and application layers.
 
 GitHub Issue #4 tracks the Phase 2 Bedrock Computer vertical slice. GitHub Issue
 #12 tracks the OS 0.3 shell, CS486 toolchain, Web Terminal, and operator manual
-expansion. Most Phase 2 behavior is implemented and verified. The native GDK
-terminal is a bounded fallback; the preferred interactive terminal is the local
-Web Terminal companion started with `npm run dev:bds:web`.
+expansion. GitHub Issue #13 tracks Python-to-CS486 compilation, filesystem
+imports, and CS486 C/C++ extension modules. Most Phase 2 behavior is implemented
+and verified. The native GDK terminal is a bounded fallback; the preferred
+interactive terminal is the local Web Terminal companion started with
+`npm run dev:bds:web`.
 
 ## Architecture rules
 
@@ -178,6 +181,17 @@ functions with EAX returns. Restricted statement-boundary inline assembly may
 not introduce labels, control flow, stack operations, or ESP/EBP access. Dynamic
 linking is not implemented yet; extend the versioned object/ABI boundary rather
 than dispatching to a host linker or loader.
+
+Computer System Python parses directly to CS486 control flow plus the
+allowlisted `python` syscall ABI in `pythonCs486.ts`. Calls, returns, branches,
+waits, instruction accounting, and cycle debt belong to `Cs486Process`; do not
+reintroduce a Python instruction pointer, bytecode VM, or scheduler. Python
+module lookup is bounded and deterministic: importer directory, `/lib/python`,
+`/usr/lib/computer-system/python`, then the DOS library path. `.py` modules
+initialize once. Imported `.o` modules must be valid `CS486OBJ` files and expose
+only the current zero-argument EAX-return ABI. Keep module graph resolution
+O(source + modules), explicitly terminate missing/circular/oversized imports,
+and charge extension instructions to the same process.
 
 Keep OS-specific behavior behind `osProfile.ts`: path dialect, boot layout,
 environment, aliases, and virtual devices must not leak into the domain
