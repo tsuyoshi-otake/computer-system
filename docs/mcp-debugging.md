@@ -19,17 +19,18 @@ start a new Codex session) after pulling or changing the configuration.
 
 The server uses these optional environment variables:
 
-| Variable                      | Default                                             | Purpose                                                        |
-| ----------------------------- | --------------------------------------------------- | -------------------------------------------------------------- |
-| `BDS_HOME`                    | `%USERPROFILE%\tmp\computer-system-bds\runtime`     | Extracted official BDS distribution used only as a copy source |
-| `BDS_MCP_WORKDIR`             | `%USERPROFILE%\tmp\computer-system-bds\mcp-runtime` | Isolated MCP debug runtime                                     |
-| `BDS_MCP_PORT`                | `19142`                                             | IPv4 server port; IPv6 uses the following port                 |
-| `BDS_MCP_WORLD`               | `ComputerSystemMcpDebug`                            | Debug world name                                               |
-| `WEB_COMPANION_HOST`          | `0.0.0.0`                                           | Web listener interface for trusted LAN access                  |
-| `WEB_COMPANION_PORT`          | `19144`                                             | Web listener TCP port                                          |
-| `WEB_COMPANION_PUBLIC_HOST`   | Listener host                                       | Reachable host used in generated HTTP links                    |
-| `WEB_COMPANION_PUBLIC_ORIGIN` | unset                                               | Complete HTTPS origin advertised behind a reverse proxy        |
-| `WEB_COMPANION_AUTO_OPEN`     | `0`                                                 | Open each loopback handoff once in the host's default browser  |
+| Variable                        | Default                                             | Purpose                                                        |
+| ------------------------------- | --------------------------------------------------- | -------------------------------------------------------------- |
+| `BDS_HOME`                      | `%USERPROFILE%\tmp\computer-system-bds\runtime`     | Extracted official BDS distribution used only as a copy source |
+| `BDS_MCP_WORKDIR`               | `%USERPROFILE%\tmp\computer-system-bds\mcp-runtime` | Isolated MCP debug runtime                                     |
+| `BDS_MCP_PORT`                  | `19142`                                             | IPv4 server port; IPv6 uses the following port                 |
+| `BDS_MCP_WORLD`                 | `ComputerSystemMcpDebug`                            | Debug world name                                               |
+| `WEB_COMPANION_HOST`            | `0.0.0.0`                                           | Web listener interface for trusted LAN access                  |
+| `WEB_COMPANION_PORT`            | `19144`                                             | Web listener TCP port                                          |
+| `WEB_COMPANION_PUBLIC_HOST`     | Listener host                                       | Reachable host used in generated HTTP links                    |
+| `WEB_COMPANION_PUBLIC_ORIGIN`   | unset                                               | Complete HTTPS origin advertised behind a reverse proxy        |
+| `WEB_COMPANION_ALLOWED_ORIGINS` | unset                                               | Extra origins, or `*` to accept every request Origin           |
+| `WEB_COMPANION_AUTO_OPEN`       | `0`                                                 | Open each loopback handoff once in the host's default browser  |
 
 No API key or `.env` file is required.
 
@@ -138,7 +139,10 @@ Computers remain independently writable.
 LAN clients require TCP 19144 (or the configured companion port) in addition to
 the BDS UDP port. Internet access must use an HTTPS reverse proxy: bind the
 companion to `127.0.0.1`, set `WEB_COMPANION_PUBLIC_ORIGIN`, and proxy only from
-the TLS endpoint. Do not publish the plain HTTP listener directly.
+the TLS endpoint. The configured custom origin and the host's loopback auto-open
+origin are accepted explicitly. Set `WEB_COMPANION_ALLOWED_ORIGINS=*` when
+arbitrary proxy domains must be accepted; bearer authentication and handoff
+limits remain enforced. Do not publish the plain HTTP listener directly.
 
 ## Verification rubric
 

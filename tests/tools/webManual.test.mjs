@@ -171,4 +171,21 @@ describe("Web terminal field manual", () => {
       "No paging, swap, process table, or MMU page emulation",
     );
   });
+
+  it("documents CS-Linux boot reset and password storage semantics", () => {
+    const shell = manualChapters.find(({ id }) => id === "shell")?.html ?? "";
+
+    for (const required of [
+      "Boot and first login",
+      "Reset the display",
+      "does not format the guest disk",
+      "boot banner",
+      "appear once",
+      "512-round one-way SHA-256",
+      "computer:cs-sha256-v1:512:",
+      "plaintext is never stored",
+    ]) {
+      expect(shell).toContain(required);
+    }
+  });
 });

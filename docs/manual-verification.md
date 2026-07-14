@@ -20,8 +20,10 @@ Verify lifecycle and persistence:
   number. Enter it within two minutes. Move beyond three blocks and expect one
   `out_of_range` close; the same number must be reused on the next activation.
 - On a fresh CS-Linux Computer, set an eight-or-more-character password twice.
-  Confirm input is masked and absent from command history, then reboot and
-  verify a wrong password is rejected while the correct password reaches `~$ `.
+  Confirm the boot banner, first-boot notice, and `New password:` prompt each
+  appear exactly once; input is masked and absent from command history. Reboot
+  and verify the prior display is cleared, `/etc/shadow` remains present, a
+  wrong password is rejected, and the correct password reaches `~$ `.
 - On a DOS-profile Portable Computer, run `EDIT C:\DEMO.TXT`, enter text in the
   blue full-screen viewport, save with F2, and exit through File > Exit. Modify
   it again and verify the Save/Discard/Cancel prompt owns the dirty exit. On a

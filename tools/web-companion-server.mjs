@@ -45,6 +45,7 @@ export class WebCompanionServer {
         ? selectLanIpv4(options.networkInterfaces ?? networkInterfaces())
         : this.host);
     this.publicOrigin = normalizePublicOrigin(options.publicOrigin);
+    this.configuredOrigins = normalizeAllowedOrigins(options.allowedOrigins);
     this.browserAutoOpenEnabled = options.autoOpenBrowser === true;
     this.browserOpener = options.browserOpener ?? openDefaultBrowser;
     this.browserLaunchTimeoutMs = positiveInteger(
@@ -65,6 +66,7 @@ export class WebCompanionServer {
     this.started = false;
     this.origin = undefined;
     this.browserOrigin = undefined;
+    this.allowedOrigins = new Set();
     this.handoffFailures = new Map();
     this.operationDepths = new Map();
     this.operationTails = new Map();
@@ -114,6 +116,11 @@ export class WebCompanionServer {
       isLoopbackHost(this.host) || this.host === "0.0.0.0"
         ? `http://127.0.0.1:${String(actualPort)}`
         : undefined;
+    this.allowedOrigins = new Set(
+      [...this.configuredOrigins, this.origin, this.browserOrigin].filter(
+        (origin) => typeof origin === "string",
+      ),
+    );
     this.configureBrowserAutoOpen();
     this.started = true;
     this.cleanupTimer = setInterval(() => this.store.expire(), 30_000);
@@ -396,7 +403,7 @@ export class WebCompanionServer {
       return;
     }
     if (request.method === "POST" && url.pathname === "/api/handoff") {
-      requireSameOrigin(request, this.origin);
+      requireSameOrigin(request, this.allowedOrigins);
       const body = await readJson(request, 1_024);
       const consumed = this.consumeHandoffCode(request, body?.code);
       writeJson(response, 200, { token: consumed.token });
@@ -412,7 +419,7 @@ export class WebCompanionServer {
       return;
     }
     if (request.method === "POST" && url.pathname === "/api/input") {
-      requireSameOrigin(request, this.origin);
+      requireSameOrigin(request, this.allowedOrigins);
       const session = this.store.authenticate(bearerToken(request));
       const body = await readJson(request, 4_096);
       await this.relayInput(session, body);
@@ -420,7 +427,7 @@ export class WebCompanionServer {
       return;
     }
     if (request.method === "POST" && url.pathname === "/api/complete") {
-      requireSameOrigin(request, this.origin);
+      requireSameOrigin(request, this.allowedOrigins);
       const session = this.store.authenticate(bearerToken(request));
       const body = await readJson(request, 4_096);
       const completion = await this.completeInput(session, body);
@@ -428,7 +435,7 @@ export class WebCompanionServer {
       return;
     }
     if (request.method === "POST" && url.pathname === "/api/resize") {
-      requireSameOrigin(request, this.origin);
+      requireSameOrigin(request, this.allowedOrigins);
       const session = this.store.authenticate(bearerToken(request));
       const body = await readJson(request, 4_096);
       await this.resizeTerminal(session, body);
@@ -436,14 +443,14 @@ export class WebCompanionServer {
       return;
     }
     if (request.method === "POST" && url.pathname === "/api/take-control") {
-      requireSameOrigin(request, this.origin);
+      requireSameOrigin(request, this.allowedOrigins);
       const session = this.store.authenticate(bearerToken(request));
       const controlled = await this.takeControl(session);
       writeJson(response, 200, { outcome: "writer", session: controlled });
       return;
     }
     if (request.method === "POST" && url.pathname === "/api/close") {
-      requireSameOrigin(request, this.origin);
+      requireSameOrigin(request, this.allowedOrigins);
       const session = this.store.authenticate(bearerToken(request));
       await this.closeSession(session);
       writeJson(response, 200, { outcome: "closed" });
@@ -851,8 +858,8 @@ function bearerToken(request) {
   return match[1];
 }
 
-function requireSameOrigin(request, origin) {
-  if (request.headers.origin !== origin) {
+function requireSameOrigin(request, allowedOrigins) {
+  if (!allowedOrigins.has("*") && !allowedOrigins.has(request.headers.origin)) {
     throw new WebSessionError(
       "origin",
       "Cross-origin browser requests are not allowed.",
@@ -967,6 +974,20 @@ function normalizePublicOrigin(value) {
     );
   }
   return parsed.origin;
+}
+
+function normalizeAllowedOrigins(value) {
+  if (value === undefined || value === null || value === "") return new Set();
+  if (typeof value !== "string") {
+    throw new TypeError("WEB_COMPANION_ALLOWED_ORIGINS must be a string.");
+  }
+  const origins = new Set();
+  for (const candidate of value.split(",").map((entry) => entry.trim())) {
+    if (candidate.length === 0) continue;
+    if (candidate === "*") return new Set(["*"]);
+    origins.add(normalizePublicOrigin(candidate));
+  }
+  return origins;
 }
 
 function formatHost(host) {

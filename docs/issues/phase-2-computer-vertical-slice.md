@@ -279,7 +279,14 @@ Production CS-Linux now stops on first boot for password plus confirmation and
 stops on later boots for login. `/etc/shadow` stores a salted, bounded 512-round
 SHA-256 record. Native output never echoes the submitted secret; Web input is
 masked and excluded from browser history and completion. Three failed attempts
-produce a two-second VM wait, and MCP shell execution cannot bypass login.
+produce a two-second VM wait, and MCP shell execution cannot bypass login. Each
+OS boot clears only the persisted terminal display before emitting one banner
+and prompt; the filesystem and `/etc/shadow` remain intact.
+
+The Companion accepts state-changing requests from the exact advertised LAN or
+custom HTTPS origin and from its host-only loopback auto-open origin. An
+explicit `WEB_COMPANION_ALLOWED_ORIGINS=*` deployment mode accepts every Origin
+while retaining bearer authentication and bounded handoff-code attempts.
 
 Bare DOS `EDIT` opens an `UNTITLED` buffer backed by `C:\NONAME.TXT`.
 Full-screen terminal color spans now fill each complete row height, removing the

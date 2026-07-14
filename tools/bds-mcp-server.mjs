@@ -19,6 +19,7 @@ const webCompanion = new WebCompanionServer({
   port: process.env.WEB_COMPANION_PORT ?? "19144",
   publicHost: process.env.WEB_COMPANION_PUBLIC_HOST,
   publicOrigin: process.env.WEB_COMPANION_PUBLIC_ORIGIN,
+  allowedOrigins: process.env.WEB_COMPANION_ALLOWED_ORIGINS,
   autoOpenBrowser: parseBooleanFlag(
     process.env.WEB_COMPANION_AUTO_OPEN,
     "WEB_COMPANION_AUTO_OPEN",

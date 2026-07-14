@@ -155,12 +155,84 @@ describe("Web companion HTTP server", () => {
     expect(launches).toHaveLength(1);
     expect(launches[0]).toMatch(/^http:\/\/127\.0\.0\.1:/u);
     expect(bds.commands[0]).toContain("http://192.0.2.1:");
+    const localOrigin = new URL(launches[0]).origin;
+    const handoff = await fetch(launches[0], { redirect: "manual" });
+    const token = handoff.headers.get("location").slice(2);
+    const input = await post(localOrigin, "/api/input", token, {
+      kind: "line",
+      value: "local-auto-open",
+    });
+    expect(input.status).toBe(202);
+    expect(bds.commands.at(-1)).toMatch(/ line local-auto-open$/u);
     expect(server.status().browserAutoOpen).toMatchObject({
       enabled: true,
       eligible: true,
       state: "opened",
       attempts: 1,
     });
+  });
+
+  it("accepts an explicit custom HTTPS origin without allowing arbitrary origins", async () => {
+    const bds = new FakeBds();
+    const server = new WebCompanionServer({
+      bds,
+      host: "127.0.0.1",
+      port: 0,
+      publicOrigin: "https://terminal.example.com",
+    });
+    servers.push(server);
+    const status = await server.start();
+    const localOrigin = `http://127.0.0.1:${String(status.port)}`;
+    bds.log(
+      'CS_WEB_SESSION_REQUEST {"requestId":"r1-1","playerId":"player-1","computerId":"c-000001"}',
+    );
+    await until(() => bds.commands.length === 1);
+
+    const accepted = await fetch(`${localOrigin}/api/handoff`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Origin: status.origin,
+      },
+      body: JSON.stringify({ code: "0001" }),
+    });
+    expect(accepted.status).toBe(200);
+
+    const rejected = await fetch(`${localOrigin}/api/close`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Origin: "https://attacker.invalid",
+      },
+      body: "{}",
+    });
+    expect(rejected.status).toBe(403);
+  });
+
+  it("accepts any request Origin only when wildcard mode is explicit", async () => {
+    const bds = new FakeBds();
+    const server = new WebCompanionServer({
+      allowedOrigins: "*",
+      bds,
+      host: "127.0.0.1",
+      port: 0,
+    });
+    servers.push(server);
+    const status = await server.start();
+    bds.log(
+      'CS_WEB_SESSION_REQUEST {"requestId":"r1-1","playerId":"player-1","computerId":"c-000001"}',
+    );
+    await until(() => bds.commands.length === 1);
+
+    const response = await fetch(`${status.origin}/api/handoff`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Origin: "https://arbitrary.example",
+      },
+      body: JSON.stringify({ code: "0001" }),
+    });
+    expect(response.status).toBe(200);
   });
 
   it("selects a physical LAN IPv4 address ahead of virtual adapters", () => {

@@ -110,6 +110,13 @@ npm run test:web
 npm run dev:bds:web
 ```
 
+To accept every reverse-proxy Origin instead of pinning one domain, enable
+explicit wildcard mode:
+
+```powershell
+$env:WEB_COMPANION_ALLOWED_ORIGINS = "*"
+```
+
 `npm run deploy` updates only this project's development pack directories in the
 local Minecraft for Windows GDK creator-content location.
 
@@ -218,6 +225,10 @@ npm run dev:bds:web
 
 Do not expose the plain HTTP companion port directly to the Internet. The
 reverse proxy should terminate TLS and forward only to `127.0.0.1:19144`.
+State-changing terminal requests normally accept the exact configured public
+origin and the companion host's loopback auto-open origin. Wildcard mode accepts
+every Origin but still requires a valid terminal bearer token; use it only when
+the deployment intentionally permits arbitrary proxy domains.
 
 ## CS-Linux and CS-DOS
 
@@ -229,16 +240,17 @@ volatile. On first boot it requires the `computer` administrator password twice;
 later boots stop at `Password:` until it matches. The bounded salted SHA-256
 record is stored in `/etc/shadow`, never the plaintext, and Web input is masked,
 excluded from local history, and excluded from completion. Three failed attempts
-incur a two-second guest delay. A profile boundary separates path syntax, boot
-layout, command aliases, environment, and virtual devices. The implemented DOS
-profile shares the same terminal, filesystem, persistence, hardware limits, and
-checked CS executable/toolchain abstractions without Linux conditionals in the
-domain core. It provides drive-letter paths, case-insensitive lookup, CRLF boot
-files, `NUL`/`CON`, and DOS command aliases including `DIR`, `TYPE`, `COPY`, and
-`VER`. Computer System DOS 6.2 (`CS-DOS 6.2`) reads a bounded `CONFIG.SYS` and
-runs `AUTOEXEC.BAT`; `SET`, `PATH`, `PROMPT`, `REM`, `@ECHO OFF`, `%0`…`%9`,
-`%VAR%`, and `%ERRORLEVEL%` are supported. Unsupported boot directives fail
-visibly.
+incur a two-second guest delay. Every OS boot resets only the terminal display
+buffer before printing one banner; persisted files and `/etc/shadow` remain
+intact. A profile boundary separates path syntax, boot layout, command aliases,
+environment, and virtual devices. The implemented DOS profile shares the same
+terminal, filesystem, persistence, hardware limits, and checked CS
+executable/toolchain abstractions without Linux conditionals in the domain core.
+It provides drive-letter paths, case-insensitive lookup, CRLF boot files,
+`NUL`/`CON`, and DOS command aliases including `DIR`, `TYPE`, `COPY`, and `VER`.
+Computer System DOS 6.2 (`CS-DOS 6.2`) reads a bounded `CONFIG.SYS` and runs
+`AUTOEXEC.BAT`; `SET`, `PATH`, `PROMPT`, `REM`, `@ECHO OFF`, `%0`…`%9`, `%VAR%`,
+and `%ERRORLEVEL%` are supported. Unsupported boot directives fail visibly.
 
 ```text
 files:  pwd cd ls cat mkdir touch rm cp mv find stat df du quota
