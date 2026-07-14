@@ -1,4 +1,6 @@
-export const cs486NominalClockHz = 33_000_000;
+import { computerNominalClockHz } from "./timing.js";
+
+export const cs486NominalClockHz = computerNominalClockHz;
 
 export const cs486RegisterNames = [
   "eax",

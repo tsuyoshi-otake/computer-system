@@ -196,21 +196,23 @@ suite.
 ## Headless verification rubric
 
 Virtual hardware is part of the Computer snapshot. Legacy snapshots receive the
-20 kHz/1 MiB defaults. CPU clock is converted to per-tick VM credit, then the
-global scheduler cap arbitrates mixed-speed Computers in round-robin order.
-Shell native calls return cycle debt to the VM. RAM enforcement scans the live
-object graph only under allocation pressure, keeping the common allocation path
-O(1) while making the uncommon reclamation check O(N) in reachable objects. Disk
+33 MHz/1 MiB defaults; snapshots that stored the former 20 kHz default migrate
+to 33 MHz. CPU clock is converted to per-tick CPU-cycle credit, then the global
+scheduler cap arbitrates mixed-speed Computers in round-robin order. Python
+bytecodes, native calls, and CS486 execution all return deterministic
+486DX-equivalent cycle debt to the VM. RAM enforcement scans the live object
+graph only under allocation pressure, keeping the common allocation path O(1)
+while making the uncommon reclamation check O(N) in reachable objects. Disk
 quota remains an independent filesystem concern.
 
 CS486DX programs use a separate verified register-machine executable under the
-same Computer hardware limits. The visible identity is a nominal 486DX 33 MHz;
-the persisted internal clock remains the safe scheduler scale and is not
-presented as physical throughput. `run --stats` is the deterministic
-optimization measurement: compare instruction and opcode-cycle totals, not host
-wall time. Executables are JSON preceded by `CS486\n`, validated again at load,
-and never passed to a host process. Direct execution is capped at 10,000
-instructions per submission and returns exit 124 on a bounded yield.
+same Computer hardware limits and CPU-cycle budget. The persisted and visible
+default clock is 33 MHz. `run --stats` is the deterministic optimization
+measurement: compare CPU-cycle totals and virtual microseconds, not host wall
+time or language-specific instruction counts. Executables are JSON preceded by
+`CS486\n`, validated again at load, and never passed to a host process. Direct
+execution is capped at 10,000 instructions per submission and returns exit 124
+on a bounded yield.
 
 `Verify:` Run the scheduler, runtime-limit, shell, DOS-profile, and persistence
 tests.

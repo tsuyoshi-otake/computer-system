@@ -16,7 +16,8 @@ import { defaultSystemBootSource } from "../os/systemPrograms.js";
 import type { ShellClockSource } from "../os/clock.js";
 import type { ShellCompletionResult } from "../os/shellCommands.js";
 import type { ShellSession } from "../os/shellSession.js";
-import { cyclesPerTick } from "../../domain/computer/hardware.js";
+import { hardwareCpuCyclesPerTick } from "../../domain/computer/hardware.js";
+import { cpuCyclesToMicroseconds } from "../../domain/cpu/timing.js";
 import { defaultVmLimits } from "../runtime/vm.js";
 
 export interface ComputerRuntimeOptions {
@@ -41,7 +42,7 @@ export type DebugShellCommandResult =
       readonly exitCode: number;
       readonly stderr: string;
       readonly stdout: string;
-      readonly workCycles: number;
+      readonly cpuCycles: number;
     }
   | { readonly outcome: "missing"; readonly computerId: string }
   | { readonly outcome: "ignored"; readonly reason: "not_running" }
@@ -123,6 +124,13 @@ export class ComputerRuntime {
     for (const entry of this.entries.values()) {
       if (entry.vm === undefined) continue;
       const state = entry.vm.state;
+      if (
+        entry.vm.hasPendingCpuCycles &&
+        (state.kind === "completed" ||
+          state.kind === "crashed" ||
+          state.kind === "terminated")
+      )
+        continue;
       if (state.kind === "ready") {
         this.syncReady(entry);
       } else if (state.kind === "sleeping") {
@@ -186,7 +194,7 @@ export class ComputerRuntime {
         exitCode: result.exitCode,
         stderr: result.stderr,
         stdout: result.stdout,
-        workCycles: result.workCycles ?? 1,
+        cpuCycles: result.cpuCycles ?? 1,
       };
     } catch (error: unknown) {
       return {
@@ -225,12 +233,19 @@ export class ComputerRuntime {
         maxMemoryBytes: entry.record.hardware.memoryBytes,
       },
     );
-    const maximumCycles = 100_000;
-    let cycles = 0;
-    while (vm.state.kind === "ready" && cycles < maximumCycles) {
-      const slice = vm.runSlice(Math.min(10_000, maximumCycles - cycles));
-      if (slice.executedInstructions === 0) break;
-      cycles += slice.executedInstructions;
+    const maximumCpuCycles = 100_000_000;
+    let cpuCycles = 0;
+    let instructions = 0;
+    while (
+      (vm.state.kind === "ready" || vm.hasPendingCpuCycles) &&
+      cpuCycles < maximumCpuCycles
+    ) {
+      const slice = vm.runCpuSlice(
+        Math.min(1_000_000, maximumCpuCycles - cpuCycles),
+      );
+      if (slice.cpuCycles === 0) break;
+      cpuCycles += slice.cpuCycles;
+      instructions += slice.executedInstructions;
     }
     const output = terminal.snapshot().rows.join("\n").trimEnd();
     const stdout = output.length === 0 ? "" : `${output}\n`;
@@ -239,8 +254,8 @@ export class ComputerRuntime {
         outcome: "completed",
         exitCode: 0,
         stdout,
-        stderr: `MicroPython: ${String(cycles)} VM cycles, completed\n`,
-        workCycles: cycles,
+        stderr: pythonStats(instructions, cpuCycles, "completed"),
+        cpuCycles,
       };
     }
     if (vm.state.kind === "crashed") {
@@ -249,7 +264,7 @@ export class ComputerRuntime {
         exitCode: 1,
         stdout,
         stderr: `${vm.state.error.name}: ${vm.state.error.message}\n`,
-        workCycles: cycles,
+        cpuCycles,
       };
     }
     vm.terminate(
@@ -260,10 +275,10 @@ export class ComputerRuntime {
       exitCode: 2,
       stdout,
       stderr:
-        cycles >= maximumCycles
-          ? `MicroPython: cycle limit ${String(maximumCycles)} exceeded\n`
+        cpuCycles >= maximumCpuCycles
+          ? `MicroPython: CPU cycle limit ${String(maximumCpuCycles)} exceeded\n`
           : "MicroPython: waits and asynchronous work are not supported through MCP\n",
-      workCycles: cycles,
+      cpuCycles,
     };
   }
 
@@ -320,7 +335,10 @@ export class ComputerRuntime {
       this.scheduler.add(
         entry.runtimeId,
         vm,
-        cyclesPerTick(entry.record.hardware.clockHz, this.ticksPerSecond),
+        hardwareCpuCyclesPerTick(
+          entry.record.hardware.clockHz,
+          this.ticksPerSecond,
+        ),
       );
       entry.record.lifecycle.transition({ kind: "boot_complete" });
       return { outcome: "accepted", state: entry.record.lifecycle.state.kind };
@@ -400,6 +418,15 @@ interface RuntimeEntry {
 }
 
 type StopIntent = "reboot" | "shutdown";
+
+function pythonStats(
+  instructions: number,
+  cpuCycles: number,
+  state: string,
+): string {
+  const microseconds = cpuCyclesToMicroseconds(cpuCycles);
+  return `MicroPython: ${String(instructions)} bytecode instructions, ${String(cpuCycles)} CPU cycles, ${microseconds.toFixed(3)} us at 33 MHz, ${state}\n`;
+}
 
 function failure(error: unknown): RuntimeCommandResult {
   return {

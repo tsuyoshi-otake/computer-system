@@ -44,7 +44,7 @@ export function handleDebugCommand(message: string): void {
         exitCode: result.exitCode,
         stdout: truncate(result.stdout),
         stderr: truncate(result.stderr),
-        workCycles: result.workCycles,
+        cpuCycles: result.cpuCycles,
       });
       return;
     }

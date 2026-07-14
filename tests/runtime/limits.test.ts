@@ -29,7 +29,7 @@ describe("runtime resource limits", (): void => {
     });
   });
 
-  it("charges native work against the same instruction budget", (): void => {
+  it("charges native work against the same CPU cycle budget", (): void => {
     const ordinary = new StackVm({
       code: compileSource("value = charged()\n"),
       globals: new Map([["charged", nativeFunction("charged", () => 42)]]),
@@ -48,7 +48,9 @@ describe("runtime resource limits", (): void => {
       ]),
     });
 
-    expect(runAndCount(charged)).toBe(runAndCount(ordinary) + 10);
+    expect(runAndCountCpuCycles(charged)).toBe(
+      runAndCountCpuCycles(ordinary) + 10,
+    );
     expect(charged.globals.get("value")).toBe(42);
   });
 
@@ -185,10 +187,14 @@ function run(vm: StackVm): void {
     vm.runSlice(100);
 }
 
-function runAndCount(vm: StackVm): number {
+function runAndCountCpuCycles(vm: StackVm): number {
   let total = 0;
-  for (let count = 0; count < 1_000 && vm.state.kind === "ready"; count += 1)
-    total += vm.runSlice(1).executedInstructions;
+  for (
+    let count = 0;
+    count < 1_000 && (vm.state.kind === "ready" || vm.hasPendingCpuCycles);
+    count += 1
+  )
+    total += vm.runCpuSlice(1_000).cpuCycles;
   expect(vm.state.kind).toBe("completed");
   return total;
 }

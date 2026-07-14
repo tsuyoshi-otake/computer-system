@@ -11,8 +11,8 @@ import { nativeFunction } from "../../src/domain/runtime/value.js";
 const limits: SchedulerLimits = {
   eventCapacity: 8,
   timerCapacity: 8,
-  instructionsPerComputer: 5,
-  instructionsPerTick: 100,
+  cpuCyclesPerComputer: 1_000,
+  cpuCyclesPerTick: 20_000,
 };
 
 describe("round-robin scheduler", (): void => {
@@ -26,13 +26,9 @@ describe("round-robin scheduler", (): void => {
 
     expect(result.tick).toBe(1_200);
     expect(result.computers).toHaveLength(20);
-    expect(
-      new Set(
-        result.computers.map(
-          ({ executedInstructions }) => executedInstructions,
-        ),
-      ),
-    ).toEqual(new Set([6_000]));
+    expect(new Set(result.computers.map(({ cpuCycles }) => cpuCycles))).toEqual(
+      new Set([1_200_000]),
+    );
     expect(result.computers.every(({ state }) => state.kind === "ready")).toBe(
       true,
     );
@@ -41,7 +37,7 @@ describe("round-robin scheduler", (): void => {
   it("rotates the first slice when the global budget is smaller than runnable demand", (): void => {
     const scheduler = new RoundRobinScheduler({
       ...limits,
-      instructionsPerTick: 5,
+      cpuCyclesPerTick: 1_000,
     });
     for (let id = 0; id < 4; id += 1)
       scheduler.add(id, vm("while True:\n    pass\n"));
@@ -49,23 +45,23 @@ describe("round-robin scheduler", (): void => {
     let result = scheduler.runTick();
     for (let tick = 1; tick < 8; tick += 1) result = scheduler.runTick();
 
-    expect(
-      result.computers.map(({ executedInstructions }) => executedInstructions),
-    ).toEqual([10, 10, 10, 10]);
+    expect(result.computers.map(({ cpuCycles }) => cpuCycles)).toEqual([
+      2_000, 2_000, 2_000, 2_000,
+    ]);
   });
 
   it("applies mixed per-computer clock credits deterministically", (): void => {
     const scheduler = new RoundRobinScheduler(limits);
-    scheduler.add(1, vm("while True:\n    pass\n"), 2);
-    scheduler.add(2, vm("while True:\n    pass\n"), 5);
+    scheduler.add(1, vm("while True:\n    pass\n"), 400);
+    scheduler.add(2, vm("while True:\n    pass\n"), 1_000);
 
     let result = scheduler.runTick();
     for (let tick = 1; tick < 10; tick += 1) result = scheduler.runTick();
 
-    expect(
-      result.computers.map(({ executedInstructions }) => executedInstructions),
-    ).toEqual([20, 50]);
-    expect(result.executedInstructions).toBe(7);
+    expect(result.computers.map(({ cpuCycles }) => cpuCycles)).toEqual([
+      4_000, 10_000,
+    ]);
+    expect(result.cpuCycles).toBe(1_400);
   });
 
   it("resumes sleep and filtered event waits exactly once", (): void => {
@@ -131,7 +127,7 @@ describe("round-robin scheduler", (): void => {
     expect(result.computers[0]!.state.kind).toBe("crashed");
     expect(result.computers[1]).toMatchObject({
       state: { kind: "ready" },
-      executedInstructions: 5,
+      cpuCycles: 1_000,
     });
   });
 });

@@ -187,12 +187,14 @@ production pack build. A preserved-world BDS restart then completed headless run
 ## July 2026 virtual hardware update
 
 Computer snapshots now persist a validated CPU clock and RAM size, defaulting
-legacy machines to 20 kHz and 1 MiB. CPU clock controls per-tick VM credit under
-the existing global round-robin scheduler cap. MicroPython instructions and
-bounded shell/Bash native work share that credit. Aggregate reachable VM data is
-limited by RAM and fails explicitly with `MemoryError`; pressure-triggered live
-graph measurement permits unreachable values to be reclaimed without adding an
-O(N) scan to every instruction.
+legacy machines to 33 MHz and 1 MiB. Snapshots containing the former default 20
+kHz clock migrate to 33 MHz. CPU clock controls per-tick CPU-cycle credit under
+the existing global round-robin scheduler cap. MicroPython bytecodes, bounded
+shell/Bash native work, and CS486 programs share deterministic 486DX-equivalent
+cycle accounting. Aggregate reachable VM data is limited by RAM and fails
+explicitly with `MemoryError`; pressure-triggered live graph measurement permits
+unreachable values to be reclaimed without adding an O(N) scan to every
+instruction.
 
 Linux reports the same profile through `cpuinfo`, `free`, and dynamic read-only
 `/proc` files. DOS reports it through `CPU`, `MEM`, `SYSTEMINFO`, and `VER`

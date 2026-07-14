@@ -15,7 +15,9 @@ describe("CS486DX shell toolchain", (): void => {
     expect(shell.submit("as /sum.asm -o /sum").exitCode).toBe(0);
     expect(shell.submit("/sum").stdout).toBe("42");
     const measured = shell.submit("run --stats /sum");
-    expect(measured.stderr).toMatch(/4 instructions, \d+ cycles, halted/u);
+    expect(measured.stderr).toMatch(
+      /4 instructions, \d+ CPU cycles, \d+\.\d{3} us at 33 MHz, halted/u,
+    );
     expect(shell.submit("objdump /sum").stdout).toContain('"op":"add"');
   });
 

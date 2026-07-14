@@ -143,7 +143,7 @@ const tools = [
     name: "bds_execute_computer_command",
     title: "Execute Computer shell command",
     description:
-      "Execute one bounded non-TUI command inside a specific sandboxed Computer and return its stdout, stderr, exit code, and modeled work cycles. This never invokes the host shell or arbitrary BDS administration commands.",
+      "Execute one bounded non-TUI command inside a specific sandboxed Computer and return its stdout, stderr, exit code, and modeled 486DX CPU cycles. This never invokes the host shell or arbitrary BDS administration commands.",
     inputSchema: {
       type: "object",
       additionalProperties: false,

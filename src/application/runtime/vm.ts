@@ -1,4 +1,5 @@
 import type { SourceSpan } from "../../domain/language/source.js";
+import { pythonBytecodeCpuCycles } from "../../domain/cpu/timing.js";
 import { utf8ByteLength } from "../../domain/text/utf8.js";
 import type {
   CodeObject,
@@ -48,6 +49,7 @@ export type VmState =
   | { readonly kind: "waiting_event"; readonly filter?: string };
 
 export interface VmSliceResult {
+  readonly cpuCycles: number;
   readonly executedInstructions: number;
   readonly state: VmState;
 }
@@ -91,28 +93,24 @@ export class StackVm {
     return this.maxMemoryBytes;
   }
 
+  get hasPendingCpuCycles(): boolean {
+    return this.cycleDebt > 0;
+  }
+
   runSlice(instructionBudget: number): VmSliceResult {
     if (!Number.isInteger(instructionBudget) || instructionBudget <= 0) {
       throw new RangeError("instructionBudget must be a positive integer");
     }
     if (this.stateValue.kind !== "ready") {
-      return { executedInstructions: 0, state: this.stateValue };
+      return { cpuCycles: 0, executedInstructions: 0, state: this.stateValue };
     }
 
+    let cpuCycles = 0;
     let executedInstructions = 0;
     while (
       executedInstructions < instructionBudget &&
       this.stateValue.kind === "ready"
     ) {
-      if (this.cycleDebt > 0) {
-        const paid = Math.min(
-          this.cycleDebt,
-          instructionBudget - executedInstructions,
-        );
-        this.cycleDebt -= paid;
-        executedInstructions += paid;
-        continue;
-      }
       const frame = this.frames.at(-1);
       if (frame === undefined) {
         this.stateValue = { kind: "completed", value: null };
@@ -136,8 +134,59 @@ export class StackVm {
         const fault = normalizeFault(error, instruction.span);
         if (!this.handleFault(fault)) this.crash(fault);
       }
+      cpuCycles += pythonBytecodeCpuCycles(instruction) + this.cycleDebt;
+      this.cycleDebt = 0;
     }
-    return { executedInstructions, state: this.stateValue };
+    return { cpuCycles, executedInstructions, state: this.stateValue };
+  }
+
+  runCpuSlice(cpuCycleBudget: number): VmSliceResult {
+    if (!Number.isSafeInteger(cpuCycleBudget) || cpuCycleBudget <= 0) {
+      throw new RangeError("CPU cycle budget must be a positive safe integer");
+    }
+    if (this.stateValue.kind !== "ready" && this.cycleDebt === 0) {
+      return { cpuCycles: 0, executedInstructions: 0, state: this.stateValue };
+    }
+
+    let cpuCycles = 0;
+    let executedInstructions = 0;
+    while (
+      cpuCycles < cpuCycleBudget &&
+      (this.stateValue.kind === "ready" || this.cycleDebt > 0)
+    ) {
+      if (this.cycleDebt > 0) {
+        const paid = Math.min(this.cycleDebt, cpuCycleBudget - cpuCycles);
+        this.cycleDebt -= paid;
+        cpuCycles += paid;
+        continue;
+      }
+      if (this.stateValue.kind !== "ready") break;
+      const frame = this.frames.at(-1);
+      if (frame === undefined) {
+        this.stateValue = { kind: "completed", value: null };
+        break;
+      }
+      const instruction = frame.code.instructions[frame.ip];
+      if (instruction === undefined) {
+        this.crash(
+          new VmRuntimeError(
+            "RuntimeError",
+            "Instruction pointer escaped code",
+          ),
+        );
+        break;
+      }
+      frame.ip += 1;
+      executedInstructions += 1;
+      try {
+        this.execute(frame, instruction);
+      } catch (error: unknown) {
+        const fault = normalizeFault(error, instruction.span);
+        if (!this.handleFault(fault)) this.crash(fault);
+      }
+      this.cycleDebt += pythonBytecodeCpuCycles(instruction);
+    }
+    return { cpuCycles, executedInstructions, state: this.stateValue };
   }
 
   advanceTick(tick = this.tick + 1): VmState {

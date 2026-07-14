@@ -9,24 +9,26 @@ import type { StackVm, VmState } from "./vm.js";
 export interface SchedulerLimits {
   readonly eventCapacity: number;
   readonly timerCapacity: number;
-  readonly instructionsPerComputer: number;
-  readonly instructionsPerTick: number;
+  readonly cpuCyclesPerComputer: number;
+  readonly cpuCyclesPerTick: number;
 }
 
 export const defaultSchedulerLimits: SchedulerLimits = {
   eventCapacity: 256,
   timerCapacity: 128,
-  instructionsPerComputer: 1_000,
-  instructionsPerTick: 20_000,
+  cpuCyclesPerComputer: Math.floor(computerNominalClockHz / 20),
+  cpuCyclesPerTick: Math.floor(computerNominalClockHz / 20),
 };
 
 export interface ScheduledComputerView {
+  readonly cpuCycles: number;
   readonly id: number;
   readonly state: VmState;
   readonly executedInstructions: number;
 }
 
 export interface SchedulerTickResult {
+  readonly cpuCycles: number;
   readonly tick: number;
   readonly executedInstructions: number;
   readonly computers: readonly ScheduledComputerView[];
@@ -43,11 +45,8 @@ export class RoundRobinScheduler {
   ) {
     requirePositiveInteger(limits.eventCapacity, "eventCapacity");
     requirePositiveInteger(limits.timerCapacity, "timerCapacity");
-    requirePositiveInteger(
-      limits.instructionsPerComputer,
-      "instructionsPerComputer",
-    );
-    requirePositiveInteger(limits.instructionsPerTick, "instructionsPerTick");
+    requirePositiveInteger(limits.cpuCyclesPerComputer, "cpuCyclesPerComputer");
+    requirePositiveInteger(limits.cpuCyclesPerTick, "cpuCyclesPerTick");
   }
 
   get tickNumber(): number {
@@ -57,20 +56,21 @@ export class RoundRobinScheduler {
   add(
     id: number,
     vm: StackVm,
-    instructionsPerTick = this.limits.instructionsPerComputer,
+    cpuCyclesPerTick = this.limits.cpuCyclesPerComputer,
   ): void {
     if (!Number.isInteger(id) || id < 0)
       throw new RangeError("Computer ID must be non-negative");
     if (this.computers.has(id))
       throw new Error(`Computer ${id} is already scheduled`);
-    requirePositiveInteger(instructionsPerTick, "instructionsPerTick");
+    requirePositiveInteger(cpuCyclesPerTick, "cpuCyclesPerTick");
     this.computers.set(id, {
       id,
       vm,
       events: new BoundedEventQueue(this.limits.eventCapacity),
       timers: new BoundedTimerQueue(this.limits.timerCapacity),
+      cpuCycles: 0,
       executedInstructions: 0,
-      instructionsPerTick,
+      cpuCyclesPerTick,
     });
     this.order.push(id);
   }
@@ -110,7 +110,8 @@ export class RoundRobinScheduler {
 
   runTick(): SchedulerTickResult {
     this.tickValue += 1;
-    let remaining = this.limits.instructionsPerTick;
+    let remaining = this.limits.cpuCyclesPerTick;
+    let executedInstructions = 0;
     const count = this.order.length;
 
     for (const id of this.order) {
@@ -122,11 +123,17 @@ export class RoundRobinScheduler {
       const index = (this.cursor + offset) % count;
       const computer = this.computers.get(this.order[index]!);
       if (computer === undefined) continue;
-      if (computer.vm.state.kind !== "ready") continue;
-      const budget = Math.min(computer.instructionsPerTick, remaining);
-      const result = computer.vm.runSlice(budget);
+      if (
+        computer.vm.state.kind !== "ready" &&
+        !computer.vm.hasPendingCpuCycles
+      )
+        continue;
+      const budget = Math.min(computer.cpuCyclesPerTick, remaining);
+      const result = computer.vm.runCpuSlice(budget);
+      computer.cpuCycles += result.cpuCycles;
       computer.executedInstructions += result.executedInstructions;
-      remaining -= result.executedInstructions;
+      executedInstructions += result.executedInstructions;
+      remaining -= result.cpuCycles;
     }
     if (count > 0) this.cursor = (this.cursor + 1) % count;
 
@@ -138,13 +145,15 @@ export class RoundRobinScheduler {
             {
               id,
               state: computer.vm.state,
+              cpuCycles: computer.cpuCycles,
               executedInstructions: computer.executedInstructions,
             },
           ];
     });
     return {
+      cpuCycles: this.limits.cpuCyclesPerTick - remaining,
       tick: this.tickValue,
-      executedInstructions: this.limits.instructionsPerTick - remaining,
+      executedInstructions,
       computers,
     };
   }
@@ -182,15 +191,17 @@ export class RoundRobinScheduler {
 }
 
 interface ScheduledComputer {
+  cpuCycles: number;
   readonly id: number;
   readonly vm: StackVm;
   readonly events: BoundedEventQueue;
   readonly timers: BoundedTimerQueue;
   executedInstructions: number;
-  readonly instructionsPerTick: number;
+  readonly cpuCyclesPerTick: number;
 }
 
 function requirePositiveInteger(value: number, name: string): void {
   if (!Number.isInteger(value) || value <= 0)
     throw new RangeError(`${name} must be positive`);
 }
+import { computerNominalClockHz } from "../../domain/cpu/timing.js";

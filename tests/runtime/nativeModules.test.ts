@@ -50,8 +50,8 @@ free = fs.get_free_space()
     const scheduler = new RoundRobinScheduler({
       eventCapacity: 8,
       timerCapacity: 8,
-      instructionsPerComputer: 100,
-      instructionsPerTick: 100,
+      cpuCyclesPerComputer: 100_000,
+      cpuCyclesPerTick: 100_000,
     });
     const terminal = new TerminalBuffer();
     const filesystem = new InMemoryFilesystem();

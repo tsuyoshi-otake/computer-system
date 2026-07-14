@@ -154,7 +154,7 @@ describe("Computer persistence boundary", (): void => {
     if (loadedLegacy.outcome === "loaded") {
       expect(loadedLegacy.record.osProfile).toBe("linux");
       expect(loadedLegacy.record.hardware).toEqual({
-        clockHz: 20_000,
+        clockHz: 33_000_000,
         memoryBytes: 1_048_576,
       });
     }

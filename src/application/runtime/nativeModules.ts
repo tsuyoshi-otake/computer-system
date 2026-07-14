@@ -112,7 +112,7 @@ function createShellModule(
     if (result.sleepTicks !== undefined) {
       return { kind: "sleep", ticks: result.sleepTicks };
     }
-    return { kind: "work", cycles: result.workCycles ?? 1, value: null };
+    return { kind: "work", cycles: result.cpuCycles ?? 1, value: null };
   };
   const banner = fn("banner", (positional, keywords) => {
     requireArity(positional, keywords, 0, 0);

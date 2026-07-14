@@ -16,6 +16,8 @@ import {
   type ComputerHardwareProfile,
 } from "./hardware.js";
 
+const legacyDefaultClockHz = 20_000;
+
 export type ComputerOsProfile = "dos" | "linux";
 
 export interface ComputerSnapshot {
@@ -139,7 +141,13 @@ export class ComputerRecord {
       terminalWidth: snapshot.terminal.width,
       terminalHeight: snapshot.terminal.height,
       osProfile: snapshot.osProfile ?? "linux",
-      hardware: snapshot.hardware ?? defaultComputerHardware,
+      hardware:
+        snapshot.hardware?.clockHz === legacyDefaultClockHz
+          ? {
+              ...snapshot.hardware,
+              clockHz: defaultComputerHardware.clockHz,
+            }
+          : (snapshot.hardware ?? defaultComputerHardware),
     });
     record.filesystem.restore(snapshot.filesystem);
     record.terminal.restore(snapshot.terminal);

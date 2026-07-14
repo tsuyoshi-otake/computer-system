@@ -53,8 +53,8 @@ bytes = fs.getSize("/rom/startup.py")
     const scheduler = new RoundRobinScheduler({
       eventCapacity: 4,
       timerCapacity: 4,
-      instructionsPerComputer: 100,
-      instructionsPerTick: 100,
+      cpuCyclesPerComputer: 100_000,
+      cpuCyclesPerTick: 100_000,
     });
     const context = {
       computerId: 17,

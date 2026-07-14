@@ -281,8 +281,8 @@ describe("Computer System OS shell and editor", (): void => {
       ["for item in 1 2 3; do", "  true", "done"].join("\n"),
     );
 
-    const simple = shell.submit("true").workCycles ?? 0;
-    const scripted = shell.submit("bash /work.sh").workCycles ?? 0;
+    const simple = shell.submit("true").cpuCycles ?? 0;
+    const scripted = shell.submit("bash /work.sh").cpuCycles ?? 0;
 
     expect(simple).toBeGreaterThan(0);
     expect(scripted).toBeGreaterThan(simple);

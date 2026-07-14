@@ -11,6 +11,7 @@ import {
   validateCs486Executable,
   type Cs486Executable,
 } from "../../domain/cpu/cs486.js";
+import { cpuCyclesToMicroseconds } from "../../domain/cpu/timing.js";
 import { assembleCs486 } from "../toolchain/cs486Assembler.js";
 import {
   compileCs486Source,
@@ -27,7 +28,7 @@ export interface ShellCommandResult {
   readonly sleepTicks?: number;
   readonly terminalScreen?: ViScreen;
   readonly resetTerminal?: boolean;
-  readonly workCycles?: number;
+  readonly cpuCycles?: number;
 }
 
 export interface ShellCompletionResult {
@@ -1259,7 +1260,7 @@ export class ShellCommandRuntime {
       exitCode: 0,
       stderr: "",
       stdout: "",
-      workCycles: Math.max(
+      cpuCycles: Math.max(
         1,
         Math.ceil(source.length / 4) + executable.instructions.length * 4,
       ),
@@ -1303,7 +1304,7 @@ export class ShellCommandRuntime {
       memoryBytes: this.options.hardware.memoryBytes,
     });
     const stderr = stats
-      ? `CS486: ${result.executedInstructions} instructions, ${result.cycles} cycles, ${result.state}\n`
+      ? `CS486: ${result.executedInstructions} instructions, ${result.cycles} CPU cycles, ${cpuCyclesToMicroseconds(result.cycles).toFixed(3)} us at 33 MHz, ${result.state}\n`
       : result.state === "yielded"
         ? "CS486: execution limit reached\n"
         : "";
@@ -1311,7 +1312,7 @@ export class ShellCommandRuntime {
       exitCode: result.state === "halted" ? 0 : 124,
       stderr,
       stdout: result.output,
-      workCycles: Math.min(1_000_000, compileCycles + result.cycles),
+      cpuCycles: Math.min(1_000_000, compileCycles + result.cycles),
     };
   }
 

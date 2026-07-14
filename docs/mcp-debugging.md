@@ -55,7 +55,7 @@ administration commands, command separators, newlines, and commands longer than
 For non-interactive Computer debugging, call `bds_execute_computer_command` with
 an exact `c-xxxxxx` identity and one shell line. The command executes inside
 that Computer's sandboxed shell and returns `stdout`, `stderr`, `exitCode`, and
-modeled `workCycles`. It cannot reach the host shell or arbitrary BDS commands.
+modeled `cpuCycles`. It cannot reach the host shell or arbitrary BDS commands.
 Input, output, concurrency, and timeout are bounded; vi/editor, sleep,
 shutdown/reboot, and other TUI or asynchronous control flows return an explicit
 unsupported result.
@@ -64,9 +64,10 @@ For a bounded MicroPython comparison, pass `python <file>` or
 `micropython <file>` through the same tool. This MCP-only form compiles and runs
 the file with the target Computer's filesystem, hardware profile, and RAM limit.
 It rejects waits and long-running work after a fixed cycle ceiling. Returned
-MicroPython stack-VM cycles must be reported separately from the CS486
-instruction cycles produced by `run --stats`; they are different execution
-models rather than directly interchangeable timing units.
+bytecode instruction counts are diagnostic only. The `cpuCycles` field is a
+deterministic 486DX-equivalent cost shared with ASM, C, C++, and BASIC;
+`run --stats` and MicroPython diagnostics also convert it to virtual
+microseconds at 33 MHz. Do not use host wall-clock time for language rankings.
 
 BDS prints `Server started` before Script API world initialization is fully
 settled. The MCP session therefore applies the same bounded one-second startup

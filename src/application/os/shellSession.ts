@@ -35,7 +35,7 @@ export interface ShellResult {
   readonly sleepTicks?: number;
   readonly terminalScreen?: ViScreen;
   readonly resetTerminal?: boolean;
-  readonly workCycles?: number;
+  readonly cpuCycles?: number;
 }
 
 export interface ShellSessionOptions {
@@ -82,7 +82,7 @@ export class ShellSession {
   private readonly startupLines: string[] = [];
   private terminalHeight: number;
   private terminalWidth: number;
-  private workCyclesValue = 0;
+  private cpuCyclesValue = 0;
 
   constructor(
     private readonly filesystem: InMemoryFilesystem,
@@ -127,7 +127,7 @@ export class ShellSession {
   }
 
   submit(line: string): ShellResult {
-    this.workCyclesValue = 0;
+    this.cpuCyclesValue = 0;
     let result: ShellResult;
     if (this.vi !== undefined) result = this.submitViLine(line);
     else if (this.editor !== undefined) result = this.submitEditor(line);
@@ -138,7 +138,7 @@ export class ShellSession {
       }
       result = this.executeLine(line, 0);
     }
-    return this.withWorkCycles(result);
+    return this.withCpuCycles(result);
   }
 
   submitDebugCommand(line: string): ShellResult {
@@ -187,11 +187,11 @@ export class ShellSession {
   }
 
   keys(keys: readonly string[]): ShellResult {
-    this.workCyclesValue = keys.length;
+    this.cpuCyclesValue = keys.length;
     if (this.vi === undefined)
-      return this.withWorkCycles(resultFromStreams("", "", 0));
+      return this.withCpuCycles(resultFromStreams("", "", 0));
     if (keys.length > 32) {
-      return this.withWorkCycles(
+      return this.withCpuCycles(
         resultFromStreams("", "vi: key batch limit exceeded\n", 2),
       );
     }
@@ -203,16 +203,16 @@ export class ShellSession {
       if (this.vi === undefined) break;
       result = this.viResult(this.vi.key(key));
     }
-    return this.withWorkCycles(result);
+    return this.withCpuCycles(result);
   }
 
-  private withWorkCycles(result: ShellResult): ShellResult {
+  private withCpuCycles(result: ShellResult): ShellResult {
     const outputBytes = utf8ByteLength(`${result.stdout}${result.stderr}`);
     return {
       ...result,
-      workCycles: Math.max(
+      cpuCycles: Math.max(
         1,
-        Math.min(1_000_000, this.workCyclesValue + Math.ceil(outputBytes / 16)),
+        Math.min(1_000_000, this.cpuCyclesValue + Math.ceil(outputBytes / 16)),
       ),
     };
   }
@@ -384,7 +384,7 @@ export class ShellSession {
     depth: number,
     interactiveAllowed: boolean,
   ): ShellCommandResult {
-    this.workCyclesValue += 8;
+    this.cpuCyclesValue += 8;
     const [requestedName = "", ...arguments_] = command.words;
     const name = this.commands.canonicalCommand(requestedName);
     const functionBody = this.shellFunctions.get(name);
@@ -438,7 +438,7 @@ export class ShellSession {
       return this.executeScript(name, arguments_, stdin, depth);
     }
     const result = this.commands.execute(command.words, stdin);
-    this.workCyclesValue += result.workCycles ?? 0;
+    this.cpuCyclesValue += result.cpuCycles ?? 0;
     return result;
   }
 
@@ -508,7 +508,7 @@ export class ShellSession {
     };
 
     for (let index = 0; index < lines.length; index += 1) {
-      this.workCyclesValue += 1;
+      this.cpuCyclesValue += 1;
       const line = lines[index]!.trim();
       if (line.length === 0 || line.startsWith("#!")) continue;
       const functionMatch = /^([A-Za-z_][A-Za-z0-9_]*)\s*\(\)\s*\{$/u.exec(
@@ -564,7 +564,7 @@ export class ShellSession {
         if (end < 0) return scriptFailure(label, "unterminated for loop");
         const values = this.expandScriptWords(forMatch[2] ?? "");
         for (const value of values) {
-          this.workCyclesValue += 2;
+          this.cpuCyclesValue += 2;
           this.scriptLoopIterations += 1;
           if (this.scriptLoopIterations > maximumScriptLoopIterations)
             return scriptFailure(label, "loop iteration limit exceeded");

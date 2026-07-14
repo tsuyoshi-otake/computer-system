@@ -111,16 +111,16 @@ safety constraints.
 
 `bds_execute_computer_command` provides a direct debug path for a specific
 Computer without using its TUI. It returns stdout, stderr, exit code, and
-modeled work cycles from the sandboxed shell; it never invokes host
+modeled 486DX CPU cycles from the sandboxed shell; it never invokes host
 PowerShell/Bash or arbitrary BDS administration commands.
 `bds_wait_for_web_handoff` returns the next one-use URL for one exact Computer
 ID while preventing browser auto-open from consuming it first. Both paths bound
 input, concurrency, output, and waits. The MCP-only `python <file>` and
 `micropython <file>` forms run a bounded source file with the target Computer's
 MicroPython-compatible VM, filesystem, hardware profile, and RAM limit. They
-reject waits and long-running work and report VM cycles; those cycles are not
-directly interchangeable with CS486 instruction cycles reported by
-`run --stats`.
+reject waits and long-running work. MicroPython bytecode instructions are
+reported separately from their deterministic 486DX-equivalent CPU-cycle cost;
+`run --stats` uses the same CPU-cycle and 33 MHz virtual-time units.
 
 ## Browser terminal
 
@@ -238,26 +238,32 @@ bounded subtree usage from one filesystem snapshot. `date` defaults to wall UTC,
 with `date --game` and `date --virtual` for Minecraft and deterministic VM time.
 
 Each Computer also has a persisted virtual hardware profile. User-facing CPU
-information identifies a nominal Computer System 486DX at 33 MHz. Its internal
-safe scheduler clock remains persisted separately; the default 20 kHz execution
-scale provides 1,000 VM cycles per 20 Hz server tick, while the scheduler
-retains a global cap and round-robin fairness across Computers. Native shell
-commands and Bash scripts return bounded work-cycle charges, so they cannot
-bypass the CPU budget. The default 1 MiB RAM limit applies to the VM's aggregate
-reachable runtime data and raises `MemoryError` on overflow; unreachable values
-are reclaimed during pressure checks. Linux exposes `cpuinfo`, `free`,
-`/proc/cpuinfo`, and `/proc/meminfo`. The DOS profile exposes `CPU`, `MEM`, and
-`SYSTEMINFO`, and `VER` includes the hardware summary. RAM, persistent disk
-quota, collection size, and output bounds are independent limits.
+information and the execution model identify a Computer System 486DX at 33 MHz.
+At 20 server ticks per second, one Computer receives at most 1,650,000 modeled
+CPU cycles per tick, while the scheduler retains the same global cap and
+round-robin fairness across Computers. Computer System Python bytecodes use a
+stable, operation-specific 486DX-equivalent cost; collection and call costs
+scale with their input size. Native shell commands and Bash scripts return
+bounded CPU-cycle charges, so they cannot bypass the same budget. Snapshots
+created with the former 20 kHz default migrate to 33 MHz when restored. The
+default 1 MiB RAM limit applies to the VM's aggregate reachable runtime data and
+raises `MemoryError` on overflow; unreachable values are reclaimed during
+pressure checks. Linux exposes `cpuinfo`, `free`, `/proc/cpuinfo`, and
+`/proc/meminfo`. The DOS profile exposes `CPU`, `MEM`, and `SYSTEMINFO`, and
+`VER` includes the hardware summary. RAM, persistent disk quota, collection
+size, and output bounds are independent limits.
 
 The sandboxed CS486DX toolchain adds real 32-bit `EAX` through `EBP` registers,
 checked little-endian linear memory, stack/call control flow, terminal CPU
 faults, and instruction-specific cycle costs. `as`, `cc`, `c++`, and `basicc`
 compile safe initial language subsets to the same validated textual executable
 format; `basic` runs BASIC source directly, `run --stats` reports instructions
-and cycles, and `objdump` exposes generated instructions for optimization. No
-frontend invokes a host compiler or native binary. Compile work and execution
-cycles return to the same bounded VM debt used by shell scripts.
+and CPU cycles plus virtual microseconds at 33 MHz, and `objdump` exposes
+generated instructions for optimization. No frontend invokes a host compiler or
+native binary. Compile work and execution cycles return to the same bounded
+CPU-cycle debt used by shell scripts. MCP's `cpuCycles` field uses this unit
+across ASM, C, C++, BASIC, and MicroPython; bytecode or machine-instruction
+counts remain diagnostic values, not timing units.
 
 The Bedrock pack includes placeable `Computer` and `Advanced Computer` items
 (`computer_system:computer_item` and `computer_system:advanced_computer_item`).

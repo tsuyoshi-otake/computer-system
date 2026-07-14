@@ -1,14 +1,16 @@
+import { computerNominalClockHz, cpuCyclesPerTick } from "../cpu/timing.js";
+
 export interface ComputerHardwareProfile {
   readonly clockHz: number;
   readonly memoryBytes: number;
 }
 
 export const defaultComputerHardware: ComputerHardwareProfile = {
-  clockHz: 20_000,
+  clockHz: computerNominalClockHz,
   memoryBytes: 1_048_576,
 };
 
-const maximumClockHz = 2_000_000;
+const maximumClockHz = 100_000_000;
 const maximumMemoryBytes = 64 * 1_048_576;
 const minimumMemoryBytes = 65_536;
 
@@ -36,10 +38,9 @@ export function requireComputerHardware(
   return { ...hardware };
 }
 
-export function cyclesPerTick(clockHz: number, ticksPerSecond: number): number {
-  if (!Number.isSafeInteger(clockHz) || clockHz < 1)
-    throw new RangeError("CPU clock must be a positive integer");
-  if (!Number.isSafeInteger(ticksPerSecond) || ticksPerSecond < 1)
-    throw new RangeError("Tick rate must be a positive integer");
-  return Math.max(1, Math.floor(clockHz / ticksPerSecond));
+export function hardwareCpuCyclesPerTick(
+  clockHz: number,
+  ticksPerSecond: number,
+): number {
+  return cpuCyclesPerTick(clockHz, ticksPerSecond);
 }
