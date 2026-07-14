@@ -126,6 +126,11 @@ The July 2026 live GDK verification established the following:
 - Memory reports add bounded OS residency to dynamic guest usage: CS-Linux
   separates kernel, services, buffers, and guest runtime; CS-DOS separates its
   system/driver footprint while preserving conventional/UMB/XMS totals.
+- CS-DOS commands return CRLF and DOS-specific text. `TIME` displays the guest
+  clock while `TIMER` measures bounded command execution; `DIR`, `COPY`,
+  `DEL`/`ERASE`, `MD`/`RD`, `MOVE`, `REN`/`RENAME`, `TYPE`, `TREE`, `VOL`,
+  `VER`, `DOSKEY /HISTORY`, and `MEM /F` must not leak Linux output. `TREE`
+  remains O(N), capped at 512 entries and 32 levels.
 - `EDIT` is a DOS-profile-only full-screen editor. Its blue viewport, five
   menus, insert/overwrite state, bounded undo/search, save feedback, and dirty
   Save/Discard/Cancel dialog are rendered from the terminal model. Linux rejects

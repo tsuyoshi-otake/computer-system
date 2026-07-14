@@ -252,10 +252,14 @@ environment, and virtual devices. The implemented DOS profile shares the same
 terminal, filesystem, persistence, hardware limits, and checked CS
 executable/toolchain abstractions without Linux conditionals in the domain core.
 It provides drive-letter paths, case-insensitive lookup, CRLF boot files,
-`NUL`/`CON`, and DOS command aliases including `DIR`, `TYPE`, `COPY`, and `VER`.
-Computer System DOS 6.2 (`CS-DOS 6.2`) reads a bounded `CONFIG.SYS` and runs
-`AUTOEXEC.BAT`; `SET`, `PATH`, `PROMPT`, `REM`, `@ECHO OFF`, `%0`…`%9`, `%VAR%`,
-and `%ERRORLEVEL%` are supported. Unsupported boot directives fail visibly.
+`NUL`/`CON`, and DOS command aliases. DOS-facing commands use CRLF and
+DOS-specific status/error text rather than leaking Linux applet output. The
+implemented compatibility surface includes `DIR`, `TYPE`, `COPY`, `DEL`/
+`ERASE`, `MD`, `RD`, `MOVE`, `REN`/`RENAME`, `TREE`, `VOL`, `VER`, `TIME`,
+`TIMER`, `DOSKEY /HISTORY`, and `MEM /F`. Computer System DOS 6.2 (`CS-DOS 6.2`)
+reads a bounded `CONFIG.SYS` and runs `AUTOEXEC.BAT`; `SET`, `PATH`, `PROMPT`,
+`REM`, `@ECHO OFF`, `%0`…`%9`, `%VAR%`, and `%ERRORLEVEL%` are supported.
+Unsupported boot directives fail visibly.
 
 ```text
 files:  pwd cd ls cat mkdir touch rm cp mv find stat df du quota
@@ -263,7 +267,7 @@ text:   echo printf head tail wc grep sort uniq tr cut seq
 shell:  sh bash source env export unset which type
 info:   whoami id hostname uname date uptime cpuinfo free
 system: clear vi history time sleep test [ shutdown reboot exit true false
-DOS:    EDIT plus drive/path/environment compatibility commands
+DOS:    EDIT DIR TREE VOL TIME TIMER DOSKEY MEM and path/file aliases
 toolchain: as cc c++ basic basicc ld nm run objdump
 ```
 

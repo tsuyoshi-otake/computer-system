@@ -6,6 +6,65 @@ import { portableComputerHardware } from "../../src/domain/computer/hardware.js"
 import { InMemoryFilesystem } from "../../src/domain/filesystem/inMemoryFilesystem.js";
 
 describe("DOS profile contract", (): void => {
+  it("uses DOS command names, CRLF output, and bounded compatibility utilities", (): void => {
+    let tick = 20;
+    const filesystem = new InMemoryFilesystem();
+    const shell = new ShellSession(filesystem, {
+      clock: {
+        currentGameTime: (): { absoluteTicks: number; timeOfDay: number } => ({
+          absoluteTicks: 0,
+          timeOfDay: 0,
+        }),
+        currentWallTimeMilliseconds: (): number =>
+          Date.UTC(2026, 6, 14, 12, 34, 56, 780),
+      },
+      computerId: 0x1234,
+      currentTick: (): number => tick,
+      osProfile: "dos",
+      ticksPerSecond: 20,
+    });
+
+    expect(shell.submit("TIME").stdout).toBe("Current time is 12:34:56.78\r\n");
+    expect(shell.submit("TIME 10:00").stderr).toBe(
+      "The host-backed system time cannot be changed.\r\n",
+    );
+    tick += 2;
+    expect(shell.submit("TIMER ECHO measured").stderr).toBe(
+      "Elapsed time: 0.000 seconds\r\n",
+    );
+    expect(shell.submit("VER").stdout).toBe(
+      "Computer System DOS Version 6.20\r\n",
+    );
+    expect(shell.submit("VOL").stdout).toContain(
+      "Volume Serial Number is 0000-1234\r\n",
+    );
+
+    expect(shell.submit("MD C:\\WORK").exitCode).toBe(0);
+    expect(shell.submit("CHDIR C:\\WORK").exitCode).toBe(0);
+    expect(shell.submit("CD").stdout).toBe("C:\\WORK\r\n");
+    shell.submit("ECHO VALUE > ONE.TXT");
+    expect(shell.submit("COPY ONE.TXT TWO.TXT").stdout).toBe(
+      "        1 file(s) copied.\r\n",
+    );
+    expect(shell.submit("TYPE TWO.TXT").stdout).toBe("VALUE\r\n");
+    expect(shell.submit("RENAME TWO.TXT RENAMED.TXT").exitCode).toBe(0);
+    expect(shell.submit("DIR /B").stdout).toBe("ONE.TXT\r\nRENAMED.TXT\r\n");
+    const detailed = shell.submit("DIR").stdout;
+    expect(detailed).toContain("Volume in drive C is CS-DOS\r\n");
+    expect(detailed).toContain("Directory of C:\\WORK\r\n");
+    expect(detailed).toContain("2 File(s)");
+    expect(detailed).not.toMatch(/(?<!\r)\n/u);
+    expect(shell.submit("TREE C:\\ /F").stdout).toContain("+---WORK");
+    expect(shell.submit("MEM /F").stdout).toContain("Free memory blocks:");
+    expect(shell.submit("DOSKEY /HISTORY").stdout).toContain(
+      "COPY ONE.TXT TWO.TXT\r\n",
+    );
+    expect(shell.submit("ERASE RENAMED.TXT").exitCode).toBe(0);
+    expect(shell.submit("DEL ONE.TXT").exitCode).toBe(0);
+    expect(shell.submit("CHDIR C:\\").exitCode).toBe(0);
+    expect(shell.submit("RMDIR C:\\WORK").exitCode).toBe(0);
+  });
+
   it("supports drive paths, case-insensitive lookup, CRLF boot files, and NUL", (): void => {
     const filesystem = new InMemoryFilesystem();
     const shell = new ShellSession(filesystem, {
@@ -67,7 +126,9 @@ describe("DOS profile contract", (): void => {
     expect(shell.submit("MEM /D").lines).toContain("UMB link: enabled");
     expect(shell.submit("MEM /P").exitCode).toBe(2);
     expect(shell.submit("SYSTEMINFO").lines).toContain("Computer ID: c-dos002");
-    expect(shell.submit("VER").lines[0]).toContain("Computer System DOS 6.2");
+    expect(shell.submit("VER").lines[0]).toBe(
+      "Computer System DOS Version 6.20",
+    );
     expect(shell.submit("ECHO %OS%").lines).toEqual(["CS-DOS"]);
     expect(shell.submit("SYSTEMINFO").lines).toContain("OS Alias: CS-DOS 6.2");
     expect(shell.submit("SYSTEMINFO").stdout).toContain(

@@ -35,6 +35,11 @@ Verify lifecycle and persistence:
   Linux Computer, verify `edit` is unavailable and use `vi /startup.py`. Also
   run bare `EDIT`, type text, press F2, and verify `C:\NONAME.TXT` is created
   without horizontal gaps between the blue editor rows.
+- On that Portable, verify `VER`, `VOL`, `TIME`, `DIR C:\`, `TREE C:\ /F`,
+  `MEM /F`, and `DOSKEY /HISTORY`. Expect DOS-style labels and CRLF output;
+  `TIME` must show the clock rather than timing a command. Run `TIMER VER` and
+  expect a separate elapsed-time line. Verify `CHDIR`, `ERASE`, `RENAME`, and
+  `RMDIR` behave as DOS aliases and malformed switches fail explicitly.
 - Run bare `vi`; confirm `[No Name]` is displayed. Enter and erase a `:`
   command, then press Backspace once more and confirm Normal mode returns.
   Confirm `:w` reports no file name, then `:wq note.txt` saves and closes.

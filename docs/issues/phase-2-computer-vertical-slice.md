@@ -9,6 +9,8 @@ Parent: #1 Blocked by: #2 and #3
 - [x] Transfer stable computer identity between block and item forms.
 - [x] Integrate the VM scheduler with Bedrock ticks and lifecycle events.
 - [x] Implement the CS-Linux and CS-DOS shells and editors.
+- [x] Give the primary CS-DOS file, clock, volume, tree, history, and memory
+      commands DOS-specific CRLF output instead of shared Linux presentation.
 - [x] Replace the Phase 0 probe implementation with a production terminal view
       coordinator shared by Desktop and Portable Computer Systems and the
       Monitor fallback.

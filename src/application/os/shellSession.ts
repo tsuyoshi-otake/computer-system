@@ -480,8 +480,27 @@ export class ShellSession {
         `${this.history.map((value, index) => `${String(index + 1).padStart(5)}  ${value}`).join("\n")}\n`,
       );
     }
-    if (name === "time") {
-      if (arguments_.length === 0) return commandUsage("time <command ...>");
+    if (name === "doskey" && this.commands.profile.id === "dos") {
+      if (arguments_.length === 0) {
+        return commandSuccess("DOSKey installed. Use DOSKEY /HISTORY.\r\n");
+      }
+      if (
+        arguments_.length !== 1 ||
+        arguments_[0]?.toUpperCase() !== "/HISTORY"
+      ) {
+        return {
+          exitCode: 2,
+          stderr: "Invalid switch. Use DOSKEY /HISTORY.\r\n",
+          stdout: "",
+        };
+      }
+      return commandSuccess(`${this.history.join("\r\n")}\r\n`);
+    }
+    if (
+      (name === "time" && this.commands.profile.id === "linux") ||
+      (name === "timer" && this.commands.profile.id === "dos")
+    ) {
+      if (arguments_.length === 0) return commandUsage(`${name} <command ...>`);
       const startedAt = this.commands.currentTick();
       const timed = this.executeCommand(
         { words: arguments_, redirects: [] },
@@ -494,7 +513,10 @@ export class ShellSession {
         this.commands.ticksPerSecond();
       return {
         ...timed,
-        stderr: `${timed.stderr}real ${elapsed.toFixed(3)}s\n`,
+        stderr:
+          this.commands.profile.id === "dos"
+            ? `${timed.stderr.replaceAll("\r\n", "\n").replaceAll("\n", "\r\n")}Elapsed time: ${elapsed.toFixed(3)} seconds\r\n`
+            : `${timed.stderr}real ${elapsed.toFixed(3)}s\n`,
       };
     }
     if (name === "vi") {

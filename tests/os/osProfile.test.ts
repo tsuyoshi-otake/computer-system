@@ -25,7 +25,10 @@ describe("OS profile boundary", (): void => {
     });
 
     expect(shell.prompt()).toBe("C:\\USERS\\COMPUTER> ");
-    expect(shell.submit("DIR C:\\").lines[0]).toContain("AUTOEXEC.BAT");
+    const directory = shell.submit("DIR C:\\").stdout;
+    expect(directory).toContain("Volume in drive C is CS-DOS\r\n");
+    expect(directory).toContain("Directory of C:\\\r\n");
+    expect(directory).toContain("AUTOEXEC.BAT");
     expect(shell.submit("ECHO discarded > NUL").exitCode).toBe(0);
   });
 });

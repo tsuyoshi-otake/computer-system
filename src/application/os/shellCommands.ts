@@ -139,6 +139,7 @@ export const shellCommandNames = [
   "test",
   "[",
   "time",
+  "timer",
   "history",
   "as",
   "cc",
@@ -153,6 +154,9 @@ export const shellCommandNames = [
   "prompt",
   "rem",
   "set",
+  "doskey",
+  "tree",
+  "vol",
 ] as const;
 
 const knownCommands = new Set<string>(shellCommandNames);
@@ -357,6 +361,14 @@ export class ShellCommandRuntime {
     const [requestedCommand = "", ...arguments_] = words;
     const command = this.canonicalCommand(requestedCommand);
     try {
+      if (this.options.profile.id === "dos") {
+        const dosResult = this.dispatchDosCommand(
+          requestedCommand.toLowerCase(),
+          arguments_,
+          stdin,
+        );
+        if (dosResult !== undefined) return dosResult;
+      }
       if (knownCommands.has(command) && !this.commandAvailable(command)) {
         return this.commandNotFound(requestedCommand);
       }
@@ -383,6 +395,173 @@ export class ShellCommandRuntime {
     );
   }
 
+  private dispatchDosCommand(
+    command: string,
+    arguments_: readonly string[],
+    stdin: string,
+  ): ShellCommandResult | undefined {
+    switch (command) {
+      case "cd":
+      case "chdir":
+        if (arguments_.length === 0) {
+          return success(
+            `${this.options.profile.pathDialect.display(this.currentDirectory)}\r\n`,
+          );
+        }
+        return this.dosResult(
+          "The system cannot find the path specified.",
+          this.changeDirectory(arguments_),
+        );
+      case "copy":
+        if (arguments_.some((value) => value.startsWith("/"))) {
+          return status(2, "", "Invalid switch.\r\n");
+        }
+        return this.dosResult(
+          "File not found.",
+          this.copy(arguments_),
+          "        1 file(s) copied.\r\n",
+        );
+      case "del":
+      case "erase":
+        return this.dosResult("File not found.", this.remove(arguments_));
+      case "dir":
+        return this.dosDirectory(arguments_);
+      case "md":
+      case "mkdir":
+        return this.dosResult(
+          "Unable to create directory.",
+          this.makeDirectories(arguments_),
+        );
+      case "move":
+        return this.dosResult(
+          "The system cannot find the file specified.",
+          this.move(arguments_),
+          "        1 file(s) moved.\r\n",
+        );
+      case "rd":
+      case "rmdir":
+        return this.dosRemoveDirectory(arguments_);
+      case "ren":
+      case "rename":
+        return this.dosResult(
+          "The system cannot find the file specified.",
+          this.move(arguments_),
+        );
+      case "type":
+        return this.dosResult("File not found.", this.cat(arguments_, stdin));
+      case "ver":
+        return arguments_.length === 0
+          ? success("Computer System DOS Version 6.20\r\n")
+          : status(2, "", "Invalid number of parameters.\r\n");
+      default:
+        return undefined;
+    }
+  }
+
+  private dosResult(
+    errorMessage: string,
+    result: ShellCommandResult,
+    successOutput = "",
+  ): ShellCommandResult {
+    if (result.exitCode === 0) {
+      return {
+        ...result,
+        stdout:
+          successOutput ||
+          result.stdout.replaceAll("\r\n", "\n").replaceAll("\n", "\r\n"),
+      };
+    }
+    return status(result.exitCode, "", `${errorMessage}\r\n`);
+  }
+
+  private dosRemoveDirectory(
+    arguments_: readonly string[],
+  ): ShellCommandResult {
+    if (arguments_.length !== 1) {
+      return status(2, "", "Required parameter missing.\r\n");
+    }
+    const path = this.resolvePath(arguments_[0]!);
+    if (!this.filesystem.isDirectory(path)) {
+      return status(1, "", "The system cannot find the path specified.\r\n");
+    }
+    if (this.filesystem.list(path).length > 0) {
+      return status(
+        1,
+        "",
+        "Invalid path, not directory, or directory not empty.\r\n",
+      );
+    }
+    this.filesystem.delete(path);
+    return success();
+  }
+
+  private dosDirectory(arguments_: readonly string[]): ShellCommandResult {
+    let bare = false;
+    let path = ".";
+    for (const argument of arguments_) {
+      if (argument.toUpperCase() === "/B") bare = true;
+      else if (argument.startsWith("/")) {
+        return status(2, "", `Invalid switch - ${argument}\r\n`);
+      } else if (path === ".") path = argument;
+      else return status(2, "", "Too many parameters.\r\n");
+    }
+    const resolved = this.resolvePath(path);
+    if (!this.filesystem.exists(resolved)) {
+      return status(1, "", "File not found.\r\n");
+    }
+    const names = this.filesystem.isDirectory(resolved)
+      ? this.filesystem.list(resolved)
+      : [baseName(resolved)];
+    if (bare) {
+      return success(
+        `${names.map((name) => name.toUpperCase()).join("\r\n")}${names.length > 0 ? "\r\n" : ""}`,
+      );
+    }
+    const directory = this.filesystem.isDirectory(resolved)
+      ? resolved
+      : parentPath(resolved);
+    const rows: string[] = [];
+    let fileCount = 0;
+    let fileBytes = 0;
+    let directoryCount = 0;
+    const timestamp = this.dosDirectoryTimestamp();
+    for (const name of names) {
+      const target = this.filesystem.isDirectory(resolved)
+        ? joinPath(resolved, name)
+        : resolved;
+      if (this.filesystem.isDirectory(target)) {
+        directoryCount += 1;
+        rows.push(`${timestamp}    <DIR>          ${name.toUpperCase()}`);
+      } else {
+        const size = this.filesystem.getSize(target);
+        fileCount += 1;
+        fileBytes += size;
+        rows.push(
+          `${timestamp}       ${String(size).padStart(10)} ${name.toUpperCase()}`,
+        );
+      }
+    }
+    const volume = this.dosVolumeLines();
+    return success(
+      [
+        ...volume,
+        ` Directory of ${this.options.profile.pathDialect.display(directory)}`,
+        "",
+        ...rows,
+        `${String(fileCount).padStart(9)} File(s) ${String(fileBytes).padStart(14)} bytes`,
+        `${String(directoryCount).padStart(9)} Dir(s)  ${String(this.filesystem.getFreeSpace()).padStart(14)} bytes free`,
+        "",
+      ].join("\r\n"),
+    );
+  }
+
+  private dosDirectoryTimestamp(): string {
+    const date = new Date(this.options.clock.currentWallTimeMilliseconds());
+    const hour = date.getUTCHours();
+    const hour12 = hour % 12 || 12;
+    return `${String(date.getUTCMonth() + 1).padStart(2, "0")}-${String(date.getUTCDate()).padStart(2, "0")}-${String(date.getUTCFullYear()).slice(-2)}  ${String(hour12).padStart(2, "0")}:${String(date.getUTCMinutes()).padStart(2, "0")}${hour < 12 ? "a" : "p"}`;
+  }
+
   isKnownCommand(name: string): boolean {
     const command = this.canonicalCommand(name);
     return knownCommands.has(command) && this.commandAvailable(command);
@@ -398,22 +577,22 @@ export class ShellCommandRuntime {
     }
     switch (command) {
       case "help":
-        return success(
-          [
-            "Computer System BusyBox shell",
-            "files: pwd cd ls cat mkdir touch rm cp mv find du quota",
-            "text: echo printf head tail wc grep sort uniq tr",
-            "shell: sh bash source env export unset which type",
-            `system: clear ${this.options.profile.id === "dos" ? "edit " : ""}vi shutdown reboot exit true false`,
-            "info: whoami id hostname uname date uptime stat df du quota",
-            this.options.profile.id === "dos"
-              ? "hardware: CPU MEM SYSTEMINFO"
-              : "hardware: cpuinfo free /proc/cpuinfo /proc/meminfo",
-            "utility: history time sleep seq cut test [",
-            "toolchain: as cc c++ basic basicc ld nm run objdump",
-            "syntax: |  >  >>  <  &&  ||  ;  '...'  \"...\"  $VAR  $?",
-          ].join("\n") + "\n",
-        );
+        return this.options.profile.id === "dos"
+          ? this.dosHelp(arguments_)
+          : success(
+              [
+                "Computer System BusyBox shell",
+                "files: pwd cd ls cat mkdir touch rm cp mv find du quota",
+                "text: echo printf head tail wc grep sort uniq tr",
+                "shell: sh bash source env export unset which type",
+                "system: clear vi shutdown reboot exit true false",
+                "info: whoami id hostname uname date uptime stat df du quota",
+                "hardware: cpuinfo free /proc/cpuinfo /proc/meminfo",
+                "utility: history time sleep seq cut test [",
+                "toolchain: as cc c++ basic basicc ld nm run objdump",
+                "syntax: |  >  >>  <  &&  ||  ;  '...'  \"...\"  $VAR  $?",
+              ].join("\n") + "\n",
+            );
       case "pwd":
         return arguments_.length === 0
           ? success(
@@ -484,6 +663,10 @@ export class ShellCommandRuntime {
         return this.uname(arguments_);
       case "date":
         return this.date(arguments_);
+      case "time":
+        return this.options.profile.id === "dos"
+          ? this.dosTime(arguments_)
+          : this.commandNotFound(command);
       case "cpuinfo":
         return this.options.profile.id === "linux"
           ? this.cpuInfo(arguments_)
@@ -503,6 +686,14 @@ export class ShellCommandRuntime {
       case "systeminfo":
         return this.options.profile.id === "dos"
           ? this.dosSystemInfo(arguments_)
+          : this.commandNotFound(command);
+      case "tree":
+        return this.options.profile.id === "dos"
+          ? this.dosTree(arguments_)
+          : this.commandNotFound(command);
+      case "vol":
+        return this.options.profile.id === "dos"
+          ? this.dosVolume(arguments_)
           : this.commandNotFound(command);
       case "as":
         return this.compileExecutable("asm", arguments_);
@@ -1265,7 +1456,15 @@ export class ShellCommandRuntime {
     if (command === "edit") return this.options.profile.id === "dos";
     if (command === "cpuinfo" || command === "free")
       return this.options.profile.id === "linux";
-    if (command === "cpu" || command === "mem" || command === "systeminfo")
+    if (
+      command === "cpu" ||
+      command === "doskey" ||
+      command === "mem" ||
+      command === "systeminfo" ||
+      command === "timer" ||
+      command === "tree" ||
+      command === "vol"
+    )
       return this.options.profile.id === "dos";
     if (
       command === "path" ||
@@ -1472,6 +1671,53 @@ export class ShellCommandRuntime {
     }
     if (parsed.format === undefined) return success(`${date.toISOString()}\n`);
     return success(`${formatDate(date, parsed.format)}\n`);
+  }
+
+  private dosTime(arguments_: readonly string[]): ShellCommandResult {
+    if (arguments_.length !== 0) {
+      return status(
+        2,
+        "",
+        "The host-backed system time cannot be changed.\r\n",
+      );
+    }
+    const date = new Date(this.options.clock.currentWallTimeMilliseconds());
+    if (!Number.isFinite(date.getTime()))
+      return status(1, "", "System time is unavailable.\r\n");
+    const centiseconds = String(
+      Math.floor(date.getUTCMilliseconds() / 10),
+    ).padStart(2, "0");
+    return success(
+      `Current time is ${formatDate(date, "%H:%M:%S")}.${centiseconds}\r\n`,
+    );
+  }
+
+  private dosHelp(arguments_: readonly string[]): ShellCommandResult {
+    if (arguments_.length > 1) {
+      return status(2, "", "Invalid number of parameters.\r\n");
+    }
+    if (arguments_[0] !== undefined) {
+      const name = arguments_[0].toUpperCase();
+      if (!this.isKnownCommand(name)) {
+        return status(1, "", `Help not available for ${name}.\r\n`);
+      }
+      return success(
+        `${name} is available in Computer System DOS. Use ${name} /? where supported.\r\n`,
+      );
+    }
+    return success(
+      [
+        "Computer System DOS 6.2 Command Help",
+        "",
+        "CD CHDIR CLS COPY DATE DEL DIR DOSKEY ECHO EDIT ERASE EXIT",
+        "MD MEM MKDIR MOVE PATH PROMPT RD REN RENAME RMDIR SET TIME",
+        "TIMER TREE TYPE VER VOL",
+        "",
+        "Development extensions: AS CC C++ BASIC BASICC LD NM OBJDUMP RUN VI",
+        "Type HELP command for a short availability summary.",
+        "",
+      ].join("\r\n"),
+    );
   }
 
   private sleep(arguments_: readonly string[]): ShellCommandResult {
@@ -1832,9 +2078,10 @@ export class ShellCommandRuntime {
       (option !== undefined &&
         option !== "/C" &&
         option !== "/D" &&
+        option !== "/F" &&
         option !== "/P")
     )
-      return usage("MEM [/C | /D | /P]");
+      return usage("MEM [/C | /D | /F | /P]");
     if (option === "/P")
       return failure("MEM", "/P paging is not supported by this terminal", 2);
     const layout = this.dosMemoryLayout();
@@ -1878,7 +2125,95 @@ export class ShellCommandRuntime {
         `UMB link: ${layout.umb ? "enabled" : "disabled"}`,
       );
     }
+    if (option === "/F") {
+      lines.push(
+        "",
+        "Free memory blocks:",
+        `Conventional      ${String(layout.conventional.free).padStart(10)} bytes`,
+        `Upper             ${String(layout.upper.free).padStart(10)} bytes`,
+        `Extended (XMS)    ${String(layout.extended.free).padStart(10)} bytes`,
+      );
+    }
     return success(`${lines.join("\r\n")}\r\n`);
+  }
+
+  private dosVolume(arguments_: readonly string[]): ShellCommandResult {
+    if (
+      arguments_.length > 1 ||
+      (arguments_[0] !== undefined && !/^C:?$/iu.test(arguments_[0]))
+    ) {
+      return usage("VOL [C:]");
+    }
+    return success(`${this.dosVolumeLines().join("\r\n")}\r\n`);
+  }
+
+  private dosVolumeLines(): readonly string[] {
+    const serial = Math.max(0, this.options.computerId)
+      .toString(16)
+      .toUpperCase()
+      .padStart(8, "0")
+      .slice(-8);
+    return [
+      " Volume in drive C is CS-DOS",
+      ` Volume Serial Number is ${serial.slice(0, 4)}-${serial.slice(4)}`,
+    ];
+  }
+
+  private dosTree(arguments_: readonly string[]): ShellCommandResult {
+    let path = ".";
+    let includeFiles = false;
+    for (const argument of arguments_) {
+      const option = argument.toUpperCase();
+      if (option === "/F") includeFiles = true;
+      else if (option === "/A") continue;
+      else if (path === ".") path = argument;
+      else return usage("TREE [path] [/F] [/A]");
+    }
+    const root = this.resolvePath(path);
+    if (!this.filesystem.isDirectory(root)) {
+      return failure("TREE", `${path}: not a directory`, 1);
+    }
+    const lines = [
+      "Folder PATH listing",
+      this.options.profile.pathDialect.display(root),
+    ];
+    const maximumEntries = 512;
+    const maximumDepth = 32;
+    let entries = 0;
+    let truncated = false;
+    const visit = (directory: string, prefix: string, depth: number): void => {
+      if (truncated) return;
+      const children = this.filesystem
+        .list(directory)
+        .map((name) => ({
+          name,
+          path: directory === "/" ? `/${name}` : `${directory}/${name}`,
+        }))
+        .filter(
+          ({ path: child }) =>
+            includeFiles || this.filesystem.isDirectory(child),
+        );
+      for (const [index, child] of children.entries()) {
+        if (entries >= maximumEntries || depth >= maximumDepth) {
+          truncated = true;
+          lines.push(`${prefix}... TREE limit reached`);
+          return;
+        }
+        entries += 1;
+        const last = index === children.length - 1;
+        const directoryChild = this.filesystem.isDirectory(child.path);
+        lines.push(`${prefix}+---${child.name.toUpperCase()}`);
+        if (directoryChild) {
+          visit(child.path, `${prefix}${last ? "    " : "|   "}`, depth + 1);
+        }
+      }
+    };
+    visit(root, "", 0);
+    return status(
+      truncated ? 1 : 0,
+      `${lines.join("\r\n")}\r\n`,
+      truncated ? "TREE: output or depth limit reached\r\n" : "",
+    );
   }
 
   private dosMemoryLayout(): DosMemoryLayout {
