@@ -217,6 +217,7 @@ describe("Computer System Linux shell and editor", (): void => {
   it("reports sandbox identity, deterministic time, history, and filesystem information", (): void => {
     let tick = 40;
     const filesystem = new InMemoryFilesystem();
+    let memoryReads = 0;
     const shell = new ShellSession(filesystem, {
       clock: {
         currentGameTime: (): {
@@ -234,7 +235,10 @@ describe("Computer System Linux shell and editor", (): void => {
         cpuModel: "cs486dx",
         memoryBytes: 2_097_152,
       },
-      memoryUsageBytes: (): number => 65_536,
+      memoryUsageBytes: (): number => {
+        memoryReads += 1;
+        return 65_536;
+      },
       ticksPerSecond: 20,
     });
 
@@ -268,12 +272,15 @@ describe("Computer System Linux shell and editor", (): void => {
     ]);
     expect(shell.submit("cpuinfo").lines).toContain("clock\t\t: 10 kHz");
     expect(shell.submit("free -h").lines[1]).toContain("2.0 MiB");
+    expect(memoryReads).toBe(1);
     expect(shell.submit("cat /proc/cpuinfo").lines).toContain(
       "model name\t: Computer System 486DX",
     );
-    expect(shell.submit("cat /proc/meminfo").lines).toContain(
-      "MemUsed:  65536 B",
-    );
+    const meminfo = shell.submit("cat /proc/meminfo").lines;
+    expect(meminfo).toContain("MemUsed:  851968 B");
+    expect(meminfo).toContain("KernelResident: 524288 B");
+    expect(meminfo).toContain("GuestRuntime: 65536 B");
+    expect(memoryReads).toBe(2);
     expect(shell.submit("ls /proc").lines[0]).toContain("cpuinfo");
     expect(shell.submit("CPU").exitCode).toBe(127);
     expect(

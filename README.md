@@ -277,16 +277,24 @@ pipeline stages, script depth/lines/iterations, and intermediate output are
 limited so shell work cannot become an unbounded server load path. This is a
 sandbox implementation and never invokes host Bash.
 
-`vi <path>` uses Normal, Insert, and Command modes and supports bounded cursor
-movement, `dd`, `x`, undo, `:w`, `:q`, `:wq`, `:wq!`, `:q!`, and Shift+ZZ.
-Python, shell, JSON/TOML tokens are highlighted, and indentation rainbow
-backgrounds are on by default. The native terminal remains 51x19; the Web
-Terminal negotiates a viewport up to 160x60 from the available screen and
-resizes `vi` with it. The browser subtracts terminal padding and fits both rows
-and columns, so the terminal surface does not expose an internal scrollbar. The
-browser coalesces up to 16 keys per relay, while the BDS boundary rejects
-batches above 32 keys. Tab performs bounded command/path completion through the
-same writer-authorized relay.
+`vi [path]` uses Normal, Insert, and Command modes. Bare `vi` opens a real
+`[No Name]` buffer; `:w path` or `:wq path` assigns its first file name, while
+`:w` without a name fails explicitly. Backspace on an empty `:` line returns to
+Normal mode. Bounded controls include `I`/`A`, `o`/`O`, `gg`/`G`, page movement,
+`dd`, `x`, undo, `:w`, `:q`, `:wq`, `:wq!`, `:q!`, Shift+ZZ, and `ZQ`. Python,
+shell, JSON/TOML tokens are highlighted, and indentation rainbow backgrounds are
+on by default. The native terminal remains 51x19; the Web Terminal negotiates a
+viewport up to 160x60 from the available screen and resizes `vi` with it. The
+browser subtracts terminal padding and fits both rows and columns, so the
+terminal surface does not expose an internal scrollbar. The browser coalesces up
+to 16 keys per relay, while the BDS boundary rejects batches above 32 keys. Tab
+performs bounded command/path completion through the same writer-authorized
+relay.
+
+The Web Terminal **Copy** button beside **Manual** copies an active terminal
+selection, or the visible fixed-cell screen when nothing is selected. It uses
+the Clipboard API when available and a synchronous browser copy fallback for LAN
+HTTP deployments; no polling or background clipboard work is performed.
 
 Computer snapshots remain canonical in Bedrock World Dynamic Properties, which
 BDS stores in the world's LevelDB. Clean persistence checks compare O(1)
@@ -329,13 +337,17 @@ machines install 2 MiB RAM; the Advanced Desktop installs 8 MiB. Aggregate
 runtime data raises `MemoryError` on overflow, while unreachable values are
 reclaimed during pressure checks. Linux exposes its 32-bit protected flat
 sandbox through `cpuinfo`, `free`, `/proc/cpuinfo`, and `/proc/meminfo`; paging,
-swap, and a process/MMU model are not claimed. DOS exposes `CPU`, `MEM`,
-`MEM /C`, `MEM /D`, and `SYSTEMINFO`. Its 2 MiB view accounts for 640 KiB
-conventional memory, bounded UMB/reserved regions, and XMS/HMA state configured
-by the modeled `HIMEM.SYS`, `EMM386.EXE NOEMS`, and `DOS=HIGH,UMB` directives.
-This is protected sandbox/v86 compatibility metadata, not native BIOS/DOS
-interrupt or `.COM` / `.EXE` emulation. RAM, persistent disk quota, collection
-size, and output bounds are independent limits.
+swap, and a process/MMU model are not claimed. Linux memory usage includes a
+bounded resident kernel, system-service, and buffer allowance in addition to
+dynamic guest-runtime bytes. DOS exposes `CPU`, `MEM`, `MEM /C`, `MEM /D`, and
+`SYSTEMINFO`. Its 2 MiB view accounts for 640 KiB conventional memory, bounded
+UMB/reserved regions, and XMS/HMA state configured by the modeled `HIMEM.SYS`,
+`EMM386.EXE NOEMS`, and `DOS=HIGH,UMB` directives. `MEM` and `MEM /C` separate
+DOS system/driver residency from guest runtime use while keeping the region
+totals internally consistent. This is protected sandbox/v86 compatibility
+metadata, not native BIOS/DOS interrupt or `.COM` / `.EXE` emulation. RAM,
+persistent disk quota, collection size, and output bounds are independent
+limits.
 
 The sandboxed CS486 toolchain adds real 32-bit `EAX` through `EBP` registers,
 checked little-endian linear memory, stack/call control flow, terminal CPU

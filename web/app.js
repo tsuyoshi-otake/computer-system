@@ -43,6 +43,7 @@ const elements = {
   errorDismiss: document.querySelector("#error-dismiss"),
   inputState: document.querySelector("#input-state"),
   accessState: document.querySelector("#access-state"),
+  copyButton: document.querySelector("#copy-button"),
   manualButton: document.querySelector("#manual-button"),
   manualDialog: document.querySelector("#manual-dialog"),
   manualToc: document.querySelector("#manual-toc"),
@@ -66,6 +67,7 @@ let reconnectGeneration = 0;
 let sessionClosed = false;
 let commandPending = false;
 let completionPending = false;
+let copyResetTimer = 0;
 let takeoverPending = false;
 let connectionState = "loading";
 let accessMode = "unknown";
@@ -210,6 +212,9 @@ elements.handoffForm.addEventListener("submit", (event) => {
 });
 elements.errorDismiss.addEventListener("click", () => {
   elements.errorDialog.close();
+});
+elements.copyButton.addEventListener("click", () => {
+  void copyTerminalText();
 });
 elements.manualButton.addEventListener("click", () => {
   if (elements.manualDialog.open) return;
@@ -549,10 +554,64 @@ function renderTerminal(payload) {
   elements.terminalStage.scrollTop = elements.terminalStage.scrollHeight;
 }
 
+async function copyTerminalText() {
+  const selection = window.getSelection();
+  const selectedInsideTerminal =
+    selection?.isCollapsed === false &&
+    elements.terminalOutput.contains(selection.anchorNode) &&
+    elements.terminalOutput.contains(selection.focusNode);
+  const text = selectedInsideTerminal
+    ? selection.toString()
+    : [...elements.terminalScreen.querySelectorAll(".terminal-row")]
+        .map((row) => (row.textContent ?? "").replace(/\s+$/u, ""))
+        .join("\n")
+        .replace(/\s+$/u, "");
+  if (text.length === 0) return showCopyState("EMPTY");
+  try {
+    if (navigator.clipboard?.writeText !== undefined) {
+      await navigator.clipboard.writeText(text);
+    } else {
+      const fallback = document.createElement("textarea");
+      fallback.value = text;
+      fallback.setAttribute("readonly", "");
+      fallback.style.position = "fixed";
+      fallback.style.opacity = "0";
+      document.body.append(fallback);
+      try {
+        fallback.select();
+        if (!document.execCommand("copy")) {
+          throw new Error("Copy command was rejected.");
+        }
+      } finally {
+        fallback.remove();
+      }
+    }
+    showCopyState("COPIED");
+  } catch {
+    showCopyState("FAILED");
+  }
+}
+
+function showCopyState(label) {
+  elements.copyButton.textContent = label;
+  clearTimeout(copyResetTimer);
+  copyResetTimer = setTimeout(() => {
+    elements.copyButton.textContent = "Copy";
+  }, 1_200);
+}
+
 function editorKey(event) {
   if (event.metaKey) return undefined;
   if (event.ctrlKey) {
     if (event.key === "[") return "Ctrl+[";
+    if (
+      event.key === "Home" ||
+      event.key === "End" ||
+      event.key === "ArrowLeft" ||
+      event.key === "ArrowRight"
+    ) {
+      return `Ctrl+${event.key}`;
+    }
     return [...event.key].length === 1
       ? `Ctrl+${event.key.toLowerCase()}`
       : undefined;

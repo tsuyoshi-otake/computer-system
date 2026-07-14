@@ -123,4 +123,75 @@ describe("ViSession", (): void => {
         .lines.some((line) => line.includes("vi closed")),
     ).toBe(true);
   });
+
+  it("opens without a path, leaves an empty command line with Backspace, and names on write", (): void => {
+    const direct = new ViSession(undefined, "");
+    direct.key(":");
+    direct.key("Backspace");
+    expect(direct.mode).toBe("normal");
+
+    const filesystem = new InMemoryFilesystem();
+    const shell = new ShellSession(filesystem);
+
+    const opened = shell.submit("vi");
+    expect(opened.terminalScreen).toBeDefined();
+    expect(screenText(opened)).toContain("[No Name]");
+    shell.keys([":"]);
+    expect(shell.keys(["Backspace"]).terminalScreen).toBeDefined();
+    shell.keys(["i", "h", "e", "l", "l", "o", "Escape"]);
+    const unnamed = shell.keys([":", "w", "Enter"]);
+    expect(screenText(unnamed)).toContain("No file name");
+
+    const saved = shell.keys([
+      ":",
+      "w",
+      "q",
+      " ",
+      "n",
+      "o",
+      "t",
+      "e",
+      ".",
+      "t",
+      "x",
+      "t",
+      "Enter",
+    ]);
+    expect(saved.resetTerminal).toBe(true);
+    expect(filesystem.readFile("/home/computer/note.txt")).toBe("hello");
+  });
+
+  it("supports common normal-mode entry, navigation, discard, and insert line joining", (): void => {
+    const vi = new ViSession("demo.txt", "  one\ntwo");
+    vi.key("I");
+    vi.key("X");
+    vi.key("Escape");
+    vi.key("G");
+    vi.key("A");
+    vi.key("!");
+    vi.key("Escape");
+    vi.key("0");
+    vi.key("i");
+    vi.key("Backspace");
+    expect(vi.contents).toBe("  Xonetwo!");
+    vi.key("Escape");
+    vi.key("g");
+    vi.key("g");
+    vi.key("O");
+    vi.key("Escape");
+    expect(vi.contents.startsWith("\n")).toBe(true);
+    vi.key("Z");
+    expect(vi.key("Q")).toMatchObject({
+      kind: "closed",
+      discardedChanges: true,
+    });
+  });
 });
+
+function screenText(result: ReturnType<ShellSession["submit"]>): string {
+  return (
+    result.terminalScreen?.rows
+      .map((row) => row.map((cell) => cell.character).join(""))
+      .join("\n") ?? ""
+  );
+}

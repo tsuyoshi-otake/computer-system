@@ -119,6 +119,13 @@ The July 2026 live GDK verification established the following:
   command text and invokes the bounded interrupt only without a selection;
   bounded plain-text paste never auto-submits; Up and Down navigate local
   command history.
+- The header Copy action copies a terminal selection or the visible cell grid on
+  demand and has no polling path. Bare `vi` opens `[No Name]`, an empty `:` line
+  exits with Backspace, and `:w path` assigns the first file name. DOS EDIT
+  supports bounded document/word navigation and Ctrl+Y line deletion.
+- Memory reports add bounded OS residency to dynamic guest usage: CS-Linux
+  separates kernel, services, buffers, and guest runtime; CS-DOS separates its
+  system/driver footprint while preserving conventional/UMB/XMS totals.
 - `EDIT` is a DOS-profile-only full-screen editor. Its blue viewport, five
   menus, insert/overwrite state, bounded undo/search, save feedback, and dirty
   Save/Discard/Cancel dialog are rendered from the terminal model. Linux rejects

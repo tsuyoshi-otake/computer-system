@@ -188,6 +188,7 @@ export class DosEditSession {
     if (key === "F10") return this.openMenu("file");
     if (normalized === "ctrl+f") return this.beginSearch();
     if (normalized === "ctrl+z") return this.undoLast();
+    if (normalized === "ctrl+y") return this.deleteLine();
     if (normalized.startsWith("alt+") && normalized.length === 5) {
       return this.openMenuByMnemonic(normalized.at(-1) ?? "");
     }
@@ -195,7 +196,15 @@ export class DosEditSession {
       this.insertMode = !this.insertMode;
       return this.continue(this.insertMode ? "Insert mode" : "Overwrite mode");
     }
-    if (key === "ArrowLeft") this.moveLeft();
+    if (key === "Ctrl+Home") {
+      this.cursorLine = 0;
+      this.cursorColumn = 0;
+    } else if (key === "Ctrl+End") {
+      this.cursorLine = this.lines.length - 1;
+      this.cursorColumn = this.currentCharacters().length;
+    } else if (key === "Ctrl+ArrowLeft") this.moveWordLeft();
+    else if (key === "Ctrl+ArrowRight") this.moveWordRight();
+    else if (key === "ArrowLeft") this.moveLeft();
     else if (key === "ArrowRight") this.moveRight();
     else if (key === "ArrowUp") this.cursorLine -= 1;
     else if (key === "ArrowDown") this.cursorLine += 1;
@@ -449,6 +458,20 @@ export class DosEditSession {
     return this.continue("Undo");
   }
 
+  private deleteLine(): EditorResult {
+    const current = this.lines[this.cursorLine] ?? "";
+    if (this.lines.length === 1) {
+      this.rememberLines(this.cursorLine, 1, [current]);
+      this.lines[0] = "";
+    } else {
+      this.rememberLines(this.cursorLine, 0, [current]);
+      this.lines.splice(this.cursorLine, 1);
+    }
+    this.cursorColumn = 0;
+    this.clampCursor();
+    return this.changed();
+  }
+
   private rememberLines(
     index: number,
     deleteCount: number,
@@ -486,6 +509,25 @@ export class DosEditSession {
       this.cursorLine += 1;
       this.cursorColumn = 0;
     }
+  }
+
+  private moveWordLeft(): void {
+    if (this.cursorColumn === 0) {
+      this.moveLeft();
+      return;
+    }
+    const prefix = this.currentCharacters()
+      .slice(0, this.cursorColumn)
+      .join("");
+    this.cursorColumn = /\S+\s*$/u.exec(prefix)?.index ?? 0;
+  }
+
+  private moveWordRight(): void {
+    const characters = this.currentCharacters();
+    const suffix = characters.slice(this.cursorColumn).join("");
+    const match = /^\S*\s*/u.exec(suffix)?.[0] ?? "";
+    if (match.length === 0) this.moveRight();
+    else this.cursorColumn += [...match].length;
   }
 
   private openMenu(name: MenuName): EditorResult {

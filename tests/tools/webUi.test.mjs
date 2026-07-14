@@ -84,13 +84,18 @@ describe("Web terminal UI", () => {
   });
 
   it("preserves native copy selections and normalizes bounded paste", async () => {
-    const [css, script, inputHelpers] = await Promise.all([
+    const [html, css, script, inputHelpers] = await Promise.all([
+      source("web/index.html"),
       source("web/styles.css"),
       source("web/app.js"),
       source("web/terminal-input.js"),
     ]);
 
     expect(css).toContain("user-select: text");
+    expect(html).toContain('id="copy-button"');
+    expect(html.indexOf('id="copy-button"')).toBeLessThan(
+      html.indexOf('id="manual-button"'),
+    );
     expect(css).toContain(".terminal-output ::selection");
     expect(script).toContain(
       "hasCopySelection(elements.commandInput, window.getSelection())",
@@ -100,6 +105,9 @@ describe("Web terminal UI", () => {
     );
     expect(script).toContain('addEventListener("paste"');
     expect(script).toContain("insertPastedCommand(");
+    expect(script).toContain("copyTerminalText()");
+    expect(script).toContain("navigator.clipboard?.writeText");
+    expect(script).toContain('document.execCommand("copy")');
     expect(inputHelpers).toContain('replace(/\\r\\n?|\\n/gu, " ")');
   });
 

@@ -72,6 +72,7 @@ interface DosMemoryLayout {
   readonly extended: MemoryRegion;
   readonly reserved: MemoryRegion;
   readonly runtimeBytes: number;
+  readonly systemBytes: number;
   readonly total: MemoryRegion;
   readonly umb: boolean;
   readonly upper: MemoryRegion;
@@ -1335,7 +1336,10 @@ export class ShellCommandRuntime {
 
   private linuxMemoryInfo(): string {
     const total = this.options.hardware.memoryBytes;
-    const used = this.usedMemoryBytes();
+    const memory = this.linuxMemorySnapshot();
+    const resident = memory.resident;
+    const runtime = memory.guest;
+    const used = memory.used;
     const free = total - used;
     return (
       [
@@ -1343,7 +1347,10 @@ export class ShellCommandRuntime {
         `MemUsed:  ${used} B`,
         `MemFree:  ${free} B`,
         `MemAvailable: ${free} B`,
-        `Runtime:  ${used} B`,
+        `KernelResident: ${resident.kernel} B`,
+        `SystemServices: ${resident.services} B`,
+        `Buffers: ${resident.buffers} B`,
+        `GuestRuntime: ${runtime} B`,
         "SwapTotal: 0 B",
         "SwapFree:  0 B",
         "MemoryModel: 32-bit protected flat sandbox",
@@ -1352,10 +1359,55 @@ export class ShellCommandRuntime {
   }
 
   private usedMemoryBytes(): number {
+    const guest = this.guestRuntimeBytes();
+    if (this.options.profile.id === "dos") return guest;
+    return this.linuxMemorySnapshot(guest).used;
+  }
+
+  private guestRuntimeBytes(): number {
     return Math.min(
       this.options.hardware.memoryBytes,
       Math.max(0, Math.floor(this.options.memoryUsageBytes())),
     );
+  }
+
+  private linuxMemorySnapshot(guest = this.guestRuntimeBytes()): {
+    readonly guest: number;
+    readonly resident: {
+      readonly buffers: number;
+      readonly kernel: number;
+      readonly services: number;
+    };
+    readonly used: number;
+  } {
+    const resident = this.linuxResidentMemory(guest);
+    return {
+      guest,
+      resident,
+      used: Math.min(
+        this.options.hardware.memoryBytes,
+        guest + resident.kernel + resident.services + resident.buffers,
+      ),
+    };
+  }
+
+  private linuxResidentMemory(guest: number): {
+    readonly buffers: number;
+    readonly kernel: number;
+    readonly services: number;
+  } {
+    const kib = 1_024;
+    const total = this.options.hardware.memoryBytes;
+    let available = Math.max(0, total - guest);
+    const take = (target: number): number => {
+      const bytes = Math.min(available, target);
+      available -= bytes;
+      return bytes;
+    };
+    const kernel = take(384 * kib + Math.min(384 * kib, total / 16));
+    const services = take(192 * kib);
+    const buffers = take(Math.min(256 * kib, total / 32));
+    return { buffers, kernel, services };
   }
 
   private uptimeSeconds(): number {
@@ -1799,6 +1851,7 @@ export class ShellCommandRuntime {
       this.dosMemoryRow("Total memory", layout.total),
       "",
       `${String(this.options.hardware.memoryBytes).padStart(12)} bytes total memory`,
+      `${String(layout.systemBytes).padStart(12)} bytes DOS system and drivers`,
       `${String(layout.runtimeBytes).padStart(12)} bytes guest runtime`,
       `${String(layout.conventional.free).padStart(12)} bytes largest executable program size`,
       `${String(layout.upper.free).padStart(12)} bytes largest free upper memory block`,
@@ -1807,7 +1860,9 @@ export class ShellCommandRuntime {
       lines.push(
         "",
         "Modules using memory below 1 MB:",
+        `DOS KERNEL     ${String(16 * 1_024).padStart(10)}  Conventional`,
         `COMMAND        ${String(layout.commandBytes).padStart(10)}  ${layout.dosHigh ? "Upper" : "Conventional"}`,
+        `HIMEM/EMM386   ${String(16 * 1_024).padStart(10)}  Conventional`,
         `CS-RUNTIME     ${String(layout.runtimeBytes).padStart(10)}  Conventional`,
       );
     }
@@ -1839,7 +1894,7 @@ export class ShellCommandRuntime {
     const dosHigh = xms && this.environment.get("CONFIG_DOS_HIGH") === "ON";
     const upperTotal = umb ? Math.min(upperPhysical, 128 * kib) : 0;
     const commandBytes = 32 * kib;
-    const runtimeBytes = this.usedMemoryBytes();
+    const runtimeBytes = this.guestRuntimeBytes();
     const conventionalUsed = Math.min(
       conventionalTotal,
       runtimeBytes + (dosHigh ? 32 * kib : 64 * kib),
@@ -1866,6 +1921,11 @@ export class ShellCommandRuntime {
       dosHigh,
       emm386,
       runtimeBytes,
+      systemBytes:
+        regions.conventional.used -
+        runtimeBytes +
+        regions.upper.used +
+        regions.extended.used,
       umb,
       xms,
     };

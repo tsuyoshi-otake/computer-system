@@ -25,6 +25,7 @@ export class ViSession {
   private cursorColumn = 0;
   private cursorLine = 0;
   private dirty = false;
+  private fileNameValue: string | undefined;
   private modeValue: ViMode = "normal";
   private pendingNormal = "";
   private stateValue: ViState = "editing";
@@ -32,13 +33,14 @@ export class ViSession {
   private viewTop = 0;
 
   constructor(
-    readonly fileName: string,
+    fileName: string | undefined,
     contents: string,
     private widthValue = 51,
     private heightValue = 19,
   ) {
     if (widthValue < 20 || heightValue < 6)
       throw new RangeError("vi terminal is too small");
+    this.fileNameValue = fileName;
     this.lines = contents.replaceAll("\r\n", "\n").split("\n");
     if (this.lines.length === 0) this.lines.push("");
   }
@@ -71,12 +73,20 @@ export class ViSession {
     return this.lines.join("\n");
   }
 
+  get fileName(): string | undefined {
+    return this.fileNameValue;
+  }
+
   screen(): ViScreen {
     this.ensureVisible();
     const contentRows = this.height - 3;
     const rows: HighlightedCell[][] = [];
     rows.push(
-      this.plainRow(`VI  ${this.fileName}${this.dirty ? " [+]" : ""}`, 15, 11),
+      this.plainRow(
+        `VI  ${this.fileNameValue ?? "[No Name]"}${this.dirty ? " [+]" : ""}`,
+        15,
+        11,
+      ),
     );
     for (let offset = 0; offset < contentRows; offset += 1) {
       const lineIndex = this.viewTop + offset;
@@ -88,7 +98,7 @@ export class ViSession {
       const cells = [
         ...this.plainCells(number, lineIndex === this.cursorLine ? 0 : 8, 15),
         ...highlightLine(
-          this.fileName,
+          this.fileNameValue ?? "",
           this.lines[lineIndex] ?? "",
           this.width - number.length,
         ),
@@ -119,7 +129,8 @@ export class ViSession {
     return this.normalKey(key);
   }
 
-  completeSave(closeAfter: boolean): ViResult {
+  completeSave(closeAfter: boolean, fileName?: string): ViResult {
+    if (fileName !== undefined) this.fileNameValue = fileName;
     this.dirty = false;
     this.status = `Wrote ${this.lines.length} lines`;
     if (!closeAfter) return { kind: "continue", screen: this.screen() };
@@ -141,11 +152,22 @@ export class ViSession {
       this.modeValue = "insert";
       return this.continue("INSERT");
     }
+    if (key === "I") {
+      this.cursorColumn =
+        /^\s*/u.exec(this.lines[this.cursorLine] ?? "")?.[0].length ?? 0;
+      this.modeValue = "insert";
+      return this.continue("INSERT");
+    }
     if (key === "a") {
       this.cursorColumn = Math.min(
         this.currentCharacters().length,
         this.cursorColumn + 1,
       );
+      this.modeValue = "insert";
+      return this.continue("INSERT");
+    }
+    if (key === "A") {
+      this.cursorColumn = this.currentCharacters().length;
       this.modeValue = "insert";
       return this.continue("INSERT");
     }
@@ -158,6 +180,19 @@ export class ViSession {
       });
       this.lines.splice(this.cursorLine + 1, 0, "");
       this.cursorLine += 1;
+      this.cursorColumn = 0;
+      this.dirty = true;
+      this.modeValue = "insert";
+      return this.continue("INSERT");
+    }
+    if (key === "O") {
+      this.remember({
+        deleteCount: 1,
+        index: this.cursorLine,
+        kind: "splice",
+        lines: [],
+      });
+      this.lines.splice(this.cursorLine, 0, "");
       this.cursorColumn = 0;
       this.dirty = true;
       this.modeValue = "insert";
@@ -222,6 +257,25 @@ export class ViSession {
       this.pendingNormal = "Z";
       return this.continue("Z");
     }
+    if (key === "Q" && this.pendingNormal === "Z") {
+      this.pendingNormal = "";
+      this.stateValue = "closed";
+      return {
+        kind: "closed",
+        discardedChanges: this.dirty,
+        screen: this.screen(),
+      };
+    }
+    if (key === "g") {
+      if (this.pendingNormal === "g") {
+        this.pendingNormal = "";
+        this.cursorLine = 0;
+        this.cursorColumn = 0;
+        return this.continue("Top");
+      }
+      this.pendingNormal = "g";
+      return this.continue("g");
+    }
     this.pendingNormal = "";
     if (key === "h" || key === "ArrowLeft") this.cursorColumn -= 1;
     else if (key === "l" || key === "ArrowRight") this.cursorColumn += 1;
@@ -230,6 +284,11 @@ export class ViSession {
     else if (key === "0" || key === "Home") this.cursorColumn = 0;
     else if (key === "$" || key === "End")
       this.cursorColumn = this.currentCharacters().length;
+    else if (key === "G") {
+      this.cursorLine = this.lines.length - 1;
+      this.cursorColumn = 0;
+    } else if (key === "PageUp") this.cursorLine -= this.height - 3;
+    else if (key === "PageDown") this.cursorLine += this.height - 3;
     else return this.continue("NORMAL");
     this.clampCursor();
     return this.continue(`Line ${this.cursorLine + 1}`);
@@ -275,6 +334,19 @@ export class ViSession {
         this.lines[this.cursorLine] = characters.join("");
         this.cursorColumn -= 1;
         this.dirty = true;
+      } else if (this.cursorLine > 0) {
+        const previous = this.lines[this.cursorLine - 1] ?? "";
+        const current = this.lines[this.cursorLine] ?? "";
+        this.remember({
+          deleteCount: 1,
+          index: this.cursorLine - 1,
+          kind: "splice",
+          lines: [previous, current],
+        });
+        this.lines.splice(this.cursorLine - 1, 2, `${previous}${current}`);
+        this.cursorLine -= 1;
+        this.cursorColumn = [...previous].length;
+        this.dirty = true;
       }
       return this.continue("INSERT");
     }
@@ -290,12 +362,16 @@ export class ViSession {
   }
 
   private commandKey(key: string): ViResult {
-    if (key === "Escape") {
+    if (key === "Escape" || key === "Ctrl+[") {
       this.modeValue = "normal";
       this.command = "";
       return this.continue("NORMAL");
     }
     if (key === "Backspace") {
+      if (this.command.length === 0) {
+        this.modeValue = "normal";
+        return this.continue("NORMAL");
+      }
       this.command = [...this.command].slice(0, -1).join("");
       return this.continue("COMMAND");
     }
@@ -307,11 +383,13 @@ export class ViSession {
     const command = this.command.trim();
     this.command = "";
     this.modeValue = "normal";
-    if (command === "w" || command === "wq" || command === "wq!") {
+    const write = /^(w|wq!?|x|xit)(?:\s+(.+))?$/u.exec(command);
+    if (write !== null) {
       return {
         kind: "save",
-        closeAfter: command !== "w",
+        closeAfter: write[1] !== "w",
         contents: this.contents,
+        ...(write[2] === undefined ? {} : { fileName: write[2] }),
         screen: this.screen(),
       };
     }

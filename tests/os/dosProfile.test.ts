@@ -53,6 +53,11 @@ describe("DOS profile contract", (): void => {
     expect(shell.submit("MEM /C").lines).toContain(
       "       65536 bytes guest runtime",
     );
+    expect(shell.submit("MEM /C").lines).toContain(
+      "      131072 bytes DOS system and drivers",
+    );
+    expect(shell.submit("MEM /C").stdout).toContain("DOS KERNEL");
+    expect(shell.submit("MEM /C").stdout).toContain("HIMEM/EMM386");
     expect(shell.submit("MEM /D").lines).toContain(
       "CPU mode: protected sandbox",
     );

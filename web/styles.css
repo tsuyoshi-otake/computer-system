@@ -169,7 +169,7 @@ h1 {
   gap: 12px;
 }
 
-.manual-button {
+.topbar-button {
   min-height: 30px;
   padding-inline: 12px;
   border-color: var(--line);
@@ -911,7 +911,7 @@ dialog form {
     padding-left: 0;
   }
 
-  .manual-button {
+  .topbar-button {
     min-width: auto;
     padding-inline: 8px;
   }

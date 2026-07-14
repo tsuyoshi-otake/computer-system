@@ -903,12 +903,16 @@ export class ShellSession {
   }
 
   private startVi(arguments_: readonly string[]): ShellCommandResult {
-    if (arguments_.length !== 1) return commandUsage("vi <path>");
-    const path = this.commands.resolvePath(arguments_[0]!);
+    if (arguments_.length > 1) return commandUsage("vi [path]");
+    const path =
+      arguments_[0] === undefined
+        ? undefined
+        : this.commands.resolvePath(arguments_[0]);
     try {
-      const existing = this.filesystem.exists(path)
-        ? this.commands.readFile(path)
-        : "";
+      const existing =
+        path !== undefined && this.filesystem.exists(path)
+          ? this.commands.readFile(path)
+          : "";
       this.vi = new ViSession(
         path,
         existing,
@@ -938,8 +942,13 @@ export class ShellSession {
     if (vi === undefined) throw new Error("vi state is unavailable");
     if (result.kind === "save") {
       try {
-        this.commands.writeFile(vi.fileName, result.contents);
-        return this.viResult(vi.completeSave(result.closeAfter));
+        const path =
+          result.fileName === undefined
+            ? vi.fileName
+            : this.commands.resolvePath(result.fileName);
+        if (path === undefined) throw new Error("No file name");
+        this.commands.writeFile(path, result.contents);
+        return this.viResult(vi.completeSave(result.closeAfter, path));
       } catch (error: unknown) {
         return this.viResult(vi.failSave(message(error)));
       }

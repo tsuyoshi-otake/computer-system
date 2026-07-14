@@ -35,6 +35,14 @@ Verify lifecycle and persistence:
   Linux Computer, verify `edit` is unavailable and use `vi /startup.py`. Also
   run bare `EDIT`, type text, press F2, and verify `C:\NONAME.TXT` is created
   without horizontal gaps between the blue editor rows.
+- Run bare `vi`; confirm `[No Name]` is displayed. Enter and erase a `:`
+  command, then press Backspace once more and confirm Normal mode returns.
+  Confirm `:w` reports no file name, then `:wq note.txt` saves and closes.
+  Exercise `I`, `A`, `O`, `gg`, `G`, `ZZ`, and `ZQ`. In DOS EDIT verify
+  Ctrl+Home/End, Ctrl+Left/Right, and Ctrl+Y with Ctrl+Z undo.
+- Select part of the Web Terminal and press Copy beside Manual; confirm only the
+  selection is copied. Clear the selection, press Copy again, and confirm the
+  visible terminal grid is copied without padded trailing cells.
 - Break the Computer, confirm exactly one non-stackable item is returned, place
   it elsewhere, and confirm its numeric computer ID and file remain unchanged.
 - Reload the world and confirm `startup.py` runs from a fresh VM.
@@ -325,8 +333,14 @@ does not migrate the previous sequential `computer-N` registry.
     press Escape, and run `:wq`. Confirm Normal/Insert/Command states, Python
     token colors, four repeating indentation background colors, save, shell
     restoration, and `cat`/reopen contents. Repeat `:q` with dirty contents and
-    confirm it blocks; use `:q!` and confirm discard.
-18. Restart the Computer. Confirm `/home/computer/demo.py` and `/etc` survive,
+    confirm it blocks; use `:q!` and confirm discard. Repeat with bare `vi`,
+    `:w demo2.py`, empty-command Backspace, `gg`/`G`, and `ZZ`/`ZQ`.
+18. Run `free` and `/proc/meminfo`; confirm used memory exceeds guest runtime
+    and the kernel, services, buffers, and guest fields sum to the reported
+    usage. On CS-DOS run `MEM` and `MEM /C`; confirm DOS system/driver plus
+    guest runtime accounting agrees with the conventional, upper, reserved, and
+    XMS region total.
+19. Restart the Computer. Confirm `/home/computer/demo.py` and `/etc` survive,
     `/tmp` is empty, and BDS logs contain no persistence failure. Stop BDS
     before taking a backup of the world LevelDB; restore the copy and confirm
     the latest complete generation loads.

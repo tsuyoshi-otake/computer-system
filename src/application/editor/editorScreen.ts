@@ -10,6 +10,7 @@ export type EditorResult =
   | {
       readonly closeAfter: boolean;
       readonly contents: string;
+      readonly fileName?: string;
       readonly kind: "save";
       readonly screen: EditorScreen;
     }

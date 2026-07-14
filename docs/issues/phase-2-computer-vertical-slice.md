@@ -309,3 +309,34 @@ checks in `docs/manual-verification.md`.
 `Expect:` Headless probes complete without new diagnostics; client-visible
 orientation, password masking, distance pause/resume, and gap-free EDIT
 rendering match the documented states.
+
+## July 2026 editor fidelity, copy action, and OS memory residency
+
+Bare `vi` now opens a `[No Name]` buffer. An empty command line exits to Normal
+mode with Backspace, `:w path` assigns the first name, and common bounded Normal
+mode operations include `I`/`A`, `o`/`O`, `gg`/`G`, page movement, `ZZ`, and
+`ZQ`. Insert-mode Backspace joins lines at column zero. DOS EDIT adds document
+jumps, word movement, and Ctrl+Y line deletion with bounded undo.
+
+The Web Terminal header places Copy beside Manual. It copies a terminal
+selection or, without a selection, the visible fixed-cell screen. Clipboard work
+occurs only on a click and has a LAN-HTTP fallback; it creates no polling or
+resident background work.
+
+Memory accounting now separates OS residency from dynamic guest runtime in O(1).
+CS-Linux reports bounded kernel, services, buffers, and guest bytes. CS-DOS
+reports system/driver bytes separately while retaining internally consistent
+conventional, upper, reserved, and XMS totals.
+
+`Verify:` Run `npm run validate`.
+
+`Expect:` Formatting, lint, type checking, editor/UI/OS memory tests, all host
+tests, and the production pack build pass.
+
+`Verify:` Follow the bare-vi, DOS EDIT keys, Copy button, `free`,
+`/proc/meminfo`, `MEM`, and `MEM /C` checks in `docs/manual-verification.md` on
+the preserved real client/server runtime.
+
+`Expect:` Editor modes and file naming match the manual, Copy returns the
+selection or visible screen, and displayed memory totals include OS overhead
+without double-counting guest runtime.

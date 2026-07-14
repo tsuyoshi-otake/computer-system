@@ -9,6 +9,21 @@ function text(row: readonly { readonly character: string }[]): string {
 }
 
 describe("DosEditSession", (): void => {
+  it("supports document jumps, word movement, and Ctrl+Y line deletion", (): void => {
+    const editor = new DosEditSession("KEYS.TXT", "one two\nthree four");
+
+    editor.key("Ctrl+End");
+    editor.key("Ctrl+ArrowLeft");
+    editor.key("Ctrl+Y");
+    expect(editor.contents).toBe("one two");
+    editor.key("Ctrl+Z");
+    expect(editor.contents).toBe("one two\nthree four");
+    editor.key("Ctrl+Home");
+    editor.key("Ctrl+ArrowRight");
+    editor.key("X");
+    expect(editor.contents).toBe("one Xtwo\nthree four");
+  });
+
   it("opens an untitled NONAME.TXT buffer when EDIT has no argument", (): void => {
     const filesystem = new InMemoryFilesystem();
     const shell = new ShellSession(filesystem, { osProfile: "dos" });
