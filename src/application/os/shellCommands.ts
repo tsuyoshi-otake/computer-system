@@ -12,11 +12,20 @@ import {
   type Cs486Executable,
 } from "../../domain/cpu/cs486.js";
 import { cpuCyclesToMicroseconds } from "../../domain/cpu/timing.js";
-import { assembleCs486 } from "../toolchain/cs486Assembler.js";
 import {
+  assembleCs486,
+  assembleCs486Object,
+} from "../toolchain/cs486Assembler.js";
+import {
+  validateCs486Object,
+  type Cs486Object,
+} from "../../domain/cpu/cs486Object.js";
+import {
+  compileCs486Object,
   compileCs486Source,
   type Cs486SourceLanguage,
 } from "../toolchain/highLevelCompilers.js";
+import { linkCs486Objects } from "../toolchain/cs486Linker.js";
 
 export type ShellAction = "clear" | "reboot" | "shutdown";
 
@@ -116,6 +125,8 @@ export const shellCommandNames = [
   "basicc",
   "run",
   "objdump",
+  "ld",
+  "nm",
 ] as const;
 
 const knownCommands = new Set<string>(shellCommandNames);
@@ -272,7 +283,7 @@ export class ShellCommandRuntime {
               ? "hardware: CPU MEM SYSTEMINFO"
               : "hardware: cpuinfo free /proc/cpuinfo /proc/meminfo",
             "utility: history time sleep seq cut test [",
-            "toolchain: as cc c++ basic basicc run objdump",
+            "toolchain: as cc c++ basic basicc ld nm run objdump",
             "syntax: |  >  >>  <  &&  ||  ;  '...'  \"...\"  $VAR  $?",
           ].join("\n") + "\n",
         );
@@ -378,6 +389,10 @@ export class ShellCommandRuntime {
         return this.runExecutable(arguments_);
       case "objdump":
         return this.objectDump(arguments_);
+      case "ld":
+        return this.linkObjects(arguments_);
+      case "nm":
+        return this.listSymbols(arguments_);
       case "uptime":
         return arguments_.length === 0
           ? success(`${this.uptimeSeconds().toFixed(2)} seconds\n`)
@@ -1234,35 +1249,90 @@ export class ShellCommandRuntime {
     language: Cs486SourceLanguage | "asm",
     arguments_: readonly string[],
   ): ShellCommandResult {
-    if (arguments_.length < 1 || arguments_.length > 3)
-      return usage(
-        `${language === "asm" ? "as" : language} <source> [-o output]`,
-      );
-    const sourcePath = arguments_[0]!;
-    const outputIndex = arguments_.indexOf("-o");
+    const name = language === "asm" ? "as" : language;
+    const compileOnly = arguments_.filter(
+      (argument) => argument === "-c",
+    ).length;
+    if (compileOnly > 1) return usage(`${name} [-c] <source> [-o output]`);
+    const filtered = arguments_.filter((argument) => argument !== "-c");
+    const outputIndex = filtered.indexOf("-o");
     if (
-      (outputIndex >= 0 && (outputIndex !== 1 || arguments_.length !== 3)) ||
-      (outputIndex < 0 && arguments_.length !== 1)
+      filtered.length < 1 ||
+      filtered.length > 3 ||
+      (outputIndex >= 0 && (outputIndex !== 1 || filtered.length !== 3)) ||
+      (outputIndex < 0 && filtered.length !== 1)
     )
-      return usage(
-        `${language === "asm" ? "as" : language} <source> [-o output]`,
-      );
-    const outputPath = outputIndex < 0 ? "a.out" : arguments_[2]!;
+      return usage(`${name} [-c] <source> [-o output]`);
+    const sourcePath = filtered[0]!;
+    const outputPath =
+      outputIndex < 0 ? (compileOnly === 1 ? "a.o" : "a.out") : filtered[2]!;
     const source = this.readFile(sourcePath);
     if (source.length > 128_000)
       return failure(language, "source limit exceeded");
-    const executable =
-      language === "asm"
-        ? assembleCs486(source)
-        : compileCs486Source(language, source);
-    this.writeFile(outputPath, `CS486\n${JSON.stringify(executable)}`);
+    const output =
+      compileOnly === 1
+        ? language === "asm"
+          ? assembleCs486Object(source)
+          : compileCs486Object(language, source)
+        : language === "asm"
+          ? assembleCs486(source)
+          : compileCs486Source(language, source);
+    const object = output.format === "cs486-object";
+    this.writeFile(
+      outputPath,
+      `${object ? "CS486OBJ" : "CS486"}\n${JSON.stringify(output)}`,
+    );
     return {
       exitCode: 0,
       stderr: "",
       stdout: "",
       cpuCycles: Math.max(
         1,
-        Math.ceil(source.length / 4) + executable.instructions.length * 4,
+        Math.ceil(source.length / 4) +
+          (object
+            ? output.assembly.split("\n").length * 2
+            : output.instructions.length * 4),
+      ),
+    };
+  }
+
+  private linkObjects(arguments_: readonly string[]): ShellCommandResult {
+    const outputIndex = arguments_.indexOf("-o");
+    const entryIndex = arguments_.indexOf("--entry");
+    const consumed = new Set<number>();
+    let outputPath = "a.out";
+    let entry: string | undefined;
+    if (outputIndex >= 0) {
+      if (arguments_[outputIndex + 1] === undefined)
+        return usage("ld <objects...> [-o output] [--entry symbol]");
+      outputPath = arguments_[outputIndex + 1]!;
+      consumed.add(outputIndex);
+      consumed.add(outputIndex + 1);
+    }
+    if (entryIndex >= 0) {
+      if (arguments_[entryIndex + 1] === undefined)
+        return usage("ld <objects...> [-o output] [--entry symbol]");
+      entry = arguments_[entryIndex + 1]!;
+      consumed.add(entryIndex);
+      consumed.add(entryIndex + 1);
+    }
+    const paths = arguments_.filter((_argument, index) => !consumed.has(index));
+    if (paths.length === 0 || paths.length > 64)
+      return usage("ld <objects...> [-o output] [--entry symbol]");
+    const objects = paths.map((path) => this.readCs486Object(path));
+    const executable = linkCs486Objects(objects, { entry });
+    this.writeFile(outputPath, `CS486\n${JSON.stringify(executable)}`);
+    return {
+      exitCode: 0,
+      stderr: "",
+      stdout: "",
+      cpuCycles: Math.min(
+        1_000_000,
+        objects.reduce(
+          (total, object) =>
+            total + object.symbols.length * 4 + object.relocations.length * 4,
+          executable.instructions.length * 4,
+        ),
       ),
     };
   }
@@ -1317,10 +1387,28 @@ export class ShellCommandRuntime {
   }
 
   private objectDump(arguments_: readonly string[]): ShellCommandResult {
-    if (arguments_.length !== 1) return usage("objdump <executable>");
+    if (arguments_.length !== 1) return usage("objdump <object|executable>");
     const encoded = this.readFile(arguments_[0]!);
+    if (encoded.startsWith("CS486OBJ\n")) {
+      const object = this.parseCs486Object(encoded, arguments_[0]!);
+      return success(
+        [
+          `format ${object.format} v${String(object.version)} ${object.language}`,
+          `data ${String(object.dataBytes)} bytes`,
+          ...object.symbols.map(
+            (symbol) =>
+              `symbol ${symbol.binding.padEnd(9)} ${symbol.name}${symbol.offset === undefined ? "" : ` @${String(symbol.offset)}`}`,
+          ),
+          ...object.relocations.map(
+            (relocation) =>
+              `reloc ${relocation.type} @${String(relocation.instructionOffset)} -> ${relocation.symbol}`,
+          ),
+          object.assembly,
+        ].join("\n") + "\n",
+      );
+    }
     if (!encoded.startsWith("CS486\n"))
-      return failure(arguments_[0]!, "not a CS486 executable");
+      return failure(arguments_[0]!, "not a CS486 object or executable");
     const executable: unknown = JSON.parse(encoded.slice(6));
     validateCs486Executable(executable);
     return success(
@@ -1331,6 +1419,51 @@ export class ShellCommandRuntime {
         )
         .join("\n") + "\n",
     );
+  }
+
+  private listSymbols(arguments_: readonly string[]): ShellCommandResult {
+    if (arguments_.length !== 1) return usage("nm <object|executable>");
+    const encoded = this.readFile(arguments_[0]!);
+    if (encoded.startsWith("CS486OBJ\n")) {
+      const object = this.parseCs486Object(encoded, arguments_[0]!);
+      return success(
+        object.symbols
+          .map(
+            (symbol) =>
+              `${symbol.offset?.toString(16).padStart(8, "0") ?? "        "} ${symbol.binding === "global" ? "T" : symbol.binding === "local" ? "t" : "U"} ${symbol.name}`,
+          )
+          .join("\n") + "\n",
+      );
+    }
+    if (!encoded.startsWith("CS486\n"))
+      return failure(arguments_[0]!, "not a CS486 object or executable");
+    const executable: unknown = JSON.parse(encoded.slice(6));
+    validateCs486Executable(executable);
+    return success(
+      (executable.symbols ?? [])
+        .map(
+          (symbol) =>
+            `${symbol.address.toString(16).padStart(8, "0")} T ${symbol.name}`,
+        )
+        .join("\n") + "\n",
+    );
+  }
+
+  private readCs486Object(path: string): Cs486Object {
+    return this.parseCs486Object(this.readFile(path), path);
+  }
+
+  private parseCs486Object(encoded: string, path: string): Cs486Object {
+    if (!encoded.startsWith("CS486OBJ\n"))
+      throw new TypeError(`${path}: not a CS486 object`);
+    let object: unknown;
+    try {
+      object = JSON.parse(encoded.slice(9));
+    } catch {
+      throw new TypeError(`${path}: invalid object encoding`);
+    }
+    validateCs486Object(object);
+    return object;
   }
 
   private cpuInfo(arguments_: readonly string[]): ShellCommandResult {

@@ -202,7 +202,7 @@ text:   echo printf head tail wc grep sort uniq tr cut seq
 shell:  sh bash source env export unset which type
 info:   whoami id hostname uname date uptime cpuinfo free
 system: clear edit vi history time sleep test [ shutdown reboot exit true false
-toolchain: as cc c++ basic basicc run objdump
+toolchain: as cc c++ basic basicc ld nm run objdump
 ```
 
 The parser supports single and double quotes, backslash escapes, environment
@@ -257,13 +257,21 @@ The sandboxed CS486DX toolchain adds real 32-bit `EAX` through `EBP` registers,
 checked little-endian linear memory, stack/call control flow, terminal CPU
 faults, and instruction-specific cycle costs. `as`, `cc`, `c++`, and `basicc`
 compile safe initial language subsets to the same validated textual executable
-format; `basic` runs BASIC source directly, `run --stats` reports instructions
-and CPU cycles plus virtual microseconds at 33 MHz, and `objdump` exposes
-generated instructions for optimization. No frontend invokes a host compiler or
-native binary. Compile work and execution cycles return to the same bounded
-CPU-cycle debt used by shell scripts. MCP's `cpuCycles` field uses this unit
-across ASM, C, C++, BASIC, and MicroPython; bytecode or machine-instruction
-counts remain diagnostic values, not timing units.
+format. `as`, `cc`, `c++`, and `basicc` accept `-c` to emit a bounded `CS486OBJ`
+relocatable object. Objects carry text symbols, text-target relocations, and
+object-relative data size; `ld` resolves them into the existing validated
+`CS486` executable in O(instructions + symbols + relocations) work. `nm` and
+`objdump` inspect both formats. C and C++ support external and defined
+zero-argument integer functions plus statement-boundary `asm("...")`; inline
+assembly rejects labels, control flow, stack operations, and ESP/EBP access.
+`basic` runs BASIC source directly, while `run --stats` reports instructions,
+CPU cycles, and virtual microseconds at 33 MHz. No frontend invokes a host
+compiler, linker, or native binary. Dynamic/shared libraries remain a follow-up
+on the versioned object and ABI foundation. Compile, link, and execution work
+return to the same bounded CPU-cycle debt used by shell scripts. MCP's
+`cpuCycles` field uses this unit across ASM, C, C++, BASIC, and MicroPython;
+bytecode or machine-instruction counts remain diagnostic values, not timing
+units.
 
 The Bedrock pack includes placeable `Computer` and `Advanced Computer` items
 (`computer_system:computer_item` and `computer_system:advanced_computer_item`).

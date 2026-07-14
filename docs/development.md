@@ -214,6 +214,17 @@ time or language-specific instruction counts. Executables are JSON preceded by
 execution is capped at 10,000 instructions per submission and returns exit 124
 on a bounded yield.
 
+Relocatable objects are versioned JSON preceded by `CS486OBJ\n`. They contain
+normalized assembly, object-relative data size, local/global/undefined text
+symbols, and text-target relocations. The static linker prefixes local symbols,
+lays out data at four-byte boundaries, resolves globals through a `Map`, and
+produces the existing executable format in O(instructions + symbols +
+relocations) work. The current ABI supports zero-argument functions returning an
+integer in EAX. Inline C/C++ assembly is a statement-boundary escape hatch and
+rejects labels, branches, calls, stack operations, and ESP/EBP access. Dynamic
+loading remains deliberately unsupported until this ABI has stable field
+evidence.
+
 `Verify:` Run the scheduler, runtime-limit, shell, DOS-profile, and persistence
 tests.
 

@@ -1,5 +1,11 @@
-import { assembleCs486, Cs486CompileError } from "./cs486Assembler.js";
+import {
+  assembleCs486,
+  assembleCs486Object,
+  Cs486CompileError,
+} from "./cs486Assembler.js";
 import type { Cs486Executable } from "../../domain/cpu/cs486.js";
+import type { Cs486Object } from "../../domain/cpu/cs486Object.js";
+import { linkCs486Objects } from "./cs486Linker.js";
 
 export type Cs486SourceLanguage = "basic" | "c" | "cpp";
 
@@ -7,12 +13,24 @@ export function compileCs486Source(
   language: Cs486SourceLanguage,
   source: string,
 ): Cs486Executable {
+  return linkCs486Objects([compileCs486Object(language, source)], {
+    entry: language === "basic" ? "basic_main" : "main",
+  });
+}
+
+export function compileCs486Object(
+  language: Cs486SourceLanguage,
+  source: string,
+): Cs486Object {
   const compiler = new SourceCompiler();
-  return assembleCs486(
+  const assembly =
     language === "basic"
       ? compiler.basic(source)
-      : compiler.cFamily(source, language === "cpp"),
-  );
+      : compiler.cFamily(source, language === "cpp");
+  return assembleCs486Object(assembly, {
+    dataBytes: compiler.dataBytes,
+    language,
+  });
 }
 
 class SourceCompiler {
@@ -20,8 +38,15 @@ class SourceCompiler {
   private readonly variables = new Map<string, number>();
   private nextAddress = 0;
   private nextLabel = 0;
+  private currentFunction: string | undefined;
+  private currentFunctionReturned = false;
+
+  get dataBytes(): number {
+    return this.nextAddress;
+  }
 
   basic(source: string): string {
+    this.emit("global basic_main", "basic_main:");
     const loops: {
       variable: string;
       start: string;
@@ -115,13 +140,28 @@ class SourceCompiler {
       .replaceAll("}", "\n}\n");
     for (const [offset, raw] of lines(normalized).entries()) {
       const text = raw.trim();
-      if (
-        text.length === 0 ||
-        text.startsWith("#") ||
-        /^(?:int\s+)?main\s*\([^)]*\)\s*\{$/u.test(text) ||
-        text === "{"
-      )
+      const external =
+        /^extern\s+(?:int|long|void)\s+([A-Za-z_]\w*)\s*\(\s*\)\s*;$/u.exec(
+          text,
+        );
+      if (external !== null) {
+        this.emit(`extern ${external[1]}`);
         continue;
+      }
+      const function_ =
+        /^(?:int|long|void)\s+([A-Za-z_]\w*)\s*\(\s*\)\s*\{$/u.exec(text);
+      if (function_ !== null) {
+        if (this.currentFunction !== undefined)
+          throw new Cs486CompileError(
+            "nested functions are not supported",
+            offset + 1,
+          );
+        this.currentFunction = function_[1]!;
+        this.currentFunctionReturned = false;
+        this.emit(`global ${this.currentFunction}`, `${this.currentFunction}:`);
+        continue;
+      }
+      if (text.length === 0 || text.startsWith("#") || text === "{") continue;
       const for_ =
         /^for\s*\(\s*(?:int\s+)?([A-Za-z_]\w*)\s*=\s*(.+?)\s*;\s*\1\s*(<=|<|>=|>)\s*(.+?)\s*;\s*\1\s*(\+\+|--|\+=\s*\d+|-=\s*\d+)\s*\)\s*\{$/u.exec(
           text,
@@ -153,7 +193,7 @@ class SourceCompiler {
       }
       if (text === "}") {
         const loop = loops.pop();
-        if (loop !== undefined)
+        if (loop !== undefined) {
           this.emit(
             `load eax, [${this.variable(loop.variable)}]`,
             `add eax, ${loop.increment}`,
@@ -161,6 +201,17 @@ class SourceCompiler {
             `jmp ${loop.start}`,
             `${loop.end}:`,
           );
+        } else if (this.currentFunction !== undefined) {
+          if (!this.currentFunctionReturned) this.emit("mov eax, 0", "ret");
+          this.currentFunction = undefined;
+          this.currentFunctionReturned = false;
+        }
+        continue;
+      }
+      const inlineAssembly =
+        /^(?:asm|__asm__)\s*\(\s*("(?:\\.|[^"\\])*")\s*\)\s*;$/u.exec(text);
+      if (inlineAssembly !== null) {
+        this.inlineAssembly(inlineAssembly[1]!, offset + 1);
         continue;
       }
       const declaration =
@@ -190,8 +241,16 @@ class SourceCompiler {
         this.emit("print eax", 'print "\\n"');
         continue;
       }
-      if (/^return\s+.+;$/u.test(text)) {
-        this.emit("halt");
+      const call = /^([A-Za-z_]\w*)\s*\(\s*\)\s*;$/u.exec(text);
+      if (call !== null) {
+        this.emit(`call ${call[1]}`);
+        continue;
+      }
+      const return_ = /^return\s+(.+);$/u.exec(text);
+      if (return_ !== null) {
+        this.expression(return_[1]!, offset + 1);
+        this.emit("ret");
+        this.currentFunctionReturned = true;
         continue;
       }
       throw new Cs486CompileError(
@@ -200,7 +259,10 @@ class SourceCompiler {
       );
     }
     if (loops.length > 0) throw new Cs486CompileError("unterminated for loop");
-    this.emit("halt");
+    if (this.currentFunction !== undefined)
+      throw new Cs486CompileError(
+        `unterminated function ${this.currentFunction}`,
+      );
     return this.assembly.join("\n");
   }
 
@@ -220,6 +282,11 @@ class SourceCompiler {
   }
 
   private expression(source: string, line: number): void {
+    const call = /^([A-Za-z_]\w*)\s*\(\s*\)$/u.exec(source.trim());
+    if (call !== null) {
+      this.emit(`call ${call[1]}`, "push eax");
+      return;
+    }
     const tokens = tokenizeExpression(source, line);
     const output: string[] = [];
     const operators: string[] = [];
@@ -266,6 +333,70 @@ class SourceCompiler {
       this.variables.set(normalized, address);
     }
     return address;
+  }
+
+  private inlineAssembly(encoded: string, line: number): void {
+    let source: string;
+    try {
+      source = JSON.parse(encoded) as string;
+    } catch {
+      throw new Cs486CompileError("invalid inline assembly string", line);
+    }
+    const instructions = source.split("\n");
+    if (instructions.length > 16)
+      throw new Cs486CompileError(
+        "inline assembly instruction limit exceeded",
+        line,
+      );
+    for (const raw of instructions) {
+      let instruction = raw.trim();
+      if (instruction.length === 0) continue;
+      instruction = instruction.replace(
+        /\[([A-Za-z_]\w*)\]/gu,
+        (_match, name: string) => {
+          const address = this.variables.get(name.toLowerCase());
+          if (address === undefined)
+            throw new Cs486CompileError(
+              `unknown inline assembly variable ${name}`,
+              line,
+            );
+          return `[${String(address)}]`;
+        },
+      );
+      const op = /^(\w+)/u.exec(instruction)?.[1]?.toLowerCase();
+      if (
+        op === undefined ||
+        [
+          "call",
+          "halt",
+          "je",
+          "jge",
+          "jg",
+          "jle",
+          "jl",
+          "jmp",
+          "jne",
+          "pop",
+          "push",
+          "ret",
+        ].includes(op) ||
+        /\b(?:esp|ebp)\b/iu.test(instruction) ||
+        instruction.includes(":")
+      )
+        throw new Cs486CompileError(
+          `unsafe inline assembly instruction: ${instruction}`,
+          line,
+        );
+      try {
+        assembleCs486(`${instruction}\nhalt`);
+      } catch (error: unknown) {
+        throw new Cs486CompileError(
+          error instanceof Error ? error.message : String(error),
+          line,
+        );
+      }
+      this.emit(instruction);
+    }
   }
   private label(prefix: string): string {
     return `${prefix}_${this.nextLabel++}`;

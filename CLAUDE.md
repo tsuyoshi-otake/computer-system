@@ -169,6 +169,16 @@ and line counts are capped; regex-like user input must not introduce an
 unbounded regular expression execution path. Add applets to the sandboxed
 command runtime rather than invoking host tools.
 
+The CS486 toolchain uses versioned `CS486OBJ` relocatable objects and validated
+`CS486` executables. `as`/`cc`/`c++`/`basicc -c`, `ld`, `nm`, and `objdump` must
+remain entirely sandboxed. Linker symbol lookup is Map-backed and bounded;
+duplicate/unresolved symbols, corrupt objects, excessive object counts, and RAM
+overflow fail explicitly. The current ABI exposes zero-argument integer
+functions with EAX returns. Restricted statement-boundary inline assembly may
+not introduce labels, control flow, stack operations, or ESP/EBP access. Dynamic
+linking is not implemented yet; extend the versioned object/ABI boundary rather
+than dispatching to a host linker or loader.
+
 Keep OS-specific behavior behind `osProfile.ts`: path dialect, boot layout,
 environment, aliases, and virtual devices must not leak into the domain
 filesystem. Linux is the default persisted profile; the DOS fixture protects

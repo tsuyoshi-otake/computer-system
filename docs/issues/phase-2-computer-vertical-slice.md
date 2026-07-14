@@ -209,3 +209,10 @@ bound BDS work. ASM, BASIC, C, and C++ safe subsets target one validated
 register machine with checked RAM and opcode cycle costs. `run --stats` and
 `objdump` make manual optimization observable without allowing native host
 execution.
+
+The static-linking increment adds versioned `CS486OBJ` files, `-c` across all
+four frontends, `ld`, `nm`, object-aware `objdump`, text symbols/relocations,
+four-byte object-relative data layout, C/C++ external zero-argument functions,
+and restricted statement-boundary inline assembly. Local symbol rewriting and
+Map-backed global resolution keep linking linear in instructions, symbols, and
+relocations. Dynamic libraries remain a later increment after ABI validation.

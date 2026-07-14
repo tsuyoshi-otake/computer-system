@@ -324,3 +324,14 @@ Computer System 486DX at 33 MHz, and stats show deterministic instruction/cycle
 counts. An infinite ASM jump exits with status 124 at the bounded instruction
 limit; invalid memory and corrupted executables report explicit faults without
 affecting BDS.
+
+`Verify:` Compile a C or C++ `main` and an ASM zero-argument function with `-c`,
+inspect both objects with `nm` and `objdump`, link them with `ld`, and execute
+the result with `run --stats`. Also compile statement-boundary inline assembly
+that moves `6` into EAX and attempt an unsafe `asm("push eax")` statement.
+
+`Expect:` The external ASM symbol resolves, the mixed program produces the
+expected output under deterministic CPU-cycle accounting, object-relative data
+does not overlap, and unsafe inline assembly fails explicitly. Missing and
+duplicate symbols must not produce an executable. No command invokes a host
+compiler or linker.

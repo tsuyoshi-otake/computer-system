@@ -5,6 +5,13 @@ import {
   type Cs486Operand,
   type Cs486Register,
 } from "../../domain/cpu/cs486.js";
+import {
+  validateCs486Object,
+  type Cs486Object,
+  type Cs486ObjectLanguage,
+  type Cs486ObjectRelocation,
+  type Cs486ObjectSymbol,
+} from "../../domain/cpu/cs486Object.js";
 
 export class Cs486CompileError extends Error {
   constructor(
@@ -24,7 +31,8 @@ export function assembleCs486(source: string): Cs486Executable {
     .split("\n")
     .entries()) {
     let text = raw.replace(/;.*$/u, "").trim();
-    if (text.length === 0 || /^section\b/iu.test(text)) continue;
+    if (text.length === 0 || /^(?:section|global|extern)\b/iu.test(text))
+      continue;
     const label = /^([A-Za-z_][A-Za-z0-9_]*):/u.exec(text);
     if (label !== null) {
       if (labels.has(label[1]!))
@@ -45,6 +53,110 @@ export function assembleCs486(source: string): Cs486Executable {
       parseInstruction(text, line, labels),
     ),
   };
+}
+
+export function assembleCs486Object(
+  source: string,
+  options: {
+    readonly dataBytes?: number;
+    readonly language?: Cs486ObjectLanguage;
+  } = {},
+): Cs486Object {
+  const globals = new Set<string>();
+  const undefinedSymbols = new Set<string>();
+  const labels = new Map<string, number>();
+  const statements: { line: number; text: string }[] = [];
+  const normalized: string[] = [];
+  let inferredDataBytes = 0;
+
+  for (const [offset, raw] of source
+    .replaceAll("\r\n", "\n")
+    .split("\n")
+    .entries()) {
+    let text = raw.replace(/;.*$/u, "").trim();
+    if (text.length === 0 || /^section\b/iu.test(text)) continue;
+    const directive = /^(global|extern)\s+([A-Za-z_][A-Za-z0-9_]*)$/iu.exec(
+      text,
+    );
+    if (directive !== null) {
+      const name = directive[2]!;
+      if (directive[1]!.toLowerCase() === "global") globals.add(name);
+      else undefinedSymbols.add(name);
+      continue;
+    }
+    const label = /^([A-Za-z_][A-Za-z0-9_]*):/u.exec(text);
+    if (label !== null) {
+      const name = label[1]!;
+      if (labels.has(name) || undefinedSymbols.has(name))
+        throw new Cs486CompileError(`duplicate symbol ${name}`, offset + 1);
+      labels.set(name, statements.length);
+      normalized.push(`${name}:`);
+      text = text.slice(label[0].length).trim();
+      if (text.length === 0) continue;
+    }
+    if (statements.length >= 4_096)
+      throw new Cs486CompileError("instruction limit exceeded", offset + 1);
+    const memory = /\[\s*(-?(?:0x[0-9a-f]+|\d+))\s*\]/giu;
+    for (const match of text.matchAll(memory)) {
+      const address = Number(match[1]);
+      if (Number.isSafeInteger(address) && address >= 0)
+        inferredDataBytes = Math.max(inferredDataBytes, address + 4);
+    }
+    statements.push({ line: offset + 1, text });
+    normalized.push(text);
+  }
+
+  for (const name of globals) {
+    if (!labels.has(name))
+      throw new Cs486CompileError(`global symbol ${name} is not defined`);
+  }
+  for (const name of undefinedSymbols) {
+    if (labels.has(name) || globals.has(name))
+      throw new Cs486CompileError(`conflicting symbol ${name}`);
+  }
+  const knownTargets = new Map(labels);
+  for (const name of undefinedSymbols) knownTargets.set(name, 0);
+  const relocations: Cs486ObjectRelocation[] = [];
+  for (const [instructionOffset, statement] of statements.entries()) {
+    parseInstruction(statement.text, statement.line, knownTargets);
+    const target =
+      /^(?:jmp|je|jne|jl|jle|jg|jge|call)\s+([A-Za-z_][A-Za-z0-9_]*)$/iu.exec(
+        statement.text,
+      );
+    if (target !== null) {
+      const symbol = target[1]!;
+      if (!labels.has(symbol) && !undefinedSymbols.has(symbol))
+        throw new Cs486CompileError(
+          `symbol ${symbol} must be declared extern`,
+          statement.line,
+        );
+      relocations.push({ instructionOffset, symbol, type: "text-target" });
+    }
+  }
+  const symbols: Cs486ObjectSymbol[] = [
+    ...[...labels].map(([name, offset]): Cs486ObjectSymbol => ({
+      binding: globals.has(name) ? "global" : "local",
+      name,
+      offset,
+      section: "text",
+    })),
+    ...[...undefinedSymbols].map((name): Cs486ObjectSymbol => ({
+      binding: "undefined",
+      name,
+      section: "text",
+    })),
+  ];
+  const object: Cs486Object = {
+    assembly: normalized.join("\n"),
+    dataBytes: Math.max(options.dataBytes ?? 0, inferredDataBytes),
+    format: "cs486-object",
+    language: options.language ?? "asm",
+    relocations,
+    symbols,
+    version: 1,
+  };
+  validateCs486Object(object);
+  return object;
 }
 
 function parseInstruction(

@@ -60,9 +60,14 @@ export type Cs486Instruction =
   | { readonly op: "print"; readonly source: Cs486Operand | string };
 
 export interface Cs486Executable {
+  readonly dataBytes?: number;
   readonly format: "cs486-executable";
   readonly version: 1;
   readonly instructions: readonly Cs486Instruction[];
+  readonly symbols?: readonly {
+    readonly address: number;
+    readonly name: string;
+  }[];
 }
 
 export interface Cs486RunResult {
@@ -97,6 +102,11 @@ export function runCs486(
   const memoryBytes = Math.min(options.memoryBytes, 16 * 1_024 * 1_024);
   if (!Number.isSafeInteger(memoryBytes) || memoryBytes < 64 * 1_024)
     throw new RangeError("CS486 requires at least 64 KiB RAM");
+  if ((executable.dataBytes ?? 0) > memoryBytes)
+    throw new Cs486Fault(
+      "MemoryAccessError",
+      "executable data exceeds available RAM",
+    );
 
   const memory = new DataView(new ArrayBuffer(memoryBytes));
   const registers = new Int32Array(cs486RegisterNames.length);
@@ -323,6 +333,33 @@ export function validateCs486Executable(
       "ExecutableFormatError",
       "program instruction limit exceeded",
     );
+  if (
+    candidate.dataBytes !== undefined &&
+    (!Number.isSafeInteger(candidate.dataBytes) ||
+      candidate.dataBytes < 0 ||
+      candidate.dataBytes > 16 * 1_048_576)
+  )
+    throw new Cs486Fault("ExecutableFormatError", "invalid data size");
+  if (
+    candidate.symbols !== undefined &&
+    (!Array.isArray(candidate.symbols) ||
+      candidate.symbols.length > 2_048 ||
+      (candidate.symbols as readonly unknown[]).some((value) => {
+        if (typeof value !== "object" || value === null) return true;
+        const symbol = value as {
+          readonly address?: unknown;
+          readonly name?: unknown;
+        };
+        return (
+          typeof symbol.name !== "string" ||
+          !/^[A-Za-z_][A-Za-z0-9_]*$/u.test(symbol.name) ||
+          !Number.isSafeInteger(symbol.address) ||
+          (symbol.address as number) < 0 ||
+          (symbol.address as number) >= candidate.instructions!.length
+        );
+      }))
+  )
+    throw new Cs486Fault("ExecutableFormatError", "invalid symbol table");
   for (const instruction of candidate.instructions) {
     if (typeof instruction !== "object" || instruction === null)
       throw new Cs486Fault("ExecutableFormatError", "invalid instruction");

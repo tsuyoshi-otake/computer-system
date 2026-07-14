@@ -16,7 +16,7 @@ const chapters = [
         <ol class="manual-procedure">
           <li><b>Inspect.</b> Run <code>cpuinfo</code>, <code>free -h</code>, and <code>quota</code>.</li>
           <li><b>Edit.</b> Use <code>vi</code> for source files. MicroPython starts at <code>/startup.py</code>.</li>
-          <li><b>Build.</b> Use <code>as</code>, <code>basicc</code>, <code>cc</code>, or <code>c++</code>.</li>
+          <li><b>Build.</b> Use <code>as</code>, <code>basicc</code>, <code>cc</code>, or <code>c++</code>; add <code>-c</code> for an object and combine objects with <code>ld</code>.</li>
           <li><b>Measure.</b> Run compiled programs with <code>run --stats</code>.</li>
           <li><b>Optimize.</b> Compare instructions, cycles, output, and memory use—not host wall time.</li>
         </ol>
@@ -62,7 +62,11 @@ ls -la /</code></pre></section>`,
       <section class="manual-section"><h3>10.1 Build and inspect</h3><pre><code>as total.asm -o total
 objdump total
 run --stats total
-./total</code></pre></section>
+./total
+
+as -c fast.asm -o fast.o
+nm fast.o
+objdump fast.o</code></pre><p>Relocatable assembly declares exported labels with <code>global name</code> and imported labels with <code>extern name</code>. Unmarked labels remain local to that object.</p></section>
       <section class="manual-section"><h3>10.2 Instruction set</h3><table class="manual-instruction-table"><thead><tr><th>Form</th><th>Operation</th></tr></thead><tbody>
         <tr><td>MOV reg, src</td><td>Copy immediate or register</td></tr><tr><td>LOAD reg, [addr]</td><td>Read signed 32-bit word</td></tr><tr><td>STORE [addr], reg</td><td>Write signed 32-bit word</td></tr>
         <tr><td>ADD / SUB / MUL / DIV / MOD</td><td>Integer arithmetic into destination</td></tr><tr><td>AND / OR / XOR</td><td>Bitwise operation</td></tr><tr><td>SHL / SHR</td><td>Signed 32-bit shift; count masked to 0…31</td></tr>
@@ -160,6 +164,15 @@ run --stats program</code></pre></section>
   return 0;
 }</code></pre></section>
       <section class="manual-section"><h3>12.4 What the compiler emits</h3><p>Expressions use EAX as the result register, EBX as a secondary operand, and PUSH/POP for intermediate values. Variables occupy checked 32-bit words from low memory. Inspect exact output with <code>objdump</code>.</p></section>
+      <section class="manual-section"><h3>12.5 Objects and static linking</h3><pre><code>cc -c main.c -o main.o
+as -c fast.asm -o fast.o
+nm main.o
+ld main.o fast.o -o program
+run --stats program</code></pre><p>The versioned <code>CS486OBJ</code> format carries symbols, relocations, and object-relative data size. <code>extern int fast();</code> imports a zero-argument function; a C/C++ definition or <code>global fast</code> ASM label exports it. The callee returns its integer in EAX. Duplicate and unresolved symbols stop the link.</p></section>
+      <section class="manual-section"><h3>12.6 Restricted inline assembly</h3><pre><code>int answer = 0;
+asm("mov eax, 6");
+asm("mul eax, 7");
+asm("store [answer], eax");</code></pre><p>Inline assembly executes at a statement boundary. It may use ordinary arithmetic and checked memory operations. Labels, branches, CALL/RET, PUSH/POP, HALT, and ESP/EBP access are rejected. Dynamic libraries are not yet supported.</p></section>
       <aside class="manual-callout"><b>Manual optimization</b><p>Reduce repeated DIV/MOD, simplify constant expressions, remove redundant variables, and compare the generated instruction stream. A shorter source file is not necessarily a cheaper executable.</p></aside>`,
   },
   {

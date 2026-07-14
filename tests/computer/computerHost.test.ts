@@ -97,7 +97,7 @@ describe("ComputerRuntime", (): void => {
     )
       return;
     expect(asm.stderr).toContain("20 CPU cycles");
-    expect(cpp.stderr).toContain("50 CPU cycles");
+    expect(cpp.stderr).toContain("61 CPU cycles");
     expect(python.stderr).toMatch(/\d+ CPU cycles/u);
     expect(asm.cpuCycles).toBeLessThan(cpp.cpuCycles);
     expect(cpp.cpuCycles).toBeLessThan(python.cpuCycles);
