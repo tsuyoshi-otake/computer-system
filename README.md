@@ -247,25 +247,28 @@ record is stored in `/etc/shadow`, never the plaintext, and Web input is masked,
 excluded from local history, and excluded from completion. Three failed attempts
 incur a two-second guest delay. Every OS boot resets only the terminal display
 buffer before printing one banner; persisted files and `/etc/shadow` remain
-intact. A profile boundary separates path syntax, boot layout, command aliases,
-environment, and virtual devices. The implemented DOS profile shares the same
-terminal, filesystem, persistence, hardware limits, and checked CS
-executable/toolchain abstractions without Linux conditionals in the domain core.
-It provides drive-letter paths, case-insensitive lookup, CRLF boot files,
-`NUL`/`CON`, and DOS command aliases. DOS-facing commands use CRLF and
-DOS-specific status/error text rather than leaking Linux applet output. The
-implemented compatibility surface includes `DIR`, `TYPE`, `COPY`, `DEL`/
-`ERASE`, `MD`, `RD`, `MOVE`, `REN`/`RENAME`, `TREE`, `VOL`, `VER`, `TIME`,
-`TIMER`, `DOSKEY /HISTORY`, and `MEM /F`. Computer System DOS 6.2 (`CS-DOS 6.2`)
-reads a bounded `CONFIG.SYS` and runs `AUTOEXEC.BAT`; `SET`, `PATH`, `PROMPT`,
-`REM`, `@ECHO OFF`, `%0`…`%9`, `%VAR%`, and `%ERRORLEVEL%` are supported.
-Unsupported boot directives fail visibly.
+intact. The interactive account is UID/GID 1000; root owns system paths, while
+mode, UID, GID, modification time, symbolic links, and hard-link groups persist
+with backward-compatible filesystem snapshots. A profile boundary separates path
+syntax, boot layout, command aliases, environment, and virtual devices. The
+implemented DOS profile shares the same terminal, filesystem, persistence,
+hardware limits, and checked CS executable/toolchain abstractions without Linux
+conditionals in the domain core. It provides drive-letter paths,
+case-insensitive lookup, CRLF boot files, `NUL`/`CON`, and DOS command aliases.
+DOS-facing commands use CRLF and DOS-specific status/error text rather than
+leaking Linux applet output. The implemented compatibility surface includes
+`DIR`, `TYPE`, `COPY`, `DEL`/ `ERASE`, `MD`, `RD`, `MOVE`, `REN`/`RENAME`,
+`TREE`, `VOL`, `VER`, `TIME`, `TIMER`, `DOSKEY /HISTORY`, and `MEM /F`. Computer
+System DOS 6.2 (`CS-DOS 6.2`) reads a bounded `CONFIG.SYS` and runs
+`AUTOEXEC.BAT`; `SET`, `PATH`, `PROMPT`, `REM`, `@ECHO OFF`, `%0`…`%9`, `%VAR%`,
+and `%ERRORLEVEL%` are supported. Unsupported boot directives fail visibly.
 
 ```text
-files:  pwd cd ls cat mkdir touch rm cp mv find stat df du quota
-text:   echo printf head tail wc grep sort uniq tr cut seq
-shell:  sh bash source env export unset which type
-info:   whoami id hostname uname date uptime cpuinfo free
+files:  pwd cd ls cat mkdir rmdir touch rm cp mv ln readlink realpath find stat
+text:   echo printf head tail wc grep sort uniq tr cut seq tee cmp diff xargs
+inspect: file sha256sum od hexdump df du quota mount dmesg
+shell:  sh bash source env printenv export unset alias unalias command read
+info:   whoami id groups hostname uname date uptime cpuinfo free
 system: clear vi history time sleep test [ shutdown reboot exit true false
 DOS:    EDIT DIR TREE VOL TIME TIMER DOSKEY MEM and path/file aliases
 toolchain: as cc c++ basic basicc ld nm run objdump
@@ -275,11 +278,21 @@ The parser supports single and double quotes, backslash escapes, environment
 variables, `$?`, pipelines (`|`), input/output redirection (`<`, `>`, `>>`), and
 control operators (`&&`, `||`, `;`). Computer System Bash adds shebangs,
 positional parameters, conditionals, bounded loops, functions,
-`break`/`continue`/`return`, and `source`. It loads `/etc/bash.bashrc` and then
-`~/.bashrc` without replacing existing user files. Command length, tokens,
-pipeline stages, script depth/lines/iterations, and intermediate output are
-limited so shell work cannot become an unbounded server load path. This is a
-sandbox implementation and never invokes host Bash.
+`break`/`continue`/`return`, `source`, aliases, `command`, `read`,
+function-local variables, `shift`, and basic `getopts`. It loads
+`/etc/bash.bashrc` and then `~/.bashrc` without replacing existing user files.
+Command length, tokens, pipeline stages, script depth/lines/iterations, and
+intermediate output are limited so shell work cannot become an unbounded server
+load path. This is a sandbox implementation and never invokes host Bash.
+
+Linux-facing output follows the CS-Linux contract: LF line endings, Linux-style
+`uname`, `date`, `uptime`, `ls -la`, `stat`, `df -h`, `du -h`, `free -h`, and
+coreutils-like errors and exit status. Dynamic read-only files include
+`/proc/cpuinfo`, `/proc/meminfo`, `/proc/version`, `/proc/uptime`,
+`/proc/loadavg`, and `/proc/mounts`. Recursive or materializing operations
+remain bounded; indexed directory and hard-link accounting keeps ordinary
+listings O(N), while `diff`, hashes, dumps, `xargs`, and `yes` have explicit
+input or output ceilings.
 
 `vi [path]` uses Normal, Insert, and Command modes. Bare `vi` opens a real
 `[No Name]` buffer; `:w path` or `:wq path` assigns its first file name, while

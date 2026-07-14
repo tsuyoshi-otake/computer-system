@@ -40,6 +40,9 @@ describe("CS-Linux authentication", (): void => {
     const shadow = filesystem.readFile("/etc/shadow");
     expect(shadow).toMatch(/^computer:cs-sha256-v1:512:/u);
     expect(shadow).not.toContain("correct-horse");
+    expect(shell.submit("cat /etc/shadow").stderr).toContain(
+      "Permission denied",
+    );
   });
 
   it("requires the saved password and throttles each third failed attempt", (): void => {

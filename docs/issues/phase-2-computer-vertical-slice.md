@@ -11,6 +11,9 @@ Parent: #1 Blocked by: #2 and #3
 - [x] Implement the CS-Linux and CS-DOS shells and editors.
 - [x] Give the primary CS-DOS file, clock, volume, tree, history, and memory
       commands DOS-specific CRLF output instead of shared Linux presentation.
+- [x] Persist CS-Linux ownership, mode, mtime, symbolic links, and hard links;
+      add bounded core utilities, Bash builtins, Linux-formatted system output,
+      and dynamic `/proc` identity, uptime, load, and mount files.
 - [x] Replace the Phase 0 probe implementation with a production terminal view
       coordinator shared by Desktop and Portable Computer Systems and the
       Monitor fallback.

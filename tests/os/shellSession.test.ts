@@ -86,11 +86,18 @@ describe("Computer System Linux shell and editor", (): void => {
     expect(shell.submit("echo world >> data/message").exitCode).toBe(0);
     expect(shell.submit("cp data/message data/copy").exitCode).toBe(0);
     expect(shell.submit("mv data/copy data/moved").exitCode).toBe(0);
-    expect(shell.submit("ls -la data").lines).toEqual([
-      "file       0 empty",
-      "file      12 message",
-      "file      12 moved",
-    ]);
+    const listing = shell.submit("ls -la data").lines;
+    expect(listing[0]).toBe("total 24");
+    expect(listing.some((line) => /^drwxr-xr-x .* \.$/u.test(line))).toBe(true);
+    expect(listing.some((line) => /^-rw-r--r-- .* empty$/u.test(line))).toBe(
+      true,
+    );
+    expect(listing.some((line) => /^-rw-r--r-- .* message$/u.test(line))).toBe(
+      true,
+    );
+    expect(listing.some((line) => /^-rw-r--r-- .* moved$/u.test(line))).toBe(
+      true,
+    );
     expect(shell.submit("rm data/moved").exitCode).toBe(0);
     expect(shell.submit("find . -name 'm*'").lines).toEqual([
       "/home/computer/work/data/message",
@@ -243,10 +250,10 @@ describe("Computer System Linux shell and editor", (): void => {
     });
 
     expect(shell.submit("whoami").lines).toEqual(["computer"]);
-    expect(shell.submit("id").lines[0]).toContain("uid=0(computer)");
+    expect(shell.submit("id").lines[0]).toContain("uid=1000(computer)");
     expect(shell.submit("hostname").lines).toEqual(["c-info01"]);
     expect(shell.submit("uname -a").lines[0]).toBe(
-      "Computer System Linux 1.0 c-info01 sandbox-vm",
+      "Linux c-info01 1.0.0-cs #1 CS-Linux SMP i486 GNU/Linux",
     );
     expect(shell.submit("echo $OS").lines).toEqual(["CS-Linux"]);
     expect(shell.submit("date +%Y-%m-%dT%H:%M:%S").lines).toEqual([
@@ -259,8 +266,12 @@ describe("Computer System Linux shell and editor", (): void => {
       "2000-01-01T00:00:02",
     ]);
     tick = 60;
-    expect(shell.submit("uptime").lines).toEqual(["1.00 seconds"]);
-    expect(shell.submit("stat /etc/os-release").lines[0]).toMatch(/^file /u);
+    expect(shell.submit("uptime").lines[0]).toContain(
+      "up 00:00,  1 user,  load average: 0.00, 0.00, 0.00",
+    );
+    expect(shell.submit("stat /etc/os-release").lines[0]).toBe(
+      "  File: /etc/os-release",
+    );
     expect(shell.submit("cat /etc/os-release").lines).toContain(
       'PRETTY_NAME="Computer System Linux 1.0"',
     );

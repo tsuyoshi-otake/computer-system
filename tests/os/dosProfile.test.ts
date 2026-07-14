@@ -156,13 +156,17 @@ describe("DOS profile contract", (): void => {
     expect(linux.submit("date +%Y-%m-%dT%H:%M:%S").lines).toEqual([
       "2000-02-29T23:59:59",
     ]);
-    expect(dos.submit("DATE").lines).toEqual(["2000-02-29T23:59:59.000Z"]);
+    expect(dos.submit("DATE").lines).toEqual([
+      "Current date is Tue 02-29-2000",
+    ]);
 
     wallTime = Date.UTC(2040, 0, 1);
     expect(Number(linux.submit("date +%s").lines[0])).toBeGreaterThan(
       2_147_483_647,
     );
-    expect(dos.submit("DATE").lines).toEqual(["2040-01-01T00:00:00.000Z"]);
+    expect(dos.submit("DATE").lines).toEqual([
+      "Current date is Sun 01-01-2040",
+    ]);
   });
 
   it("runs CS486-format programs with CS386SX timing at 16 MHz", (): void => {

@@ -131,6 +131,13 @@ The July 2026 live GDK verification established the following:
   `DEL`/`ERASE`, `MD`/`RD`, `MOVE`, `REN`/`RENAME`, `TYPE`, `TREE`, `VOL`,
   `VER`, `DOSKEY /HISTORY`, and `MEM /F` must not leak Linux output. `TREE`
   remains O(N), capped at 512 entries and 32 levels.
+- CS-Linux uses UID/GID 1000 for `computer` and root-owned system paths. Its
+  backward-compatible filesystem snapshot persists mode, UID, GID, mtime,
+  symbolic links, and shared hard-link contents. Linux-facing commands use LF
+  and Linux-style identity, listing, stat, time, memory, disk, mount, and error
+  output. `/proc/version`, `/proc/uptime`, `/proc/loadavg`, and `/proc/mounts`
+  are dynamic read-only devices. Hard-link counts are O(1) so `ls -l` remains
+  O(N); materializing utilities have explicit limits.
 - `EDIT` is a DOS-profile-only full-screen editor. Its blue viewport, five
   menus, insert/overwrite state, bounded undo/search, save feedback, and dirty
   Save/Discard/Cancel dialog are rendered from the terminal model. Linux rejects

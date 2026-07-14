@@ -15,10 +15,27 @@ export const defaultFilesystemLimits: FilesystemLimits = {
 export interface InMemoryFilesystemSnapshot {
   readonly directories: readonly string[];
   readonly files: readonly (readonly [path: string, contents: string])[];
+  readonly metadata?: readonly (readonly [
+    path: string,
+    metadata: FilesystemMetadata,
+  ])[];
+  readonly symbolicLinks?: readonly (readonly [path: string, target: string])[];
+  readonly hardLinks?: readonly (readonly string[])[];
+}
+
+export interface FilesystemMetadata {
+  readonly gid: number;
+  readonly mode: number;
+  readonly modifiedAtMilliseconds: number;
+  readonly uid: number;
 }
 
 export class InMemoryFilesystem {
   private readonly files = new Map<string, string>();
+  private readonly metadata = new Map<string, FilesystemMetadata>();
+  private readonly symbolicLinks = new Map<string, string>();
+  private readonly hardLinkIds = new Map<string, number>();
+  private readonly hardLinkCounts = new Map<number, number>();
   private readonly directories = new Set<string>(["/"]);
   private readonly children = new Map<string, Set<string>>([["/", new Set()]]);
   private revisionValue = 0;
@@ -29,6 +46,7 @@ export class InMemoryFilesystem {
       if (!Number.isInteger(value) || value <= 0)
         throw new RangeError(`${name} must be positive`);
     }
+    this.metadata.set("/", defaultMetadata(true));
   }
 
   get revision(): number {
@@ -37,11 +55,95 @@ export class InMemoryFilesystem {
 
   exists(path: string): boolean {
     const normalized = this.normalize(path);
-    return this.files.has(normalized) || this.directories.has(normalized);
+    return (
+      this.files.has(normalized) ||
+      this.directories.has(normalized) ||
+      this.symbolicLinks.has(normalized)
+    );
   }
 
   isDirectory(path: string): boolean {
-    return this.directories.has(this.normalize(path));
+    return this.directories.has(this.resolveSymbolicLinks(path));
+  }
+
+  isSymbolicLink(path: string): boolean {
+    return this.symbolicLinks.has(this.normalize(path));
+  }
+
+  readLink(path: string): string {
+    const normalized = this.normalize(path);
+    const target = this.symbolicLinks.get(normalized);
+    if (target === undefined)
+      throw new FilesystemError(
+        "invalid_path",
+        `${path} is not a symbolic link`,
+      );
+    return target;
+  }
+
+  createSymbolicLink(target: string, path: string): void {
+    const normalized = this.normalize(path);
+    if (this.exists(normalized))
+      throw new FilesystemError("exists", `${path} already exists`);
+    this.requireParent(normalized);
+    this.checkEntryCount(1);
+    if (target.includes("\0"))
+      throw new FilesystemError("invalid_path", "Link target contains NUL");
+    this.symbolicLinks.set(normalized, target.replaceAll("\\", "/"));
+    this.metadata.set(normalized, defaultMetadata(false, 0o777));
+    this.addChild(normalized);
+    this.revisionValue += 1;
+  }
+
+  createHardLink(existing: string, path: string): void {
+    const source = this.resolveSymbolicLinks(existing);
+    if (!this.files.has(source))
+      throw new FilesystemError("not_found", `${existing} is not a file`);
+    const destination = this.normalize(path);
+    if (this.exists(destination))
+      throw new FilesystemError("exists", `${path} already exists`);
+    this.requireParent(destination);
+    this.writeFile(destination, this.files.get(source)!);
+    const id = this.hardLinkIds.get(source) ?? nextHardLinkId++;
+    if (!this.hardLinkIds.has(source)) this.hardLinkCounts.set(id, 1);
+    this.hardLinkIds.set(source, id);
+    this.hardLinkIds.set(destination, id);
+    this.hardLinkCounts.set(id, (this.hardLinkCounts.get(id) ?? 1) + 1);
+    this.metadata.set(destination, { ...this.getMetadata(source) });
+  }
+
+  getLinkCount(path: string): number {
+    const normalized = this.resolveSymbolicLinks(path);
+    const id = this.hardLinkIds.get(normalized);
+    if (id === undefined) return 1;
+    return this.hardLinkCounts.get(id) ?? 1;
+  }
+
+  resolveSymbolicLinks(path: string): string {
+    let resolved = this.normalize(path);
+    for (let hop = 0; hop < 16; hop += 1) {
+      const segments = resolved.split("/").filter(Boolean);
+      let prefix = "";
+      let replaced = false;
+      for (let index = 0; index < segments.length; index += 1) {
+        prefix += `/${segments[index]}`;
+        const target = this.symbolicLinks.get(prefix);
+        if (target === undefined) continue;
+        const linkTarget = target.startsWith("/")
+          ? target
+          : `${parentPath(prefix)}/${target}`;
+        resolved = this.normalize(
+          `${linkTarget}${segments.length > index + 1 ? `/${segments.slice(index + 1).join("/")}` : ""}`,
+        );
+        replaced = true;
+        break;
+      }
+      if (!replaced) return resolved;
+    }
+    throw new FilesystemError(
+      "invalid_path",
+      `${path}: too many symbolic links`,
+    );
   }
 
   list(path: string): string[] {
@@ -66,13 +168,14 @@ export class InMemoryFilesystem {
     for (const addition of additions) {
       this.directories.add(addition);
       this.children.set(addition, new Set());
+      this.metadata.set(addition, defaultMetadata(true));
       this.addChild(addition);
     }
     if (additions.length > 0) this.revisionValue += 1;
   }
 
   readFile(path: string): string {
-    const normalized = this.normalize(path);
+    const normalized = this.resolveSymbolicLinks(path);
     const contents = this.files.get(normalized);
     if (contents === undefined)
       throw new FilesystemError("not_found", `${path} is not a file`);
@@ -80,7 +183,10 @@ export class InMemoryFilesystem {
   }
 
   writeFile(path: string, contents: string): void {
-    const normalized = this.normalize(path);
+    const original = this.normalize(path);
+    const normalized = this.symbolicLinks.has(original)
+      ? this.resolveSymbolicLinks(original)
+      : original;
     if (normalized === "/" || this.directories.has(normalized)) {
       throw new FilesystemError("is_directory", `${path} is a directory`);
     }
@@ -90,7 +196,8 @@ export class InMemoryFilesystem {
 
   appendFile(path: string, contents: string): void {
     const normalized = this.normalize(path);
-    this.writeFile(normalized, (this.files.get(normalized) ?? "") + contents);
+    const current = this.exists(normalized) ? this.readFile(normalized) : "";
+    this.writeFile(normalized, current + contents);
   }
 
   delete(path: string): void {
@@ -99,11 +206,33 @@ export class InMemoryFilesystem {
       throw new FilesystemError("protected", "Cannot delete root");
     if (!this.exists(normalized))
       throw new FilesystemError("not_found", `${path} does not exist`);
+    if (this.symbolicLinks.has(normalized)) {
+      this.symbolicLinks.delete(normalized);
+      this.metadata.delete(normalized);
+      this.removeChild(normalized);
+      this.revisionValue += 1;
+      return;
+    }
     const prefix = `${normalized}/`;
     for (const candidate of [...this.files.keys()]) {
       if (candidate === normalized || candidate.startsWith(prefix)) {
         this.usedBytesValue -= utf8Size(this.files.get(candidate)!);
         this.files.delete(candidate);
+        const hardLinkId = this.hardLinkIds.get(candidate);
+        this.hardLinkIds.delete(candidate);
+        if (hardLinkId !== undefined) {
+          const count = (this.hardLinkCounts.get(hardLinkId) ?? 1) - 1;
+          if (count <= 1) this.hardLinkCounts.delete(hardLinkId);
+          else this.hardLinkCounts.set(hardLinkId, count);
+        }
+        this.metadata.delete(candidate);
+        this.removeChild(candidate);
+      }
+    }
+    for (const candidate of [...this.symbolicLinks.keys()]) {
+      if (candidate.startsWith(prefix)) {
+        this.symbolicLinks.delete(candidate);
+        this.metadata.delete(candidate);
         this.removeChild(candidate);
       }
     }
@@ -116,6 +245,7 @@ export class InMemoryFilesystem {
       this.removeChild(candidate);
       this.children.delete(candidate);
       this.directories.delete(candidate);
+      this.metadata.delete(candidate);
     }
     this.revisionValue += 1;
   }
@@ -125,7 +255,7 @@ export class InMemoryFilesystem {
     const destination = this.normalize(to);
     const snapshot = this.subtreeSnapshot(source, from);
     this.validateTransfer(source, destination, snapshot, false);
-    this.commitSnapshot(source, destination, snapshot);
+    this.commitSnapshot(source, destination, snapshot, false);
   }
 
   move(from: string, to: string): void {
@@ -136,11 +266,11 @@ export class InMemoryFilesystem {
     const snapshot = this.subtreeSnapshot(source, from);
     this.validateTransfer(source, destination, snapshot, true);
     this.delete(source);
-    this.commitSnapshot(source, destination, snapshot);
+    this.commitSnapshot(source, destination, snapshot, true);
   }
 
   getSize(path: string): number {
-    const normalized = this.normalize(path);
+    const normalized = this.resolveSymbolicLinks(path);
     const contents = this.files.get(normalized);
     if (contents !== undefined) return utf8Size(contents);
     if (this.directories.has(normalized)) return 0;
@@ -151,12 +281,74 @@ export class InMemoryFilesystem {
     return this.limits.capacityBytes - this.usedBytesValue;
   }
 
+  getMetadata(path: string, followLinks = true): FilesystemMetadata {
+    const normalized = followLinks
+      ? this.resolveSymbolicLinks(path)
+      : this.normalize(path);
+    const value = this.metadata.get(normalized);
+    if (value === undefined)
+      throw new FilesystemError("not_found", `${path} does not exist`);
+    return { ...value };
+  }
+
+  setMetadata(
+    path: string,
+    update: Partial<Pick<FilesystemMetadata, "gid" | "mode" | "uid">>,
+  ): void {
+    const normalized = this.resolveSymbolicLinks(path);
+    const current = this.getMetadata(normalized);
+    const next = {
+      ...current,
+      ...update,
+      mode: update.mode === undefined ? current.mode : update.mode & 0o7777,
+    };
+    if (JSON.stringify(current) === JSON.stringify(next)) return;
+    const id = this.hardLinkIds.get(normalized);
+    const paths =
+      id === undefined
+        ? [normalized]
+        : [...this.hardLinkIds]
+            .filter(([, candidate]) => candidate === id)
+            .map(([candidate]) => candidate);
+    for (const candidate of paths) this.metadata.set(candidate, { ...next });
+    this.revisionValue += 1;
+  }
+
+  setModifiedTime(path: string, milliseconds: number): void {
+    if (!Number.isFinite(milliseconds))
+      throw new FilesystemError("invalid_path", "Invalid modification time");
+    const normalized = this.resolveSymbolicLinks(path);
+    const current = this.getMetadata(normalized);
+    if (current.modifiedAtMilliseconds === milliseconds) return;
+    const id = this.hardLinkIds.get(normalized);
+    const paths =
+      id === undefined
+        ? [normalized]
+        : [...this.hardLinkIds]
+            .filter(([, candidate]) => candidate === id)
+            .map(([candidate]) => candidate);
+    for (const candidate of paths) {
+      this.metadata.set(candidate, {
+        ...this.getMetadata(candidate),
+        modifiedAtMilliseconds: milliseconds,
+      });
+    }
+    this.revisionValue += 1;
+  }
+
   snapshot(): InMemoryFilesystemSnapshot {
     return {
       directories: [...this.directories].filter((path) => path !== "/").sort(),
       files: [...this.files].sort(([left], [right]) =>
         left.localeCompare(right),
       ),
+      metadata: [...this.metadata]
+        .filter(([path]) => path !== "/")
+        .sort(([left], [right]) => left.localeCompare(right)),
+      symbolicLinks: [...this.symbolicLinks].sort(([left], [right]) =>
+        left.localeCompare(right),
+      ),
+      hardLinks: hardLinkGroups(this.hardLinkIds),
     };
   }
 
@@ -170,13 +362,43 @@ export class InMemoryFilesystem {
     for (const [path, contents] of snapshot.files) {
       restored.writeFile(path, contents);
     }
+    for (const [path, target] of snapshot.symbolicLinks ?? []) {
+      restored.createSymbolicLink(target, path);
+    }
+    for (const paths of snapshot.hardLinks ?? []) {
+      if (paths.length < 2) continue;
+      const id = nextHardLinkId++;
+      let count = 0;
+      for (const path of paths) {
+        if (restored.files.has(path)) {
+          restored.hardLinkIds.set(path, id);
+          count += 1;
+        }
+      }
+      if (count > 1) restored.hardLinkCounts.set(id, count);
+    }
+    for (const [path, metadata] of snapshot.metadata ?? []) {
+      if (restored.exists(path)) restored.metadata.set(path, { ...metadata });
+    }
     this.files.clear();
     this.directories.clear();
     this.children.clear();
+    this.metadata.clear();
+    this.symbolicLinks.clear();
+    this.hardLinkIds.clear();
+    this.hardLinkCounts.clear();
     for (const directory of restored.directories)
       this.directories.add(directory);
     for (const [path, contents] of restored.files)
       this.files.set(path, contents);
+    for (const [path, metadata] of restored.metadata)
+      this.metadata.set(path, { ...metadata });
+    for (const [path, target] of restored.symbolicLinks)
+      this.symbolicLinks.set(path, target);
+    for (const [path, id] of restored.hardLinkIds)
+      this.hardLinkIds.set(path, id);
+    for (const [id, count] of restored.hardLinkCounts)
+      this.hardLinkCounts.set(id, count);
     for (const [path, names] of restored.children)
       this.children.set(path, new Set(names));
     this.usedBytesValue = restored.usedBytesValue;
@@ -204,7 +426,7 @@ export class InMemoryFilesystem {
   }
 
   private requireDirectory(path: string): string {
-    const normalized = this.normalize(path);
+    const normalized = this.resolveSymbolicLinks(path);
     if (!this.directories.has(normalized)) {
       throw new FilesystemError("not_directory", `${path} is not a directory`);
     }
@@ -228,29 +450,77 @@ export class InMemoryFilesystem {
     const previous = this.files.get(path);
     if (previous === contents) return;
     const previousSize = previous === undefined ? 0 : utf8Size(previous);
-    if (this.usedBytesValue - previousSize + size > this.limits.capacityBytes) {
+    const linkId = this.hardLinkIds.get(path);
+    const linkedPaths =
+      linkId === undefined
+        ? [path]
+        : [...this.hardLinkIds]
+            .filter(([, candidate]) => candidate === linkId)
+            .map(([candidate]) => candidate);
+    const delta = (size - previousSize) * linkedPaths.length;
+    if (this.usedBytesValue + delta > this.limits.capacityBytes) {
       throw new FilesystemError("capacity", "Filesystem capacity exceeded");
     }
     if (!this.files.has(path)) this.checkEntryCount(1);
-    this.files.set(path, contents);
+    for (const linkedPath of linkedPaths) {
+      this.files.set(linkedPath, contents);
+      this.metadata.set(linkedPath, {
+        ...(this.metadata.get(linkedPath) ?? defaultMetadata(false)),
+        modifiedAtMilliseconds: Date.now(),
+      });
+    }
     if (previous === undefined) this.addChild(path);
-    this.usedBytesValue += size - previousSize;
+    this.usedBytesValue += delta;
     this.revisionValue += 1;
   }
 
   private subtreeSnapshot(path: string, original: string): FilesystemSnapshot {
     const file = this.files.get(path);
-    if (file !== undefined) return { directories: [], files: [[path, file]] };
+    if (file !== undefined)
+      return {
+        directories: [],
+        files: [[path, file]],
+        hardLinkIds: this.hardLinkIds.has(path)
+          ? [[path, this.hardLinkIds.get(path)!]]
+          : [],
+        metadata: [[path, this.getMetadata(path, false)]],
+        symbolicLinks: [],
+      };
+    const link = this.symbolicLinks.get(path);
+    if (link !== undefined)
+      return {
+        directories: [],
+        files: [],
+        hardLinkIds: [],
+        metadata: [[path, this.getMetadata(path, false)]],
+        symbolicLinks: [[path, link]],
+      };
     if (!this.directories.has(path)) {
       throw new FilesystemError("not_found", `${original} does not exist`);
     }
     const prefix = path === "/" ? "/" : `${path}/`;
+    const directories = [...this.directories].filter(
+      (candidate) => candidate === path || candidate.startsWith(prefix),
+    );
+    const files = [...this.files].filter(([candidate]) =>
+      candidate.startsWith(prefix),
+    );
+    const symbolicLinks = [...this.symbolicLinks].filter(([candidate]) =>
+      candidate.startsWith(prefix),
+    );
     return {
-      directories: [...this.directories].filter(
-        (candidate) => candidate === path || candidate.startsWith(prefix),
-      ),
-      files: [...this.files].filter(([candidate]) =>
+      directories,
+      files,
+      hardLinkIds: [...this.hardLinkIds].filter(([candidate]) =>
         candidate.startsWith(prefix),
+      ),
+      symbolicLinks,
+      metadata: [
+        ...directories,
+        ...files.map(([candidate]) => candidate),
+        ...symbolicLinks.map(([candidate]) => candidate),
+      ].map(
+        (candidate) => [candidate, this.getMetadata(candidate, false)] as const,
       ),
     };
   }
@@ -278,6 +548,9 @@ export class InMemoryFilesystem {
       ...snapshot.files.map(([path]) =>
         this.transferPath(source, destination, path),
       ),
+      ...snapshot.symbolicLinks.map(([path]) =>
+        this.transferPath(source, destination, path),
+      ),
     ];
     for (const path of mapped) {
       if (this.normalize(path) !== path || this.exists(path)) {
@@ -300,6 +573,7 @@ export class InMemoryFilesystem {
     source: string,
     destination: string,
     snapshot: FilesystemSnapshot,
+    moving: boolean,
   ): void {
     for (const path of [...snapshot.directories].sort(
       (left, right) => left.length - right.length,
@@ -307,6 +581,45 @@ export class InMemoryFilesystem {
       this.makeDirectory(this.transferPath(source, destination, path));
     for (const [path, contents] of snapshot.files) {
       this.writeFile(this.transferPath(source, destination, path), contents);
+    }
+    for (const [path, target] of snapshot.symbolicLinks) {
+      this.createSymbolicLink(
+        target,
+        this.transferPath(source, destination, path),
+      );
+    }
+    for (const [path, metadata] of snapshot.metadata) {
+      const destinationPath = this.transferPath(source, destination, path);
+      if (this.exists(destinationPath))
+        this.metadata.set(destinationPath, { ...metadata });
+    }
+    if (moving) {
+      for (const [path, id] of snapshot.hardLinkIds) {
+        this.hardLinkIds.set(this.transferPath(source, destination, path), id);
+      }
+    } else {
+      const copiedGroups = new Map<number, string[]>();
+      for (const [path, id] of snapshot.hardLinkIds) {
+        const paths = copiedGroups.get(id) ?? [];
+        paths.push(this.transferPath(source, destination, path));
+        copiedGroups.set(id, paths);
+      }
+      for (const paths of copiedGroups.values()) {
+        if (paths.length < 2) continue;
+        const id = nextHardLinkId++;
+        for (const path of paths) this.hardLinkIds.set(path, id);
+      }
+    }
+    this.rebuildHardLinkCounts();
+  }
+
+  private rebuildHardLinkCounts(): void {
+    this.hardLinkCounts.clear();
+    for (const id of this.hardLinkIds.values()) {
+      this.hardLinkCounts.set(id, (this.hardLinkCounts.get(id) ?? 0) + 1);
+    }
+    for (const [id, count] of [...this.hardLinkCounts]) {
+      if (count < 2) this.hardLinkCounts.delete(id);
     }
   }
 
@@ -363,6 +676,38 @@ export class FilesystemError extends Error {
 interface FilesystemSnapshot {
   readonly directories: readonly string[];
   readonly files: readonly (readonly [string, string])[];
+  readonly hardLinkIds: readonly (readonly [string, number])[];
+  readonly metadata: readonly (readonly [string, FilesystemMetadata])[];
+  readonly symbolicLinks: readonly (readonly [string, string])[];
+}
+
+let nextHardLinkId = 1;
+
+function hardLinkGroups(
+  links: ReadonlyMap<string, number>,
+): readonly (readonly string[])[] {
+  const groups = new Map<number, string[]>();
+  for (const [path, id] of links) {
+    const paths = groups.get(id) ?? [];
+    paths.push(path);
+    groups.set(id, paths);
+  }
+  return [...groups.values()]
+    .filter((paths) => paths.length > 1)
+    .map((paths) => paths.sort())
+    .sort(([left = ""], [right = ""]) => left.localeCompare(right));
+}
+
+function defaultMetadata(
+  directory: boolean,
+  mode = directory ? 0o755 : 0o644,
+): FilesystemMetadata {
+  return {
+    gid: 1_000,
+    mode,
+    modifiedAtMilliseconds: Date.now(),
+    uid: 1_000,
+  };
 }
 
 function ancestors(path: string): string[] {

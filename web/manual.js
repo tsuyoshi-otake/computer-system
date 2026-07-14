@@ -205,12 +205,19 @@ asm("store [answer], eax");</code></pre><p>Inline assembly executes at a stateme
     summary: "Paths, devices, quota, persistence",
     html: `
       <header class="manual-page-header"><p class="manual-kicker">Chapter 05 · Filesystem interface</p><h2>Filesystem and storage</h2><p class="manual-lead">Minecraft behavior is exposed through bounded adapters. The domain/runtime core does not import Minecraft APIs.</p></header>
-      <section class="manual-section"><h3>5.1 Linux layout</h3><table><thead><tr><th>Path</th><th>Role</th></tr></thead><tbody><tr><td>/etc</td><td>System configuration and bash startup</td></tr><tr><td>/dev</td><td>Virtual devices</td></tr><tr><td>/proc</td><td>Dynamic CPU and memory information</td></tr><tr><td>/tmp</td><td>Volatile working files</td></tr><tr><td>/usr</td><td>Userland hierarchy</td></tr><tr><td>/home/computer</td><td>Default user home</td></tr></tbody></table></section>
+      <section class="manual-section"><h3>5.1 Linux layout</h3><table><thead><tr><th>Path</th><th>Role</th></tr></thead><tbody><tr><td>/etc</td><td>Root-owned system configuration and Bash startup</td></tr><tr><td>/dev</td><td>Virtual devices</td></tr><tr><td>/proc</td><td>Dynamic CPU, memory, version, uptime, load, and mount information</td></tr><tr><td>/tmp</td><td>Volatile mode-1777 working files</td></tr><tr><td>/usr</td><td>Userland hierarchy</td></tr><tr><td>/home/computer</td><td>UID/GID 1000 default user home</td></tr></tbody></table><p>CS-Linux persists mode, UID, GID, modification time, symbolic links, and hard-link groups. Older snapshots without metadata remain readable and receive safe defaults on boot.</p></section>
       <section class="manual-section manual-grid-2"><div><h3>5.2 Terminal state</h3><p>The fixed-cell model is the source of truth. Web and Resource Pack UIs render snapshots. A newly opened Web Terminal receives control immediately and demotes the previous writer; a viewer may reclaim control explicitly.</p></div><div><h3>5.3 World state</h3><p>Inputs and outputs are side-addressed. Digital and analog observations enter through bounded events; output state persists with the Computer record.</p></div></section>
-      <section class="manual-section"><h3>5.4 Storage model</h3><p>Bedrock World Dynamic Properties stored in world LevelDB are canonical. Snapshots use checksum-backed transactional pages and preserve the current and previous complete generations. SQLite is not used by the Bedrock runtime.</p><pre><code>df
-du -s /home/computer
+      <section class="manual-section"><h3>5.4 Storage model</h3><p>Bedrock World Dynamic Properties stored in world LevelDB are canonical. Snapshots use checksum-backed transactional pages and preserve the current and previous complete generations. SQLite is not used by the Bedrock runtime.</p><pre><code>df -h
+du -sh /home/computer
 quota
 stat /startup.py</code></pre></section>
+      <section class="manual-section"><h3>5.5 CS-Linux command surface</h3><table><thead><tr><th>Area</th><th>Commands</th></tr></thead><tbody><tr><td>Identity</td><td>whoami, id, groups, hostname, uname</td></tr><tr><td>Files and metadata</td><td>ls, stat, chmod, chown, chgrp, ln, readlink, realpath, rmdir</td></tr><tr><td>Text and inspection</td><td>tee, cmp, diff, file, sha256sum, od, hexdump, xargs</td></tr><tr><td>System</td><td>date, uptime, free, df, du, mount, dmesg, sync, mktemp</td></tr><tr><td>Bash builtins</td><td>alias, unalias, command, read, local, shift, getopts</td></tr></tbody></table><p>Linux-facing commands use LF, Linux-style labels, and observable nonzero status for errors. <code>date --game</code> and <code>date --virtual</code> remain documented CS-Linux extensions. <code>yes</code>, <code>xargs</code>, dumps, hashes, and diffs stop at explicit sandbox limits.</p></section>
+      <section class="manual-section"><h3>5.6 Dynamic proc files</h3><pre><code>cat /proc/cpuinfo
+cat /proc/meminfo
+cat /proc/version
+cat /proc/uptime
+cat /proc/loadavg
+cat /proc/mounts</code></pre><p>These entries are read-only views generated from the Computer identity, hardware, clock, and mount model. They are not host Linux files. Directory and hard-link indexes keep ordinary listings O(N); no command scans the host filesystem.</p></section>
       <aside class="manual-warning"><b>Independent ceilings</b><p>RAM, disk quota, per-file size, entry count, pipeline buffer, output size, and CPU cycles are separate limits. Free disk does not imply free VM RAM.</p></aside>`,
   },
   {

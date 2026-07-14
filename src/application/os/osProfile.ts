@@ -121,6 +121,7 @@ const linuxProfile: OsProfile = {
       "/home/computer",
       "/lib/python",
       "/proc",
+      "/root",
       "/tmp",
       "/usr/bin",
       "/usr/lib/computer-system/python",
@@ -131,12 +132,20 @@ const linuxProfile: OsProfile = {
       legacyLinuxOsRelease,
     ]);
     ensureFile(filesystem, "/etc/hostname", `${context.computerName}\n`);
-    ensureFile(
+    ensureMigratedDefaultFile(
       filesystem,
       "/etc/passwd",
-      "computer:x:0:0:Computer System administrator:/home/computer:/bin/bash\n",
+      "root:x:0:0:root:/root:/bin/bash\ncomputer:x:1000:1000:Computer System administrator:/home/computer:/bin/bash\n",
+      [
+        "computer:x:0:0:Computer System administrator:/home/computer:/bin/bash\n",
+      ],
     );
-    ensureFile(filesystem, "/etc/group", "computer:x:0:computer\n");
+    ensureMigratedDefaultFile(
+      filesystem,
+      "/etc/group",
+      "root:x:0:\ncomputer:x:1000:computer\n",
+      ["computer:x:0:computer\n"],
+    );
     ensureFile(
       filesystem,
       "/etc/profile",
@@ -152,6 +161,35 @@ const linuxProfile: OsProfile = {
       "/home/computer/.bashrc",
       "# Personal Computer System Bash configuration\nexport EDITOR=vi\n",
     );
+    for (const path of [
+      "/bin",
+      "/dev",
+      "/etc",
+      "/lib",
+      "/proc",
+      "/root",
+      "/usr",
+      "/var",
+    ]) {
+      filesystem.setMetadata(path, { gid: 0, mode: 0o755, uid: 0 });
+    }
+    filesystem.setMetadata("/tmp", { gid: 0, mode: 0o1777, uid: 0 });
+    filesystem.setMetadata("/home", { gid: 0, mode: 0o755, uid: 0 });
+    filesystem.setMetadata("/home/computer", {
+      gid: 1_000,
+      mode: 0o755,
+      uid: 1_000,
+    });
+    for (const path of [
+      "/etc/bash.bashrc",
+      "/etc/group",
+      "/etc/hostname",
+      "/etc/os-release",
+      "/etc/passwd",
+      "/etc/profile",
+    ]) {
+      filesystem.setMetadata(path, { gid: 0, mode: 0o644, uid: 0 });
+    }
   },
 };
 

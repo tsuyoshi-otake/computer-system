@@ -124,4 +124,49 @@ describe("in-memory filesystem", (): void => {
     filesystem.makeDirectory("/target");
     expect(filesystem.revision).toBe(revision);
   });
+
+  it("persists Linux metadata, symbolic links, and shared hard-link contents", (): void => {
+    const filesystem = new InMemoryFilesystem({
+      ...limits,
+      capacityBytes: 1_000,
+      maxEntries: 20,
+    });
+    filesystem.makeDirectory("/data");
+    filesystem.writeFile("/data/original", "one");
+    filesystem.setMetadata("/data/original", { mode: 0o640 });
+    filesystem.createSymbolicLink("/data/original", "/data/symbolic");
+    filesystem.createHardLink("/data/original", "/data/hard");
+
+    filesystem.writeFile("/data/hard", "two");
+    expect(filesystem.readFile("/data/original")).toBe("two");
+    expect(filesystem.readFile("/data/symbolic")).toBe("two");
+    expect(filesystem.readLink("/data/symbolic")).toBe("/data/original");
+    expect(filesystem.getLinkCount("/data/original")).toBe(2);
+    expect(filesystem.getMetadata("/data/original").mode).toBe(0o640);
+    filesystem.copy("/data/symbolic", "/data/symbolic-copy");
+    expect(filesystem.readLink("/data/symbolic-copy")).toBe("/data/original");
+    filesystem.move("/data/hard", "/data/hard-moved");
+    expect(filesystem.getLinkCount("/data/hard-moved")).toBe(2);
+    filesystem.writeFile("/data/hard-moved", "three");
+    expect(filesystem.readFile("/data/original")).toBe("three");
+    filesystem.delete("/data/hard-moved");
+    expect(filesystem.readFile("/data/original")).toBe("three");
+    expect(filesystem.getLinkCount("/data/original")).toBe(1);
+    filesystem.createHardLink("/data/original", "/data/hard2");
+    filesystem.setMetadata("/data/hard2", { mode: 0o600 });
+    expect(filesystem.getMetadata("/data/original").mode).toBe(0o600);
+
+    filesystem.makeDirectory("/data/relative");
+    filesystem.writeFile("/data/relative/source", "relative");
+    filesystem.createSymbolicLink("source", "/data/relative/link");
+    filesystem.move("/data/relative", "/moved");
+    expect(filesystem.readFile("/moved/link")).toBe("relative");
+    expect(filesystem.readLink("/moved/link")).toBe("source");
+
+    const restored = new InMemoryFilesystem(filesystem.limits);
+    restored.restore(filesystem.snapshot());
+    expect(restored.readFile("/data/symbolic")).toBe("three");
+    expect(restored.getLinkCount("/data/hard2")).toBe(2);
+    expect(restored.getMetadata("/data/original").mode).toBe(0o600);
+  });
 });

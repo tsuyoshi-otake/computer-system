@@ -62,7 +62,7 @@ const variableMarkerEnd = "\u{e001}";
 const dosBackslashMarker = "\u{e002}";
 
 interface ScriptFrame {
-  readonly arguments: readonly string[];
+  arguments: string[];
   readonly name: string;
 }
 
@@ -82,6 +82,9 @@ export class ShellSession {
   private lastExitCode = 0;
   private readonly scriptFrames: ScriptFrame[] = [];
   private readonly shellFunctions = new Map<string, readonly string[]>();
+  private readonly shellAliases = new Map<string, string>();
+  private readonly localScopes: Map<string, string | undefined>[] = [];
+  private aliasDepth = 0;
   private scriptLoopIterations = 0;
   private readonly startupLines: string[] = [];
   private terminalHeight: number;
@@ -462,18 +465,42 @@ export class ShellSession {
     this.cpuCyclesValue += 8;
     const [requestedName = "", ...arguments_] = command.words;
     const name = this.commands.canonicalCommand(requestedName);
+    const alias = this.shellAliases.get(requestedName);
+    if (alias !== undefined) {
+      if (this.aliasDepth >= maximumScriptDepth)
+        return commandFailure(
+          "alias",
+          "maximum alias expansion depth exceeded",
+        );
+      const words = [...alias.trim().split(/\s+/u), ...arguments_];
+      this.aliasDepth += 1;
+      try {
+        return this.executeCommand(
+          { words, redirects: command.redirects },
+          stdin,
+          depth,
+          interactiveAllowed,
+        );
+      } finally {
+        this.aliasDepth -= 1;
+      }
+    }
     const functionBody = this.shellFunctions.get(name);
     if (functionBody !== undefined) {
       if (depth >= maximumScriptDepth)
         return commandFailure(name, "maximum function depth exceeded");
       if (this.scriptFrames.length === 0) this.scriptLoopIterations = 0;
-      this.scriptFrames.push({ arguments: arguments_, name });
+      this.scriptFrames.push({ arguments: [...arguments_], name });
+      this.localScopes.push(new Map());
       try {
         return this.executeScriptLines(functionBody, depth + 1, name).result;
       } finally {
+        this.restoreLocalScope(this.localScopes.pop()!);
         this.scriptFrames.pop();
       }
     }
+    const shellBuiltin = this.executeLinuxShellBuiltin(name, arguments_, stdin);
+    if (shellBuiltin !== undefined) return shellBuiltin;
     if (name === "history") {
       if (arguments_.length > 0) return commandUsage("history");
       return commandSuccess(
@@ -549,6 +576,151 @@ export class ShellSession {
     return result;
   }
 
+  private executeLinuxShellBuiltin(
+    name: string,
+    arguments_: readonly string[],
+    stdin: string,
+  ): ShellCommandResult | undefined {
+    if (this.commands.profile.id !== "linux") return undefined;
+    if (name === "alias") {
+      if (arguments_.length === 0) {
+        return commandSuccess(
+          `${[...this.shellAliases]
+            .sort(([left], [right]) => left.localeCompare(right))
+            .map(
+              ([aliasName, value]) =>
+                `alias ${aliasName}='${value.replaceAll("'", "'\\''")}'`,
+            )
+            .join("\n")}${this.shellAliases.size > 0 ? "\n" : ""}`,
+        );
+      }
+      for (const value of arguments_) {
+        const separator = value.indexOf("=");
+        if (separator < 1)
+          return commandFailure("alias", `${value}: not found`, 1);
+        const aliasName = value.slice(0, separator);
+        if (!/^[A-Za-z_][A-Za-z0-9_-]*$/u.test(aliasName))
+          return commandFailure("alias", `${aliasName}: invalid alias name`, 2);
+        this.shellAliases.set(aliasName, value.slice(separator + 1));
+      }
+      return commandSuccess();
+    }
+    if (name === "unalias") {
+      if (arguments_.length === 0) return commandUsage("unalias <name ...>");
+      for (const aliasName of arguments_) {
+        if (!this.shellAliases.delete(aliasName))
+          return commandFailure("unalias", `${aliasName}: not found`, 1);
+      }
+      return commandSuccess();
+    }
+    if (name === "command") {
+      if (arguments_[0] === "-v") {
+        if (arguments_.length !== 2) return commandUsage("command -v <name>");
+        const requested = arguments_[1]!;
+        if (this.shellAliases.has(requested))
+          return commandSuccess(`${requested}\n`);
+        return this.commands.isKnownCommand(requested)
+          ? commandSuccess(`${requested}\n`)
+          : { exitCode: 1, stderr: "", stdout: "" };
+      }
+      if (arguments_.length === 0) return commandSuccess();
+      return this.commands.execute(arguments_, stdin);
+    }
+    if (name === "read") {
+      if (arguments_.length > 1) return commandUsage("read [name]");
+      const variable = arguments_[0] ?? "REPLY";
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/u.test(variable))
+        return commandFailure("read", `${variable}: invalid identifier`, 2);
+      const newline = stdin.indexOf("\n");
+      const value = (newline < 0 ? stdin : stdin.slice(0, newline)).replace(
+        /\r$/u,
+        "",
+      );
+      this.commands.setEnvironmentValue(variable, value);
+      return { exitCode: stdin.length === 0 ? 1 : 0, stderr: "", stdout: "" };
+    }
+    if (name === "shift") {
+      if (arguments_.length > 1) return commandUsage("shift [count]");
+      const frame = this.scriptFrames.at(-1);
+      if (frame === undefined)
+        return commandFailure("shift", "not in a function or script", 1);
+      const count = arguments_[0] === undefined ? 1 : Number(arguments_[0]);
+      if (
+        !Number.isSafeInteger(count) ||
+        count < 0 ||
+        count > frame.arguments.length
+      )
+        return commandFailure("shift", "shift count out of range", 1);
+      frame.arguments.splice(0, count);
+      return commandSuccess();
+    }
+    if (name === "local") {
+      const scope = this.localScopes.at(-1);
+      if (scope === undefined)
+        return commandFailure("local", "can only be used in a function", 1);
+      for (const assignment of arguments_) {
+        const separator = assignment.indexOf("=");
+        const variable =
+          separator < 0 ? assignment : assignment.slice(0, separator);
+        if (!/^[A-Za-z_][A-Za-z0-9_]*$/u.test(variable))
+          return commandFailure("local", `${variable}: invalid identifier`, 2);
+        if (!scope.has(variable))
+          scope.set(variable, this.commands.environmentValue(variable));
+        this.commands.setEnvironmentValue(
+          variable,
+          separator < 0 ? "" : assignment.slice(separator + 1),
+        );
+      }
+      return commandSuccess();
+    }
+    if (name === "getopts") return this.executeGetopts(arguments_);
+    return undefined;
+  }
+
+  private executeGetopts(arguments_: readonly string[]): ShellCommandResult {
+    if (arguments_.length !== 2)
+      return commandUsage("getopts <optstring> <name>");
+    const frame = this.scriptFrames.at(-1);
+    if (frame === undefined)
+      return commandFailure("getopts", "not in a function or script", 1);
+    const [specification = "", variable = ""] = arguments_;
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/u.test(variable))
+      return commandFailure("getopts", `${variable}: invalid identifier`, 2);
+    const index = Number(this.commands.environmentValue("OPTIND") ?? "1");
+    const argument = frame.arguments[index - 1];
+    if (argument === undefined || !/^-[^-].*/u.test(argument))
+      return { exitCode: 1, stderr: "", stdout: "" };
+    const option = argument[1]!;
+    const location = specification.indexOf(option);
+    this.commands.setEnvironmentValue("OPTIND", String(index + 1));
+    if (location < 0) {
+      this.commands.setEnvironmentValue(variable, "?");
+      return commandSuccess();
+    }
+    this.commands.setEnvironmentValue(variable, option);
+    if (specification[location + 1] === ":") {
+      const attached = argument.slice(2);
+      const optionArgument = attached || frame.arguments[index];
+      if (optionArgument === undefined) {
+        this.commands.setEnvironmentValue(variable, "?");
+        return commandSuccess();
+      }
+      this.commands.setEnvironmentValue("OPTARG", optionArgument);
+      if (attached.length === 0)
+        this.commands.setEnvironmentValue("OPTIND", String(index + 2));
+    } else this.commands.unsetEnvironmentValue("OPTARG");
+    return commandSuccess();
+  }
+
+  private restoreLocalScope(
+    scope: ReadonlyMap<string, string | undefined>,
+  ): void {
+    for (const [name, value] of scope) {
+      if (value === undefined) this.commands.unsetEnvironmentValue(name);
+      else this.commands.setEnvironmentValue(name, value);
+    }
+  }
+
   private executeScript(
     command: "bash" | "sh" | "source",
     arguments_: readonly string[],
@@ -563,7 +735,7 @@ export class ShellSession {
     }
     let source: string;
     let label: string;
-    let scriptArguments: readonly string[];
+    let scriptArguments: string[];
     if (arguments_[0] === "-c") {
       if (arguments_.length < 2)
         return commandUsage(`${command} -c <command> [name [argument ...]]`);
@@ -1180,8 +1352,12 @@ function commandSuccess(stdout = ""): ShellCommandResult {
   return { exitCode: 0, stderr: "", stdout };
 }
 
-function commandFailure(command: string, detail: string): ShellCommandResult {
-  return { exitCode: 1, stderr: `${command}: ${detail}\n`, stdout: "" };
+function commandFailure(
+  command: string,
+  detail: string,
+  exitCode = 1,
+): ShellCommandResult {
+  return { exitCode, stderr: `${command}: ${detail}\n`, stdout: "" };
 }
 
 function commandUsage(usage: string): ShellCommandResult {

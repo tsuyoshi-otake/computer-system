@@ -135,6 +135,7 @@ export class LinuxAuthentication {
       shadowPath,
       `${createPasswordRecord(password, salt)}\n`,
     );
+    this.filesystem.setMetadata(shadowPath, { gid: 0, mode: 0o600, uid: 0 });
     this.state = { kind: "authenticated" };
     return result(true, "Password configured.\n", "", 0);
   }

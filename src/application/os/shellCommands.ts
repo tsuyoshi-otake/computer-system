@@ -27,6 +27,7 @@ import {
   type Cs486SourceLanguage,
 } from "../toolchain/highLevelCompilers.js";
 import { linkCs486Objects } from "../toolchain/cs486Linker.js";
+import { sha256Hex } from "./passwordHash.js";
 
 export type ShellAction = "clear" | "reboot" | "shutdown";
 
@@ -157,6 +158,35 @@ export const shellCommandNames = [
   "doskey",
   "tree",
   "vol",
+  "chmod",
+  "chown",
+  "chgrp",
+  "cmp",
+  "diff",
+  "dmesg",
+  "file",
+  "groups",
+  "hexdump",
+  "ln",
+  "mktemp",
+  "mount",
+  "od",
+  "printenv",
+  "readlink",
+  "realpath",
+  "rmdir",
+  "sha256sum",
+  "sync",
+  "tee",
+  "xargs",
+  "yes",
+  "alias",
+  "command",
+  "getopts",
+  "local",
+  "read",
+  "shift",
+  "unalias",
 ] as const;
 
 const knownCommands = new Set<string>(shellCommandNames);
@@ -168,6 +198,8 @@ export class ShellCommandRuntime {
   private previousDirectory: string;
   private readonly environment: Map<string, string>;
   private dosEcho = true;
+  private temporarySequence = 0;
+  private xargsDepth = 0;
 
   constructor(
     private readonly filesystem: InMemoryFilesystem,
@@ -426,6 +458,8 @@ export class ShellCommandRuntime {
         return this.dosResult("File not found.", this.remove(arguments_));
       case "dir":
         return this.dosDirectory(arguments_);
+      case "date":
+        return this.dosDate(arguments_);
       case "md":
       case "mkdir":
         return this.dosResult(
@@ -582,12 +616,13 @@ export class ShellCommandRuntime {
           : success(
               [
                 "Computer System BusyBox shell",
-                "files: pwd cd ls cat mkdir touch rm cp mv find du quota",
+                "files: pwd cd ls cat mkdir rmdir touch rm cp mv ln readlink realpath find du quota",
                 "text: echo printf head tail wc grep sort uniq tr",
-                "shell: sh bash source env export unset which type",
+                "text+: tee cmp diff sha256sum od hexdump xargs",
+                "shell: sh bash source env printenv export unset alias unalias command read local shift getopts",
                 "system: clear vi shutdown reboot exit true false",
                 "info: whoami id hostname uname date uptime stat df du quota",
-                "hardware: cpuinfo free /proc/cpuinfo /proc/meminfo",
+                "hardware: cpuinfo free mount dmesg /proc/cpuinfo /proc/meminfo",
                 "utility: history time sleep seq cut test [",
                 "toolchain: as cc c++ basic basicc ld nm run objdump",
                 "syntax: |  >  >>  <  &&  ||  ;  '...'  \"...\"  $VAR  $?",
@@ -650,10 +685,10 @@ export class ShellCommandRuntime {
           ? success(`${this.options.profile.username}\n`)
           : usage("whoami");
       case "id":
+        if (this.options.profile.id === "linux")
+          return this.linuxId(arguments_);
         return arguments_.length === 0
-          ? success(
-              `uid=0(${this.options.profile.username}) gid=0(${this.options.profile.username}) groups=0(${this.options.profile.username})\n`,
-            )
+          ? success("uid=0(COMPUTER) gid=0(COMPUTER) groups=0(COMPUTER)\r\n")
           : usage("id");
       case "hostname":
         return arguments_.length === 0
@@ -695,6 +730,49 @@ export class ShellCommandRuntime {
         return this.options.profile.id === "dos"
           ? this.dosVolume(arguments_)
           : this.commandNotFound(command);
+      case "chmod":
+        return this.linuxChangeMode(arguments_);
+      case "chown":
+        return this.linuxChangeOwner(arguments_, true);
+      case "chgrp":
+        return this.linuxChangeOwner(arguments_, false);
+      case "cmp":
+        return this.linuxCompare(arguments_);
+      case "diff":
+        return this.linuxDiff(arguments_);
+      case "dmesg":
+        return this.linuxDmesg(arguments_);
+      case "file":
+        return this.linuxFile(arguments_);
+      case "groups":
+        return this.linuxGroups(arguments_);
+      case "hexdump":
+      case "od":
+        return this.linuxHexDump(command, arguments_, stdin);
+      case "ln":
+        return this.linuxLink(arguments_);
+      case "mktemp":
+        return this.linuxMakeTemporary(arguments_);
+      case "mount":
+        return this.linuxMount(arguments_);
+      case "printenv":
+        return this.linuxPrintEnvironment(arguments_);
+      case "readlink":
+        return this.linuxReadLink(arguments_);
+      case "realpath":
+        return this.linuxRealPath(arguments_);
+      case "rmdir":
+        return this.linuxRemoveDirectory(arguments_);
+      case "sha256sum":
+        return this.linuxSha256Sum(arguments_, stdin);
+      case "sync":
+        return arguments_.length === 0 ? success() : usage("sync");
+      case "tee":
+        return this.linuxTee(arguments_, stdin);
+      case "xargs":
+        return this.linuxXargs(arguments_, stdin);
+      case "yes":
+        return this.linuxYes(arguments_);
       case "as":
         return this.compileExecutable("asm", arguments_);
       case "cc":
@@ -730,9 +808,11 @@ export class ShellCommandRuntime {
           ? this.dosSet(arguments_.join(" "))
           : this.commandNotFound(command);
       case "uptime":
-        return arguments_.length === 0
-          ? success(`${this.uptimeSeconds().toFixed(2)} seconds\n`)
-          : usage("uptime");
+        return this.options.profile.id === "linux"
+          ? this.linuxUptime(arguments_)
+          : arguments_.length === 0
+            ? success(`${this.uptimeSeconds().toFixed(2)} seconds\r\n`)
+            : usage("uptime");
       case "sleep":
         return this.sleep(arguments_);
       case "seq":
@@ -781,6 +861,13 @@ export class ShellCommandRuntime {
       case "sh":
       case "bash":
       case "source":
+      case "alias":
+      case "command":
+      case "getopts":
+      case "local":
+      case "read":
+      case "shift":
+      case "unalias":
         return failure(command, "internal dispatch is unavailable", 125);
       default:
         return this.commandNotFound(command);
@@ -803,6 +890,8 @@ export class ShellCommandRuntime {
   private list(arguments_: readonly string[]): ShellCommandResult {
     let long = false;
     let all = false;
+    let human = false;
+    let directoryEntry = false;
     const paths: string[] = [];
     for (const argument of arguments_) {
       if (argument === "--") {
@@ -812,6 +901,8 @@ export class ShellCommandRuntime {
         for (const flag of argument.slice(1)) {
           if (flag === "l") long = true;
           else if (flag === "a" || flag === "1") all ||= flag === "a";
+          else if (flag === "h") human = true;
+          else if (flag === "d") directoryEntry = true;
           else return failure("ls", `invalid option -- '${flag}'`, 2);
         }
       } else paths.push(argument);
@@ -824,12 +915,24 @@ export class ShellCommandRuntime {
       if (!this.filesystem.exists(resolved) && resolvedDevice === undefined) {
         return failure("ls", `${path}: no such file or directory`);
       }
-      const names = this.filesystem.isDirectory(resolved)
+      const listDirectory =
+        this.filesystem.isDirectory(resolved) && !directoryEntry;
+      if (
+        this.options.profile.id === "linux" &&
+        listDirectory &&
+        !this.linuxHasAccess(resolved, 0b101)
+      )
+        return failure(
+          "ls",
+          `cannot open directory '${path}': Permission denied`,
+          2,
+        );
+      const names = listDirectory
         ? this.filesystem
             .list(resolved)
             .filter((name) => all || !name.startsWith("."))
         : [baseName(resolved)];
-      if (this.filesystem.isDirectory(resolved)) {
+      if (listDirectory) {
         for (const devicePath of this.virtualDevicePaths()) {
           if (parentPath(devicePath) !== resolved) continue;
           const name = baseName(devicePath);
@@ -838,26 +941,64 @@ export class ShellCommandRuntime {
           }
         }
         names.sort();
+        if (all && this.options.profile.id === "linux")
+          names.unshift(".", "..");
       }
       const prefix = paths.length > 1 ? `${path}:\n` : "";
       const listing = long
         ? names
             .map((name) => {
-              const target = this.filesystem.isDirectory(resolved)
-                ? joinPath(resolved, name)
+              const target = listDirectory
+                ? name === "."
+                  ? resolved
+                  : name === ".."
+                    ? parentPath(resolved)
+                    : joinPath(resolved, name)
                 : resolved;
               const device = this.virtualDevice(target) !== undefined;
-              const kind = device
-                ? "dev "
-                : this.filesystem.isDirectory(target)
-                  ? "dir "
-                  : "file";
-              const size = device ? 0 : this.filesystem.getSize(target);
-              return `${kind} ${String(size).padStart(7)} ${this.displayName(name)}`;
+              const symbolic = this.filesystem.isSymbolicLink(target);
+              const directory =
+                !symbolic && this.filesystem.isDirectory(target);
+              const size = device
+                ? 0
+                : symbolic
+                  ? utf8ByteLength(this.filesystem.readLink(target))
+                  : this.filesystem.getSize(target);
+              if (this.options.profile.id === "dos") {
+                const kind = device ? "dev " : directory ? "dir " : "file";
+                return `${kind} ${String(size).padStart(7)} ${this.displayName(name)}`;
+              }
+              const metadata = device
+                ? {
+                    gid: 0,
+                    mode: 0o666,
+                    modifiedAtMilliseconds: 0,
+                    uid: 0,
+                  }
+                : this.filesystem.getMetadata(target, !symbolic);
+              const renderedName = symbolic
+                ? `${name} -> ${this.filesystem.readLink(target)}`
+                : name;
+              return `${linuxModeString(device ? "device" : symbolic ? "link" : directory ? "directory" : "file", metadata.mode)} ${String(device || symbolic ? 1 : this.filesystem.getLinkCount(target)).padStart(2)} ${linuxIdentityName(metadata.uid).padEnd(8)} ${linuxIdentityName(metadata.gid).padEnd(8)} ${formatLinuxSize(size, human).padStart(8)} ${formatLinuxTimestamp(metadata.modifiedAtMilliseconds)} ${renderedName}`;
             })
             .join("\n")
         : names.map((name) => this.displayName(name)).join("  ");
-      sections.push(`${index > 0 ? "\n" : ""}${prefix}${listing}`);
+      const total =
+        long && listDirectory && this.options.profile.id === "linux"
+          ? `total ${String(
+              names.reduce((sum, name) => {
+                if (name === "." || name === "..") return sum;
+                const target = joinPath(resolved, name);
+                return (
+                  sum +
+                  (this.virtualDevice(target) === undefined
+                    ? this.filesystem.getSize(target)
+                    : 0)
+                );
+              }, 0),
+            )}\n`
+          : "";
+      sections.push(`${index > 0 ? "\n" : ""}${prefix}${total}${listing}`);
     }
     return success(sections.join("") + "\n");
   }
@@ -920,6 +1061,14 @@ export class ShellCommandRuntime {
     if (paths.length === 0) return usage("mkdir [-p] <directory ...>");
     for (const path of paths) {
       const resolved = this.resolvePath(path);
+      if (
+        this.options.profile.id === "linux" &&
+        !this.linuxHasAccess(this.closestExistingDirectory(resolved), 0b011)
+      )
+        return failure(
+          "mkdir",
+          `cannot create directory '${path}': Permission denied`,
+        );
       if (!recursive && !this.filesystem.isDirectory(parentPath(resolved))) {
         return failure("mkdir", `${path}: parent directory does not exist`);
       }
@@ -938,8 +1087,16 @@ export class ShellCommandRuntime {
       if (this.filesystem.isDirectory(resolved)) {
         return failure("touch", `${path}: is a directory`);
       }
-      if (!this.filesystem.exists(resolved))
-        this.filesystem.writeFile(resolved, "");
+      if (!this.filesystem.exists(resolved)) this.writeFile(path, "");
+      else if (
+        this.options.profile.id === "linux" &&
+        !this.linuxHasAccess(resolved, 0b010)
+      )
+        return failure("touch", `cannot touch '${path}': Permission denied`);
+      this.filesystem.setModifiedTime(
+        resolved,
+        this.options.clock.currentWallTimeMilliseconds(),
+      );
     }
     return success();
   }
@@ -967,6 +1124,11 @@ export class ShellCommandRuntime {
       if (this.filesystem.isDirectory(resolved) && !recursive) {
         return failure("rm", `${path}: is a directory`);
       }
+      if (
+        this.options.profile.id === "linux" &&
+        !this.linuxHasAccess(parentPath(resolved), 0b011)
+      )
+        return failure("rm", `cannot remove '${path}': Permission denied`);
       this.filesystem.delete(resolved);
     }
     return success();
@@ -982,17 +1144,32 @@ export class ShellCommandRuntime {
     if (this.filesystem.isDirectory(source) && !recursive) {
       return failure("cp", `${paths[0]}: omitting directory`);
     }
-    this.filesystem.copy(source, this.transferDestination(source, paths[1]!));
+    if (
+      this.options.profile.id === "linux" &&
+      !this.linuxHasAccess(source, 0b100)
+    )
+      return failure("cp", `cannot open '${paths[0]}': Permission denied`);
+    const destination = this.transferDestination(source, paths[1]!);
+    if (
+      this.options.profile.id === "linux" &&
+      !this.linuxHasAccess(parentPath(destination), 0b011)
+    )
+      return failure("cp", `cannot create '${paths[1]}': Permission denied`);
+    this.filesystem.copy(source, destination);
     return success();
   }
 
   private move(arguments_: readonly string[]): ShellCommandResult {
     if (arguments_.length !== 2) return usage("mv <source> <destination>");
     const source = this.resolvePath(arguments_[0]!);
-    this.filesystem.move(
-      source,
-      this.transferDestination(source, arguments_[1]!),
-    );
+    const destination = this.transferDestination(source, arguments_[1]!);
+    if (
+      this.options.profile.id === "linux" &&
+      (!this.linuxHasAccess(parentPath(source), 0b011) ||
+        !this.linuxHasAccess(parentPath(destination), 0b011))
+    )
+      return failure("mv", "cannot move: Permission denied");
+    this.filesystem.move(source, destination);
     return success();
   }
 
@@ -1370,6 +1547,13 @@ export class ShellCommandRuntime {
   readFile(path: string): string {
     const resolved = this.resolvePath(path);
     const device = this.virtualDevice(resolved);
+    if (
+      device === undefined &&
+      this.options.profile.id === "linux" &&
+      !this.linuxHasAccess(resolved, 0b100)
+    ) {
+      throw new Error(`${path}: Permission denied`);
+    }
     return device === undefined
       ? this.filesystem.readFile(resolved)
       : device.read();
@@ -1382,12 +1566,47 @@ export class ShellCommandRuntime {
       device.write(contents);
       return;
     }
+    if (this.options.profile.id === "linux") {
+      const accessPath = this.filesystem.exists(resolved)
+        ? resolved
+        : parentPath(resolved);
+      const required = this.filesystem.exists(resolved) ? 0b010 : 0b011;
+      if (!this.linuxHasAccess(accessPath, required))
+        throw new Error(`${path}: Permission denied`);
+    }
     if (append) this.filesystem.appendFile(resolved, contents);
     else this.filesystem.writeFile(resolved, contents);
   }
 
   currentTick(): number {
     return this.options.currentTick();
+  }
+
+  environmentValue(name: string): string | undefined {
+    return this.environment.get(this.environmentName(name));
+  }
+
+  setEnvironmentValue(name: string, value: string): void {
+    this.environment.set(this.environmentName(name), value);
+  }
+
+  unsetEnvironmentValue(name: string): void {
+    this.environment.delete(this.environmentName(name));
+  }
+
+  private linuxHasAccess(path: string, required: number): boolean {
+    const metadata = this.filesystem.getMetadata(path);
+    const shift = metadata.uid === 1_000 ? 6 : metadata.gid === 1_000 ? 3 : 0;
+    return ((metadata.mode >> shift) & 0b111 & required) === required;
+  }
+
+  private closestExistingDirectory(path: string): string {
+    let candidate = parentPath(path);
+    while (!this.filesystem.isDirectory(candidate)) {
+      if (candidate === "/") return "/";
+      candidate = parentPath(candidate);
+    }
+    return candidate;
   }
 
   ticksPerSecond(): number {
@@ -1454,7 +1673,39 @@ export class ShellCommandRuntime {
 
   private commandAvailable(command: string): boolean {
     if (command === "edit") return this.options.profile.id === "dos";
-    if (command === "cpuinfo" || command === "free")
+    if (
+      command === "chmod" ||
+      command === "alias" ||
+      command === "chown" ||
+      command === "chgrp" ||
+      command === "cmp" ||
+      command === "cpuinfo" ||
+      command === "diff" ||
+      command === "dmesg" ||
+      command === "file" ||
+      command === "free" ||
+      command === "groups" ||
+      command === "getopts" ||
+      command === "hexdump" ||
+      command === "ln" ||
+      command === "local" ||
+      command === "mktemp" ||
+      command === "mount" ||
+      command === "od" ||
+      command === "printenv" ||
+      command === "readlink" ||
+      command === "read" ||
+      command === "realpath" ||
+      command === "rmdir" ||
+      command === "sha256sum" ||
+      command === "sync" ||
+      command === "shift" ||
+      command === "tee" ||
+      command === "xargs" ||
+      command === "yes" ||
+      command === "command" ||
+      command === "unalias"
+    )
       return this.options.profile.id === "linux";
     if (
       command === "cpu" ||
@@ -1495,6 +1746,26 @@ export class ShellCommandRuntime {
       return this.readOnlyDevice(path, () => this.linuxCpuInfo());
     if (path === "/proc/meminfo")
       return this.readOnlyDevice(path, () => this.linuxMemoryInfo());
+    if (path === "/proc/version")
+      return this.readOnlyDevice(
+        path,
+        () =>
+          "Linux version 1.0.0-cs (computer@cs-linux) #1 CS-Linux SMP i486 GNU/Linux\n",
+      );
+    if (path === "/proc/uptime")
+      return this.readOnlyDevice(
+        path,
+        () =>
+          `${this.uptimeSeconds().toFixed(2)} ${this.uptimeSeconds().toFixed(2)}\n`,
+      );
+    if (path === "/proc/loadavg")
+      return this.readOnlyDevice(path, () => "0.00 0.00 0.00 1/1 1\n");
+    if (path === "/proc/mounts")
+      return this.readOnlyDevice(
+        path,
+        () =>
+          "csfs / csfs rw,nosuid,nodev 0 0\nproc /proc proc ro,nosuid,nodev,noexec 0 0\ncsdev /dev csdev rw,nosuid,noexec 0 0\ntmpfs /tmp tmpfs rw,nosuid,nodev 0 0\n",
+      );
     return undefined;
   }
 
@@ -1502,7 +1773,14 @@ export class ShellCommandRuntime {
     return [
       ...this.options.profile.virtualDevices.keys(),
       ...(this.options.profile.id === "linux"
-        ? ["/proc/cpuinfo", "/proc/meminfo"]
+        ? [
+            "/proc/cpuinfo",
+            "/proc/loadavg",
+            "/proc/meminfo",
+            "/proc/mounts",
+            "/proc/uptime",
+            "/proc/version",
+          ]
         : []),
     ];
   }
@@ -1615,13 +1893,72 @@ export class ShellCommandRuntime {
     );
   }
 
+  private linuxId(arguments_: readonly string[]): ShellCommandResult {
+    if (arguments_.length === 0)
+      return success(
+        "uid=1000(computer) gid=1000(computer) groups=1000(computer)\n",
+      );
+    if (
+      arguments_.length !== 1 ||
+      !["-u", "-g", "-G", "-un", "-gn"].includes(arguments_[0]!)
+    )
+      return usage("id [-u|-g|-G|-un|-gn]");
+    return success(arguments_[0]!.includes("n") ? "computer\n" : "1000\n");
+  }
+
+  private linuxUptime(arguments_: readonly string[]): ShellCommandResult {
+    if (arguments_.length !== 0) return usage("uptime");
+    const seconds = Math.max(0, this.uptimeSeconds());
+    const days = Math.floor(seconds / 86_400);
+    const hours = Math.floor((seconds % 86_400) / 3_600);
+    const minutes = Math.floor((seconds % 3_600) / 60);
+    const now = new Date(this.options.clock.currentWallTimeMilliseconds());
+    const clock = Number.isFinite(now.getTime())
+      ? formatDate(now, "%H:%M:%S")
+      : "00:00:00";
+    const duration =
+      days > 0
+        ? `${String(days)} day${days === 1 ? "" : "s"}, ${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`
+        : `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`;
+    return success(
+      ` ${clock} up ${duration},  1 user,  load average: 0.00, 0.00, 0.00\n`,
+    );
+  }
+
   private uname(arguments_: readonly string[]): ShellCommandResult {
+    if (this.options.profile.id === "linux") {
+      const values = new Map<string, string>([
+        ["s", "Linux"],
+        ["n", this.options.computerName],
+        ["r", "1.0.0-cs"],
+        ["v", "#1 CS-Linux SMP"],
+        ["m", "i486"],
+        ["p", "i486"],
+        ["i", "unknown"],
+        ["o", "GNU/Linux"],
+      ]);
+      if (arguments_.length === 0) return success("Linux\n");
+      const flags = arguments_.flatMap((argument) =>
+        argument === "--all"
+          ? ["a"]
+          : argument.startsWith("-")
+            ? [...argument.slice(1)]
+            : ["?"],
+      );
+      if (flags.some((flag) => flag !== "a" && !values.has(flag)))
+        return usage("uname [-asnrvmpio]");
+      const selected = flags.includes("a")
+        ? ["s", "n", "r", "v", "m", "o"]
+        : [...new Set(flags)];
+      return success(
+        `${selected.map((flag) => values.get(flag)!).join(" ")}\n`,
+      );
+    }
     if (
       arguments_.length > 1 ||
       (arguments_.length === 1 && arguments_[0] !== "-a")
-    ) {
+    )
       return usage("uname [-a]");
-    }
     const name = formatOsIdentity(this.options.profile.identity);
     const system =
       this.options.profile.id === "dos"
@@ -1669,7 +2006,12 @@ export class ShellCommandRuntime {
     if (!Number.isFinite(date.getTime())) {
       return failure("date", `${parsed.mode} clock is unavailable`, 1);
     }
-    if (parsed.format === undefined) return success(`${date.toISOString()}\n`);
+    if (parsed.format === undefined)
+      return success(
+        parsed.mode === "real"
+          ? `${formatLinuxDate(date)}\n`
+          : `${date.toISOString()}\n`,
+      );
     return success(`${formatDate(date, parsed.format)}\n`);
   }
 
@@ -1689,6 +2031,22 @@ export class ShellCommandRuntime {
     ).padStart(2, "0");
     return success(
       `Current time is ${formatDate(date, "%H:%M:%S")}.${centiseconds}\r\n`,
+    );
+  }
+
+  private dosDate(arguments_: readonly string[]): ShellCommandResult {
+    if (arguments_.length !== 0)
+      return status(
+        2,
+        "",
+        "The host-backed system date cannot be changed.\r\n",
+      );
+    const date = new Date(this.options.clock.currentWallTimeMilliseconds());
+    if (!Number.isFinite(date.getTime()))
+      return status(1, "", "System date is unavailable.\r\n");
+    const weekdays = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    return success(
+      `Current date is ${weekdays[date.getUTCDay()]} ${formatDate(date, "%m-%d-%Y")}\r\n`,
     );
   }
 
@@ -1787,21 +2145,58 @@ export class ShellCommandRuntime {
     if (arguments_.length !== 1) return usage("stat <path>");
     const resolved = this.resolvePath(arguments_[0]!);
     const device = this.virtualDevice(resolved);
-    if (device !== undefined) return success(`device 0 ${arguments_[0]}\n`);
+    if (device !== undefined)
+      return success(
+        `  File: ${arguments_[0]}\n  Size: 0\tBlocks: 0\tIO Block: 1 character special file\nDevice: csdev\tInode: 0\tLinks: 1\nAccess: (0666/crw-rw-rw-)  Uid: (    0/    root)   Gid: (    0/    root)\n`,
+      );
     if (!this.filesystem.exists(resolved))
-      return failure("stat", `${arguments_[0]}: no such file or directory`);
-    const kind = this.filesystem.isDirectory(resolved) ? "directory" : "file";
+      return failure(
+        "stat",
+        `cannot statx '${arguments_[0]}': No such file or directory`,
+      );
+    const symbolic = this.filesystem.isSymbolicLink(resolved);
+    const kind = symbolic
+      ? "symbolic link"
+      : this.filesystem.isDirectory(resolved)
+        ? "directory"
+        : "regular file";
+    const metadata = this.filesystem.getMetadata(resolved, !symbolic);
+    const mode = linuxModeString(
+      symbolic
+        ? "link"
+        : this.filesystem.isDirectory(resolved)
+          ? "directory"
+          : "file",
+      metadata.mode,
+    );
+    const modified = new Date(metadata.modifiedAtMilliseconds).toISOString();
     return success(
-      `${kind} ${this.filesystem.getSize(resolved)} ${arguments_[0]}\n`,
+      `  File: ${arguments_[0]}${symbolic ? ` -> ${this.filesystem.readLink(resolved)}` : ""}\n` +
+        `  Size: ${String(symbolic ? utf8ByteLength(this.filesystem.readLink(resolved)) : this.filesystem.getSize(resolved))}\tBlocks: 1\tIO Block: 1 ${kind}\n` +
+        `Device: csfs\tInode: ${String(stablePathInode(resolved))}\tLinks: ${String(symbolic ? 1 : this.filesystem.getLinkCount(resolved))}\n` +
+        `Access: (${metadata.mode.toString(8).padStart(4, "0")}/${mode})  Uid: (${String(metadata.uid).padStart(5)}/${linuxIdentityName(metadata.uid).padStart(8)})   Gid: (${String(metadata.gid).padStart(5)}/${linuxIdentityName(metadata.gid).padStart(8)})\n` +
+        `Modify: ${modified}\n`,
     );
   }
 
   private diskFree(arguments_: readonly string[]): ShellCommandResult {
-    if (arguments_.length > 1) return usage("df [path]");
+    const human = arguments_[0] === "-h";
+    const paths = arguments_.filter((argument) => argument !== "-h");
+    if (
+      paths.length > 1 ||
+      arguments_.some(
+        (argument) => argument.startsWith("-") && argument !== "-h",
+      )
+    )
+      return usage("df [-h] [path]");
     const free = this.filesystem.getFreeSpace();
     const capacity = this.filesystem.limits.capacityBytes;
+    const used = capacity - free;
+    const percent = capacity === 0 ? 0 : Math.ceil((used / capacity) * 100);
+    const display = (value: number): string =>
+      human ? formatLinuxSize(value, true) : String(Math.ceil(value / 1_024));
     return success(
-      `Filesystem 1B-blocks Used Available Mounted on\ncomputer-system ${capacity} ${capacity - free} ${free} /\n`,
+      `Filesystem      Size  Used Avail Use% Mounted on\ncsfs         ${display(capacity).padStart(6)} ${display(used).padStart(5)} ${display(free).padStart(5)} ${String(percent).padStart(3)}% /\n`,
     );
   }
 
@@ -2299,15 +2694,19 @@ export class ShellCommandRuntime {
   private diskUsage(arguments_: readonly string[]): ShellCommandResult {
     let includeFiles = false;
     let summarize = false;
+    let human = false;
     const requested: string[] = [];
     for (const argument of arguments_) {
-      if (argument === "-a") includeFiles = true;
-      else if (argument === "-s") summarize = true;
-      else if (argument.startsWith("-")) {
-        return usage("du [-a|-s] [path ...]");
+      if (argument.startsWith("-") && argument !== "-") {
+        for (const flag of argument.slice(1)) {
+          if (flag === "a") includeFiles = true;
+          else if (flag === "s") summarize = true;
+          else if (flag === "h") human = true;
+          else return usage("du [-a|-s] [-h] [path ...]");
+        }
       } else requested.push(argument);
     }
-    if (includeFiles && summarize) return usage("du [-a|-s] [path ...]");
+    if (includeFiles && summarize) return usage("du [-a|-s] [-h] [path ...]");
     if (requested.length > 32) return failure("du", "too many paths", 2);
 
     const paths = requested.length === 0 ? ["."] : requested;
@@ -2338,14 +2737,20 @@ export class ShellCommandRuntime {
         if (includeFiles) {
           for (const [file] of snapshot.files) {
             if (file.startsWith(prefix))
-              output.push(`${sizes.get(file) ?? 0}\t${file}`);
+              output.push(
+                `${formatDuSize(sizes.get(file) ?? 0, human)}\t${file}`,
+              );
           }
         }
         for (const directory of descendants) {
-          output.push(`${sizes.get(directory) ?? 0}\t${directory}`);
+          output.push(
+            `${formatDuSize(sizes.get(directory) ?? 0, human)}\t${directory}`,
+          );
         }
       }
-      output.push(`${sizes.get(resolved) ?? 0}\t${requestedPath}`);
+      output.push(
+        `${formatDuSize(sizes.get(resolved) ?? 0, human)}\t${requestedPath}`,
+      );
     }
     return success(`${output.join("\n")}\n`);
   }
@@ -2359,6 +2764,391 @@ export class ShellCommandRuntime {
       `Disk quota: ${used} / ${capacity} bytes used (${free} bytes free)\n` +
         `Limits: ${this.filesystem.limits.maxFileBytes} bytes/file, ${this.filesystem.limits.maxEntries} entries\n`,
     );
+  }
+
+  private linuxChangeMode(arguments_: readonly string[]): ShellCommandResult {
+    if (arguments_.length < 2 || arguments_.length > 33)
+      return usage("chmod <octal-mode> <path ...>");
+    const [modeText = "", ...paths] = arguments_;
+    if (!/^[0-7]{3,4}$/u.test(modeText))
+      return failure("chmod", `invalid mode: '${modeText}'`, 1);
+    const mode = Number.parseInt(modeText, 8);
+    for (const path of paths) {
+      const resolved = this.resolvePath(path);
+      if (!this.filesystem.exists(resolved))
+        return failure(
+          "chmod",
+          `cannot access '${path}': No such file or directory`,
+        );
+      if (this.filesystem.getMetadata(resolved).uid !== 1_000)
+        return failure(
+          "chmod",
+          `changing permissions of '${path}': Operation not permitted`,
+        );
+      this.filesystem.setMetadata(resolved, { mode });
+    }
+    return success();
+  }
+
+  private linuxChangeOwner(
+    arguments_: readonly string[],
+    includeOwner: boolean,
+  ): ShellCommandResult {
+    const command = includeOwner ? "chown" : "chgrp";
+    if (arguments_.length < 2 || arguments_.length > 33)
+      return usage(
+        `${command} <owner${includeOwner ? "[:group]" : ""}> <path ...>`,
+      );
+    const [identity = "", ...paths] = arguments_;
+    const [ownerName = "", groupName] = includeOwner
+      ? identity.split(":", 2)
+      : ["", identity];
+    const uid = includeOwner ? linuxIdentityNumber(ownerName) : undefined;
+    const gid =
+      groupName === undefined ? undefined : linuxIdentityNumber(groupName);
+    if (
+      (includeOwner && uid === undefined) ||
+      (groupName !== undefined && gid === undefined)
+    )
+      return failure(command, `invalid user or group: '${identity}'`, 1);
+    for (const path of paths) {
+      const resolved = this.resolvePath(path);
+      if (!this.filesystem.exists(resolved))
+        return failure(
+          command,
+          `cannot access '${path}': No such file or directory`,
+        );
+      const current = this.filesystem.getMetadata(resolved);
+      if (
+        current.uid !== 1_000 ||
+        (includeOwner && uid !== undefined && uid !== current.uid) ||
+        (gid !== undefined && gid !== 1_000)
+      )
+        return failure(
+          command,
+          `changing ownership of '${path}': Operation not permitted`,
+        );
+      this.filesystem.setMetadata(resolved, {
+        ...(gid === undefined ? {} : { gid }),
+        ...(uid === undefined ? {} : { uid }),
+      });
+    }
+    return success();
+  }
+
+  private linuxLink(arguments_: readonly string[]): ShellCommandResult {
+    let symbolic = false;
+    const paths: string[] = [];
+    for (const argument of arguments_) {
+      if (argument === "-s" || argument === "--symbolic") symbolic = true;
+      else if (argument.startsWith("-"))
+        return failure("ln", `invalid option -- '${argument}'`, 1);
+      else paths.push(argument);
+    }
+    if (paths.length !== 2) return usage("ln [-s] <target> <link-name>");
+    const target = symbolic ? paths[0]! : this.resolvePath(paths[0]!);
+    const link = this.resolvePath(paths[1]!);
+    if (!this.linuxHasAccess(parentPath(link), 0b011))
+      return failure(
+        "ln",
+        `failed to create link '${paths[1]}': Permission denied`,
+      );
+    if (symbolic) this.filesystem.createSymbolicLink(target, link);
+    else this.filesystem.createHardLink(target, link);
+    return success();
+  }
+
+  private linuxReadLink(arguments_: readonly string[]): ShellCommandResult {
+    if (arguments_.length !== 1) return usage("readlink <path>");
+    const path = this.resolvePath(arguments_[0]!);
+    if (!this.filesystem.isSymbolicLink(path)) return status(1);
+    return success(`${this.filesystem.readLink(path)}\n`);
+  }
+
+  private linuxRealPath(arguments_: readonly string[]): ShellCommandResult {
+    if (arguments_.length !== 1) return usage("realpath <path>");
+    const resolved = this.filesystem.resolveSymbolicLinks(
+      this.resolvePath(arguments_[0]!),
+    );
+    if (!this.filesystem.exists(resolved))
+      return failure(
+        "realpath",
+        `${arguments_[0]}: No such file or directory`,
+        1,
+      );
+    return success(`${resolved}\n`);
+  }
+
+  private linuxRemoveDirectory(
+    arguments_: readonly string[],
+  ): ShellCommandResult {
+    if (arguments_.length === 0 || arguments_.length > 32)
+      return usage("rmdir <directory ...>");
+    for (const path of arguments_) {
+      const resolved = this.resolvePath(path);
+      if (!this.filesystem.isDirectory(resolved))
+        return failure("rmdir", `failed to remove '${path}': Not a directory`);
+      if (this.filesystem.list(resolved).length > 0)
+        return failure(
+          "rmdir",
+          `failed to remove '${path}': Directory not empty`,
+        );
+      if (!this.linuxHasAccess(parentPath(resolved), 0b011))
+        return failure(
+          "rmdir",
+          `failed to remove '${path}': Permission denied`,
+        );
+      this.filesystem.delete(resolved);
+    }
+    return success();
+  }
+
+  private linuxGroups(arguments_: readonly string[]): ShellCommandResult {
+    if (
+      arguments_.length > 1 ||
+      (arguments_[0] !== undefined && arguments_[0] !== "computer")
+    )
+      return failure("groups", `${arguments_[0] ?? ""}: no such user`, 1);
+    return success("computer\n");
+  }
+
+  private linuxPrintEnvironment(
+    arguments_: readonly string[],
+  ): ShellCommandResult {
+    if (arguments_.length > 1) return usage("printenv [name]");
+    if (arguments_[0] !== undefined) {
+      const value = this.environment.get(arguments_[0]);
+      return value === undefined ? status(1) : success(`${value}\n`);
+    }
+    return success(
+      `${[...this.environment]
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([name, value]) => `${name}=${value}`)
+        .join("\n")}\n`,
+    );
+  }
+
+  private linuxFile(arguments_: readonly string[]): ShellCommandResult {
+    if (arguments_.length === 0 || arguments_.length > 32)
+      return usage("file <path ...>");
+    const lines: string[] = [];
+    for (const path of arguments_) {
+      const resolved = this.resolvePath(path);
+      if (!this.filesystem.exists(resolved)) {
+        lines.push(`${path}: cannot open (No such file or directory)`);
+        continue;
+      }
+      if (this.filesystem.isSymbolicLink(resolved)) {
+        lines.push(
+          `${path}: symbolic link to ${this.filesystem.readLink(resolved)}`,
+        );
+      } else if (this.filesystem.isDirectory(resolved)) {
+        lines.push(`${path}: directory`);
+      } else {
+        const contents = this.filesystem.readFile(resolved);
+        const description = contents.startsWith("CS486\n")
+          ? "Computer System CS486 executable"
+          : contents.includes("\0")
+            ? "data"
+            : contents.length === 0
+              ? "empty"
+              : "Unicode text, UTF-8 text";
+        lines.push(`${path}: ${description}`);
+      }
+    }
+    return success(`${lines.join("\n")}\n`);
+  }
+
+  private linuxSha256Sum(
+    arguments_: readonly string[],
+    stdin: string,
+  ): ShellCommandResult {
+    if (arguments_.length > 32)
+      return failure("sha256sum", "too many files", 1);
+    const paths = arguments_.length === 0 ? ["-"] : arguments_;
+    const lines = paths.map((path) => {
+      const contents = path === "-" ? stdin : this.readFile(path);
+      return `${sha256Hex(contents)}  ${path}`;
+    });
+    return success(`${lines.join("\n")}\n`);
+  }
+
+  private linuxTee(
+    arguments_: readonly string[],
+    stdin: string,
+  ): ShellCommandResult {
+    let append = false;
+    const paths: string[] = [];
+    for (const argument of arguments_) {
+      if (argument === "-a" || argument === "--append") append = true;
+      else if (argument.startsWith("-"))
+        return failure("tee", `invalid option -- '${argument}'`, 1);
+      else paths.push(argument);
+    }
+    if (paths.length > 32) return failure("tee", "too many files", 1);
+    for (const path of paths) this.writeFile(path, stdin, append);
+    return success(stdin);
+  }
+
+  private linuxCompare(arguments_: readonly string[]): ShellCommandResult {
+    let silent = false;
+    const paths: string[] = [];
+    for (const argument of arguments_) {
+      if (argument === "-s" || argument === "--silent") silent = true;
+      else paths.push(argument);
+    }
+    if (paths.length !== 2) return usage("cmp [-s] <file1> <file2>");
+    const left = this.readFile(paths[0]!);
+    const right = this.readFile(paths[1]!);
+    if (left === right) return success();
+    if (silent) return status(1);
+    const length = Math.min(left.length, right.length);
+    let offset = 0;
+    while (offset < length && left[offset] === right[offset]) offset += 1;
+    const line = left.slice(0, offset).split("\n").length;
+    return status(
+      1,
+      `${paths[0]} ${paths[1]} differ: byte ${String(offset + 1)}, line ${String(line)}\n`,
+    );
+  }
+
+  private linuxDiff(arguments_: readonly string[]): ShellCommandResult {
+    const paths = arguments_.filter((argument) => argument !== "-u");
+    if (
+      paths.length !== 2 ||
+      arguments_.some(
+        (argument) => argument.startsWith("-") && argument !== "-u",
+      )
+    )
+      return usage("diff [-u] <file1> <file2>");
+    const left = splitLines(this.readFile(paths[0]!));
+    const right = splitLines(this.readFile(paths[1]!));
+    if (left.join("\n") === right.join("\n")) return success();
+    if (left.length + right.length > 4_000)
+      return failure("diff", "comparison line limit exceeded", 1);
+    const lines = [`--- ${paths[0]}`, `+++ ${paths[1]}`, "@@"];
+    const maximum = Math.max(left.length, right.length);
+    for (let index = 0; index < maximum; index += 1) {
+      if (left[index] === right[index]) lines.push(` ${left[index] ?? ""}`);
+      else {
+        if (left[index] !== undefined) lines.push(`-${left[index]}`);
+        if (right[index] !== undefined) lines.push(`+${right[index]}`);
+      }
+    }
+    return status(1, `${lines.join("\n")}\n`);
+  }
+
+  private linuxHexDump(
+    command: "hexdump" | "od",
+    arguments_: readonly string[],
+    stdin: string,
+  ): ShellCommandResult {
+    const paths = arguments_.filter(
+      (argument) =>
+        argument !== "-C" && argument !== "-An" && argument !== "-tx1",
+    );
+    if (paths.length > 1) return usage(`${command} [-C] [file]`);
+    const contents = paths[0] === undefined ? stdin : this.readFile(paths[0]);
+    const bytes = new TextEncoder().encode(contents);
+    if (bytes.length > 65_536)
+      return failure(command, "input limit exceeded", 1);
+    const lines: string[] = [];
+    for (let offset = 0; offset < bytes.length; offset += 16) {
+      const row = bytes.slice(offset, offset + 16);
+      const hex = [...row]
+        .map((value) => value.toString(16).padStart(2, "0"))
+        .join(" ");
+      if (command === "od") lines.push(hex);
+      else {
+        const ascii = [...row]
+          .map((value) =>
+            value >= 32 && value < 127 ? String.fromCharCode(value) : ".",
+          )
+          .join("");
+        lines.push(
+          `${offset.toString(16).padStart(8, "0")}  ${hex.padEnd(47)}  |${ascii}|`,
+        );
+      }
+    }
+    if (command === "hexdump")
+      lines.push(bytes.length.toString(16).padStart(8, "0"));
+    return success(lines.length === 0 ? "" : `${lines.join("\n")}\n`);
+  }
+
+  private linuxMakeTemporary(
+    arguments_: readonly string[],
+  ): ShellCommandResult {
+    if (arguments_.length > 1) return usage("mktemp [template]");
+    const template = arguments_[0] ?? "/tmp/tmp.XXXXXX";
+    if (!/X{6}$/u.test(template))
+      return failure("mktemp", `too few X's in template '${template}'`, 1);
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const suffix = (++this.temporarySequence).toString(36).padStart(6, "0");
+      const path = template.replace(/X{6}$/u, suffix);
+      const resolved = this.resolvePath(path);
+      if (this.filesystem.exists(resolved)) continue;
+      this.filesystem.writeFile(resolved, "");
+      this.filesystem.setMetadata(resolved, { mode: 0o600 });
+      return success(`${path}\n`);
+    }
+    return failure("mktemp", "failed to create file", 1);
+  }
+
+  private linuxMount(arguments_: readonly string[]): ShellCommandResult {
+    if (arguments_.length !== 0) return usage("mount");
+    return success(
+      [
+        "computer-system on / type csfs (rw,nosuid,nodev)",
+        "proc on /proc type proc (ro,nosuid,nodev,noexec)",
+        "dev on /dev type csdev (rw,nosuid,noexec)",
+        "tmpfs on /tmp type tmpfs (rw,nosuid,nodev)",
+        "",
+      ].join("\n"),
+    );
+  }
+
+  private linuxDmesg(arguments_: readonly string[]): ShellCommandResult {
+    if (arguments_.length !== 0) return usage("dmesg");
+    const cpu = cpuModelSpecification(this.options.hardware.cpuModel);
+    return success(
+      [
+        "[    0.000000] CS-Linux 1.0 sandbox kernel starting",
+        `[    0.000001] CPU: ${cpu.displayName} at ${formatClock(this.options.hardware.clockHz)}`,
+        `[    0.000002] Memory: ${String(this.options.hardware.memoryBytes)} bytes available`,
+        "[    0.000003] csfs: mounted root filesystem",
+        "[    0.000004] Run /bin/bash as uid 1000",
+        "",
+      ].join("\n"),
+    );
+  }
+
+  private linuxYes(arguments_: readonly string[]): ShellCommandResult {
+    const value = arguments_.length === 0 ? "y" : arguments_.join(" ");
+    return status(
+      1,
+      `${Array.from({ length: 1_024 }, () => value).join("\n")}\n`,
+      "yes: bounded output limit reached\n",
+    );
+  }
+
+  private linuxXargs(
+    arguments_: readonly string[],
+    stdin: string,
+  ): ShellCommandResult {
+    if (this.xargsDepth > 0)
+      return failure("xargs", "recursive use is not supported", 1);
+    if (arguments_.some((argument) => argument.startsWith("-")))
+      return usage("xargs [command [initial-arguments ...]]");
+    const values = stdin.trim().length === 0 ? [] : stdin.trim().split(/\s+/u);
+    if (values.length > 128)
+      return failure("xargs", "argument limit exceeded", 1);
+    const command = arguments_.length === 0 ? ["echo"] : [...arguments_];
+    this.xargsDepth += 1;
+    try {
+      return this.execute([...command, ...values], "");
+    } finally {
+      this.xargsDepth -= 1;
+    }
   }
 
   private test(
@@ -2423,6 +3213,110 @@ export class ShellCommandRuntime {
 }
 
 type DateMode = "game" | "real" | "virtual";
+
+function linuxIdentityNumber(value: string): number | undefined {
+  if (value === "computer" || value === "1000") return 1_000;
+  if (value === "root" || value === "0") return 0;
+  return undefined;
+}
+
+function linuxIdentityName(value: number): string {
+  if (value === 1_000) return "computer";
+  if (value === 0) return "root";
+  return String(value);
+}
+
+function linuxModeString(
+  kind: "device" | "directory" | "file" | "link",
+  mode: number,
+): string {
+  const type =
+    kind === "directory"
+      ? "d"
+      : kind === "link"
+        ? "l"
+        : kind === "device"
+          ? "c"
+          : "-";
+  const bits = [0o400, 0o200, 0o100, 0o040, 0o020, 0o010, 0o004, 0o002, 0o001];
+  return (
+    type +
+    bits
+      .map((bit, index) =>
+        (mode & bit) === 0
+          ? "-"
+          : index % 3 === 0
+            ? "r"
+            : index % 3 === 1
+              ? "w"
+              : "x",
+      )
+      .join("")
+  );
+}
+
+function formatLinuxSize(bytes: number, human: boolean): string {
+  if (!human) return String(bytes);
+  return formatBinaryBytes(bytes)
+    .replace(" MiB", "M")
+    .replace(" KiB", "K")
+    .replace(" B", "B")
+    .replace(" bytes", "B");
+}
+
+function formatLinuxTimestamp(milliseconds: number): string {
+  const date = new Date(milliseconds);
+  if (!Number.isFinite(date.getTime())) return "Jan  1 00:00";
+  const months = [
+    "Jan",
+    "Feb",
+    "Mar",
+    "Apr",
+    "May",
+    "Jun",
+    "Jul",
+    "Aug",
+    "Sep",
+    "Oct",
+    "Nov",
+    "Dec",
+  ];
+  return `${months[date.getUTCMonth()]} ${String(date.getUTCDate()).padStart(2)} ${String(date.getUTCHours()).padStart(2, "0")}:${String(date.getUTCMinutes()).padStart(2, "0")}`;
+}
+
+function formatLinuxDate(date: Date): string {
+  const weekdays = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  const months = [
+    "Jan",
+    "Feb",
+    "Mar",
+    "Apr",
+    "May",
+    "Jun",
+    "Jul",
+    "Aug",
+    "Sep",
+    "Oct",
+    "Nov",
+    "Dec",
+  ];
+  return `${weekdays[date.getUTCDay()]} ${months[date.getUTCMonth()]} ${String(date.getUTCDate()).padStart(2)} ${formatDate(date, "%H:%M:%S")} UTC ${String(date.getUTCFullYear())}`;
+}
+
+function stablePathInode(path: string): number {
+  let value = 2_166_136_261;
+  for (const character of path) {
+    value ^= character.codePointAt(0)!;
+    value = Math.imul(value, 16_777_619) >>> 0;
+  }
+  return Math.max(1, value);
+}
+
+function formatDuSize(bytes: number, human: boolean): string {
+  return human
+    ? formatLinuxSize(bytes, true)
+    : String(Math.ceil(bytes / 1_024));
+}
 
 function findCompletionTokenStart(value: string): number {
   for (let index = value.length - 1; index >= 0; index -= 1) {

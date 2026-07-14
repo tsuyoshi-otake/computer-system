@@ -40,6 +40,16 @@ Verify lifecycle and persistence:
   `TIME` must show the clock rather than timing a command. Run `TIMER VER` and
   expect a separate elapsed-time line. Verify `CHDIR`, `ERASE`, `RENAME`, and
   `RMDIR` behave as DOS aliases and malformed switches fail explicitly.
+- On CS-Linux, run `id`, `groups`, `uname -a`, `date`, `uptime`, `ls -la /etc`,
+  `stat /etc/os-release`, `df -h`, `du -sh /etc`, `free -h`, `mount`, and
+  `dmesg`. Expect LF Linux-style output, UID/GID 1000 for `computer`, and
+  root-owned system entries. Read `/proc/version`, `/proc/uptime`,
+  `/proc/loadavg`, and `/proc/mounts`; writes must fail explicitly.
+- Create a file, run `chmod 640`, make both `ln` and `ln -s` links, edit through
+  the hard link, and confirm both names share content while `readlink` and
+  `realpath` resolve the symbolic link. Reboot and verify metadata and links
+  persist. Exercise `tee`, `sha256sum`, `file`, `cmp`, `diff`, `hexdump`,
+  `mktemp`, and `xargs`; oversized work must terminate at its documented bound.
 - Run bare `vi`; confirm `[No Name]` is displayed. Enter and erase a `:`
   command, then press Backspace once more and confirm Normal mode returns.
   Confirm `:w` reports no file name, then `:wq note.txt` saves and closes.
