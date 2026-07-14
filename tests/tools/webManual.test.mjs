@@ -59,6 +59,8 @@ describe("Web terminal field manual", () => {
     for (const required of [
       "CS486DX",
       "33 MHz",
+      "386SX 16 MHz",
+      "2 MB RAM",
       "Assembly language",
       "MicroPython",
       "Computer System Bash",
@@ -95,7 +97,7 @@ describe("Web terminal field manual", () => {
       'src="/assets/manual/portable-computer-system.png"',
     );
     expect(dos?.html).toContain(
-      'alt="Portable Computer System showing a DOS prompt',
+      'alt="Portable 386SX 16 MHz Computer System with 2 MB RAM',
     );
   });
 });
