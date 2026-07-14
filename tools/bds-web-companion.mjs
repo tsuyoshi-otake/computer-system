@@ -7,7 +7,7 @@ import {
 const bds = new BdsDebugSession();
 const web = new WebCompanionServer({
   bds,
-  host: process.env.WEB_COMPANION_HOST ?? "127.0.0.1",
+  host: process.env.WEB_COMPANION_HOST ?? "0.0.0.0",
   port: process.env.WEB_COMPANION_PORT ?? "19144",
   publicHost: process.env.WEB_COMPANION_PUBLIC_HOST,
   publicOrigin: process.env.WEB_COMPANION_PUBLIC_ORIGIN,

@@ -14,11 +14,10 @@ import {
 } from "../../domain/computer/hardware.js";
 import { createVirtualShellClock, type ShellClockSource } from "./clock.js";
 import { getOsProfile } from "./osProfile.js";
-import {
-  ViSession,
-  type ViResult,
-  type ViScreen,
-} from "../editor/viSession.js";
+import { LinuxAuthentication } from "./linuxAuthentication.js";
+import { DosEditSession } from "../editor/dosEditSession.js";
+import type { EditorResult, EditorScreen } from "../editor/editorScreen.js";
+import { ViSession, type ViResult } from "../editor/viSession.js";
 import {
   parseShellProgram,
   ShellSyntaxError,
@@ -33,7 +32,7 @@ export interface ShellResult {
   readonly stderr: string;
   readonly stdout: string;
   readonly sleepTicks?: number;
-  readonly terminalScreen?: ViScreen;
+  readonly terminalScreen?: EditorScreen;
   readonly resetTerminal?: boolean;
   readonly cpuCycles?: number;
 }
@@ -49,14 +48,18 @@ export interface ShellSessionOptions {
   readonly terminalWidth?: number;
   readonly hardware?: ComputerHardwareProfile;
   readonly memoryUsageBytes?: () => number;
+  readonly requireLogin?: boolean;
+  readonly passwordSalt?: () => string;
 }
 
 const maximumScriptDepth = 8;
 const maximumScriptLines = 256;
 const maximumScriptLoopIterations = 1_024;
+const maximumDosConfigLines = 64;
 const maximumPipelineBuffer = 256_000;
 const variableMarkerStart = "\u{e000}";
 const variableMarkerEnd = "\u{e001}";
+const dosBackslashMarker = "\u{e002}";
 
 interface ScriptFrame {
   readonly arguments: readonly string[];
@@ -71,7 +74,8 @@ interface ScriptExecution {
 }
 
 export class ShellSession {
-  private editor: { path: string; lines: string[] } | undefined;
+  private readonly authentication: LinuxAuthentication;
+  private editor: DosEditSession | undefined;
   private vi: ViSession | undefined;
   private readonly commands: ShellCommandRuntime;
   private readonly history: string[] = [];
@@ -83,6 +87,7 @@ export class ShellSession {
   private terminalHeight: number;
   private terminalWidth: number;
   private cpuCyclesValue = 0;
+  private dosBatchDepth = 0;
 
   constructor(
     private readonly filesystem: InMemoryFilesystem,
@@ -105,6 +110,10 @@ export class ShellSession {
       memoryUsageBytes: options.memoryUsageBytes ?? ((): number => 0),
     };
     profile.boot(filesystem, { computerName: runtimeOptions.computerName });
+    this.authentication = new LinuxAuthentication(filesystem, {
+      enabled: options.requireLogin === true && profile.id === "linux",
+      salt: options.passwordSalt,
+    });
     this.commands = new ShellCommandRuntime(filesystem, runtimeOptions);
     if (profile.id === "linux") {
       for (const path of ["/etc/bash.bashrc", `${profile.home}/.bashrc`]) {
@@ -112,14 +121,27 @@ export class ShellSession {
         const text = `${loaded.stderr}${loaded.stdout}`.trimEnd();
         if (text.length > 0) this.startupLines.push(...text.split("\n"));
       }
+    } else {
+      for (const loaded of [
+        this.loadDosConfiguration("C:\\CONFIG.SYS"),
+        this.executeDosBatch("C:\\AUTOEXEC.BAT", [], 0),
+      ]) {
+        const text = `${loaded.stderr}${loaded.stdout}`.trimEnd();
+        if (text.length > 0) this.startupLines.push(...text.split(/\r?\n/u));
+      }
     }
+    this.startupLines.push(...this.authentication.startupLines());
   }
 
   prompt(): string {
-    if (this.vi !== undefined) return "";
-    return this.editor === undefined
-      ? this.commands.prompt()
-      : `edit:${this.editor.path}> `;
+    if (this.vi !== undefined || this.editor !== undefined) return "";
+    const authenticationPrompt = this.authentication.prompt();
+    if (authenticationPrompt !== undefined) return authenticationPrompt;
+    return this.commands.prompt();
+  }
+
+  isSecretInput(): boolean {
+    return this.authentication.isSecretInput();
   }
 
   takeStartupLines(): readonly string[] {
@@ -131,7 +153,16 @@ export class ShellSession {
     let result: ShellResult;
     if (this.vi !== undefined) result = this.submitViLine(line);
     else if (this.editor !== undefined) result = this.submitEditor(line);
-    else {
+    else if (!this.authentication.isAuthenticated()) {
+      const authentication = this.authentication.submit(line);
+      result = resultFromStreams(
+        authentication.stdout,
+        authentication.stderr,
+        authentication.exitCode,
+        undefined,
+        authentication.sleepTicks,
+      );
+    } else {
       if (line.trim().length > 0) {
         this.history.push(line);
         if (this.history.length > 100) this.history.shift();
@@ -142,6 +173,13 @@ export class ShellSession {
   }
 
   submitDebugCommand(line: string): ShellResult {
+    if (!this.authentication.isAuthenticated()) {
+      return resultFromStreams(
+        "",
+        "debug: CS-Linux login is required before MCP command execution\n",
+        2,
+      );
+    }
     if (this.vi !== undefined || this.editor !== undefined) {
       return resultFromStreams(
         "",
@@ -174,34 +212,45 @@ export class ShellSession {
   }
 
   complete(line: string, cursor: number): ShellCompletionResult {
-    if (this.vi !== undefined || this.editor !== undefined) {
+    if (
+      !this.authentication.isAuthenticated() ||
+      this.vi !== undefined ||
+      this.editor !== undefined
+    ) {
       return { candidates: [], cursor, value: line };
     }
     return this.commands.complete(line, cursor);
   }
 
-  resize(width: number, height: number): ViScreen | undefined {
+  resize(width: number, height: number): EditorScreen | undefined {
     this.terminalWidth = width;
     this.terminalHeight = height;
-    return this.vi?.resize(width, height);
+    return this.editor?.resize(width, height) ?? this.vi?.resize(width, height);
   }
 
   keys(keys: readonly string[]): ShellResult {
     this.cpuCyclesValue = keys.length;
-    if (this.vi === undefined)
+    if (!this.authentication.isAuthenticated())
+      return this.withCpuCycles(resultFromStreams("", "", 0));
+    if (this.vi === undefined && this.editor === undefined)
       return this.withCpuCycles(resultFromStreams("", "", 0));
     if (keys.length > 32) {
       return this.withCpuCycles(
-        resultFromStreams("", "vi: key batch limit exceeded\n", 2),
+        resultFromStreams("", "editor: key batch limit exceeded\n", 2),
       );
     }
-    let result: ShellResult = this.viResult({
-      kind: "continue",
-      screen: this.vi.screen(),
-    });
+    let result: ShellResult =
+      this.editor === undefined
+        ? this.viResult({ kind: "continue", screen: this.vi!.screen() })
+        : this.editorResult({
+            kind: "continue",
+            screen: this.editor.screen(),
+          });
     for (const key of keys) {
-      if (this.vi === undefined) break;
-      result = this.viResult(this.vi.key(key));
+      if (this.editor !== undefined)
+        result = this.editorResult(this.editor.key(key));
+      else if (this.vi !== undefined) result = this.viResult(this.vi.key(key));
+      else break;
     }
     return this.withCpuCycles(result);
   }
@@ -218,10 +267,34 @@ export class ShellSession {
   }
 
   private executeLine(line: string, depth: number): ShellResult {
+    if (this.commands.profile.id === "dos") {
+      const frame = this.scriptFrames.at(-1);
+      line = this.commands.expandDosVariables(
+        line,
+        frame?.name ?? "",
+        frame?.arguments ?? [],
+        this.lastExitCode,
+      );
+      const control = this.commands.executeDosControlLine(line);
+      if (control !== undefined) {
+        this.cpuCyclesValue += 4;
+        this.lastExitCode = control.exitCode;
+        return resultFromStreams(
+          control.stdout,
+          control.stderr,
+          control.exitCode,
+          control.action,
+          control.sleepTicks,
+        );
+      }
+      line = line.trimStart().replace(/^@/u, "");
+    }
     let program;
     try {
       const source =
-        this.commands.profile.id === "dos" ? line.replaceAll("\\", "/") : line;
+        this.commands.profile.id === "dos"
+          ? line.replaceAll("\\", dosBackslashMarker)
+          : line;
       program = parseShellProgram(
         source,
         (name) => `${variableMarkerStart}${name}${variableMarkerEnd}`,
@@ -289,7 +362,7 @@ export class ShellSession {
     let exitCode = 0;
     let action: ShellAction | undefined;
     let sleepTicks: number | undefined;
-    let terminalScreen: ViScreen | undefined;
+    let terminalScreen: EditorScreen | undefined;
     let resetTerminal = false;
     for (const command of pipeline.commands) {
       const expanded = this.expandCommand(command);
@@ -365,10 +438,12 @@ export class ShellSession {
 
   private expandCommand(command: ShellCommandNode): ShellCommandNode {
     const expand = (value: string): string =>
-      value.replace(
-        /\u{e000}([A-Za-z_][A-Za-z0-9_]*|[?#@*]|[0-9]+)\u{e001}/gu,
-        (_match, name: string) => this.resolveVariable(name),
-      );
+      value
+        .replace(
+          /\u{e000}([A-Za-z_][A-Za-z0-9_]*|[?#@*]|[0-9]+)\u{e001}/gu,
+          (_match, name: string) => this.resolveVariable(name),
+        )
+        .replaceAll(dosBackslashMarker, "\\");
     return {
       words: command.words.map(expand),
       redirects: command.redirects.map((redirect) => ({
@@ -428,7 +503,7 @@ export class ShellSession {
       }
       return this.startVi(arguments_);
     }
-    if (name === "edit") {
+    if (name === "edit" && this.commands.profile.id === "dos") {
       if (!interactiveAllowed || command.redirects.length > 0) {
         return commandFailure(name, "cannot run in a pipeline or redirect");
       }
@@ -436,6 +511,16 @@ export class ShellSession {
     }
     if (name === "sh" || name === "bash" || name === "source") {
       return this.executeScript(name, arguments_, stdin, depth);
+    }
+    if (
+      this.commands.profile.id === "dos" &&
+      !this.commands.isBuiltInCommand(requestedName)
+    ) {
+      const program = this.commands.resolveDosProgram(requestedName);
+      if (program?.kind === "batch")
+        return this.executeDosBatch(program.path, arguments_, depth);
+      if (program?.kind === "executable")
+        return this.commands.execute([program.path, ...arguments_], stdin);
     }
     const result = this.commands.execute(command.words, stdin);
     this.cpuCyclesValue += result.cpuCycles ?? 0;
@@ -490,6 +575,134 @@ export class ShellSession {
     }
   }
 
+  private executeDosBatch(
+    path: string,
+    arguments_: readonly string[],
+    depth: number,
+  ): ShellCommandResult {
+    if (depth >= maximumScriptDepth)
+      return commandFailure(path, "maximum batch depth exceeded");
+    let source: string;
+    try {
+      source = this.commands.readFile(path);
+    } catch (error: unknown) {
+      return commandFailure(path, message(error));
+    }
+    const lines = source.replaceAll("\r\n", "\n").split("\n");
+    if (lines.length > maximumScriptLines)
+      return commandFailure(path, "batch line limit exceeded");
+    if (this.scriptFrames.length === 0) this.scriptLoopIterations = 0;
+    this.scriptFrames.push({
+      arguments: arguments_.slice(0, 9),
+      name: this.commands.profile.pathDialect.display(path),
+    });
+    this.dosBatchDepth += 1;
+    try {
+      return this.executeScriptLines(lines, depth + 1, path).result;
+    } finally {
+      this.dosBatchDepth -= 1;
+      this.scriptFrames.pop();
+    }
+  }
+
+  private loadDosConfiguration(path: string): ShellCommandResult {
+    let source: string;
+    try {
+      source = this.commands.readFile(path);
+    } catch (error: unknown) {
+      return commandFailure(path, message(error));
+    }
+    const lines = source.replaceAll("\r\n", "\n").split("\n");
+    if (lines.length > maximumDosConfigLines)
+      return commandFailure(path, "configuration line limit exceeded");
+    let stderr = "";
+    let exitCode = 0;
+    for (const [index, sourceLine] of lines.entries()) {
+      const line = sourceLine.trim();
+      if (
+        line.length === 0 ||
+        line.startsWith(";") ||
+        /^REM(?:\s|$)/iu.test(line)
+      )
+        continue;
+      const numeric = /^(FILES|BUFFERS)\s*=\s*([0-9]+)$/iu.exec(line);
+      if (numeric !== null) {
+        const name = numeric[1]!.toUpperCase();
+        const value = Number(numeric[2]);
+        const maximum = name === "FILES" ? 255 : 99;
+        if (!Number.isSafeInteger(value) || value < 1 || value > maximum) {
+          stderr += `CONFIG.SYS line ${String(index + 1)}: ${name} must be between 1 and ${String(maximum)}\r\n`;
+          exitCode = 2;
+          continue;
+        }
+        this.commands.setVariable(`CONFIG_${name}`, String(value));
+        continue;
+      }
+
+      const device = /^DEVICE(?:HIGH)?\s*=\s*([^\s]+)(?:\s+(.*))?$/iu.exec(
+        line,
+      );
+      if (device !== null) {
+        const driver = device[1]!.replaceAll("/", "\\").toUpperCase();
+        const arguments_ = (device[2] ?? "").trim().toUpperCase();
+        if (driver === "HIMEM.SYS" || driver.endsWith("\\HIMEM.SYS")) {
+          this.commands.setVariable("CONFIG_XMS", "ON");
+          continue;
+        }
+        if (driver === "EMM386.EXE" || driver.endsWith("\\EMM386.EXE")) {
+          if (arguments_ !== "" && arguments_ !== "NOEMS") {
+            stderr += `CONFIG.SYS line ${String(index + 1)}: EMM386 supports only NOEMS\r\n`;
+            exitCode = 2;
+            continue;
+          }
+          this.commands.setVariable("CONFIG_EMM386", "ON");
+          this.commands.setVariable(
+            "CONFIG_EMM386_MODE",
+            arguments_ === "NOEMS" ? "NOEMS" : "EMS",
+          );
+          continue;
+        }
+      }
+
+      const dos = /^DOS\s*=\s*(.+)$/iu.exec(line);
+      if (dos !== null) {
+        const modes = new Set(
+          dos[1]!
+            .split(",")
+            .map((value) => value.trim().toUpperCase())
+            .filter((value) => value.length > 0),
+        );
+        if (
+          modes.size === 0 ||
+          [...modes].some(
+            (mode) =>
+              mode !== "HIGH" &&
+              mode !== "LOW" &&
+              mode !== "UMB" &&
+              mode !== "NOUMB",
+          )
+        ) {
+          stderr += `CONFIG.SYS line ${String(index + 1)}: DOS supports HIGH, LOW, UMB, or NOUMB\r\n`;
+          exitCode = 2;
+          continue;
+        }
+        this.commands.setVariable(
+          "CONFIG_DOS_HIGH",
+          modes.has("LOW") ? "OFF" : modes.has("HIGH") ? "ON" : "OFF",
+        );
+        this.commands.setVariable(
+          "CONFIG_UMB",
+          modes.has("NOUMB") ? "OFF" : modes.has("UMB") ? "ON" : "OFF",
+        );
+        continue;
+      }
+
+      stderr += `CONFIG.SYS line ${String(index + 1)}: unsupported directive ${line}\r\n`;
+      exitCode = 2;
+    }
+    return { exitCode, stderr, stdout: "" };
+  }
+
   private executeScriptLines(
     lines: readonly string[],
     depth: number,
@@ -509,8 +722,21 @@ export class ShellSession {
 
     for (let index = 0; index < lines.length; index += 1) {
       this.cpuCyclesValue += 1;
-      const line = lines[index]!.trim();
+      const rawLine = lines[index]!.trim();
+      const suppressEcho = rawLine.startsWith("@");
+      const line =
+        this.dosBatchDepth > 0
+          ? rawLine.replace(/^@/u, "").trimStart()
+          : rawLine;
       if (line.length === 0 || line.startsWith("#!")) continue;
+      if (
+        this.dosBatchDepth > 0 &&
+        this.commands.dosEchoEnabled &&
+        !suppressEcho
+      ) {
+        if (!append(commandSuccess(`${line}\r\n`)))
+          return scriptFailure(label, "script output limit exceeded");
+      }
       const functionMatch = /^([A-Za-z_][A-Za-z0-9_]*)\s*\(\)\s*\{$/u.exec(
         line,
       );
@@ -651,17 +877,26 @@ export class ShellSession {
   }
 
   private startEditor(arguments_: readonly string[]): ShellCommandResult {
-    if (arguments_.length !== 1) return commandUsage("edit <path>");
-    const path = this.commands.resolvePath(arguments_[0]!);
+    if (arguments_.length > 1) return commandUsage("edit [path]");
+    const untitled = arguments_.length === 0;
+    const path = this.commands.resolvePath(arguments_[0] ?? "C:\\NONAME.TXT");
     try {
       const existing = this.filesystem.exists(path)
         ? this.commands.readFile(path)
         : "";
-      this.editor = {
+      this.editor = new DosEditSession(
         path,
-        lines: existing.length === 0 ? [] : existing.split("\n"),
+        existing,
+        this.terminalWidth,
+        this.terminalHeight,
+        untitled ? "UNTITLED" : this.commands.profile.pathDialect.display(path),
+      );
+      return {
+        exitCode: 0,
+        stderr: "",
+        stdout: "",
+        terminalScreen: this.editor.screen(),
       };
-      return commandSuccess(`Editing ${path}; enter .save when finished\n`);
     } catch (error: unknown) {
       return commandFailure("edit", message(error));
     }
@@ -730,30 +965,51 @@ export class ShellSession {
   private submitEditor(line: string): ShellResult {
     const editor = this.editor;
     if (editor === undefined) throw new Error("Editor state is unavailable");
-    if (line === ".cancel") {
-      this.editor = undefined;
-      this.lastExitCode = 0;
-      return resultFromStreams("Edit cancelled\n", "", 0);
+    const keys =
+      line === ".save"
+        ? ["F2"]
+        : line === ".cancel"
+          ? ["Alt+f", "x", "n"]
+          : [...line, "Enter"];
+    this.cpuCyclesValue += keys.length;
+    let result: ShellResult = this.editorResult({
+      kind: "continue",
+      screen: editor.screen(),
+    });
+    for (const key of keys) {
+      if (this.editor === undefined) break;
+      result = this.editorResult(this.editor.key(key));
     }
-    if (line === ".clear") {
-      editor.lines.length = 0;
-      this.lastExitCode = 0;
-      return resultFromStreams("Buffer cleared\n", "", 0);
-    }
-    if (line === ".save") {
+    return result;
+  }
+
+  private editorResult(result: EditorResult): ShellResult {
+    const editor = this.editor;
+    if (editor === undefined) throw new Error("Editor state is unavailable");
+    if (result.kind === "save") {
       try {
-        this.commands.writeFile(editor.path, editor.lines.join("\n"));
-        this.editor = undefined;
-        this.lastExitCode = 0;
-        return resultFromStreams(`Saved ${editor.path}\n`, "", 0);
+        this.commands.writeFile(editor.fileName, result.contents);
+        return this.editorResult(editor.completeSave(result.closeAfter));
       } catch (error: unknown) {
-        this.lastExitCode = 1;
-        return resultFromStreams("", `${message(error)}\n`, 1);
+        return this.editorResult(editor.failSave(message(error)));
       }
     }
-    editor.lines.push(line);
-    this.lastExitCode = 0;
-    return resultFromStreams("", "", 0);
+    if (result.kind === "closed") {
+      this.editor = undefined;
+      this.lastExitCode = 0;
+      return {
+        ...resultFromStreams(
+          result.discardedChanges ? "Changes discarded\n" : "EDIT closed\n",
+          "",
+          0,
+        ),
+        resetTerminal: true,
+      };
+    }
+    return {
+      ...resultFromStreams("", "", 0),
+      terminalScreen: result.screen,
+    };
   }
 }
 

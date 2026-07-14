@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { ShellSession } from "../../src/application/os/shellSession.js";
 import { InMemoryFilesystem } from "../../src/domain/filesystem/inMemoryFilesystem.js";
 
-describe("Computer System OS shell and editor", (): void => {
+describe("Computer System Linux shell and editor", (): void => {
   it("lists and reads files and reports unknown commands", (): void => {
     const filesystem = new InMemoryFilesystem();
     filesystem.writeFile("/hello.py", "print('hi')");
@@ -13,22 +13,26 @@ describe("Computer System OS shell and editor", (): void => {
     expect(shell.submit("wat").lines).toEqual(["bash: wat: command not found"]);
   });
 
-  it("saves, cancels, and clears editor buffers explicitly", (): void => {
+  it("saves and discards full-screen EDIT buffers explicitly", (): void => {
     const filesystem = new InMemoryFilesystem();
-    const shell = new ShellSession(filesystem);
-    expect(shell.submit("edit /startup.py").lines[0]).toMatch(/Editing/u);
-    shell.submit("import redstone");
-    shell.submit('print("ready")');
-    expect(shell.submit(".save").lines).toEqual(["Saved /startup.py"]);
-    expect(filesystem.readFile("/startup.py")).toBe(
+    const linux = new ShellSession(filesystem);
+    expect(linux.submit("edit /startup.py")).toMatchObject({ exitCode: 127 });
+    expect(linux.submit("which edit")).toMatchObject({ exitCode: 1 });
+
+    const shell = new ShellSession(filesystem, { osProfile: "dos" });
+    expect(shell.submit("EDIT C:\\STARTUP.TXT").terminalScreen).toBeDefined();
+    shell.keys([..."import redstone", "Enter"]);
+    shell.keys([...'print("ready")']);
+    expect(shell.keys(["Ctrl+s"]).terminalScreen).toBeDefined();
+    expect(filesystem.readFile("/drives/c/startup.txt")).toBe(
       'import redstone\nprint("ready")',
     );
-    shell.submit("edit /discarded.txt");
-    shell.submit("discard me");
-    shell.submit(".clear");
-    shell.submit("replacement");
-    shell.submit(".cancel");
-    expect(filesystem.exists("/discarded.txt")).toBe(false);
+    expect(shell.keys(["Alt+f", "x"]).resetTerminal).toBe(true);
+
+    shell.submit("EDIT C:\\DISCARD.TXT");
+    shell.keys([..."discard me", "Alt+f", "x"]);
+    expect(shell.keys(["n"]).resetTerminal).toBe(true);
+    expect(filesystem.exists("/drives/c/discard.txt")).toBe(false);
   });
 
   it("returns explicit lifecycle actions", (): void => {
@@ -48,6 +52,17 @@ describe("Computer System OS shell and editor", (): void => {
       stderr: "",
     });
     expect(shell.submitDebugCommand("vi /tmp/debug.txt")).toMatchObject({
+      exitCode: 2,
+      stderr: "debug: TUI commands are not supported through MCP\n",
+    });
+    expect(shell.submitDebugCommand("edit /tmp/debug.txt")).toMatchObject({
+      exitCode: 127,
+      stderr: "bash: edit: command not found\n",
+    });
+    const dosShell = new ShellSession(new InMemoryFilesystem(), {
+      osProfile: "dos",
+    });
+    expect(dosShell.submitDebugCommand("EDIT C:\\DEBUG.TXT")).toMatchObject({
       exitCode: 2,
       stderr: "debug: TUI commands are not supported through MCP\n",
     });
@@ -226,7 +241,10 @@ describe("Computer System OS shell and editor", (): void => {
     expect(shell.submit("whoami").lines).toEqual(["computer"]);
     expect(shell.submit("id").lines[0]).toContain("uid=0(computer)");
     expect(shell.submit("hostname").lines).toEqual(["c-info01"]);
-    expect(shell.submit("uname -a").lines[0]).toContain("c-info01 sandbox-vm");
+    expect(shell.submit("uname -a").lines[0]).toBe(
+      "Computer System Linux 1.0 c-info01 sandbox-vm",
+    );
+    expect(shell.submit("echo $OS").lines).toEqual(["CS-Linux"]);
     expect(shell.submit("date +%Y-%m-%dT%H:%M:%S").lines).toEqual([
       "2026-07-14T00:50:30",
     ]);
@@ -239,6 +257,9 @@ describe("Computer System OS shell and editor", (): void => {
     tick = 60;
     expect(shell.submit("uptime").lines).toEqual(["1.00 seconds"]);
     expect(shell.submit("stat /etc/os-release").lines[0]).toMatch(/^file /u);
+    expect(shell.submit("cat /etc/os-release").lines).toContain(
+      'PRETTY_NAME="Computer System Linux 1.0"',
+    );
     expect(shell.submit("df").lines[0]).toContain("Filesystem");
     expect(shell.submit("du -s /etc").lines[0]).toMatch(/^\d+\t\/etc$/u);
     expect(shell.submit("quota").lines).toEqual([

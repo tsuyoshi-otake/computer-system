@@ -1,4 +1,4 @@
-import { system, world, type Player } from "@minecraft/server";
+import { system, world, type Block, type Player } from "@minecraft/server";
 
 import type { ComputerRecord } from "../domain/computer/computer.js";
 import { TerminalSnapshotScheduler } from "../application/terminal/terminalSnapshotScheduler.js";
@@ -7,7 +7,10 @@ import {
   type WebTerminalAccessMode,
 } from "../application/terminal/webTerminalAccess.js";
 import { computerHost } from "./computerHost.js";
-import { openComputerTerminal } from "./computerTerminal.js";
+import {
+  openComputerTerminal,
+  selectComputerTerminal,
+} from "./computerTerminal.js";
 
 const requestMarker = "CS_WEB_SESSION_REQUEST ";
 const snapshotMarker = "CS_WEB_TERMINAL ";
@@ -22,6 +25,7 @@ const maxEagerSnapshotsPerPass = 4;
 const maxEagerSnapshotAttempts = 3;
 
 interface PendingRequest {
+  readonly accessPoint?: WebTerminalAccessPoint;
   readonly computerId: string;
   readonly expiresAtTick: number;
   readonly player: Player;
@@ -29,11 +33,20 @@ interface PendingRequest {
 }
 
 interface ActiveSession {
+  readonly accessPoint?: WebTerminalAccessPoint;
   readonly computerId: string;
   readonly expiresAtTick: number;
   readonly playerId: string;
+  readonly player: Player;
   readonly sessionId: string;
   lastSnapshot?: string;
+}
+
+interface WebTerminalAccessPoint {
+  readonly dimensionId: string;
+  readonly x: number;
+  readonly y: number;
+  readonly z: number;
 }
 
 const pendingRequests = new Map<string, PendingRequest>();
@@ -50,6 +63,7 @@ let started = false;
 export function requestWebComputerTerminal(
   player: Player,
   record: ComputerRecord,
+  accessBlock?: Block,
 ): void {
   pruneExpiredRequests();
   if (pendingRequests.size >= maxPendingRequests) {
@@ -60,12 +74,22 @@ export function requestWebComputerTerminal(
     return;
   }
 
+  selectComputerTerminal(player.id, record.computerId);
   if (record.lifecycle.state.kind === "off") {
     computerHost.runtime.powerOn(record.computerId);
   }
   const requestId = `r${system.currentTick.toString(36)}-${nextRequest.toString(36)}`;
   nextRequest = nextRequest === Number.MAX_SAFE_INTEGER ? 1 : nextRequest + 1;
   const request: PendingRequest = {
+    accessPoint:
+      accessBlock === undefined
+        ? undefined
+        : {
+            dimensionId: accessBlock.dimension.id,
+            x: accessBlock.x + 0.5,
+            y: accessBlock.y + 0.5,
+            z: accessBlock.z + 0.5,
+          },
     computerId: record.computerId,
     expiresAtTick: system.currentTick + requestLifetimeTicks,
     player,
@@ -133,15 +157,31 @@ export function startWebTerminalBridge(): void {
   system.runInterval(emitChangedSnapshots, 5);
   system.runInterval(pruneExpiredSessions, 100);
   world.afterEvents.playerLeave.subscribe(({ playerId }): void => {
-    for (const session of [...activeSessions.values()]) {
-      if (session.playerId === playerId)
-        finalizeSession(session, "disconnected");
-    }
-    for (const request of [...pendingRequests.values()]) {
-      if (request.player.id === playerId)
-        pendingRequests.delete(request.requestId);
-    }
+    disconnectWebTerminalPlayer(playerId, "disconnected");
   });
+}
+
+export function disconnectWebTerminalPlayer(
+  playerId: string,
+  reason = "disconnected",
+  computerId?: string,
+): void {
+  for (const session of [...activeSessions.values()]) {
+    if (
+      session.playerId === playerId &&
+      (computerId === undefined || session.computerId === computerId)
+    ) {
+      finalizeSession(session, reason);
+    }
+  }
+  for (const request of [...pendingRequests.values()]) {
+    if (
+      request.player.id === playerId &&
+      (computerId === undefined || request.computerId === computerId)
+    ) {
+      pendingRequests.delete(request.requestId);
+    }
+  }
 }
 
 function handleResponse(message: string): void {
@@ -161,6 +201,13 @@ function handleResponse(message: string): void {
     rejectSession(sessionId, "request_expired");
     return;
   }
+  if (!isWithinAccessRange(request.player, request.accessPoint)) {
+    request.player.sendMessage(
+      "Web Terminal access expired: stay within 3 blocks of the Computer.",
+    );
+    rejectSession(sessionId, "out_of_range");
+    return;
+  }
 
   pruneExpiredSessions();
   if (activeSessions.size >= maxActiveSessions) {
@@ -174,9 +221,11 @@ function handleResponse(message: string): void {
   }
 
   const session: ActiveSession = {
+    accessPoint: request.accessPoint,
     computerId: request.computerId,
     expiresAtTick: system.currentTick + sessionLifetimeTicks,
     playerId: request.player.id,
+    player: request.player,
     sessionId,
   };
   try {
@@ -198,9 +247,15 @@ function handleResponse(message: string): void {
   }
   activeSessions.set(sessionId, session);
   request.player.sendMessage(
-    "Open Computer System Web Terminal (valid for 60s):",
+    "Open Computer System Web Terminal (valid for 2 minutes):",
   );
-  request.player.sendMessage(url);
+  const shortHandoff = /^(https?:\/\/[^/\s]+)\/p\/([0-9]{4})$/u.exec(url);
+  if (shortHandoff === null) {
+    request.player.sendMessage(url);
+  } else {
+    request.player.sendMessage(`${shortHandoff[1]}/`);
+    request.player.sendMessage(`Connection code: ${shortHandoff[2]}`);
+  }
   emitSnapshot(session, true);
 }
 
@@ -330,7 +385,29 @@ function requireActiveSession(sessionId: string): ActiveSession | undefined {
     finalizeSession(session, "expired");
     return undefined;
   }
+  if (!isWithinAccessRange(session.player, session.accessPoint)) {
+    if (session.player.isValid) {
+      session.player.sendMessage(
+        "Web Terminal closed: move within 3 blocks of the Computer to reconnect.",
+      );
+    }
+    finalizeSession(session, "out_of_range");
+    return undefined;
+  }
   return session;
+}
+
+function isWithinAccessRange(
+  player: Player,
+  accessPoint: WebTerminalAccessPoint | undefined,
+): boolean {
+  if (accessPoint === undefined) return true;
+  if (!player.isValid || player.dimension.id !== accessPoint.dimensionId)
+    return false;
+  const x = player.location.x - accessPoint.x;
+  const y = player.location.y - accessPoint.y;
+  const z = player.location.z - accessPoint.z;
+  return x * x + y * y + z * z <= 9;
 }
 
 function emitChangedSnapshots(): void {
@@ -352,6 +429,15 @@ function emitEagerSnapshots(): void {
 }
 
 function emitSnapshot(session: ActiveSession, force: boolean): boolean {
+  if (!isWithinAccessRange(session.player, session.accessPoint)) {
+    if (session.player.isValid) {
+      session.player.sendMessage(
+        "Web Terminal closed: move within 3 blocks of the Computer to reconnect.",
+      );
+    }
+    finalizeSession(session, "out_of_range");
+    return false;
+  }
   const record = computerHost.get(session.computerId);
   if (record === undefined) {
     finalizeSession(session, "computer_missing");
@@ -362,7 +448,10 @@ function emitSnapshot(session: ActiveSession, force: boolean): boolean {
     computerId: session.computerId,
     label: record.label ?? record.computerId,
     lifecycle: record.lifecycle.state.kind,
-    terminal: record.terminal.snapshot(),
+    terminal: {
+      ...record.terminal.snapshot(),
+      secretInput: computerHost.runtime.isShellSecretInput(record.computerId),
+    },
   });
   if (!force && session.lastSnapshot === serialized) return false;
   session.lastSnapshot = serialized;

@@ -22,12 +22,23 @@ import {
   createRedstoneProbeBlock,
   redstoneProbeIdentifier,
 } from "./redstone-probe-block.mjs";
+import { createPortableComputerItem } from "./portable-computer-item.mjs";
 import {
-  createPocketComputerItem,
-  createPocketComputerTexture,
-  createPocketComputerTextureAtlas,
-} from "./pocket-computer-item.mjs";
+  createPortableComputerBlock,
+  portableComputerBlockIdentifier,
+} from "./portable-computer-block.mjs";
 import { createMonitorBlock } from "./monitor-block.mjs";
+import { createMonitorItem } from "./monitor-item.mjs";
+import {
+  createMachineBlockGeometry,
+  createMachineBlockTextureAtlas,
+  createMachineBlockTextures,
+} from "./machine-block-assets.mjs";
+import {
+  createMachineItemTexture,
+  createMachineItemTextureAtlas,
+  machineTextureSources,
+} from "./machine-textures.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const outputRoot = path.join(root, "dist");
@@ -54,9 +65,23 @@ await mkdir(path.join(resourceOutput, "ui"), { recursive: true });
 await mkdir(path.join(resourceOutput, "textures", "items"), {
   recursive: true,
 });
+await mkdir(path.join(resourceOutput, "textures", "blocks"), {
+  recursive: true,
+});
+await mkdir(path.join(resourceOutput, "models", "blocks"), {
+  recursive: true,
+});
 await writeFile(
   path.join(generatedBlocksDirectory, "monitor.json"),
   `${JSON.stringify(createMonitorBlock(), null, 2)}\n`,
+  "utf8",
+);
+await writeFile(
+  path.join(
+    generatedBlocksDirectory,
+    `${portableComputerBlockIdentifier.split(":")[1]}.json`,
+  ),
+  `${JSON.stringify(createPortableComputerBlock(), null, 2)}\n`,
   "utf8",
 );
 await Promise.all(
@@ -82,18 +107,50 @@ await Promise.all(
   }),
 );
 await writeFile(
-  path.join(generatedItemsDirectory, "pocket_computer.json"),
-  `${JSON.stringify(createPocketComputerItem(), null, 2)}\n`,
+  path.join(generatedItemsDirectory, "portable_computer.json"),
+  `${JSON.stringify(createPortableComputerItem(), null, 2)}\n`,
+  "utf8",
+);
+await writeFile(
+  path.join(generatedItemsDirectory, "monitor.json"),
+  `${JSON.stringify(createMonitorItem(), null, 2)}\n`,
   "utf8",
 );
 await writeFile(
   path.join(resourceOutput, "textures", "item_texture.json"),
-  `${JSON.stringify(createPocketComputerTextureAtlas(), null, 2)}\n`,
+  `${JSON.stringify(createMachineItemTextureAtlas(), null, 2)}\n`,
   "utf8",
 );
 await writeFile(
-  path.join(resourceOutput, "textures", "items", "pocket_computer.png"),
-  createPocketComputerTexture(),
+  path.join(resourceOutput, "textures", "terrain_texture.json"),
+  `${JSON.stringify(createMachineBlockTextureAtlas(), null, 2)}\n`,
+  "utf8",
+);
+await writeFile(
+  path.join(resourceOutput, "models", "blocks", "computer_system.geo.json"),
+  `${JSON.stringify(createMachineBlockGeometry(), null, 2)}\n`,
+  "utf8",
+);
+await Promise.all(
+  Object.entries(createMachineBlockTextures()).map(
+    async ([textureKey, contents]) => {
+      await writeFile(
+        path.join(resourceOutput, "textures", "blocks", `${textureKey}.png`),
+        contents,
+      );
+    },
+  ),
+);
+await Promise.all(
+  Object.values(machineTextureSources).map(async (filename) => {
+    const source = await readFile(
+      path.join(root, "web", "assets", "machines", filename),
+    );
+    await writeFile(
+      path.join(resourceOutput, "textures", "items", filename),
+      createMachineItemTexture(source),
+    );
+  }),
 );
 await Promise.all(
   Array.from({ length: 64 }, async (_, mask) => {

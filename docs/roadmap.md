@@ -5,14 +5,15 @@
 Build a ComputerCraft-inspired Minecraft Bedrock Add-On named **Computer
 System**. User programs use a sandboxed MicroPython-compatible language, while
 device behavior, APIs, terminal semantics, filesystems, events, networking,
-peripherals, pocket computers, and turtles remain as close to ComputerCraft as
+peripherals, portable computers, and turtles remain as close to ComputerCraft as
 Bedrock permits.
 
 ## Product decisions
 
 - Product name: Computer System
 - Add-On namespace: `computer_system`
-- Operating system: Computer System OS
+- Operating systems: Computer System Linux (`CS-Linux`) and Computer System DOS
+  (`CS-DOS`)
 - User language: Computer System Python
 - Repository visibility: private
 - Runtime: Behavior Pack, Resource Pack, and TypeScript Script API
@@ -70,13 +71,13 @@ Major components:
 - [ ] Printed Pages
 - [ ] Printed Book
 
-### Pocket computers
+### Portable computers
 
-- [ ] Pocket Computer
-- [ ] Advanced Pocket Computer
-- [ ] Wireless Pocket Computer
-- [ ] Ender Pocket Computer
-- [ ] Noisy Pocket Computer
+- [ ] Portable Computer System
+- [ ] Advanced Portable Computer System
+- [ ] Wireless Portable Computer System
+- [ ] Ender Portable Computer System
+- [ ] Noisy Portable Computer System
 
 ### Turtles
 
@@ -182,7 +183,7 @@ suppressed error may leave a device accidentally marked as running.
 - no immediate retry loops
 - deduplicated in-flight storage and network work
 - topology recomputation only for changed wired-network components
-- no every-tick full inventory scan for pocket computers
+- no every-tick full inventory scan for portable computers
 - no implicit chunk loading for turtles
 - command computers are administrator-only and command-audited
 - unsupported Bedrock behavior fails explicitly instead of silently producing an
@@ -211,7 +212,7 @@ suppressed error may leave a device accidentally marked as running.
 - [Phase 1: Build the host-side Computer System runtime](https://github.com/tsuyoshi-otake/computer-system/issues/3)
 - [Phase 2: Deliver the Bedrock Computer vertical slice](https://github.com/tsuyoshi-otake/computer-system/issues/4)
 - [Phase 3: Implement redstone and local peripherals](https://github.com/tsuyoshi-otake/computer-system/issues/5)
-- [Phase 4: Implement networking and pocket computers](https://github.com/tsuyoshi-otake/computer-system/issues/6)
+- [Phase 4: Implement networking and portable computers](https://github.com/tsuyoshi-otake/computer-system/issues/6)
 - [Phase 5: Implement turtles and upgrades](https://github.com/tsuyoshi-otake/computer-system/issues/7)
 - [Phase 6: Add command computers, hidden content, and release hardening](https://github.com/tsuyoshi-otake/computer-system/issues/8)
 
@@ -229,7 +230,7 @@ suppressed error may leave a device accidentally marked as running.
 - [x] Behavior Pack and Resource Pack
 - [x] Computer and Advanced Computer blocks
 - [x] stable computer IDs and block/item identity transfer
-- [x] Computer System OS shell and editor
+- [x] CS-Linux and CS-DOS shells and editors
 - [x] Bedrock terminal UI
   - dedicated ComputerCraft-inspired 51x19 cell presentation rather than the
     Phase 0 DDUI probe
@@ -252,12 +253,12 @@ suppressed error may leave a device accidentally marked as running.
 - [ ] Speaker
 - [ ] Printer and printed media
 
-### M4: Networking and pocket computers
+### M4: Networking and portable computers
 
 - [ ] Wired Modem and Networking Cable topology
 - [ ] Wireless and Ender Modems
 - [ ] `rednet` send, broadcast, receive, host, and lookup
-- [ ] Pocket Computer variants and lifecycle reconciliation
+- [ ] Portable Computer System variants and lifecycle reconciliation
 
 ### M5: Turtles
 
@@ -353,7 +354,7 @@ import term
 
 term.clear()
 term.set_cursor_pos(1, 1)
-print("Computer System OS")
+print("Computer System Linux")
 print("Computer ID:", os.get_computer_id())
 
 while True:

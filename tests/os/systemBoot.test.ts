@@ -2,15 +2,15 @@ import { describe, expect, it } from "vitest";
 import { ComputerRuntime } from "../../src/application/computer/computerRuntime.js";
 import { ComputerRecord } from "../../src/domain/computer/computer.js";
 
-describe("default Computer System OS boot", (): void => {
-  it("boots the shell, edits startup.py, and remains cooperatively waiting", (): void => {
+describe("default Computer System Linux boot", (): void => {
+  it("boots the Linux shell, edits startup.py with vi, and remains cooperatively waiting", (): void => {
     const record = new ComputerRecord("computer-30", "standard");
     const runtime = new ComputerRuntime();
     runtime.register(record);
     expect(runtime.powerOn(record.computerId).outcome).toBe("accepted");
     runtime.runTick();
     expect(record.terminal.line(1).trimEnd()).toBe(
-      "Computer System OS 0.3 (tty1)",
+      "Computer System Linux 1.0 (tty1)",
     );
     expect(record.terminal.line(3).trimEnd()).toBe("~$");
     expect(record.terminal.cell(1, 1).foreground).toBe(0);
@@ -19,11 +19,22 @@ describe("default Computer System OS boot", (): void => {
       kind: "waiting_event",
       filter: undefined,
     });
-    runtime.queueEvent(record.computerId, "terminal_line", "edit /startup.py");
+    runtime.queueEvent(record.computerId, "terminal_line", "vi /startup.py");
     runtime.runTick();
-    runtime.queueEvent(record.computerId, "terminal_line", 'print("boot")');
-    runtime.runTick();
-    runtime.queueEvent(record.computerId, "terminal_line", ".save");
+    expect(record.terminal.line(1)).toContain("VI  /startup.py");
+    runtime.queueEvent(
+      record.computerId,
+      "terminal_keys",
+      JSON.stringify([
+        "i",
+        ...'print("boot")',
+        "Escape",
+        ":",
+        "w",
+        "q",
+        "Enter",
+      ]),
+    );
     runtime.runTick();
     expect(record.filesystem.readFile("/startup.py")).toBe('print("boot")');
     expect(record.lifecycle.state.kind).toBe("waiting_event");

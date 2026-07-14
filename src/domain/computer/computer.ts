@@ -11,6 +11,7 @@ import { requireComputerId, type ComputerFamily } from "./identity.js";
 import { ComputerLifecycle } from "./lifecycle.js";
 import { RedstoneState } from "../redstone/redstoneState.js";
 import {
+  defaultComputerHardwareForFamily,
   defaultComputerHardware,
   requireComputerHardware,
   restoreComputerHardware,
@@ -66,7 +67,7 @@ export class ComputerRecord {
     );
     this.osProfileValue = options.osProfile ?? "linux";
     this.hardwareValue = requireComputerHardware(
-      options.hardware ?? defaultComputerHardware,
+      options.hardware ?? defaultComputerHardwareForFamily(family),
     );
     this.setLabel(options.label);
   }

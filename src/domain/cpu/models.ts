@@ -1,4 +1,4 @@
-export const cpuModelIds = ["cs386sx", "cs486dx"] as const;
+export const cpuModelIds = ["cs386sx", "cs486dx", "cs486dx2"] as const;
 
 export type CpuModel = (typeof cpuModelIds)[number];
 
@@ -10,6 +10,7 @@ export interface CpuModelSpecification {
   readonly maximumMemoryBytes: number;
   readonly nominalClockHz: number;
   readonly runtimeName: string;
+  readonly supportsMicroPython: boolean;
 }
 
 const specifications: Readonly<Record<CpuModel, CpuModelSpecification>> = {
@@ -21,6 +22,7 @@ const specifications: Readonly<Record<CpuModel, CpuModelSpecification>> = {
     maximumMemoryBytes: 16 * 1_048_576,
     nominalClockHz: 16_000_000,
     runtimeName: "CS386SX",
+    supportsMicroPython: false,
   },
   cs486dx: {
     addressBits: 32,
@@ -30,6 +32,17 @@ const specifications: Readonly<Record<CpuModel, CpuModelSpecification>> = {
     maximumMemoryBytes: 64 * 1_048_576,
     nominalClockHz: 33_000_000,
     runtimeName: "CS486DX",
+    supportsMicroPython: true,
+  },
+  cs486dx2: {
+    addressBits: 32,
+    dataBusBits: 32,
+    displayName: "Computer System 486DX2",
+    id: "cs486dx2",
+    maximumMemoryBytes: 64 * 1_048_576,
+    nominalClockHz: 66_000_000,
+    runtimeName: "CS486DX2",
+    supportsMicroPython: true,
   },
 };
 

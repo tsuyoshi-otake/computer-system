@@ -1,10 +1,11 @@
 import type { InMemoryFilesystem } from "../../domain/filesystem/inMemoryFilesystem.js";
 import { utf8ByteLength } from "../../domain/text/utf8.js";
 import type { OsProfile } from "./osProfile.js";
-import type { ViScreen } from "../editor/viSession.js";
+import type { EditorScreen } from "../editor/editorScreen.js";
 import type { ShellClockSource } from "./clock.js";
 import type { ComputerHardwareProfile } from "../../domain/computer/hardware.js";
 import type { VirtualDevice } from "./osProfile.js";
+import { formatOsIdentity } from "./osIdentity.js";
 import {
   runCs486,
   validateCs486Executable,
@@ -35,7 +36,7 @@ export interface ShellCommandResult {
   readonly stderr: string;
   readonly stdout: string;
   readonly sleepTicks?: number;
-  readonly terminalScreen?: ViScreen;
+  readonly terminalScreen?: EditorScreen;
   readonly resetTerminal?: boolean;
   readonly cpuCycles?: number;
 }
@@ -55,6 +56,26 @@ export interface ShellCommandRuntimeOptions {
   readonly ticksPerSecond: number;
   readonly hardware: ComputerHardwareProfile;
   readonly memoryUsageBytes: () => number;
+}
+
+interface MemoryRegion {
+  readonly free: number;
+  readonly total: number;
+  readonly used: number;
+}
+
+interface DosMemoryLayout {
+  readonly commandBytes: number;
+  readonly conventional: MemoryRegion;
+  readonly dosHigh: boolean;
+  readonly emm386: boolean;
+  readonly extended: MemoryRegion;
+  readonly reserved: MemoryRegion;
+  readonly runtimeBytes: number;
+  readonly total: MemoryRegion;
+  readonly umb: boolean;
+  readonly upper: MemoryRegion;
+  readonly xms: boolean;
 }
 
 export const shellCommandNames = [
@@ -127,6 +148,10 @@ export const shellCommandNames = [
   "objdump",
   "ld",
   "nm",
+  "path",
+  "prompt",
+  "rem",
+  "set",
 ] as const;
 
 const knownCommands = new Set<string>(shellCommandNames);
@@ -137,6 +162,7 @@ export class ShellCommandRuntime {
   private currentDirectory: string;
   private previousDirectory: string;
   private readonly environment: Map<string, string>;
+  private dosEcho = true;
 
   constructor(
     private readonly filesystem: InMemoryFilesystem,
@@ -192,7 +218,7 @@ export class ShellCommandRuntime {
 
   prompt(): string {
     if (this.options.profile.id === "dos") {
-      return `${this.options.profile.pathDialect.display(this.currentDirectory)}> `;
+      return this.renderDosPrompt(this.environment.get("PROMPT") ?? "$P$G");
     }
     const display =
       this.currentDirectory === this.options.profile.home
@@ -205,14 +231,111 @@ export class ShellCommandRuntime {
     if (name === "?") return String(lastExitCode);
     if (name === "PWD") return this.currentDirectory;
     if (name === "OLDPWD") return this.previousDirectory;
-    return this.environment.get(name);
+    return this.environment.get(this.environmentName(name));
   }
 
   setVariable(name: string, value: string): void {
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/u.test(name)) {
       throw new Error(`${name}: invalid variable name`);
     }
-    this.environment.set(name, value);
+    this.environment.set(this.environmentName(name), value);
+  }
+
+  isBuiltInCommand(name: string): boolean {
+    return knownCommands.has(this.canonicalCommand(name));
+  }
+
+  get dosEchoEnabled(): boolean {
+    return this.dosEcho;
+  }
+
+  expandDosVariables(
+    value: string,
+    scriptName: string,
+    arguments_: readonly string[],
+    lastExitCode: number,
+  ): string {
+    if (this.options.profile.id !== "dos") return value;
+    return value.replace(
+      /%([A-Za-z_][A-Za-z0-9_]*)%|%([0-9])/gu,
+      (_match, variable: string | undefined, position: string | undefined) => {
+        if (position !== undefined) {
+          const index = Number(position);
+          return index === 0 ? scriptName : (arguments_[index - 1] ?? "");
+        }
+        if (variable?.toUpperCase() === "ERRORLEVEL")
+          return String(lastExitCode);
+        return this.environment.get(this.environmentName(variable ?? "")) ?? "";
+      },
+    );
+  }
+
+  executeDosControlLine(line: string): ShellCommandResult | undefined {
+    if (this.options.profile.id !== "dos") return undefined;
+    const normalized = line.trim().replace(/^@/u, "").trimStart();
+    const match = /^([A-Za-z]+)(?:\s+(.*))?$/su.exec(normalized);
+    if (match === null) return undefined;
+    const command = match[1]!.toLowerCase();
+    const remainder = match[2] ?? "";
+    switch (command) {
+      case "rem":
+        return success();
+      case "set":
+        return this.dosSet(remainder);
+      case "path":
+        return this.dosPath(remainder);
+      case "prompt":
+        return this.dosPrompt(remainder);
+      case "echo":
+        return remainder.length === 0 || /^(?:off|on)$/iu.test(remainder)
+          ? this.dosEchoCommand(remainder)
+          : undefined;
+      default:
+        return undefined;
+    }
+  }
+
+  resolveDosProgram(
+    name: string,
+  ):
+    | { readonly kind: "batch" | "executable"; readonly path: string }
+    | undefined {
+    if (this.options.profile.id !== "dos" || name.length === 0)
+      return undefined;
+    const hasDirectory = name.includes("/") || name.includes("\\");
+    const directories = hasDirectory
+      ? [""]
+      : [
+          this.currentDirectory,
+          ...(this.environment.get("PATH") ?? "")
+            .split(";")
+            .filter((entry) => entry.length > 0)
+            .slice(0, 16)
+            .map((entry) => this.resolvePath(entry)),
+        ];
+    const hasExtension = /\.[^/\\]+$/u.test(name);
+    const names = hasExtension ? [name] : [name, `${name}.bat`];
+    for (const directory of directories) {
+      for (const candidateName of names) {
+        const candidate = hasDirectory
+          ? this.resolvePath(candidateName)
+          : this.filesystem.normalize(
+              joinPath(directory, candidateName.toLowerCase()),
+            );
+        if (
+          this.filesystem.exists(candidate) &&
+          !this.filesystem.isDirectory(candidate)
+        ) {
+          return {
+            kind: candidate.toLowerCase().endsWith(".bat")
+              ? "batch"
+              : "executable",
+            path: candidate,
+          };
+        }
+      }
+    }
+    return undefined;
   }
 
   execute(words: readonly string[], stdin: string): ShellCommandResult {
@@ -222,7 +345,7 @@ export class ShellCommandRuntime {
       for (const assignment of words.slice(0, count)) {
         const separator = assignment.indexOf("=");
         this.environment.set(
-          assignment.slice(0, separator),
+          this.environmentName(assignment.slice(0, separator)),
           assignment.slice(separator + 1),
         );
       }
@@ -233,6 +356,9 @@ export class ShellCommandRuntime {
     const [requestedCommand = "", ...arguments_] = words;
     const command = this.canonicalCommand(requestedCommand);
     try {
+      if (knownCommands.has(command) && !this.commandAvailable(command)) {
+        return this.commandNotFound(requestedCommand);
+      }
       const result = this.dispatch(command, arguments_, stdin);
       if (
         result.stdout.length > maximumOutputLength ||
@@ -277,7 +403,7 @@ export class ShellCommandRuntime {
             "files: pwd cd ls cat mkdir touch rm cp mv find du quota",
             "text: echo printf head tail wc grep sort uniq tr",
             "shell: sh bash source env export unset which type",
-            "system: clear edit vi shutdown reboot exit true false",
+            `system: clear ${this.options.profile.id === "dos" ? "edit " : ""}vi shutdown reboot exit true false`,
             "info: whoami id hostname uname date uptime stat df du quota",
             this.options.profile.id === "dos"
               ? "hardware: CPU MEM SYSTEMINFO"
@@ -300,7 +426,9 @@ export class ShellCommandRuntime {
       case "cat":
         return this.cat(arguments_, stdin);
       case "echo":
-        return this.echo(arguments_);
+        return this.options.profile.id === "dos"
+          ? this.dosEchoCommand(arguments_.join(" "))
+          : this.echo(arguments_);
       case "printf":
         return this.printf(arguments_);
       case "mkdir":
@@ -393,6 +521,22 @@ export class ShellCommandRuntime {
         return this.linkObjects(arguments_);
       case "nm":
         return this.listSymbols(arguments_);
+      case "path":
+        return this.options.profile.id === "dos"
+          ? this.dosPath(arguments_.join(" "))
+          : this.commandNotFound(command);
+      case "prompt":
+        return this.options.profile.id === "dos"
+          ? this.dosPrompt(arguments_.join(" "))
+          : this.commandNotFound(command);
+      case "rem":
+        return this.options.profile.id === "dos"
+          ? success()
+          : this.commandNotFound(command);
+      case "set":
+        return this.options.profile.id === "dos"
+          ? this.dosSet(arguments_.join(" "))
+          : this.commandNotFound(command);
       case "uptime":
         return arguments_.length === 0
           ? success(`${this.uptimeSeconds().toFixed(2)} seconds\n`)
@@ -870,6 +1014,105 @@ export class ShellCommandRuntime {
     return success(`${paths.join("\n")}\n`);
   }
 
+  private dosEchoCommand(value: string): ShellCommandResult {
+    const normalized = value.trim();
+    if (normalized.length === 0) {
+      return success(`ECHO is ${this.dosEcho ? "on" : "off"}.\r\n`);
+    }
+    if (/^off$/iu.test(normalized)) {
+      this.dosEcho = false;
+      return success();
+    }
+    if (/^on$/iu.test(normalized)) {
+      this.dosEcho = true;
+      return success();
+    }
+    return success(`${value}\r\n`);
+  }
+
+  private dosSet(value: string): ShellCommandResult {
+    const assignment = value.trim();
+    if (assignment.length === 0) {
+      return success(
+        `${[...this.environment]
+          .sort(([left], [right]) => left.localeCompare(right))
+          .map(([name, contents]) => `${name}=${contents}`)
+          .join("\r\n")}\r\n`,
+      );
+    }
+    const separator = assignment.indexOf("=");
+    if (separator < 0) {
+      const prefix = this.environmentName(assignment);
+      const matches = [...this.environment]
+        .filter(([name]) => name.startsWith(prefix))
+        .sort(([left], [right]) => left.localeCompare(right));
+      return matches.length === 0
+        ? status(1, "", `Environment variable ${assignment} not defined\r\n`)
+        : success(
+            `${matches.map(([name, contents]) => `${name}=${contents}`).join("\r\n")}\r\n`,
+          );
+    }
+    const name = assignment.slice(0, separator).trim();
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/u.test(name))
+      return failure("set", `${name}: invalid variable name`, 2);
+    const canonical = this.environmentName(name);
+    const contents = assignment.slice(separator + 1);
+    if (contents.length === 0) this.environment.delete(canonical);
+    else this.environment.set(canonical, contents);
+    return success();
+  }
+
+  private dosPath(value: string): ShellCommandResult {
+    const requested = value.trim();
+    if (requested.length === 0)
+      return success(`PATH=${this.environment.get("PATH") ?? ""}\r\n`);
+    this.environment.set("PATH", requested === ";" ? "" : requested);
+    return success();
+  }
+
+  private dosPrompt(value: string): ShellCommandResult {
+    const requested = value.trim();
+    if (requested.length > 64)
+      return failure("prompt", "prompt template limit exceeded", 2);
+    this.environment.set("PROMPT", requested.length === 0 ? "$P$G" : requested);
+    return success();
+  }
+
+  private renderDosPrompt(template: string): string {
+    const displayPath = this.options.profile.pathDialect.display(
+      this.currentDirectory,
+    );
+    const drive = /^[A-Za-z]:/u.exec(displayPath)?.[0]?.slice(0, 1) ?? "C";
+    const replacements: Readonly<Record<string, string>> = {
+      B: "|",
+      G: ">",
+      L: "<",
+      N: drive,
+      P: displayPath,
+      Q: "=",
+      V: formatOsIdentity(this.options.profile.identity),
+      _: "\n",
+      $: "$",
+    };
+    let rendered = "";
+    for (let index = 0; index < template.length && rendered.length < 128;) {
+      const character = template[index]!;
+      if (character !== "$" || index + 1 >= template.length) {
+        rendered += character;
+        index += 1;
+        continue;
+      }
+      const token = template[index + 1]!.toUpperCase();
+      rendered += replacements[token] ?? `$${template[index + 1]!}`;
+      index += 2;
+    }
+    return `${rendered} `;
+  }
+
+  private environmentName(name: string): string {
+    return this.options.profile.id === "dos" ? name.toUpperCase() : name;
+  }
+
   private environmentCommand(
     command: "env" | "export",
     arguments_: readonly string[],
@@ -878,7 +1121,7 @@ export class ShellCommandRuntime {
       if (!isAssignment(argument)) return usage(`${command} [NAME=value ...]`);
       const separator = argument.indexOf("=");
       this.environment.set(
-        argument.slice(0, separator),
+        this.environmentName(argument.slice(0, separator)),
         argument.slice(separator + 1),
       );
     }
@@ -899,7 +1142,7 @@ export class ShellCommandRuntime {
       if (!/^[A-Za-z_][A-Za-z0-9_]*$/u.test(name)) {
         return failure("unset", `${name}: invalid variable name`, 2);
       }
-      this.environment.delete(name);
+      this.environment.delete(this.environmentName(name));
     }
     return success();
   }
@@ -1018,9 +1261,17 @@ export class ShellCommandRuntime {
   }
 
   private commandAvailable(command: string): boolean {
+    if (command === "edit") return this.options.profile.id === "dos";
     if (command === "cpuinfo" || command === "free")
       return this.options.profile.id === "linux";
     if (command === "cpu" || command === "mem" || command === "systeminfo")
+      return this.options.profile.id === "dos";
+    if (
+      command === "path" ||
+      command === "prompt" ||
+      command === "rem" ||
+      command === "set"
+    )
       return this.options.profile.id === "dos";
     return true;
   }
@@ -1073,8 +1324,11 @@ export class ShellCommandRuntime {
         "processor\t: 0",
         `model name\t: ${cpu.displayName}`,
         `model id\t: ${cpu.id}`,
+        `address size\t: ${String(cpu.addressBits)} bit`,
         `data bus\t: ${String(cpu.dataBusBits)} bit`,
         `clock\t\t: ${formatClock(this.options.hardware.clockHz)}`,
+        "execution mode\t: protected sandbox",
+        "paging\t\t: unavailable",
       ].join("\n") + "\n"
     );
   }
@@ -1082,11 +1336,17 @@ export class ShellCommandRuntime {
   private linuxMemoryInfo(): string {
     const total = this.options.hardware.memoryBytes;
     const used = this.usedMemoryBytes();
+    const free = total - used;
     return (
       [
         `MemTotal: ${total} B`,
         `MemUsed:  ${used} B`,
-        `MemFree:  ${total - used} B`,
+        `MemFree:  ${free} B`,
+        `MemAvailable: ${free} B`,
+        `Runtime:  ${used} B`,
+        "SwapTotal: 0 B",
+        "SwapFree:  0 B",
+        "MemoryModel: 32-bit protected flat sandbox",
       ].join("\n") + "\n"
     );
   }
@@ -1111,10 +1371,11 @@ export class ShellCommandRuntime {
     ) {
       return usage("uname [-a]");
     }
+    const name = formatOsIdentity(this.options.profile.identity);
     const system =
       this.options.profile.id === "dos"
-        ? `Computer System DOS 0.1 [CPU ${cpuModelSpecification(this.options.hardware.cpuModel).runtimeName} ${formatClock(this.options.hardware.clockHz)}, Memory ${formatBinaryBytes(this.options.hardware.memoryBytes)}]`
-        : "Computer System OS 0.3";
+        ? `${name} [CPU ${cpuModelSpecification(this.options.hardware.cpuModel).runtimeName} ${formatClock(this.options.hardware.clockHz)}, Memory ${formatBinaryBytes(this.options.hardware.memoryBytes)}]`
+        : name;
     return success(
       arguments_[0] === "-a"
         ? `${system} ${this.options.computerName} sandbox-vm\n`
@@ -1251,6 +1512,7 @@ export class ShellCommandRuntime {
     arguments_: readonly string[],
   ): ShellCommandResult {
     const name = language === "asm" ? "as" : language;
+    arguments_ = arguments_.map((argument) => this.dosOption(argument));
     const compileOnly = arguments_.filter(
       (argument) => argument === "-c",
     ).length;
@@ -1298,6 +1560,7 @@ export class ShellCommandRuntime {
   }
 
   private linkObjects(arguments_: readonly string[]): ShellCommandResult {
+    arguments_ = arguments_.map((argument) => this.dosOption(argument));
     const outputIndex = arguments_.indexOf("-o");
     const entryIndex = arguments_.indexOf("--entry");
     const consumed = new Set<number>();
@@ -1348,6 +1611,7 @@ export class ShellCommandRuntime {
   }
 
   private runExecutable(arguments_: readonly string[]): ShellCommandResult {
+    arguments_ = arguments_.map((argument) => this.dosOption(argument));
     const stats = arguments_[0] === "--stats" || arguments_[0] === "-v";
     const path = arguments_[stats ? 1 : 0];
     if (path === undefined || arguments_.length !== (stats ? 2 : 1))
@@ -1489,7 +1753,7 @@ export class ShellCommandRuntime {
     const free = total - used;
     const display = arguments_[0] === "-h" ? formatBinaryBytes : String;
     return success(
-      `              total        used        free\nMem:     ${display(total).padStart(10)}  ${display(used).padStart(10)}  ${display(free).padStart(10)}\n`,
+      `              total        used        free   available\nMem:     ${display(total).padStart(10)}  ${display(used).padStart(10)}  ${display(free).padStart(10)}  ${display(free).padStart(10)}\nSwap:             0           0           0           0\n`,
     );
   }
 
@@ -1500,8 +1764,11 @@ export class ShellCommandRuntime {
       [
         cpu.displayName,
         `Model ID: ${cpu.id}`,
+        `Address size: ${String(cpu.addressBits)} bit`,
         `Data bus: ${String(cpu.dataBusBits)} bit`,
         `Clock speed: ${formatClock(this.options.hardware.clockHz)}`,
+        "Execution modes: real, protected, virtual-8086 compatibility",
+        "Current mode: protected sandbox",
       ].join("\r\n") + "\r\n",
     );
   }
@@ -1510,25 +1777,110 @@ export class ShellCommandRuntime {
     const option = arguments_[0]?.toUpperCase();
     if (
       arguments_.length > 1 ||
-      (option !== undefined && option !== "/C" && option !== "/P")
-    ) {
-      return usage("MEM [/C | /P]");
-    }
+      (option !== undefined &&
+        option !== "/C" &&
+        option !== "/D" &&
+        option !== "/P")
+    )
+      return usage("MEM [/C | /D | /P]");
     if (option === "/P")
       return failure("MEM", "/P paging is not supported by this terminal", 2);
-    const total = this.options.hardware.memoryBytes;
-    const used = this.usedMemoryBytes();
-    const free = total - used;
+    const layout = this.dosMemoryLayout();
     const lines = [
-      "Computer System DOS Memory",
+      `${formatOsIdentity(this.options.profile.identity)} Memory`,
       "",
-      `${String(total).padStart(12)} bytes total memory`,
-      `${String(used).padStart(12)} bytes used memory`,
-      `${String(free).padStart(12)} bytes free memory`,
+      "Memory Type        Total       Used       Free",
+      "----------------  ----------  ----------  ----------",
+      this.dosMemoryRow("Conventional", layout.conventional),
+      this.dosMemoryRow("Upper", layout.upper),
+      this.dosMemoryRow("Reserved", layout.reserved),
+      this.dosMemoryRow("Extended (XMS)", layout.extended),
+      "----------------  ----------  ----------  ----------",
+      this.dosMemoryRow("Total memory", layout.total),
+      "",
+      `${String(this.options.hardware.memoryBytes).padStart(12)} bytes total memory`,
+      `${String(layout.runtimeBytes).padStart(12)} bytes guest runtime`,
+      `${String(layout.conventional.free).padStart(12)} bytes largest executable program size`,
+      `${String(layout.upper.free).padStart(12)} bytes largest free upper memory block`,
     ];
-    if (option === "/C")
-      lines.push("", `${String(used).padStart(12)} bytes VM runtime`);
+    if (option === "/C") {
+      lines.push(
+        "",
+        "Modules using memory below 1 MB:",
+        `COMMAND        ${String(layout.commandBytes).padStart(10)}  ${layout.dosHigh ? "Upper" : "Conventional"}`,
+        `CS-RUNTIME     ${String(layout.runtimeBytes).padStart(10)}  Conventional`,
+      );
+    }
+    if (option === "/D") {
+      lines.push(
+        "",
+        "CPU mode: protected sandbox",
+        "DOS compatibility mode: virtual-8086 model",
+        "Paging: unavailable",
+        `XMS driver (HIMEM.SYS): ${layout.xms ? "installed" : "not installed"}`,
+        `UMB provider (EMM386.EXE): ${layout.emm386 ? "installed" : "not installed"}`,
+        `DOS high: ${layout.dosHigh ? "enabled" : "disabled"}`,
+        `UMB link: ${layout.umb ? "enabled" : "disabled"}`,
+      );
+    }
     return success(`${lines.join("\r\n")}\r\n`);
+  }
+
+  private dosMemoryLayout(): DosMemoryLayout {
+    const kib = 1_024;
+    const totalBytes = this.options.hardware.memoryBytes;
+    const conventionalTotal = Math.min(totalBytes, 640 * kib);
+    const lowMemoryTotal = Math.min(totalBytes, 1_024 * kib);
+    const upperPhysical = Math.max(0, lowMemoryTotal - conventionalTotal);
+    const extendedTotal = Math.max(0, totalBytes - lowMemoryTotal);
+    const xms = this.environment.get("CONFIG_XMS") === "ON";
+    const emm386 = this.environment.get("CONFIG_EMM386") === "ON";
+    const umb = emm386 && this.environment.get("CONFIG_UMB") === "ON";
+    const dosHigh = xms && this.environment.get("CONFIG_DOS_HIGH") === "ON";
+    const upperTotal = umb ? Math.min(upperPhysical, 128 * kib) : 0;
+    const commandBytes = 32 * kib;
+    const runtimeBytes = this.usedMemoryBytes();
+    const conventionalUsed = Math.min(
+      conventionalTotal,
+      runtimeBytes + (dosHigh ? 32 * kib : 64 * kib),
+    );
+    const upperUsed = Math.min(upperTotal, dosHigh ? commandBytes : 0);
+    const extendedUsed = Math.min(extendedTotal, dosHigh ? 64 * kib : 0);
+    const reservedTotal = upperPhysical - upperTotal;
+    const regions = {
+      conventional: memoryRegion(conventionalTotal, conventionalUsed),
+      upper: memoryRegion(upperTotal, upperUsed),
+      reserved: memoryRegion(reservedTotal, reservedTotal),
+      extended: memoryRegion(extendedTotal, extendedUsed),
+    };
+    return {
+      ...regions,
+      total: memoryRegion(
+        totalBytes,
+        regions.conventional.used +
+          regions.upper.used +
+          regions.reserved.used +
+          regions.extended.used,
+      ),
+      commandBytes,
+      dosHigh,
+      emm386,
+      runtimeBytes,
+      umb,
+      xms,
+    };
+  }
+
+  private dosMemoryRow(name: string, region: MemoryRegion): string {
+    const format = (bytes: number): string =>
+      `${String(Math.floor(bytes / 1_024))}K`;
+    return `${name.padEnd(16)}  ${format(region.total).padStart(10)}  ${format(region.used).padStart(10)}  ${format(region.free).padStart(10)}`;
+  }
+
+  private dosOption(argument: string): string {
+    return this.options.profile.id === "dos" && argument.startsWith("-")
+      ? argument.toLowerCase()
+      : argument;
   }
 
   private dosSystemInfo(arguments_: readonly string[]): ShellCommandResult {
@@ -1539,7 +1891,8 @@ export class ShellCommandRuntime {
     return success(
       [
         `Computer ID: ${this.options.computerName}`,
-        "Operating System: Computer System DOS 0.1",
+        `Operating System: ${formatOsIdentity(this.options.profile.identity)}`,
+        `OS Alias: ${this.options.profile.identity.shortName} ${this.options.profile.identity.version}`,
         `CPU: ${cpu.displayName}, ${formatClock(this.options.hardware.clockHz)}`,
         `Data bus: ${String(cpu.dataBusBits)} bit`,
         `Memory: ${this.options.hardware.memoryBytes} bytes`,
@@ -1887,6 +2240,16 @@ function utf8Size(value: string): number {
     size += point <= 0x7f ? 1 : point <= 0x7ff ? 2 : point <= 0xffff ? 3 : 4;
   }
   return size;
+}
+
+function memoryRegion(total: number, used: number): MemoryRegion {
+  const boundedTotal = Math.max(0, Math.floor(total));
+  const boundedUsed = Math.min(boundedTotal, Math.max(0, Math.floor(used)));
+  return {
+    free: boundedTotal - boundedUsed,
+    total: boundedTotal,
+    used: boundedUsed,
+  };
 }
 
 function formatClock(clockHz: number): string {

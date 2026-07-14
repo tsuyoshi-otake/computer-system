@@ -6,6 +6,31 @@ import { describe, expect, it } from "vitest";
 const root = path.resolve(import.meta.dirname, "../..");
 
 describe("Web terminal UI", () => {
+  it("accepts a one-use four-digit code at the stable LAN entry page", async () => {
+    const [html, script] = await Promise.all([
+      source("web/index.html"),
+      source("web/app.js"),
+    ]);
+
+    expect(html).toContain('id="handoff-code"');
+    expect(html).toContain('pattern="[0-9]{4}"');
+    expect(script).toContain('fetch("/api/handoff"');
+  });
+
+  it("masks secret input and paints full-height terminal cell backgrounds", async () => {
+    const [css, script] = await Promise.all([
+      source("web/styles.css"),
+      source("web/app.js"),
+    ]);
+
+    expect(css).toContain("-webkit-text-security: disc");
+    expect(css).toContain(".terminal-row > span");
+    expect(css).toContain("height: 100%");
+    expect(script).toContain("terminal.secretInput === true");
+    expect(script).toContain("!submittedSecret");
+    expect(script).toContain("if (!secretInput) moveHistory(-1)");
+  });
+
   it("places the command input at the terminal cursor without a visible field", async () => {
     const [html, css, script] = await Promise.all([
       source("web/index.html"),
@@ -73,14 +98,19 @@ describe("Web terminal UI", () => {
     expect(inputHelpers).toContain('replace(/\\r\\n?|\\n/gu, " ")');
   });
 
-  it("detects vi screens and relays bounded coalesced editor key batches", async () => {
+  it("detects vi and DOS EDIT screens and relays bounded editor key batches", async () => {
     const script = await source("web/app.js");
 
-    expect(script).toContain("viActive = terminal.rows.some");
-    expect(script).toContain("queueViKeys([key])");
-    expect(script).toContain("Math.min(16, viKeyQueue.length)");
+    expect(script).toContain("editorActive =");
+    expect(script).toContain("File\\s+Edit\\s+Search\\s+Options\\s+Help");
+    expect(script).toContain("queueEditorKeys([key])");
+    expect(script).toContain("Math.min(16, editorKeyQueue.length)");
     expect(script).toContain('kind: "keys"');
-    expect(script).toContain("viKeyQueue.length > 0");
+    expect(script).toContain("editorKeyQueue.length > 0");
+    expect(script).toContain("`Ctrl+${event.key.toLowerCase()}`");
+    expect(script).toContain("`Alt+${event.key.toLowerCase()}`");
+    expect(script).toContain('"PageDown"');
+    expect(script).toContain('"F10"');
   });
 
   it("exposes view-only ownership and an explicit bounded takeover action", async () => {

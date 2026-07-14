@@ -3,7 +3,10 @@ import path from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { WebCompanionServer } from "../../tools/web-companion-server.mjs";
+import {
+  selectLanIpv4,
+  WebCompanionServer,
+} from "../../tools/web-companion-server.mjs";
 
 const servers = [];
 
@@ -129,7 +132,7 @@ describe("Web companion HTTP server", () => {
     ).toThrow("c-xxxxxx");
   });
 
-  it("blocks non-loopback browser opening while preserving the handoff", async () => {
+  it("opens a LAN handoff through loopback on the companion host", async () => {
     const bds = new FakeBds();
     const launches = [];
     const server = new WebCompanionServer({
@@ -147,16 +150,66 @@ describe("Web companion HTTP server", () => {
       'CS_WEB_SESSION_REQUEST {"requestId":"r1-1","playerId":"player-1","computerId":"c-000001"}',
     );
     await until(() => bds.commands.length === 1);
+    await until(() => launches.length === 1);
 
-    expect(launches).toEqual([]);
+    expect(launches).toHaveLength(1);
+    expect(launches[0]).toMatch(/^http:\/\/127\.0\.0\.1:/u);
     expect(bds.commands[0]).toContain("http://192.0.2.1:");
     expect(server.status().browserAutoOpen).toMatchObject({
       enabled: true,
-      eligible: false,
-      state: "blocked",
-      reason: "origin_not_loopback",
-      attempts: 0,
+      eligible: true,
+      state: "opened",
+      attempts: 1,
     });
+  });
+
+  it("selects a physical LAN IPv4 address ahead of virtual adapters", () => {
+    expect(
+      selectLanIpv4({
+        CloudflareWARP: [
+          { address: "172.16.0.2", family: "IPv4", internal: false },
+        ],
+        "Wi-Fi 2": [
+          { address: "10.255.10.90", family: "IPv4", internal: false },
+        ],
+        "vEthernet (WSL)": [
+          { address: "172.28.0.1", family: "IPv4", internal: false },
+        ],
+      }),
+    ).toBe("10.255.10.90");
+  });
+
+  it("rate-limits four-digit connection-code guessing per client", async () => {
+    const server = new WebCompanionServer({ bds: new FakeBds(), port: 0 });
+    servers.push(server);
+    const status = await server.start();
+
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      expect((await fetch(`${status.origin}/p/9999`)).status).toBe(401);
+    }
+    expect((await fetch(`${status.origin}/p/9999`)).status).toBe(429);
+  });
+
+  it("exchanges a four-digit code without leaving the stable entry page", async () => {
+    const bds = new FakeBds();
+    const server = new WebCompanionServer({ bds, port: 0 });
+    servers.push(server);
+    const status = await server.start();
+    bds.log(
+      'CS_WEB_SESSION_REQUEST {"requestId":"r1-1","playerId":"player-1","computerId":"c-000001"}',
+    );
+    await until(() => bds.commands.length === 1);
+
+    const response = await fetch(`${status.origin}/api/handoff`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Origin: status.origin,
+      },
+      body: JSON.stringify({ code: "0001" }),
+    });
+    expect(response.status).toBe(200);
+    expect((await response.json()).token).toMatch(/^[A-Za-z0-9_-]{20,}$/u);
   });
 
   it("keeps the chat handoff usable when browser opening fails", async () => {
@@ -328,7 +381,7 @@ describe("Web companion HTTP server", () => {
       `CS_WEB_TERMINAL ${JSON.stringify({
         sessionId,
         computerId: "c-000001",
-        label: "Pocket One",
+        label: "Portable One",
         lifecycle: "running",
         terminal: { width: 51, height: 19, rows: [] },
       })}`,
@@ -342,7 +395,7 @@ describe("Web companion HTTP server", () => {
     const session = await fetch(`${status.origin}/api/session`, {
       headers: { Authorization: `Bearer ${token}` },
     }).then((response) => response.json());
-    expect(session.terminal).toMatchObject({ label: "Pocket One" });
+    expect(session.terminal).toMatchObject({ label: "Portable One" });
 
     const rejected = await fetch(`${status.origin}/api/input`, {
       method: "POST",

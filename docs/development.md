@@ -60,11 +60,12 @@ browser and positions its semantic input at the terminal cursor, preserving
 physical Enter, Ctrl+C, and history without a separate visible text field. Start
 the combined managed runtime with `npm run dev:bds:web`; see
 [the MCP debugging guide](mcp-debugging.md) for network and security settings.
-Set `WEB_COMPANION_AUTO_OPEN=1` for the loopback-only one-action workflow: using
-a Pocket Computer opens its newly minted handoff in the host's default browser.
-The companion refuses automatic opening when either the listener or published
-origin is non-loopback, and the in-game 60-second URL remains the fallback for
-every blocked or failed launch.
+Set `WEB_COMPANION_AUTO_OPEN=1` for the companion-host one-action workflow:
+interacting with a Desktop or Advanced Desktop Computer System, or using a
+Portable Computer System, opens its activated path through loopback in the
+host's default browser. Remote players receive the detected LAN entry page and
+the Computer's permanent four-digit number. An interaction activates that number
+once for two minutes; invalid guesses and active collisions are bounded.
 
 Terminal output remains mouse-selectable. Ctrl+C copies when either output or
 command text is selected and otherwise performs the bounded terminal interrupt.
@@ -90,13 +91,16 @@ a successful takeover demotes the prior writer before later input can pass.
 Closing one view leaves the terminal open; only the final detach emits
 `terminal_closed`. Different Computers have independent writer leases.
 
-The Web Terminal and native fallback send `terminal_line`; vi additionally uses
-bounded `terminal_keys` batches. Writer-only `web-complete` and `web-resize`
-requests provide command/path completion and negotiate a 51x19 through 160x60
-Web viewport without changing the native fallback contract. OS 0.3 parses a
-bounded Computer System Bash language with pipelines, redirects, control
-operators, quoting, variables, positional parameters, conditionals, loops, and
-functions. The Linux profile owns `/etc`, `/dev`, volatile `/tmp`, `/usr`,
+The Web Terminal and native fallback send `terminal_line`; DOS `EDIT` and
+cross-profile `vi` additionally use bounded `terminal_keys` batches. Writer-only
+`web-complete` and `web-resize` requests provide command/path completion and
+negotiate a 51x19 through 160x60 Web viewport without changing the native
+fallback contract. CS-Linux 1.0 parses a bounded Computer System Bash language
+with pipelines, redirects, control operators, quoting, variables, positional
+parameters, conditionals, loops, and functions. Production first boot requires
+password setup twice and later boots require login; the salted record is stored
+in `/etc/shadow`, while secret Web input is masked and excluded from history and
+completion. The Linux profile owns `/etc`, `/dev`, volatile `/tmp`, `/usr`,
 `/var`, `/home/computer`, identity/time applets, and `/dev/null`. The shared OS
 profile boundary owns path dialects, aliases, boot images, and virtual devices;
 the DOS contract fixture proves drive paths, case-insensitive names, CRLF,
@@ -160,10 +164,11 @@ transactional turtle operations, two pitched sound calls, six-face redstone
 input sampling, all 64 independent digital output masks, all 16 Redstone
 Interface analog levels, and simultaneous analog levels 4 and 12. Turtle probes
 rejected occupied, unloaded, and conflicting moves without leaving an active
-resource lease. The second session recovered the Pocket Computer ItemStack
-identity written by the first, including placed-block and block-to-item identity
-round trips. The custom item is parsed in the current direct-component format
-and is verified as non-stackable before any Dynamic Property is written.
+resource lease. The second session recovered the Portable Computer System
+ItemStack identity written by the first, including placed-block and
+block-to-item identity round trips. The custom item is parsed in the current
+direct-component format and is verified as non-stackable before any Dynamic
+Property is written.
 
 The arena loader polls a fixed set of required chunks for at most 40 ticks. Each
 redstone output transition settles for at most eight ticks. These bounds prevent
@@ -183,6 +188,39 @@ For persistent command execution and log inspection through Codex rather than
 the Minecraft chat UI, use the local
 [Bedrock MCP debug companion](mcp-debugging.md).
 
+## Authored machine artwork
+
+Keep the original machine illustrations in `web/assets/machines/` and the CPU
+identification plates in `web/assets/cpu/`. The Web Terminal serves both sets
+directly in Manual Chapter 2. During `npm run build`,
+`tools/machine-textures.mjs` validates each machine source as a bounded,
+non-interlaced 4-bit indexed PNG, removes its pure-white canvas, and scales the
+visible content into a transparent 256 by 256 RGBA item icon. The work is
+O(source pixels + 256 squared) for each of the fixed four machine assets, and
+malformed, oversized, or unsupported inputs fail the build explicitly.
+
+Do not map the isometric machine plates directly onto block faces: they are
+manual and inventory artwork, not six-face UV textures.
+`tools/machine-block-assets.mjs` instead generates bounded custom geometry and
+purpose-built 16 px block textures for Desktop, Advanced Desktop, Monitor, and
+the open-laptop Portable Computer System. It also generates the terrain atlas.
+All four blocks use `minecraft:placement_direction` and cardinal transformation
+permutations. Programmatic Computer and Portable placement sets the same state,
+and redstone mask swaps preserve it. Desktop bodies occupy 15.5 by 16 by 14.5
+model units so they read as larger base units beneath the Monitor. Resource
+artwork changes require a Resource Pack version increment so connected clients
+fetch the new files.
+
+Desktop Web Terminal requests require exactly one physically adjacent Monitor.
+Touching a connected Monitor resolves its adjacent desktop rather than a stale
+global target; zero and multiple candidates terminate with explicit messages.
+Placed access is valid only within a three-block Euclidean radius of the touched
+Computer, Monitor, or Portable block. Range or dimension failure owns
+finalization as `out_of_range`. Portable Computer System items can be used
+directly or placed as `computer_system:portable_computer_block`; the item/block
+round trip must retain the same identity and the portable CS386SX/CS-DOS
+profile.
+
 After activating both packs in a test world, run:
 
 ```text
@@ -195,24 +233,27 @@ suite.
 
 ## Headless verification rubric
 
-Virtual hardware is part of the Computer snapshot. Legacy snapshots receive the
-33 MHz/1 MiB defaults; snapshots that stored the former 20 kHz default migrate
-to 33 MHz. CPU clock is converted to per-tick CPU-cycle credit, then the global
-scheduler cap arbitrates mixed-speed Computers in round-robin order. Python-
-generated CS486 instructions, managed-runtime syscalls, native calls, and other
-CS486 execution all return deterministic cycle debt to the same process. RAM
-enforcement scans the live object graph only under allocation pressure, keeping
-the common allocation path O(1) while making the uncommon reclamation check O(N)
-in reachable objects. Disk quota remains an independent filesystem concern.
+Virtual hardware is part of the Computer snapshot. Standard Desktop snapshots
+use CS486DX at 33 MHz/2 MiB, Advanced Desktop snapshots use CS486DX2 at 66 MHz/8
+MiB, and Portable snapshots use CS386SX at 16 MHz/2 MiB. Exactly recognized
+former defaults migrate to their family profile; customized hardware remains
+authoritative. CPU clock is converted to per-tick CPU-cycle credit, then the
+global scheduler cap arbitrates mixed-speed Computers in round-robin order.
+Python-generated CS486 instructions, managed-runtime syscalls, native calls, and
+other CS486 execution all return deterministic cycle debt to the same process.
+RAM enforcement scans the live object graph only under allocation pressure,
+keeping the common allocation path O(1) while making the uncommon reclamation
+check O(N) in reachable objects. Disk quota remains an independent filesystem
+concern.
 
-CS486DX programs use a separate verified register-machine executable under the
-same Computer hardware limits and CPU-cycle budget. The persisted and visible
-default clock is 33 MHz. `run --stats` is the deterministic optimization
-measurement: compare CPU-cycle totals and virtual microseconds, not host wall
-time or language-specific instruction counts. Executables are JSON preceded by
-`CS486\n`, validated again at load, and never passed to a host process. Direct
-execution is capped at 10,000 instructions per submission and returns exit 124
-on a bounded yield.
+CS486DX and CS486DX2 programs use a separate verified register-machine
+executable under the same Computer hardware limits and CPU-cycle budget. Their
+persisted and visible clocks are 33 MHz and 66 MHz. `run --stats` is the
+deterministic optimization measurement: compare CPU-cycle totals and virtual
+microseconds, not host wall time or language-specific instruction counts.
+Executables are JSON preceded by `CS486\n`, validated again at load, and never
+passed to a host process. Direct execution is capped at 10,000 instructions per
+submission and returns exit 124 on a bounded yield.
 
 Relocatable objects are versioned JSON preceded by `CS486OBJ\n`. They contain
 normalized assembly, object-relative data size, local/global/undefined text

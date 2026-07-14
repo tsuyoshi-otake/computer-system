@@ -37,6 +37,10 @@ const elements = {
   lifecycleState: document.querySelector("#lifecycle-state"),
   errorDialog: document.querySelector("#error-dialog"),
   errorMessage: document.querySelector("#error-message"),
+  errorTitle: document.querySelector("#error-title"),
+  handoffForm: document.querySelector("#handoff-form"),
+  handoffCode: document.querySelector("#handoff-code"),
+  errorDismiss: document.querySelector("#error-dismiss"),
   inputState: document.querySelector("#input-state"),
   accessState: document.querySelector("#access-state"),
   manualButton: document.querySelector("#manual-button"),
@@ -59,8 +63,9 @@ let completionPending = false;
 let takeoverPending = false;
 let connectionState = "loading";
 let accessMode = "unknown";
-let viActive = false;
-let viKeyPending = false;
+let editorActive = false;
+let secretInput = false;
+let editorKeyPending = false;
 let historyCursor = 0;
 let historyDraft = "";
 let resizeFrame = 0;
@@ -69,7 +74,7 @@ let pendingTerminalSize;
 let lastRequestedTerminalSize = "";
 let manualChapterIndex = 0;
 const commandHistory = [];
-const viKeyQueue = [];
+const editorKeyQueue = [];
 
 if (location.hash.length > 1) sessionStorage.setItem(tokenStorageKey, token);
 window.history.replaceState(null, "", `${location.pathname}${location.search}`);
@@ -79,7 +84,7 @@ elements.commandForm.addEventListener("submit", (event) => {
   void sendLine();
 });
 elements.commandInput.addEventListener("keydown", (event) => {
-  if (viActive) {
+  if (editorActive) {
     if (
       event.ctrlKey &&
       event.key.toLowerCase() === "c" &&
@@ -89,7 +94,7 @@ elements.commandInput.addEventListener("keydown", (event) => {
     }
     event.preventDefault();
     const key = editorKey(event);
-    if (key !== undefined) queueViKeys([key]);
+    if (key !== undefined) queueEditorKeys([key]);
     return;
   }
   if (event.key === "Enter" && !event.isComposing) {
@@ -99,7 +104,7 @@ elements.commandInput.addEventListener("keydown", (event) => {
   }
   if (event.key === "Tab" && !event.isComposing) {
     event.preventDefault();
-    void completeCommandLine();
+    if (!secretInput) void completeCommandLine();
     return;
   }
   if (event.ctrlKey) {
@@ -131,15 +136,15 @@ elements.commandInput.addEventListener("keydown", (event) => {
   }
   if (event.key === "ArrowUp") {
     event.preventDefault();
-    moveHistory(-1);
+    if (!secretInput) moveHistory(-1);
   } else if (event.key === "ArrowDown") {
     event.preventDefault();
-    moveHistory(1);
+    if (!secretInput) moveHistory(1);
   }
 });
 elements.commandInput.addEventListener("input", () => {
   hideCompletions();
-  if (historyCursor === commandHistory.length) {
+  if (!secretInput && historyCursor === commandHistory.length) {
     historyDraft = elements.commandInput.value;
   }
   elements.commandInput.removeAttribute("aria-invalid");
@@ -147,9 +152,9 @@ elements.commandInput.addEventListener("input", () => {
 elements.commandInput.addEventListener("paste", (event) => {
   const pastedText = event.clipboardData?.getData("text/plain");
   if (pastedText === undefined || elements.commandInput.disabled) return;
-  if (viActive) {
+  if (editorActive) {
     event.preventDefault();
-    queueViKeys(
+    queueEditorKeys(
       [...pastedText.replaceAll("\r\n", "\n")].map((key) =>
         key === "\n" ? "Enter" : key,
       ),
@@ -188,6 +193,18 @@ elements.reconnectButton.addEventListener("click", () => {
 elements.takeControlButton.addEventListener("click", () => {
   void takeControl();
 });
+elements.handoffCode.addEventListener("input", () => {
+  elements.handoffCode.value = elements.handoffCode.value
+    .replace(/[^0-9]/gu, "")
+    .slice(0, 4);
+});
+elements.handoffForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  void connectWithCode();
+});
+elements.errorDismiss.addEventListener("click", () => {
+  elements.errorDialog.close();
+});
 elements.manualButton.addEventListener("click", () => {
   if (elements.manualDialog.open) return;
   elements.manualDialog.showModal();
@@ -213,7 +230,9 @@ elements.manualDialog.addEventListener("keydown", (event) => {
 renderManualToc();
 window.addEventListener("resize", scheduleTerminalFit);
 if (!/^[A-Za-z0-9_-]{20,}$/u.test(token)) {
-  fail("This handoff link is invalid, expired, or has already been used.");
+  showHandoffPrompt(
+    "Enter this Computer's permanent four-digit number from Minecraft. Each activation lasts two minutes.",
+  );
 } else {
   void bootstrap();
 }
@@ -333,10 +352,11 @@ async function consumeEvents(response, generation) {
 async function sendLine() {
   hideCompletions();
   const line = elements.commandInput.value;
+  const submittedSecret = secretInput;
   if (commandPending || elements.commandInput.disabled) return;
   const accepted = await sendInput({ kind: "line", value: line });
   if (accepted) {
-    if (line.length > 0 && commandHistory.at(-1) !== line) {
+    if (!submittedSecret && line.length > 0 && commandHistory.at(-1) !== line) {
       commandHistory.push(line);
       if (commandHistory.length > 100) commandHistory.shift();
     }
@@ -351,7 +371,8 @@ async function completeCommandLine() {
     completionPending ||
     commandPending ||
     sessionClosed ||
-    viActive ||
+    editorActive ||
+    secretInput ||
     elements.commandInput.disabled
   )
     return;
@@ -419,8 +440,7 @@ async function sendInput(payload) {
     setConnection("offline", "INPUT FAILED");
     elements.commandInput.setAttribute("aria-invalid", "true");
     elements.reconnectButton.hidden = false;
-    elements.errorMessage.textContent = errorMessage(error);
-    if (!elements.errorDialog.open) elements.errorDialog.showModal();
+    showError(errorMessage(error));
     return false;
   } finally {
     commandPending = false;
@@ -433,10 +453,18 @@ async function sendInput(payload) {
 function renderTerminal(payload) {
   const terminal = payload?.terminal;
   if (!Array.isArray(terminal?.rows)) return;
-  viActive = terminal.rows.some((row) =>
-    /^-- (?:COMMAND|INSERT|NORMAL) --/u.test(row.trimStart()),
+  editorActive =
+    terminal.rows.some((row) =>
+      /^-- (?:COMMAND|INSERT|NORMAL) --/u.test(row.trimStart()),
+    ) ||
+    /^ File\s+Edit\s+Search\s+Options\s+Help/u.test(terminal.rows[0] ?? "");
+  secretInput = terminal.secretInput === true;
+  elements.commandInput.classList.toggle("secret-input", secretInput);
+  elements.commandInput.setAttribute(
+    "aria-label",
+    secretInput ? "Secret terminal input" : "Terminal command line",
   );
-  if (viActive) {
+  if (editorActive) {
     elements.commandInput.value = "";
     elements.inputState.textContent = "EDIT";
   }
@@ -491,8 +519,18 @@ function renderTerminal(payload) {
 }
 
 function editorKey(event) {
-  if (event.ctrlKey && event.key === "[") return "Ctrl+[";
-  if (event.ctrlKey || event.altKey || event.metaKey) return undefined;
+  if (event.metaKey) return undefined;
+  if (event.ctrlKey) {
+    if (event.key === "[") return "Ctrl+[";
+    return [...event.key].length === 1
+      ? `Ctrl+${event.key.toLowerCase()}`
+      : undefined;
+  }
+  if (event.altKey) {
+    return [...event.key].length === 1
+      ? `Alt+${event.key.toLowerCase()}`
+      : undefined;
+  }
   const named = new Set([
     "ArrowDown",
     "ArrowLeft",
@@ -504,32 +542,43 @@ function editorKey(event) {
     "Enter",
     "Escape",
     "Home",
+    "Insert",
+    "PageDown",
+    "PageUp",
     "Tab",
+    "F1",
+    "F2",
+    "F3",
+    "F10",
   ]);
   if (named.has(event.key)) return event.key;
   return [...event.key].length === 1 ? event.key : undefined;
 }
 
-function queueViKeys(keys) {
-  const available = Math.max(0, 1_024 - viKeyQueue.length);
-  viKeyQueue.push(...keys.slice(0, available));
-  void drainViKeys();
+function queueEditorKeys(keys) {
+  const available = Math.max(0, 1_024 - editorKeyQueue.length);
+  editorKeyQueue.push(...keys.slice(0, available));
+  void drainEditorKeys();
 }
 
-async function drainViKeys() {
-  if (viKeyPending || sessionClosed || accessMode !== "writer") return;
-  viKeyPending = true;
+async function drainEditorKeys() {
+  if (editorKeyPending || sessionClosed || accessMode !== "writer") return;
+  editorKeyPending = true;
   try {
-    while (viKeyQueue.length > 0 && !sessionClosed && accessMode === "writer") {
-      let count = Math.min(16, viKeyQueue.length);
+    while (
+      editorKeyQueue.length > 0 &&
+      !sessionClosed &&
+      accessMode === "writer"
+    ) {
+      let count = Math.min(16, editorKeyQueue.length);
       while (
         count > 1 &&
-        encodeURIComponent(JSON.stringify(viKeyQueue.slice(0, count))).length >
-          180
+        encodeURIComponent(JSON.stringify(editorKeyQueue.slice(0, count)))
+          .length > 180
       ) {
         count -= 1;
       }
-      const keys = viKeyQueue.splice(0, count);
+      const keys = editorKeyQueue.splice(0, count);
       await api("/api/input", {
         method: "POST",
         headers: {
@@ -540,12 +589,11 @@ async function drainViKeys() {
       });
     }
   } catch (error) {
-    viKeyQueue.length = 0;
+    editorKeyQueue.length = 0;
     setConnection("offline", "EDITOR INPUT FAILED");
-    elements.errorMessage.textContent = errorMessage(error);
-    if (!elements.errorDialog.open) elements.errorDialog.showModal();
+    showError(errorMessage(error));
   } finally {
-    viKeyPending = false;
+    editorKeyPending = false;
   }
 }
 
@@ -578,7 +626,7 @@ function updateSession(session) {
 }
 
 function moveHistory(offset) {
-  if (commandHistory.length === 0) return;
+  if (secretInput || commandHistory.length === 0) return;
   if (historyCursor === commandHistory.length && offset < 0) {
     historyDraft = elements.commandInput.value;
   }
@@ -670,8 +718,7 @@ async function takeControl() {
     const result = await response.json();
     updateSession(result.session ?? {});
   } catch (error) {
-    elements.errorMessage.textContent = errorMessage(error);
-    if (!elements.errorDialog.open) elements.errorDialog.showModal();
+    showError(errorMessage(error));
   } finally {
     takeoverPending = false;
     elements.takeControlButton.removeAttribute("aria-busy");
@@ -725,8 +772,7 @@ async function closeSession() {
     elements.lifecycleState.textContent = "LOGOUT";
     elements.inputState.textContent = "OFFLINE";
   } catch (error) {
-    elements.errorMessage.textContent = errorMessage(error);
-    if (!elements.errorDialog.open) elements.errorDialog.showModal();
+    showError(errorMessage(error));
     const online = connectionState === "online";
     setInputAvailable(online, online ? "INPUT" : "OFFLINE");
   } finally {
@@ -837,7 +883,65 @@ function fail(message) {
   elements.commandInput.disabled = true;
   elements.inputState.textContent = "OFFLINE";
   setConnection("offline", "UNAVAILABLE");
+  showHandoffPrompt(message);
+}
+
+function showHandoffPrompt(message) {
+  elements.errorTitle.textContent = "Enter connection code";
   elements.errorMessage.textContent = message;
+  elements.handoffForm.hidden = false;
+  elements.errorDismiss.hidden = true;
+  if (!elements.errorDialog.open) elements.errorDialog.showModal();
+  queueMicrotask(() => elements.handoffCode.focus());
+}
+
+async function connectWithCode() {
+  const code = elements.handoffCode.value;
+  if (!/^[0-9]{4}$/u.test(code)) {
+    elements.handoffCode.setAttribute("aria-invalid", "true");
+    elements.handoffCode.focus();
+    return;
+  }
+  elements.handoffCode.disabled = true;
+  try {
+    const response = await fetch("/api/handoff", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code }),
+      cache: "no-store",
+    });
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}));
+      throw new Error(
+        typeof body.error === "string"
+          ? body.error
+          : `Connection failed (${String(response.status)}).`,
+      );
+    }
+    const body = await response.json();
+    if (!/^[A-Za-z0-9_-]{20,}$/u.test(body.token ?? "")) {
+      throw new Error("The companion returned an invalid session token.");
+    }
+    token = body.token;
+    sessionStorage.setItem(tokenStorageKey, token);
+    window.history.replaceState(null, "", "/");
+    elements.errorDialog.close();
+    sessionClosed = false;
+    void bootstrap();
+  } catch (error) {
+    elements.errorMessage.textContent = errorMessage(error);
+    elements.handoffCode.select();
+  } finally {
+    elements.handoffCode.disabled = false;
+    elements.handoffCode.focus();
+  }
+}
+
+function showError(message) {
+  elements.errorTitle.textContent = "Terminal unavailable";
+  elements.errorMessage.textContent = message;
+  elements.handoffForm.hidden = true;
+  elements.errorDismiss.hidden = false;
   if (!elements.errorDialog.open) elements.errorDialog.showModal();
 }
 

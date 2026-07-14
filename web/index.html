@@ -154,12 +154,28 @@
     </dialog>
 
     <dialog id="error-dialog" aria-labelledby="error-title">
-      <div class="dialog-code">CONNECTION ERROR</div>
-      <h2 id="error-title">Terminal unavailable</h2>
+      <div class="dialog-code">WEB TERMINAL ACCESS</div>
+      <h2 id="error-title">Enter connection code</h2>
       <p id="error-message">
-        This handoff link is invalid, expired, or has already been used.
+        Enter this Computer's permanent four-digit number from Minecraft. Each
+        activation lasts two minutes.
       </p>
-      <form method="dialog"><button>Dismiss</button></form>
+      <form id="handoff-form" class="handoff-form">
+        <label for="handoff-code">Connection code</label>
+        <input
+          id="handoff-code"
+          name="code"
+          type="text"
+          inputmode="numeric"
+          pattern="[0-9]{4}"
+          minlength="4"
+          maxlength="4"
+          autocomplete="off"
+          required
+        />
+        <button type="submit">Connect</button>
+      </form>
+      <button id="error-dismiss" type="button" hidden>Dismiss</button>
     </dialog>
   </body>
 </html>

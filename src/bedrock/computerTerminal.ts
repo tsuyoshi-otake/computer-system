@@ -12,7 +12,7 @@ export async function openComputerTerminal(
   player: Player,
   record: ComputerRecord,
 ): Promise<void> {
-  targets.select(player.id, record.computerId);
+  selectComputerTerminal(player.id, record.computerId);
   if (record.lifecycle.state.kind === "off") {
     computerHost.runtime.powerOn(record.computerId);
   }
@@ -43,13 +43,20 @@ export async function openComputerTerminal(
   );
 }
 
+export function selectComputerTerminal(
+  playerId: string,
+  computerId: string,
+): void {
+  targets.select(playerId, computerId);
+}
+
 export async function openSelectedComputerTerminal(
   player: Player,
 ): Promise<boolean> {
   const target = targets.resolve(player.id);
   if (target.outcome === "missing") {
     player.sendMessage(
-      "Monitor has no terminal target. Open a Computer or Pocket Computer first.",
+      "Monitor has no terminal target. Open a Desktop Computer System or Portable Computer System first.",
     );
     return false;
   }
@@ -66,6 +73,14 @@ export async function openSelectedComputerTerminal(
   return true;
 }
 
-export function disconnectComputerTerminalPlayer(playerId: string): void {
+export function disconnectComputerTerminalPlayer(
+  playerId: string,
+  computerId?: string,
+): void {
+  if (computerId !== undefined) {
+    const target = targets.resolve(playerId);
+    if (target.outcome === "missing" || target.computerId !== computerId)
+      return;
+  }
   targets.disconnect(playerId);
 }

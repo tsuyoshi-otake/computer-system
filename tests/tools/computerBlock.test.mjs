@@ -6,6 +6,12 @@ import {
   computerRedstoneFaces,
   createComputerBlock,
 } from "../../tools/computer-block.mjs";
+import {
+  createCardinalDirectionPermutations,
+  machineBlockGeometryIds,
+  machinePlacementTraits,
+  machineBlockTextureKeys,
+} from "../../tools/machine-block-assets.mjs";
 
 describe("computer block generator", () => {
   it("generates two families with every independent digital output mask", () => {
@@ -25,6 +31,20 @@ describe("computer block generator", () => {
           family,
         });
         expect(block.description.menu_category.category).toBe("none");
+        expect(block.description.traits).toEqual(machinePlacementTraits);
+        expect(block.permutations).toEqual(
+          createCardinalDirectionPermutations(),
+        );
+        expect(block.components["minecraft:geometry"]).toBe(
+          machineBlockGeometryIds[family],
+        );
+        const front =
+          family === "advanced_computer"
+            ? "advanced_computer_front"
+            : "computer_front";
+        expect(
+          block.components["minecraft:material_instances"][front].texture,
+        ).toBe(machineBlockTextureKeys[front]);
       }
     }
   });

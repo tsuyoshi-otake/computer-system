@@ -98,11 +98,17 @@ describe("CS486DX execution core", (): void => {
       cpuModel: "cs386sx",
       memoryBytes: 65_536,
     });
+    const cs486dx2 = runCs486(executable, {
+      cpuModel: "cs486dx2",
+      memoryBytes: 65_536,
+    });
 
     expect(cs386sx.output).toBe(cs486dx.output);
+    expect(cs486dx2.output).toBe(cs486dx.output);
     expect(cs386sx.output).toBe("42");
     expect(cs386sx.executedInstructions).toBe(cs486dx.executedInstructions);
     expect(cs486dx.cycles).toBe(26);
+    expect(cs486dx2.cycles).toBe(cs486dx.cycles);
     expect(cs386sx.cycles).toBe(48);
   });
 

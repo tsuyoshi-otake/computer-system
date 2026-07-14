@@ -5,6 +5,7 @@ import {
   requireCpuModel,
   type CpuModel,
 } from "../cpu/models.js";
+import type { ComputerFamily } from "./identity.js";
 
 export interface ComputerHardwareProfile {
   readonly clockHz: number;
@@ -21,7 +22,13 @@ export interface ComputerHardwareSnapshot {
 export const defaultComputerHardware: ComputerHardwareProfile = {
   clockHz: computerNominalClockHz,
   cpuModel: defaultCpuModel,
-  memoryBytes: 1_048_576,
+  memoryBytes: 2 * 1_048_576,
+};
+
+export const advancedComputerHardware: ComputerHardwareProfile = {
+  clockHz: cpuModelSpecification("cs486dx2").nominalClockHz,
+  cpuModel: "cs486dx2",
+  memoryBytes: 8 * 1_048_576,
 };
 
 export const portableComputerHardware: ComputerHardwareProfile = {
@@ -29,6 +36,14 @@ export const portableComputerHardware: ComputerHardwareProfile = {
   cpuModel: "cs386sx",
   memoryBytes: 2 * 1_048_576,
 };
+
+export function defaultComputerHardwareForFamily(
+  family: ComputerFamily,
+): ComputerHardwareProfile {
+  return family === "advanced"
+    ? advancedComputerHardware
+    : defaultComputerHardware;
+}
 
 const maximumClockHz = 100_000_000;
 const minimumMemoryBytes = 65_536;

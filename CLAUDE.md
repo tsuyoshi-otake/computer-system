@@ -4,19 +4,21 @@
 
 Computer System is a ComputerCraft-inspired Minecraft Bedrock Add-On. Computer
 System Python is a deterministic, sandboxed, MicroPython-compatible language
-compiled to the shared validated CS process; it has no dedicated Python VM. The
-persisted Computer hardware profile selects CS486DX or CS386SX execution timing.
-Minecraft-specific behavior is implemented by thin Bedrock adapters around
-host-testable domain and application layers.
+compiled to the shared validated CS process; it has no dedicated Python VM. It
+is a user-facing CS486DX/CS486DX2 desktop capability. Portable CS386SX machines
+retain ASM, C, C++, BASIC, and bounded DOS batch support but reject user
+MicroPython. The persisted hardware profile selects CS486DX, CS486DX2, or
+CS386SX execution timing. Minecraft-specific behavior is implemented by thin
+Bedrock adapters around host-testable domain and application layers.
 
 GitHub Issue #4 tracks the Phase 2 Bedrock Computer vertical slice. GitHub Issue
-#12 tracks the OS 0.3 shell, CS486 toolchain, Web Terminal, and operator manual
-expansion. GitHub Issue #13 tracks Python-to-CS486 compilation, filesystem
-imports, and CS486 C/C++ extension modules. GitHub Issue #14 tracks the portable
-CS386SX 16 MHz / 2 MiB hardware profile. Most Phase 2 behavior is implemented
-and verified. The native GDK terminal is a bounded fallback; the preferred
-interactive terminal is the local Web Terminal companion started with
-`npm run dev:bds:web`.
+#12 tracks the CS-Linux 1.0 / CS-DOS 6.2 shell profiles, CS486 toolchain, Web
+Terminal, and operator manual expansion. GitHub Issue #13 tracks Python-to-CS486
+compilation, filesystem imports, and CS486 C/C++ extension modules. GitHub Issue
+#14 tracks the portable CS386SX 16 MHz / 2 MiB hardware profile. Most Phase 2
+behavior is implemented and verified. The native GDK terminal is a bounded
+fallback; the preferred interactive terminal is the local Web Terminal companion
+started with `npm run dev:bds:web`.
 
 ## Architecture rules
 
@@ -37,7 +39,7 @@ Bedrock adapters -> application services -> domain/runtime abstractions
   Cancel, disconnect, competing form, server close, failure, and retry paths
   must each have one finalization owner.
 - Preserve computer identity and storage transactionally across block, item,
-  pocket, monitor, reload, and rollback paths.
+  portable, monitor, reload, and rollback paths.
 - Unsupported Bedrock behavior must fail explicitly rather than silently
   approximating incompatible behavior.
 
@@ -117,6 +119,12 @@ The July 2026 live GDK verification established the following:
   command text and invokes the bounded interrupt only without a selection;
   bounded plain-text paste never auto-submits; Up and Down navigate local
   command history.
+- `EDIT` is a DOS-profile-only full-screen editor. Its blue viewport, five
+  menus, insert/overwrite state, bounded undo/search, save feedback, and dirty
+  Save/Discard/Cancel dialog are rendered from the terminal model. Linux rejects
+  `EDIT` and uses the syntax-highlighted `vi` editor. Bare `EDIT` opens an
+  `UNTITLED` buffer backed by `C:\NONAME.TXT`. Web terminal color spans fill the
+  complete cell height so full-screen backgrounds do not develop row gaps.
 - New identities use a collision-checked `c-xxxxxx` format. The lowercase
   Crockford Base32 payload decodes to the stable 30-bit numeric computer ID;
   legacy identity snapshots are not migrated automatically.
@@ -124,32 +132,40 @@ The July 2026 live GDK verification established the following:
   view-only until **Take control** completes, at which point the previous writer
   is demoted. Viewer input is rejected at both transport boundaries, and only
   the final detached session emits `terminal_closed`.
-- Browser handoff links are one-use and valid for 60 seconds. Browser bearer
-  tokens do not pass through BDS logs. Sessions, listeners, polling retries, and
-  Bedrock snapshot work are all bounded and end in an explicit final state.
+- Each Computer derives a permanent four-digit browser connection number from
+  its stable identity. A machine interaction activates that number once for two
+  minutes; invalid guesses are rate-limited per client and simultaneous code
+  collisions fail explicitly. Browser bearer tokens do not pass through BDS
+  logs. Placed-machine sessions require the player to remain within three blocks
+  and finalize as `out_of_range` otherwise.
 - `bds_wait_for_web_handoff` owns at most one bounded wait per Computer ID and
   suppresses auto-open for its matching handoff, preventing one-use URL races.
   `bds_execute_computer_command` returns bounded stdout, stderr, exit code, and
   modeled CPU cycles for one exact Computer's selected hardware model. TUI,
   sleep, and lifecycle-control commands fail explicitly on this debug path.
 - The MCP-only `python <file>`/`micropython <file>` debug forms execute a
-  bounded source file with the target Computer's VM, filesystem, hardware, and
-  RAM limit. They reject waits and long-running execution. Bytecode instruction
-  counts are diagnostic only; the returned `cpuCycles` use the same selected
-  CS486DX or CS386SX timing model as ASM, C, C++, and BASIC.
+  bounded source file only when the target CPU specification enables
+  MicroPython. CS386SX returns status 127. CS486DX and CS486DX2 reject waits and
+  long-running execution; their returned `cpuCycles` use the same timing unit as
+  ASM, C, C++, and BASIC.
 - Periodic snapshot work is fixed-batch O(K), without an O(N) allocation per
   pass. Writer input uses an amortized-O(1), deduplicated, attempt-bounded eager
   queue so interactive latency does not inherit the viewer round-robin delay.
-- `WEB_COMPANION_AUTO_OPEN=1` makes one loopback Pocket Computer use open its
-  minted handoff in the host default browser. Non-loopback listeners or origins
-  are blocked, and the in-game URL remains the failure fallback.
+- `WEB_COMPANION_AUTO_OPEN=1` opens the activated path through loopback in the
+  companion host's default browser even while the published entry page uses a
+  LAN address. It cannot open a remote player's browser; Minecraft prints the
+  stable LAN entry page and four-digit number for that player instead.
+- Production CS-Linux requires first-boot password setup and later login. The
+  salted bounded SHA-256 record lives in `/etc/shadow`; plaintext is never
+  persisted or echoed. Secret Web input is masked and excluded from browser
+  history/completion. MCP shell execution is rejected before login.
 
 Reproduce native Resource Pack UI changes on the real GDK client. For Web
 Terminal changes, run the focused Web tests and verify the connected state,
 inline typing, physical Enter, and disconnect behavior in a real browser.
 
 The Web Terminal includes a searchable 16-chapter field manual. Its canonical
-learning sequence is: orientation, architecture, terminal/vi, Bash,
+learning sequence is: orientation, architecture, terminal/editors, Bash,
 filesystem/storage, MicroPython, MicroPython API, Redstone, worked project,
 assembly, BASIC, C/C++, optimization, DOS, diagnostics, and limits/glossary.
 Keep chapter numbers, section numbers, search order, previous/next navigation,
@@ -158,15 +174,15 @@ locks the publication order and chapter/header agreement.
 
 ## Web companion networking
 
-The default Web companion is loopback-only on TCP 19144. `WEB_COMPANION_HOST`
-controls the listening interface, while `WEB_COMPANION_PUBLIC_HOST` controls the
-host printed in LAN handoff links. For Internet access, keep the process on
-loopback, set `WEB_COMPANION_PUBLIC_ORIGIN` to an HTTPS origin, and use a TLS
-reverse proxy. Never publish the plain HTTP port directly to the Internet.
+The BDS companion entry points listen on `0.0.0.0:19144` by default and select a
+non-virtual LAN IPv4 address. `WEB_COMPANION_HOST` controls the listener, while
+`WEB_COMPANION_PUBLIC_HOST` overrides the detected address. For Internet access,
+keep the process on loopback, set `WEB_COMPANION_PUBLIC_ORIGIN` to an HTTPS
+origin, and use a TLS reverse proxy. Never publish plain HTTP to the Internet.
 
 ## Shell compatibility
 
-The OS 0.3 shell is a bounded BusyBox-compatible subset implemented by
+The CS-Linux 1.0 shell is a bounded BusyBox-compatible subset implemented by
 `shellSyntax.ts`, `shellCommands.ts`, and `shellSession.ts`. It supports
 quoting, variables, `$?`, `|`, `<`, `>`, `>>`, `&&`, `||`, `;`, and bounded
 `sh`/`bash` scripts. Pipeline data stays in memory and is capped; script depth
@@ -185,34 +201,58 @@ linking is not implemented yet; extend the versioned object/ABI boundary rather
 than dispatching to a host linker or loader.
 
 CPU identity, clock, and RAM are one persisted hardware profile. Desktop
-Computers default to CS486DX at 33 MHz with 1 MiB RAM. Portable/Pocket Computers
-default to DOS on CS386SX at 16 MHz with 2 MiB RAM. `instructionTiming.ts`
-selects timing in O(1): preserve the existing CS486DX costs and the Intel
-80386-derived CS386SX arithmetic, branch, early-out multiply, and 16-bit
+Computer Systems default to CS486DX at 33 MHz with 2 MiB RAM. Advanced Desktop
+Computer Systems default to CS486DX2 at 66 MHz with 8 MiB RAM. Portable Computer
+Systems default to DOS on CS386SX at 16 MHz with 2 MiB RAM.
+`instructionTiming.ts` selects timing in O(1): CS486DX and CS486DX2 share the
+existing 486 instruction costs and differ by persisted clock rate, while CS386SX
+uses Intel 80386-derived arithmetic, branch, early-out multiply, and 16-bit
 data-bus penalties. The scheduler derives per-tick credit from the persisted
 clock. Keep the shared executable and ABI representation; never fork a
-language-specific CPU engine. `applyPortableComputerProfile` may migrate only an
-exact legacy-default Pocket record and must leave every customized OS or
-hardware field unchanged.
+language-specific CPU engine. Profile migration may rewrite only an exactly
+recognized former default and must leave every customized OS or hardware field
+unchanged.
+
+Authored machine plates live in `web/assets/machines/`; CPU identification
+plates live in `web/assets/cpu/`. Manual Chapter 2 serves both sets directly.
+The build derives bounded transparent 256 px item icons from the four machine
+plates through `tools/machine-textures.mjs`. Purpose-built geometry, terrain
+atlas entries, and 16 px face textures come from
+`tools/machine-block-assets.mjs`; keep the isometric plates out of block-face UV
+maps. Reject unsupported source PNGs explicitly and increment the Resource Pack
+version whenever shipped artwork changes.
+
+Desktop and Advanced Desktop Web Terminal access requires exactly one physically
+adjacent Monitor. Selecting a bare desktop must not request a browser handoff,
+and a Monitor with zero or multiple adjacent desktop identities must fail
+explicitly. Portable Computer Systems have a built-in display and may open Web
+Terminal while held or placed. Their item/block round trip must preserve one
+persistent identity and retain the CS386SX/CS-DOS hardware profile.
 
 Computer System Python parses directly to CS486 control flow plus the
 allowlisted `python` syscall ABI in `pythonCs486.ts`. Calls, returns, branches,
 waits, instruction accounting, and cycle debt belong to `Cs486Process`; do not
 reintroduce a Python instruction pointer, bytecode VM, or scheduler. Python
 module lookup is bounded and deterministic: importer directory, `/lib/python`,
-`/usr/lib/computer-system/python`, then the DOS library path. `.py` modules
-initialize once. Imported `.o` modules must be valid `CS486OBJ` files and expose
-only the current zero-argument EAX-return ABI. Keep module graph resolution
-O(source + modules), explicitly terminate missing/circular/oversized imports,
-and charge extension instructions to the same process.
+`/usr/lib/computer-system/python`. `.py` modules initialize once. Imported `.o`
+modules must be valid `CS486OBJ` files and expose only the current zero-argument
+EAX-return ABI. Keep module graph resolution O(source + modules), explicitly
+terminate missing/circular/oversized imports, and charge extension instructions
+to the same process.
 
 Keep OS-specific behavior behind `osProfile.ts`: path dialect, boot layout,
 environment, aliases, and virtual devices must not leak into the domain
 filesystem. Linux is the default persisted profile; the DOS fixture protects
-drive-letter, case-insensitive, CRLF, and `NUL` semantics, and Pocket Computers
-select DOS explicitly. `vi` uses bounded `terminal_keys` batches and renders
-only its fixed viewport. Syntax and indent highlighting must scan no more than
-the visible columns/rows per redraw.
+drive-letter, case-insensitive, CRLF, and `NUL` semantics, and Portable Computer
+Systems select DOS explicitly. DOS startup processes at most 64 `CONFIG.SYS`
+lines and 256 lines per batch, with depth 8, explicit failure, and a modeled
+conventional/UMB/XMS layout. Only the built-in HIMEM/EMM386 and
+`DOS=HIGH|LOW,UMB|NOUMB` contract may affect that layout; never claim native
+drivers, paging, BIOS/DOS interrupts, TSRs, or `.COM`/`.EXE` execution. DOS
+`EDIT` and cross-profile `vi` use writer-owned bounded `terminal_keys` batches
+and render only their fixed viewports. Every menu, search, save, exit, failure,
+and resize branch must return an explicit editor state. Syntax and indent
+highlighting must scan no more than the visible columns/rows per redraw.
 
 World Dynamic Properties remain the Bedrock source of truth (physically the
 world LevelDB). Clean persistence checks use component revision tokens, not
@@ -229,7 +269,8 @@ future non-Bedrock host.
 - Preserve unrelated working-tree changes.
 - Use English commit messages with a useful description and reference Issue #4
   while Phase 2 work remains in scope. Reference Issue #12 for the OS,
-  toolchain, Web Terminal, and field-manual work it tracks.
+  toolchain, Web Terminal, and field-manual work it tracks; reference Issue #15
+  for the full-screen `EDIT` implementation.
 - Keep temporary scripts and work artifacts under `%USERPROFILE%\tmp`, not the
   user home directory root.
 

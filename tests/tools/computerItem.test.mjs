@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  computerItemDisplayNames,
   computerItemIdentifier,
   createComputerItem,
 } from "../../tools/computer-item.mjs";
+import { machineTextureKeys } from "../../tools/machine-textures.mjs";
 
 describe("computer item generator", () => {
   it.each(["computer", "advanced_computer"])(
@@ -15,6 +17,12 @@ describe("computer item generator", () => {
         family,
       });
       expect(item.components["minecraft:max_stack_size"]).toBe(1);
+      expect(item.components["minecraft:display_name"]).toEqual({
+        value: computerItemDisplayNames[family],
+      });
+      expect(item.components["minecraft:icon"]).toBe(
+        machineTextureKeys[family],
+      );
     },
   );
 });

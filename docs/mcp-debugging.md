@@ -25,7 +25,7 @@ The server uses these optional environment variables:
 | `BDS_MCP_WORKDIR`             | `%USERPROFILE%\tmp\computer-system-bds\mcp-runtime` | Isolated MCP debug runtime                                     |
 | `BDS_MCP_PORT`                | `19142`                                             | IPv4 server port; IPv6 uses the following port                 |
 | `BDS_MCP_WORLD`               | `ComputerSystemMcpDebug`                            | Debug world name                                               |
-| `WEB_COMPANION_HOST`          | `127.0.0.1`                                         | Web listener interface                                         |
+| `WEB_COMPANION_HOST`          | `0.0.0.0`                                           | Web listener interface for trusted LAN access                  |
 | `WEB_COMPANION_PORT`          | `19144`                                             | Web listener TCP port                                          |
 | `WEB_COMPANION_PUBLIC_HOST`   | Listener host                                       | Reachable host used in generated HTTP links                    |
 | `WEB_COMPANION_PUBLIC_ORIGIN` | unset                                               | Complete HTTPS origin advertised behind a reverse proxy        |
@@ -52,6 +52,13 @@ No API key or `.env` file is required.
 administration commands, command separators, newlines, and commands longer than
 240 characters.
 
+To grant one standard stationary Computer item during a controlled debug
+session, first use `list` and require the intended player to be the only online
+player. Then call `bds_run_probe` with `probe: "computer"` and
+`target: "all_players"`. This dedicated path does not broaden `bds_run_command`
+to arbitrary `give` or operator commands. If the inventory is full, the one item
+is dropped at the player's location.
+
 For non-interactive Computer debugging, call `bds_execute_computer_command` with
 an exact `c-xxxxxx` identity and one shell line. The command executes inside
 that Computer's sandboxed shell and returns `stdout`, `stderr`, `exitCode`, and
@@ -77,28 +84,34 @@ This prevents the first probe from racing component registration.
 ## Browser terminal workflow
 
 Run `npm run dev:bds:web` to start the managed BDS runtime and Web Terminal in a
-single lifecycle. Use a Pocket Computer in Minecraft. The Behavior Pack emits a
-session request, the companion returns a one-use 60-second URL through the
-allowlisted relay, and Minecraft prints that URL to the requesting player.
-Opening the URL connects the browser to the computer's fixed-cell terminal. The
-URL is already bound to a `c-xxxxxx` Computer identity; the companion root page
-cannot select an arbitrary Computer and the bearer token is never accepted for a
-different identity.
+single lifecycle. The companion selects a physical LAN IPv4 address unless
+`WEB_COMPANION_PUBLIC_HOST` overrides it. Using an eligible Computer prints the
+stable entry page and that Computer's permanent four-digit number. The
+interaction activates the number once for two minutes. Entering it exchanges the
+activation for a browser bearer token bound to the exact `c-xxxxxx` identity.
+Invalid guesses are limited to eight attempts per client per minute, and an
+active number collision returns an explicit conflict.
 
-For a one-action local workflow, set `WEB_COMPANION_AUTO_OPEN=1` before starting
-the companion. A Pocket Computer use then opens the freshly minted `/p/...` URL
-in the host's default browser. The launch does not use a command shell, is
+For a one-action workflow on the companion host, set `WEB_COMPANION_AUTO_OPEN=1`
+before starting the companion. A Desktop/Advanced block interaction or Portable
+Computer System use then opens the activated `/p/NNNN` path through loopback in
+the host's default browser. The launch does not use a command shell, is
 serialized through a bounded queue, times out explicitly, and runs at most once
-per handoff. Automatic opening is blocked unless both the listener and published
-origin are loopback. The in-game URL is still emitted before the launch attempt,
-so disabled, blocked, timed-out, and failed launches retain the normal fallback.
+per activation. The server cannot launch a browser on another player's device;
+remote players use the printed LAN entry page and four digits. Disabled,
+timed-out, and failed host launches retain that fallback.
 
 An MCP client that needs the URL itself can call `bds_wait_for_web_handoff` with
-the exact `c-xxxxxx` Computer ID before the Pocket Computer is used. The wait is
-bounded to at most 120 seconds and only one wait may own a Computer ID. A
-matching handoff is returned to MCP instead of being sent to browser auto-open,
-avoiding a race to consume the one-use URL. The URL remains absent from BDS logs
-and unrelated Computer IDs cannot satisfy the wait.
+the exact `c-xxxxxx` Computer ID before the Portable Computer System is used.
+The wait is bounded to at most 120 seconds and only one wait may own a Computer
+ID. A matching handoff is returned to MCP instead of being sent to browser
+auto-open, avoiding a race to consume the one-use URL. The URL remains absent
+from BDS logs and unrelated Computer IDs cannot satisfy the wait.
+
+Placed-machine sessions recheck the requesting player against the access block
+during attachment, input, completion, resize, and snapshot work. Moving beyond
+three blocks or changing dimension finalizes once as `out_of_range`. A held
+Portable remains exempt because the access point moves with its owner.
 
 The browser input is overlaid at the terminal cursor rather than rendered as a
 separate form field. Physical Enter sends one bounded `terminal_line` event,
@@ -122,11 +135,10 @@ and Bedrock emits `terminal_closed` only after the last browser session for that
 Computer detaches. Sessions attached to different Computers remain independently
 writable.
 
-Loopback use requires no extra published port. LAN clients require TCP 19144 (or
-the configured companion port) in addition to the BDS UDP port. Internet access
-must use an HTTPS reverse proxy: bind the companion to `127.0.0.1`, set
-`WEB_COMPANION_PUBLIC_ORIGIN`, and proxy only from the TLS endpoint. Do not
-publish the plain HTTP listener directly.
+LAN clients require TCP 19144 (or the configured companion port) in addition to
+the BDS UDP port. Internet access must use an HTTPS reverse proxy: bind the
+companion to `127.0.0.1`, set `WEB_COMPANION_PUBLIC_ORIGIN`, and proxy only from
+the TLS endpoint. Do not publish the plain HTTP listener directly.
 
 ## Verification rubric
 
@@ -139,8 +151,9 @@ publish the plain HTTP listener directly.
   same-origin command submission, terminal streaming, session limits, and
   explicit close behavior pass.
 - `Verify:` Set `WEB_COMPANION_AUTO_OPEN=1`, start the loopback companion, and
-  use one Pocket Computer. `Expect:` The host default browser opens the minted
-  handoff exactly once; the same fallback URL remains visible in Minecraft.
+  use one Portable Computer System. `Expect:` The host default browser opens the
+  minted handoff exactly once; the same fallback URL remains visible in
+  Minecraft.
 - `Verify:` Open two one-use links for the same Computer, attempt viewer input,
   choose **Take control**, and retry from both browsers. `Expect:` The second
   session begins `VIEW ONLY`; its first input is rejected; takeover promotes it,
@@ -148,10 +161,11 @@ publish the plain HTTP listener directly.
 - `Verify:` Close one of two sessions and then close the final session.
   `Expect:` The first close does not emit `terminal_closed`; the final close
   emits exactly one terminal finalization record.
-- `Verify:` Start `npm run dev:bds:web`, use a Pocket Computer, open its link in
-  a browser, type `ls` after the visible `~$ ` prompt, and press physical Enter.
-  `Expect:` The command appears inline, submits once, and the next prompt
-  appears at the following terminal row without a separate input box.
+- `Verify:` Start `npm run dev:bds:web`, use a Portable Computer System, open
+  its link in a browser, type `ls` after the visible `~$ ` prompt, and press
+  physical Enter. `Expect:` The command appears inline, submits once, and the
+  next prompt appears at the following terminal row without a separate input
+  box.
 - `Verify:` Start a fresh Codex session, call `bds_start`, then call
   `bds_run_probe` with `headless/server` and wait for a `suite` terminal record.
   `Expect:` BDS reaches `running`, the suite emits `CS_PROBE_RESULT`,

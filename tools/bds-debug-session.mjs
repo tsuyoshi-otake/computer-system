@@ -35,9 +35,10 @@ const defaultWorkRoot = path.join(
 const defaultWorldName = "ComputerSystemMcpDebug";
 const allowedPlayerProbes = new Set([
   "compete",
+  "computer",
   "help",
   "monitor",
-  "pocket",
+  "portable",
   "runtime",
   "speaker",
   "status",

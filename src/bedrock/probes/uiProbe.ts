@@ -51,7 +51,7 @@ export async function showTerminalProbe(player: Player): Promise<void> {
 
 export function showCustomTerminalProbe(player: Player): void {
   const terminal = new TerminalBuffer();
-  terminal.write("Computer System OS 0.1");
+  terminal.write("Computer System Linux 1.0");
   terminal.setCursorPosition(1, 2);
   terminal.write("Bedrock Core UI 0.9.2 prototype");
   terminal.setCursorPosition(1, 3);

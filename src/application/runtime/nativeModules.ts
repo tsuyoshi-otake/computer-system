@@ -19,10 +19,11 @@ import {
 } from "../../domain/redstone/redstoneState.js";
 import { ShellSession } from "../os/shellSession.js";
 import type { ShellResult } from "../os/shellSession.js";
-import type { ViScreen } from "../editor/viSession.js";
+import type { EditorScreen } from "../editor/editorScreen.js";
 import type { ComputerOsProfile } from "../../domain/computer/computer.js";
 import type { ShellClockSource } from "../os/clock.js";
 import type { ComputerHardwareProfile } from "../../domain/computer/hardware.js";
+import { formatOsIdentity, getOsIdentity } from "../os/osIdentity.js";
 
 export interface NativeModuleContext {
   readonly clock?: ShellClockSource;
@@ -44,6 +45,7 @@ export interface NativeModuleContext {
   readonly ticksPerSecond?: number;
   readonly hardware?: ComputerHardwareProfile;
   readonly memoryUsageBytes?: () => number;
+  readonly requireLinuxLogin?: boolean;
   readonly shell?: ShellSession;
 }
 
@@ -67,6 +69,7 @@ export function createNativeEnvironment(
       ticksPerSecond: context.ticksPerSecond,
       hardware: context.hardware,
       memoryUsageBytes: context.memoryUsageBytes,
+      requireLogin: context.requireLinuxLogin,
       terminalHeight: context.terminal.height,
       terminalWidth: context.terminal.width,
     });
@@ -118,7 +121,7 @@ function createShellModule(
     requireArity(positional, keywords, 0, 0);
     context.terminal.setTextColor(0);
     writeTerminalLines(context.terminal, [
-      "Computer System OS 0.3 (tty1)",
+      `${formatOsIdentity(getOsIdentity(context.osProfile ?? "linux"))} (tty1)`,
       "Computer System Bash 0.4; type 'help' for commands.",
       ...shell.takeStartupLines(),
     ]);
@@ -133,7 +136,8 @@ function createShellModule(
   const submit = fn("submit", (positional, keywords) => {
     requireArity(positional, keywords, 1, 1);
     const line = stringArgument(positional[0]);
-    writeTerminalLines(context.terminal, [line]);
+    const secretInput = shell.isSecretInput();
+    writeTerminalLines(context.terminal, [secretInput ? "" : line]);
     return applyResult(shell.submit(line));
   });
   const keys = fn("keys", (positional, keywords) => {
@@ -159,7 +163,7 @@ function createShellModule(
 
 export function renderTerminalScreen(
   terminal: TerminalBuffer,
-  screen: ViScreen,
+  screen: EditorScreen,
 ): void {
   terminal.setTextColor(0);
   terminal.setBackgroundColor(15);

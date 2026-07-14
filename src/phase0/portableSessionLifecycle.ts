@@ -1,44 +1,49 @@
-export type PocketLocation =
-  "held" | "inventory" | "container" | "dropped" | "disconnected";
+export type PortableLocation =
+  | "held"
+  | "inventory"
+  | "container"
+  | "dropped"
+  | "disconnected"
+  | "transferred";
 
-export type PocketSessionState = "open" | "closed" | "duplicate";
+export type PortableSessionState = "open" | "closed" | "duplicate";
 
-export interface PocketObservation {
+export interface PortableObservation {
   readonly instanceId: string;
-  readonly location: PocketLocation;
+  readonly location: PortableLocation;
   readonly ownerId?: string;
 }
 
-export interface PocketSession extends PocketObservation {
-  readonly state: PocketSessionState;
+export interface PortableSession extends PortableObservation {
+  readonly state: PortableSessionState;
 }
 
-export type PocketTransition =
-  | { readonly outcome: "opened"; readonly session: PocketSession }
-  | { readonly outcome: "updated"; readonly session: PocketSession }
-  | { readonly outcome: "closed"; readonly session: PocketSession }
-  | { readonly outcome: "duplicate"; readonly session: PocketSession }
+export type PortableTransition =
+  | { readonly outcome: "opened"; readonly session: PortableSession }
+  | { readonly outcome: "updated"; readonly session: PortableSession }
+  | { readonly outcome: "closed"; readonly session: PortableSession }
+  | { readonly outcome: "duplicate"; readonly session: PortableSession }
   | { readonly outcome: "ignored"; readonly reason: "not-active" };
 
 export interface ReconcileResult {
   readonly checked: number;
   readonly remaining: number;
-  readonly transitions: readonly PocketTransition[];
+  readonly transitions: readonly PortableTransition[];
 }
 
-export class PocketSessionLifecycle {
-  readonly #active = new Map<string, PocketSession>();
+export class PortableSessionLifecycle {
+  readonly #active = new Map<string, PortableSession>();
   #cursor = 0;
 
   get activeCount(): number {
     return this.#active.size;
   }
 
-  get(instanceId: string): PocketSession | undefined {
+  get(instanceId: string): PortableSession | undefined {
     return this.#active.get(instanceId);
   }
 
-  use(observation: PocketObservation): PocketTransition {
+  use(observation: PortableObservation): PortableTransition {
     const existing = this.#active.get(observation.instanceId);
     if (
       existing !== undefined &&
@@ -52,12 +57,12 @@ export class PocketSessionLifecycle {
       };
     }
 
-    const session: PocketSession = { ...observation, state: "open" };
+    const session: PortableSession = { ...observation, state: "open" };
     this.#active.set(observation.instanceId, session);
     return { outcome: existing === undefined ? "opened" : "updated", session };
   }
 
-  observe(observation: PocketObservation): PocketTransition {
+  observe(observation: PortableObservation): PortableTransition {
     const existing = this.#active.get(observation.instanceId);
     if (existing === undefined) {
       return { outcome: "ignored", reason: "not-active" };
@@ -76,20 +81,21 @@ export class PocketSessionLifecycle {
 
     if (
       observation.location === "dropped" ||
-      observation.location === "disconnected"
+      observation.location === "disconnected" ||
+      observation.location === "transferred"
     ) {
-      const session: PocketSession = { ...observation, state: "closed" };
+      const session: PortableSession = { ...observation, state: "closed" };
       this.#active.delete(observation.instanceId);
       return { outcome: "closed", session };
     }
 
-    const session: PocketSession = { ...observation, state: "open" };
+    const session: PortableSession = { ...observation, state: "open" };
     this.#active.set(observation.instanceId, session);
     return { outcome: "updated", session };
   }
 
-  disconnect(ownerId: string): readonly PocketTransition[] {
-    const transitions: PocketTransition[] = [];
+  disconnect(ownerId: string): readonly PortableTransition[] {
+    const transitions: PortableTransition[] = [];
     for (const session of [...this.#active.values()]) {
       if (session.ownerId === ownerId) {
         transitions.push(
@@ -106,7 +112,7 @@ export class PocketSessionLifecycle {
 
   reconcile(
     budget: number,
-    inspect: (session: PocketSession) => PocketObservation,
+    inspect: (session: PortableSession) => PortableObservation,
   ): ReconcileResult {
     const sessions = [...this.#active.values()];
     if (sessions.length === 0 || budget <= 0) {
@@ -114,12 +120,12 @@ export class PocketSessionLifecycle {
     }
 
     const checked = Math.min(Math.floor(budget), sessions.length);
-    const transitions: PocketTransition[] = [];
+    const transitions: PortableTransition[] = [];
     for (let offset = 0; offset < checked; offset += 1) {
       const index = (this.#cursor + offset) % sessions.length;
       const session = sessions[index];
       if (session === undefined) {
-        throw new Error("Pocket reconciliation cursor was out of bounds.");
+        throw new Error("Portable reconciliation cursor was out of bounds.");
       }
       transitions.push(this.observe(inspect(session)));
     }

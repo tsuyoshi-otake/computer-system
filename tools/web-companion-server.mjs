@@ -1,6 +1,7 @@
 import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
 import { createServer } from "node:http";
+import { networkInterfaces } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -21,6 +22,9 @@ const defaultBrowserLaunchTimeoutMs = 5_000;
 const completionTimeoutMs = 2_000;
 const maximumPendingCompletions = 32;
 const maximumHandoffWaitMs = 120_000;
+const maximumHandoffFailuresPerWindow = 8;
+const maximumHandoffFailureClients = 256;
+const handoffFailureWindowMs = 60_000;
 const computerIdPattern = /^c-[0-9a-hjkmnp-tv-z]{6}$/u;
 const assetTypes = new Map([
   [".css", "text/css; charset=utf-8"],
@@ -35,7 +39,11 @@ export class WebCompanionServer {
     this.bds = options.bds;
     this.host = options.host ?? "127.0.0.1";
     this.port = parsePort(options.port ?? 19_144);
-    this.publicHost = options.publicHost ?? this.host;
+    this.publicHost =
+      options.publicHost ??
+      (this.host === "0.0.0.0"
+        ? selectLanIpv4(options.networkInterfaces ?? networkInterfaces())
+        : this.host);
     this.publicOrigin = normalizePublicOrigin(options.publicOrigin);
     this.browserAutoOpenEnabled = options.autoOpenBrowser === true;
     this.browserOpener = options.browserOpener ?? openDefaultBrowser;
@@ -56,6 +64,8 @@ export class WebCompanionServer {
     this.cleanupTimer = undefined;
     this.started = false;
     this.origin = undefined;
+    this.browserOrigin = undefined;
+    this.handoffFailures = new Map();
     this.operationDepths = new Map();
     this.operationTails = new Map();
     this.browserLaunchDepth = 0;
@@ -100,6 +110,10 @@ export class WebCompanionServer {
     this.origin =
       this.publicOrigin ??
       `http://${formatHost(this.publicHost)}:${String(actualPort)}`;
+    this.browserOrigin =
+      isLoopbackHost(this.host) || this.host === "0.0.0.0"
+        ? `http://127.0.0.1:${String(actualPort)}`
+        : undefined;
     this.configureBrowserAutoOpen();
     this.started = true;
     this.cleanupTimer = setInterval(() => this.store.expire(), 30_000);
@@ -284,22 +298,12 @@ export class WebCompanionServer {
 
   configureBrowserAutoOpen() {
     if (!this.browserAutoOpenEnabled) return;
-    const origin = new URL(this.origin);
-    if (!isLoopbackHost(this.host)) {
+    if (this.browserOrigin === undefined) {
       this.browserLaunch = {
         ...this.browserLaunch,
         eligible: false,
         state: "blocked",
-        reason: "listener_not_loopback",
-      };
-      return;
-    }
-    if (!isLoopbackHost(origin.hostname)) {
-      this.browserLaunch = {
-        ...this.browserLaunch,
-        eligible: false,
-        state: "blocked",
-        reason: "origin_not_loopback",
+        reason: "listener_not_locally_reachable",
       };
       return;
     }
@@ -331,9 +335,14 @@ export class WebCompanionServer {
       ...this.browserLaunch,
       attempts: this.browserLaunch.attempts + 1,
     };
+    const published = new URL(url);
+    const localUrl = new URL(
+      `${published.pathname}${published.search}${published.hash}`,
+      this.browserOrigin,
+    ).toString();
     const operation = this.browserLaunchTail.then(
-      () => this.launchBrowser(url),
-      () => this.launchBrowser(url),
+      () => this.launchBrowser(localUrl),
+      () => this.launchBrowser(localUrl),
     );
     this.browserLaunchTail = operation.catch(() => undefined);
     try {
@@ -378,12 +387,19 @@ export class WebCompanionServer {
     const url = new URL(request.url ?? "/", this.origin ?? "http://127.0.0.1");
     if (request.method === "GET" && url.pathname.startsWith("/p/")) {
       const code = url.pathname.slice(3);
-      const consumed = this.store.consumeHandoff(code);
+      const consumed = this.consumeHandoffCode(request, code);
       response.writeHead(302, {
         Location: `/#${consumed.token}`,
         "Cache-Control": "no-store",
       });
       response.end();
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/api/handoff") {
+      requireSameOrigin(request, this.origin);
+      const body = await readJson(request, 1_024);
+      const consumed = this.consumeHandoffCode(request, body?.code);
+      writeJson(response, 200, { token: consumed.token });
       return;
     }
     if (request.method === "GET" && url.pathname === "/api/session") {
@@ -704,6 +720,67 @@ export class WebCompanionServer {
     }
   }
 
+  requireHandoffAttemptAllowed(client) {
+    this.pruneHandoffFailures();
+    const failures = this.handoffFailures.get(client);
+    if (
+      failures !== undefined &&
+      failures.count >= maximumHandoffFailuresPerWindow
+    ) {
+      throw new WebSessionError(
+        "handoff_rate_limit",
+        "Too many invalid connection-code attempts. Try again later.",
+        429,
+      );
+    }
+  }
+
+  consumeHandoffCode(request, code) {
+    const client = request.socket.remoteAddress ?? "unknown";
+    this.requireHandoffAttemptAllowed(client);
+    try {
+      const consumed = this.store.consumeHandoff(code);
+      this.handoffFailures.delete(client);
+      return consumed;
+    } catch (error) {
+      this.recordHandoffFailure(client);
+      throw error;
+    }
+  }
+
+  recordHandoffFailure(client) {
+    const now = Date.now();
+    const existing = this.handoffFailures.get(client);
+    if (existing === undefined || existing.expiresAt <= now) {
+      if (this.handoffFailures.size >= maximumHandoffFailureClients) {
+        this.pruneHandoffFailures(true);
+      }
+      this.handoffFailures.set(client, {
+        count: 1,
+        expiresAt: now + handoffFailureWindowMs,
+      });
+      return;
+    }
+    existing.count += 1;
+  }
+
+  pruneHandoffFailures(removeOldest = false) {
+    const now = Date.now();
+    for (const [client, failures] of this.handoffFailures) {
+      if (failures.expiresAt <= now) this.handoffFailures.delete(client);
+    }
+    if (
+      !removeOldest ||
+      this.handoffFailures.size < maximumHandoffFailureClients
+    ) {
+      return;
+    }
+    const oldest = [...this.handoffFailures.entries()].sort(
+      (left, right) => left[1].expiresAt - right[1].expiresAt,
+    )[0];
+    if (oldest !== undefined) this.handoffFailures.delete(oldest[0]);
+  }
+
   async serveAsset(pathname, response) {
     const relative = pathname === "/" ? "index.html" : pathname.slice(1);
     if (!/^[A-Za-z0-9._/-]+$/u.test(relative) || relative.includes("..")) {
@@ -830,6 +907,41 @@ function validateHost(host, publicHost, publicOrigin) {
       "WEB_COMPANION_PUBLIC_ORIGIN or WEB_COMPANION_PUBLIC_HOST is required when binding to 0.0.0.0.",
     );
   }
+}
+
+export function selectLanIpv4(interfaces) {
+  const candidates = [];
+  for (const [name, addresses] of Object.entries(interfaces)) {
+    for (const address of addresses ?? []) {
+      if (
+        address.internal ||
+        (address.family !== "IPv4" && address.family !== 4) ||
+        address.address.startsWith("169.254.")
+      ) {
+        continue;
+      }
+      const virtual =
+        /cloudflare|docker|hyper-v|loopback|tunnel|vethernet|vmware|wsl/iu.test(
+          name,
+        );
+      const physical = /ethernet|wi-?fi|wireless|wlan/iu.test(name);
+      candidates.push({
+        address: address.address,
+        score: virtual ? 20 : physical ? 0 : 10,
+      });
+    }
+  }
+  candidates.sort(
+    (left, right) =>
+      left.score - right.score || left.address.localeCompare(right.address),
+  );
+  const selected = candidates[0]?.address;
+  if (selected === undefined) {
+    throw new Error(
+      "No LAN IPv4 address is available. Set WEB_COMPANION_PUBLIC_HOST explicitly.",
+    );
+  }
+  return selected;
 }
 
 function normalizePublicOrigin(value) {

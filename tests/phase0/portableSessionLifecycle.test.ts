@@ -1,13 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
-  PocketSessionLifecycle,
-  type PocketSession,
-} from "../../src/phase0/pocketSessionLifecycle.js";
+  PortableSessionLifecycle,
+  type PortableSession,
+} from "../../src/phase0/portableSessionLifecycle.js";
 
-describe("PocketSessionLifecycle", () => {
+describe("PortableSessionLifecycle", () => {
   it("tracks held, inventory, and container locations until drop closes it", () => {
-    const lifecycle = new PocketSessionLifecycle();
+    const lifecycle = new PortableSessionLifecycle();
     expect(
       lifecycle.use({ instanceId: "p1", location: "held", ownerId: "alex" })
         .outcome,
@@ -29,7 +29,7 @@ describe("PocketSessionLifecycle", () => {
   });
 
   it("closes every session owned by a disconnected player", () => {
-    const lifecycle = new PocketSessionLifecycle();
+    const lifecycle = new PortableSessionLifecycle();
     lifecycle.use({ instanceId: "p1", location: "held", ownerId: "alex" });
     lifecycle.use({ instanceId: "p2", location: "held", ownerId: "alex" });
     lifecycle.use({ instanceId: "p3", location: "held", ownerId: "steve" });
@@ -42,7 +42,7 @@ describe("PocketSessionLifecycle", () => {
   });
 
   it("rejects another owner for the same instance without replacing the original", () => {
-    const lifecycle = new PocketSessionLifecycle();
+    const lifecycle = new PortableSessionLifecycle();
     lifecycle.use({ instanceId: "p1", location: "held", ownerId: "alex" });
 
     expect(
@@ -52,8 +52,25 @@ describe("PocketSessionLifecycle", () => {
     expect(lifecycle.get("p1")?.ownerId).toBe("alex");
   });
 
+  it("closes the former owner explicitly before a transferred item is reopened", () => {
+    const lifecycle = new PortableSessionLifecycle();
+    lifecycle.use({ instanceId: "p1", location: "held", ownerId: "alex" });
+
+    expect(
+      lifecycle.observe({
+        instanceId: "p1",
+        location: "transferred",
+        ownerId: "alex",
+      }),
+    ).toMatchObject({ outcome: "closed" });
+    expect(
+      lifecycle.use({ instanceId: "p1", location: "held", ownerId: "steve" }),
+    ).toMatchObject({ outcome: "opened" });
+    expect(lifecycle.get("p1")?.ownerId).toBe("steve");
+  });
+
   it("reconciles only active sessions and respects its budget", () => {
-    const lifecycle = new PocketSessionLifecycle();
+    const lifecycle = new PortableSessionLifecycle();
     lifecycle.use({
       instanceId: "active-1",
       location: "held",
@@ -64,7 +81,9 @@ describe("PocketSessionLifecycle", () => {
       location: "held",
       ownerId: "steve",
     });
-    const inspect = vi.fn((session: PocketSession): PocketSession => session);
+    const inspect = vi.fn(
+      (session: PortableSession): PortableSession => session,
+    );
 
     const result = lifecycle.reconcile(1, inspect);
 
@@ -74,7 +93,7 @@ describe("PocketSessionLifecycle", () => {
   });
 
   it("returns an explicit ignored terminal outcome for dormant items", () => {
-    const lifecycle = new PocketSessionLifecycle();
+    const lifecycle = new PortableSessionLifecycle();
     expect(
       lifecycle.observe({ instanceId: "dormant", location: "inventory" }),
     ).toEqual({ outcome: "ignored", reason: "not-active" });

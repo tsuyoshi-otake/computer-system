@@ -2,7 +2,10 @@ import { world } from "@minecraft/server";
 
 import { DynamicPropertyIdentityRepository } from "../adapters/storage/dynamicPropertyIdentityRepository.js";
 import { PersistentComputerIdentityService } from "../application/computer/identityPersistence.js";
-import { applyPortableComputerProfile } from "../application/computer/hardwareProfiles.js";
+import {
+  applyPortableComputerProfile,
+  applyStationaryComputerProfile,
+} from "../application/computer/hardwareProfiles.js";
 import { ComputerRecord } from "../domain/computer/computer.js";
 import { portableComputerHardware } from "../domain/computer/hardware.js";
 import type { ComputerFamily } from "../domain/computer/identity.js";
@@ -24,9 +27,15 @@ export function ensureComputer(
   family: ComputerFamily,
 ): ComputerRecord {
   const existing = computerHost.get(computerId);
-  if (existing !== undefined) return existing;
+  if (existing !== undefined) {
+    applyStationaryComputerProfile(existing);
+    return existing;
+  }
   const restored = computerHost.restore(computerId);
-  if (restored.outcome === "registered") return restored.record;
+  if (restored.outcome === "registered") {
+    applyStationaryComputerProfile(restored.record);
+    return restored.record;
+  }
   if (restored.outcome === "failed") throw restored.error;
   const record = new ComputerRecord(computerId, family);
   registerComputer(record);

@@ -164,7 +164,7 @@ describe("Computer persistence boundary", (): void => {
       expect(loadedLegacy.record.hardware).toEqual({
         clockHz: 33_000_000,
         cpuModel: "cs486dx",
-        memoryBytes: 1_048_576,
+        memoryBytes: 2_097_152,
       });
     }
   });

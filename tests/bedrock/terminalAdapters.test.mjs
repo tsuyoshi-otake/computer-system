@@ -28,41 +28,61 @@ describe("Bedrock terminal adapters", () => {
     expect(new Set(codes)).toHaveProperty("size", 16);
   });
 
-  it("routes Computer and Pocket Computer through the production coordinator", async () => {
-    const [computer, pocket, coordinator, registry] = await Promise.all([
+  it("routes Computer and Portable Computer System through the production coordinator", async () => {
+    const [computer, portable, coordinator, registry] = await Promise.all([
       source("src/bedrock/computerComponent.ts"),
-      source("src/bedrock/pocketComputer.ts"),
+      source("src/bedrock/portableComputer.ts"),
       source("src/bedrock/computerTerminal.ts"),
       source("src/bedrock/computerRegistry.ts"),
     ]);
 
-    expect(computer).toContain("openComputerTerminal");
-    expect(pocket).toContain("requestWebComputerTerminal");
-    expect(pocket).toContain("resolvePocketComputer(source, itemStack)");
-    expect(pocket).toContain("Pocket Computer initialized");
-    expect(pocket).toContain(
+    expect(computer).toContain("requestWebComputerTerminal");
+    expect(computer).toContain(
+      "requestWebComputerTerminal(player, record, event.block)",
+    );
+    expect(computer).toContain("hasAdjacentMonitor(event.block)");
+    expect(computer).toContain("selectComputerTerminal");
+    expect(portable).toContain("requestWebComputerTerminal");
+    expect(portable).toContain("resolvePortableComputer(source, itemStack)");
+    expect(portable).toContain("Portable Computer System");
+    expect(portable).toContain(
       "inventory.setItem(player.selectedSlotIndex, selectedItem)",
     );
-    expect(pocket).not.toContain("showTerminalProbe");
+    expect(portable).not.toContain("showTerminalProbe");
     expect(coordinator).toContain("showTerminalView");
     expect(coordinator).toContain('"terminal_line"');
     expect(coordinator).toContain('"terminal_closed"');
-    expect(pocket).toContain("ensurePortableComputer");
+    expect(coordinator).toContain("selectComputerTerminal");
+    expect(portable).toContain("ensurePortableComputer");
+    expect(portable).toContain("playerOwnsPortableIdentity");
+    expect(portable).toContain('location: "transferred"');
+    expect(portable).toContain(
+      'disconnectWebTerminalPlayer(previous.ownerId, "transferred", identity)',
+    );
     expect(registry).toContain("applyPortableComputerProfile");
     expect(registry).toContain("hardware: portableComputerHardware");
     expect(registry).toContain('osProfile: "dos"');
   });
 
   it("normalizes the GDK single-entity item-drop shape and keeps the world in daytime", async () => {
-    const [pocket, daylight, main, headless] = await Promise.all([
-      source("src/bedrock/pocketComputer.ts"),
+    const [portable, daylight, main, headless] = await Promise.all([
+      source("src/bedrock/portableComputer.ts"),
       source("src/bedrock/daylightController.ts"),
       source("src/bedrock/main.ts"),
       source("src/bedrock/probes/headlessProbe.ts"),
     ]);
 
-    expect(pocket).toContain("Array.isArray(items) ? items : [items]");
-    expect(pocket).not.toContain("for (const entity of items)");
+    expect(portable).toContain("Array.isArray(items) ? items : [items]");
+    expect(portable).not.toContain("for (const entity of items)");
+    expect(portable).not.toContain("for (const entity of droppedEntities)");
+    expect(portable).toContain("maximumDroppedItemsToInspect");
+    expect(portable).toContain(
+      "for (let index = 0; index < count; index += 1)",
+    );
+    expect(portable).toContain("handlePortableItemUseOn");
+    expect(portable).toContain("handlePortableBlockInteraction");
+    expect(portable).toContain("handlePortableBlockBreak");
+    expect(portable).toContain("portableComputerBlockTypeId");
     expect(daylight).toContain("world.gameRules.doDayLightCycle = false");
     expect(daylight).toContain("world.setTimeOfDay(TimeOfDay.Day)");
     expect(daylight).toContain("system.runInterval");
@@ -71,17 +91,24 @@ describe("Bedrock terminal adapters", () => {
     expect(headless).toContain('emit(runId, "always_day"');
   });
 
-  it("hands Pocket Computer use to the bounded Web companion bridge", async () => {
-    const [main, pocket, bridge] = await Promise.all([
+  it("hands every Computer System interaction to the bounded Web companion bridge", async () => {
+    const [main, computer, portable, bridge] = await Promise.all([
       source("src/bedrock/main.ts"),
-      source("src/bedrock/pocketComputer.ts"),
+      source("src/bedrock/computerComponent.ts"),
+      source("src/bedrock/portableComputer.ts"),
       source("src/bedrock/webTerminalBridge.ts"),
     ]);
 
     expect(main).toContain("startWebTerminalBridge");
     expect(main).toContain("handleWebTerminalScriptEvent");
-    expect(pocket).toContain("requestWebComputerTerminal(source, record)");
+    expect(computer).toContain(
+      "requestWebComputerTerminal(player, record, event.block)",
+    );
+    expect(portable).toContain("requestWebComputerTerminal(source, record)");
     expect(bridge).toContain("CS_WEB_SESSION_REQUEST");
+    expect(bridge).toContain(
+      "selectComputerTerminal(player.id, record.computerId)",
+    );
     expect(bridge).toContain("CS_WEB_TERMINAL");
     expect(bridge).toContain("maxSnapshotsPerPass = 2");
     expect(bridge).toContain("maxEagerSnapshotsPerPass = 4");
@@ -97,6 +124,9 @@ describe("Bedrock terminal adapters", () => {
     expect(bridge).toContain("terminalAccess.canWrite");
     expect(bridge).toContain("detached.wasLast");
     expect(bridge).toContain("rejectSession");
+    expect(bridge).toContain("x * x + y * y + z * z <= 9");
+    expect(bridge).toContain('finalizeSession(session, "out_of_range")');
+    expect(bridge).toContain("Connection code:");
   });
 
   it("keeps the Bedrock Core prototype isolated from the production DDUI coordinator", async () => {
@@ -115,13 +145,17 @@ describe("Bedrock terminal adapters", () => {
     expect(coordinator).not.toContain("showCustomTerminalView");
   });
 
-  it("routes Monitor touch to the latest selected production computer", async () => {
+  it("routes Monitor touch only to one physically adjacent desktop computer", async () => {
     const [monitor, coordinator] = await Promise.all([
       source("src/bedrock/monitorComponent.ts"),
       source("src/bedrock/computerTerminal.ts"),
     ]);
 
-    expect(monitor).toContain("openSelectedComputerTerminal");
+    expect(monitor).toContain("adjacentDesktopComputers");
+    expect(monitor).toContain(
+      "requestWebComputerTerminal(player, record, block)",
+    );
+    expect(monitor).not.toContain("openSelectedComputerTerminal");
     expect(monitor).not.toContain("showTerminalProbe");
     expect(coordinator).toContain("TerminalTargetRegistry");
     expect(coordinator).toContain("targets.resolve(player.id)");
@@ -134,6 +168,7 @@ describe("Bedrock terminal adapters", () => {
     expect(computer).toContain("if (breakingBlocks.has(physicalKey)) return");
     expect(computer).toContain('residual.setType("minecraft:air")');
     expect(computer).toContain("giveComputerItem(player");
+    expect(computer).toContain("!isComputerBlock(block.typeId)");
   });
 
   it("exposes a bounded GDK competing-form probe with per-session finalization counts", async () => {

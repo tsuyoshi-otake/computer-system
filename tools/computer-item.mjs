@@ -1,4 +1,10 @@
+import { machineTextureKeys } from "./machine-textures.mjs";
+
 export const computerItemFamilies = ["computer", "advanced_computer"];
+export const computerItemDisplayNames = {
+  computer: "Desktop Computer System",
+  advanced_computer: "Advanced Desktop Computer System",
+};
 
 export function computerItemIdentifier(family) {
   requireFamily(family);
@@ -7,7 +13,6 @@ export function computerItemIdentifier(family) {
 
 export function createComputerItem(family) {
   requireFamily(family);
-  const advanced = family === "advanced_computer";
   return {
     format_version: "1.21.90",
     "minecraft:item": {
@@ -18,9 +23,9 @@ export function createComputerItem(family) {
       components: {
         "computer_system:computer_item": { family },
         "minecraft:display_name": {
-          value: advanced ? "Advanced Computer" : "Computer",
+          value: computerItemDisplayNames[family],
         },
-        "minecraft:icon": advanced ? "gold_ingot" : "repeater",
+        "minecraft:icon": machineTextureKeys[family],
         "minecraft:max_stack_size": 1,
       },
     },

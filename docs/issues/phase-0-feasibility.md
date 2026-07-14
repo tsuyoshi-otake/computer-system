@@ -54,7 +54,7 @@ before production architecture depends on an unsupported behavior.
       generation.
 - [x] Reload the world and prove stable identity without accidental duplication.
 
-### Pocket computer lifecycle
+### Portable computer lifecycle
 
 - [x] Open a terminal from an item-use interaction.
 - [x] Reconcile held, inventory, container, dropped, disconnected, and
@@ -93,7 +93,7 @@ before production architecture depends on an unsupported behavior.
 - The stable Script API bundle loaded without Beta API experiments.
 - A tester completed the in-game runtime command through the 20-computer probe.
 - Host tests cover fair scheduling, transactional paged storage recovery,
-  terminal finalization, redstone output constraints, monitor bounds, pocket
+  terminal finalization, redstone output constraints, monitor bounds, portable
   lifecycle, and the machine-readable probe protocol.
 - `npm run test:bds` passed on Bedrock Dedicated Server 1.26.33.2. Both runtime
   sessions produced `min=2000` and `max=2000` across 20 computers and 40 ticks.

@@ -29,6 +29,7 @@ export interface ComputerRuntimeOptions {
   readonly schedulerLimits?: SchedulerLimits;
   readonly defaultBootSource?: string;
   readonly ticksPerSecond?: number;
+  readonly requireLinuxLogin?: boolean;
 }
 
 export type RuntimeCommandResult =
@@ -58,6 +59,7 @@ export class ComputerRuntime {
   private readonly defaultBootSource: string;
   private readonly clock: ShellClockSource | undefined;
   private readonly ticksPerSecond: number;
+  private readonly requireLinuxLogin: boolean;
   private nextRuntimeId = 1;
 
   constructor(options: ComputerRuntimeOptions = {}) {
@@ -66,6 +68,7 @@ export class ComputerRuntime {
       options.defaultBootSource ?? defaultSystemBootSource;
     this.clock = options.clock;
     this.ticksPerSecond = options.ticksPerSecond ?? 20;
+    this.requireLinuxLogin = options.requireLinuxLogin ?? false;
   }
 
   get tickNumber(): number {
@@ -180,6 +183,10 @@ export class ComputerRuntime {
     return this.entries.get(computerId)?.shell?.complete(line, cursor);
   }
 
+  isShellSecretInput(computerId: string): boolean {
+    return this.entries.get(computerId)?.shell?.isSecretInput() ?? false;
+  }
+
   executeDebugShellCommand(
     computerId: string,
     line: string,
@@ -212,6 +219,16 @@ export class ComputerRuntime {
     entry: RuntimeEntry,
     path: string,
   ): DebugShellCommandResult {
+    const cpu = cpuModelSpecification(entry.record.hardware.cpuModel);
+    if (!cpu.supportsMicroPython) {
+      return {
+        outcome: "completed",
+        exitCode: 127,
+        stdout: "",
+        stderr: `MicroPython is not available on ${cpu.runtimeName}\n`,
+        cpuCycles: 1,
+      };
+    }
     const source = entry.record.filesystem.readFile(path);
     const terminal = new TerminalBuffer(80, 25);
     const environment = createNativeEnvironment({
@@ -301,9 +318,13 @@ export class ComputerRuntime {
 
   private boot(entry: RuntimeEntry): RuntimeCommandResult {
     try {
-      const source = entry.record.filesystem.exists("/startup.py")
-        ? entry.record.filesystem.readFile("/startup.py")
-        : this.defaultBootSource;
+      const supportsMicroPython = cpuModelSpecification(
+        entry.record.hardware.cpuModel,
+      ).supportsMicroPython;
+      const source =
+        supportsMicroPython && entry.record.filesystem.exists("/startup.py")
+          ? entry.record.filesystem.readFile("/startup.py")
+          : this.defaultBootSource;
       const environment = createNativeEnvironment({
         clock: this.clock,
         computerId: numericComputerId(entry.record.computerId),
@@ -324,6 +345,7 @@ export class ComputerRuntime {
         shutdown: () => this.requestEntryStop(entry, "shutdown", "shutdown"),
         reboot: () => this.requestEntryStop(entry, "reboot", "reboot"),
         ticksPerSecond: this.ticksPerSecond,
+        requireLinuxLogin: this.requireLinuxLogin,
       });
       const vm = createPythonCs486Program({
         cpuModel: entry.record.hardware.cpuModel,

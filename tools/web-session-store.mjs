@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 
 const tokenPattern = /^[A-Za-z0-9_-]+$/u;
+const handoffPattern = /^[0-9]{4}$/u;
 
 export class WebSessionError extends Error {
   constructor(code, message, status = 400) {
@@ -15,7 +16,7 @@ export class WebSessionStore {
   constructor(options = {}) {
     this.clock = options.clock ?? Date.now;
     this.random = options.random ?? randomBytes;
-    this.handoffTtlMs = positiveInteger(options.handoffTtlMs ?? 60_000);
+    this.handoffTtlMs = positiveInteger(options.handoffTtlMs ?? 120_000);
     this.sessionTtlMs = positiveInteger(options.sessionTtlMs ?? 30 * 60_000);
     this.maxSessions = positiveInteger(options.maxSessions ?? 32);
     this.maxConnectionsPerSession = positiveInteger(
@@ -42,11 +43,23 @@ export class WebSessionStore {
       );
     }
     const now = this.clock();
+    const handoffCode = permanentComputerCode(identity.computerId);
+    const conflicting = this.handoffs.get(handoffCode);
+    if (conflicting !== undefined) {
+      if (conflicting.computerId !== identity.computerId) {
+        throw new WebSessionError(
+          "code_collision",
+          "Another Computer with the same four-digit code is awaiting connection.",
+          409,
+        );
+      }
+      this.finalize(conflicting, "closed", "handoff_superseded");
+    }
     const attached = this.sessionsByComputer.get(identity.computerId);
     const session = {
       sessionId: this.uniqueValue(12, this.sessionsById),
       token: this.uniqueValue(32, this.sessionsByToken),
-      handoffCode: this.uniqueValue(12, this.handoffs),
+      handoffCode,
       requestId: identity.requestId,
       playerId: identity.playerId,
       computerId: identity.computerId,
@@ -80,7 +93,7 @@ export class WebSessionStore {
   }
 
   consumeHandoff(code) {
-    if (typeof code !== "string" || !tokenPattern.test(code)) {
+    if (typeof code !== "string" || !handoffPattern.test(code)) {
       throw unauthorized();
     }
     const session = this.handoffs.get(code);
@@ -206,7 +219,14 @@ export class WebSessionStore {
     const now = this.clock();
     let count = 0;
     for (const session of this.sessionsById.values()) {
-      if (isActive(session) && session.expiresAt <= now) {
+      if (
+        isActive(session) &&
+        this.handoffs.has(session.handoffCode) &&
+        session.handoffExpiresAt <= now
+      ) {
+        this.finalize(session, "expired", "handoff_expired");
+        count += 1;
+      } else if (isActive(session) && session.expiresAt <= now) {
         this.finalize(session, "expired", "session_expired");
         count += 1;
       }
@@ -317,4 +337,26 @@ function unauthorized() {
     "A valid browser terminal token is required.",
     401,
   );
+}
+
+export function permanentComputerCode(computerId) {
+  if (/^computer-[1-9][0-9]*$/u.test(computerId)) {
+    const numeric = Number.parseInt(computerId.slice(9), 10);
+    if (!Number.isSafeInteger(numeric)) {
+      throw new WebSessionError(
+        "identity",
+        "Invalid browser session identity.",
+      );
+    }
+    return (numeric % 10_000).toString().padStart(4, "0");
+  }
+  if (!/^c-[0-9a-hjkmnp-tv-z]{6}$/u.test(computerId)) {
+    throw new WebSessionError("identity", "Invalid browser session identity.");
+  }
+  const alphabet = "0123456789abcdefghjkmnpqrstvwxyz";
+  let numeric = 0;
+  for (const character of computerId.slice(2)) {
+    numeric = numeric * 32 + alphabet.indexOf(character);
+  }
+  return (numeric % 10_000).toString().padStart(4, "0");
 }

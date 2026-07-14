@@ -1,4 +1,4 @@
-# Phase 4: Implement networking and pocket computers
+# Phase 4: Implement networking and portable computers
 
 Parent: #1 Blocked by: #5
 
@@ -10,9 +10,9 @@ Parent: #1 Blocked by: #5
 - [ ] Implement Ender Modem long-range and cross-dimension rules.
 - [ ] Implement `rednet` open, close, send, broadcast, receive, host, and
       lookup.
-- [ ] Implement normal and Advanced Pocket Computers.
-- [ ] Implement Wireless, Ender, and Noisy Pocket Computer upgrades.
-- [ ] Reconcile pocket lifecycle without hidden every-tick inventory scans.
+- [ ] Implement normal and Advanced Portable Computer Systems.
+- [ ] Implement Wireless, Ender, and Noisy Portable Computer System upgrades.
+- [ ] Reconcile portable lifecycle without hidden every-tick inventory scans.
 - [ ] Bound delivery queues, topology work, retries, and disconnect cleanup.
 
 ## Acceptance rubric
@@ -21,4 +21,4 @@ Parent: #1 Blocked by: #5
 out, cross-dimension, disconnect, duplicate-item, and container-storage cases.
 
 `Expect:` Exactly the eligible computers receive each message, no computer is
-starved, timeouts resume callers, and each pocket ID has one observable owner.
+starved, timeouts resume callers, and each portable ID has one observable owner.

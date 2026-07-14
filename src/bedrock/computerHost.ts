@@ -11,6 +11,7 @@ const repository = new DynamicPropertyComputerRepository(world);
 const persistence = new ComputerPersistenceService(repository);
 export const computerHost = new ComputerHost(
   new ComputerRuntime({
+    requireLinuxLogin: true,
     clock: {
       currentGameTime: (): GameClockSnapshot => ({
         absoluteTicks: world.getAbsoluteTime(),

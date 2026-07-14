@@ -139,14 +139,17 @@ describe("ComputerRuntime", (): void => {
     }
   });
 
-  it("runs Python debug work with portable CS386SX timing", (): void => {
+  it("rejects user MicroPython on portable CS386SX and ignores startup.py", (): void => {
     const record = new ComputerRecord("c-000104", "advanced", {
       hardware: portableComputerHardware,
       osProfile: "dos",
     });
-    record.filesystem.writeFile("/startup.py", "import os\nos.pull_event()\n");
+    record.filesystem.writeFile("/startup.py", "this is not valid Python\n");
     const runtime = runtimeWith(record);
-    runtime.powerOn(record.computerId);
+    expect(runtime.powerOn(record.computerId)).toMatchObject({
+      outcome: "accepted",
+      state: "running",
+    });
     record.filesystem.writeFile(
       "/drives/c/users/computer/demo.py",
       "print(6 * 7)\n",
@@ -158,13 +161,11 @@ describe("ComputerRuntime", (): void => {
     );
     expect(result).toMatchObject({
       outcome: "completed",
-      exitCode: 0,
-      stdout: "42\n",
+      exitCode: 127,
+      stdout: "",
     });
     if (result.outcome === "completed") {
-      expect(result.stderr).toMatch(
-        /^Python\/CS386SX: \d+ machine instructions, \d+ CPU cycles, \d+\.\d{3} us at 16 MHz/u,
-      );
+      expect(result.stderr).toBe("MicroPython is not available on CS386SX\n");
     }
   });
 

@@ -1,3 +1,10 @@
+import {
+  createCardinalDirectionPermutations,
+  machineBlockGeometryIds,
+  machinePlacementTraits,
+  machineBlockTextureKeys,
+} from "./machine-block-assets.mjs";
+
 export const computerFamilies = ["computer", "advanced_computer"];
 export const computerRedstoneFaces = [
   "down",
@@ -26,17 +33,30 @@ export function createComputerBlock(family, mask) {
       description: {
         identifier: computerBlockIdentifier(family, mask),
         menu_category: { category: "none" },
+        traits: machinePlacementTraits,
       },
       components: {
         "computer_system:computer": { family },
         "minecraft:destructible_by_explosion": { explosion_resistance: 6 },
         "minecraft:destructible_by_mining": { seconds_to_destroy: 1.5 },
-        "minecraft:geometry": "minecraft:geometry.full_block",
+        "minecraft:geometry": machineBlockGeometryIds[family],
         "minecraft:loot": "loot_tables/blocks/computer_empty.json",
         "minecraft:material_instances": {
           "*": {
             render_method: "opaque",
-            texture: family === "advanced_computer" ? "gold_block" : "stone",
+            texture: machineBlockTextureKeys.case,
+          },
+          case: {
+            render_method: "opaque",
+            texture: machineBlockTextureKeys.case,
+          },
+          computer_front: {
+            render_method: "opaque",
+            texture: machineBlockTextureKeys.computer_front,
+          },
+          advanced_computer_front: {
+            render_method: "opaque",
+            texture: machineBlockTextureKeys.advanced_computer_front,
           },
         },
         "minecraft:redstone_conductivity": { redstone_conductor: false },
@@ -51,6 +71,7 @@ export function createComputerBlock(family, mask) {
               },
             }),
       },
+      permutations: createCardinalDirectionPermutations(),
     },
   };
 }

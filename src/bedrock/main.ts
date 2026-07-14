@@ -3,6 +3,8 @@ import { Player, system, world } from "@minecraft/server";
 import { startAlwaysDayController } from "./daylightController.js";
 import { startComputerHost } from "./computerHost.js";
 import {
+  desktopComputerDisplayName,
+  giveNewComputerItem,
   registerComputerComponents,
   startComputerComponents,
 } from "./computerComponent.js";
@@ -12,10 +14,11 @@ import {
   registerMonitorComponent,
 } from "./monitorComponent.js";
 import {
-  givePocketComputer,
-  registerPocketComputerComponent,
-  startPocketComputerLifecycle,
-} from "./pocketComputer.js";
+  givePortableComputer,
+  portableComputerDisplayName,
+  registerPortableComputerComponent,
+  startPortableComputerLifecycle,
+} from "./portableComputer.js";
 import { handleDebugCommand } from "./debugCommandBridge.js";
 import { startHeadlessProbeSuite } from "./probes/headlessProbe.js";
 import { registerRedstoneProbeComponent } from "./probes/redstoneProbeComponent.js";
@@ -41,7 +44,10 @@ system.beforeEvents.startup.subscribe(
     registerComputerComponents(blockComponentRegistry, itemComponentRegistry);
     registerRedstoneProbeComponent(blockComponentRegistry);
     registerMonitorComponent(blockComponentRegistry);
-    registerPocketComputerComponent(itemComponentRegistry);
+    registerPortableComputerComponent(
+      itemComponentRegistry,
+      blockComponentRegistry,
+    );
   },
 );
 
@@ -49,7 +55,7 @@ system.run((): void => {
   startAlwaysDayController();
   startComputerHost();
   startComputerComponents();
-  startPocketComputerLifecycle();
+  startPortableComputerLifecycle();
   startWebTerminalBridge();
   world.sendMessage(`Computer System Phase 0 loaded (${packVersion}).`);
 });
@@ -79,7 +85,7 @@ system.afterEvents.scriptEventReceive.subscribe((event): void => {
     case "help":
     case "status":
       event.sourceEntity.sendMessage(
-        "Computer System Phase 0 commands: status, ui, ui-custom, ui-nano, stream, compete, monitor, pocket, runtime, storage, speaker, headless",
+        "Computer System Phase 0 commands: status, ui, ui-custom, ui-nano, stream, compete, computer, monitor, portable, runtime, storage, speaker, headless",
       );
       return;
     case "runtime":
@@ -125,16 +131,34 @@ system.afterEvents.scriptEventReceive.subscribe((event): void => {
       system.run((): void => startTerminalStreamProbe(player));
       return;
     }
-    case "pocket": {
+    case "portable": {
       const player = event.sourceEntity;
       system.run((): void => {
         try {
-          const identity = givePocketComputer(player);
-          player.sendMessage(`Pocket Computer granted (${identity}).`);
+          const identity = givePortableComputer(player);
+          player.sendMessage(
+            `${portableComputerDisplayName} granted (${identity}).`,
+          );
         } catch (error: unknown) {
           if (player.isValid)
             player.sendMessage(
-              `Pocket Computer grant failed: ${error instanceof Error ? error.message : String(error)}`,
+              `${portableComputerDisplayName} grant failed: ${error instanceof Error ? error.message : String(error)}`,
+            );
+        }
+      });
+      return;
+    }
+    case "computer": {
+      const player = event.sourceEntity;
+      system.run((): void => {
+        try {
+          giveNewComputerItem(player);
+          if (player.isValid)
+            player.sendMessage(`${desktopComputerDisplayName} granted.`);
+        } catch (error: unknown) {
+          if (player.isValid)
+            player.sendMessage(
+              `${desktopComputerDisplayName} grant failed: ${error instanceof Error ? error.message : String(error)}`,
             );
         }
       });

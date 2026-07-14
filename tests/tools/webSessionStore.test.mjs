@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  permanentComputerCode,
   WebSessionError,
   WebSessionStore,
 } from "../../tools/web-session-store.mjs";
@@ -11,7 +12,8 @@ describe("Web terminal session store", () => {
     const issued = store.issue(identity());
 
     expect(issued).not.toHaveProperty("token");
-    expect(issued.handoffCode).toMatch(/^[A-Za-z0-9_-]+$/u);
+    expect(issued.handoffCode).toMatch(/^[0-9]{4}$/u);
+    expect(issued.handoffCode).toBe("0001");
     const consumed = store.consumeHandoff(issued.handoffCode);
     expect(consumed.token).toMatch(/^[A-Za-z0-9_-]{20,}$/u);
     expect(store.authenticate(consumed.token).computerId).toBe("c-000001");
@@ -19,6 +21,20 @@ describe("Web terminal session store", () => {
     expect(() => store.consumeHandoff(issued.handoffCode)).toThrow(
       WebSessionError,
     );
+  });
+
+  it("keeps a Computer code stable and rejects an active collision", () => {
+    expect(permanentComputerCode("c-000001")).toBe("0001");
+    expect(permanentComputerCode("computer-10001")).toBe("0001");
+    const store = createStore();
+    store.issue(identity());
+    expect(() =>
+      store.issue({
+        ...identity(),
+        requestId: "r1-2",
+        computerId: "computer-10001",
+      }),
+    ).toThrow(/same four-digit code/u);
   });
 
   it("finalizes expiry once and rejects the expired token", () => {
@@ -38,6 +54,22 @@ describe("Web terminal session store", () => {
       session: { state: "expired", finalReason: "session_expired" },
     });
     expect(() => store.authenticate(token)).toThrow(/no longer active/u);
+  });
+
+  it("expires an unused permanent code after two minutes", () => {
+    let now = 1_000;
+    const store = createStore({ clock: () => now });
+    const issued = store.issue(identity());
+    expect(issued.handoffExpiresAt).toBe(121_000);
+
+    now = 121_001;
+    expect(store.expire()).toBe(1);
+    expect(() => store.consumeHandoff(issued.handoffCode)).toThrow(
+      WebSessionError,
+    );
+    expect(store.issue({ ...identity(), requestId: "r1-2" }).handoffCode).toBe(
+      "0001",
+    );
   });
 
   it("bounds active sessions and event-stream subscribers", () => {

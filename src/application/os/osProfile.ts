@@ -1,5 +1,7 @@
 import type { InMemoryFilesystem } from "../../domain/filesystem/inMemoryFilesystem.js";
 import type { ComputerOsProfile } from "../../domain/computer/computer.js";
+import { formatOsIdentity, getOsIdentity } from "./osIdentity.js";
+import type { OsIdentity } from "./osIdentity.js";
 
 export interface OsBootContext {
   readonly computerName: string;
@@ -22,6 +24,7 @@ export interface OsProfile {
   readonly environment: ReadonlyMap<string, string>;
   readonly home: string;
   readonly id: ComputerOsProfile;
+  readonly identity: OsIdentity;
   readonly pathDialect: PathDialect;
   readonly username: string;
   readonly version: number;
@@ -58,6 +61,7 @@ const dosPathDialect: PathDialect = {
   },
   resolve: (path, currentDirectory, home) => {
     const expanded = path === "~" ? home : path.replaceAll("\\", "/");
+    if (expanded.startsWith("/drives/")) return canonicalize(expanded, true);
     if (/^nul$/iu.test(expanded)) return "/drives/c/nul";
     if (/^con$/iu.test(expanded)) return "/drives/c/con";
     const drive = /^([A-Za-z]):(?:\/(.*))?$/u.exec(expanded);
@@ -77,8 +81,23 @@ const discardDevice = (path: string): VirtualDevice => ({
   write: () => undefined,
 });
 
+const legacyLinuxOsRelease =
+  'NAME="Computer System OS"\nID=computer-system\nVERSION="0.3"\n';
+const linuxOsRelease = [
+  'NAME="Computer System Linux"',
+  `PRETTY_NAME="${formatOsIdentity(getOsIdentity("linux"))}"`,
+  "ID=cs-linux",
+  "ID_LIKE=linux",
+  'VERSION="1.0"',
+  'VERSION_ID="1.0"',
+  'VARIANT="CS-Linux"',
+  "VARIANT_ID=cs-linux",
+  "",
+].join("\n");
+
 const linuxProfile: OsProfile = {
   id: "linux",
+  identity: getOsIdentity("linux"),
   version: 1,
   username: "computer",
   home: "/home/computer",
@@ -91,6 +110,7 @@ const linuxProfile: OsProfile = {
     ["TERM", "computer-system"],
     ["USER", "computer"],
     ["LOGNAME", "computer"],
+    ["OS", "CS-Linux"],
   ]),
   virtualDevices: new Map([["/dev/null", discardDevice("/dev/null")]]),
   boot: (filesystem, context) => {
@@ -107,11 +127,9 @@ const linuxProfile: OsProfile = {
       "/var/log",
     ]);
     resetDirectory(filesystem, "/tmp");
-    ensureFile(
-      filesystem,
-      "/etc/os-release",
-      'NAME="Computer System OS"\nID=computer-system\nVERSION="0.3"\n',
-    );
+    ensureMigratedDefaultFile(filesystem, "/etc/os-release", linuxOsRelease, [
+      legacyLinuxOsRelease,
+    ]);
     ensureFile(filesystem, "/etc/hostname", `${context.computerName}\n`);
     ensureFile(
       filesystem,
@@ -139,6 +157,7 @@ const linuxProfile: OsProfile = {
 
 const dosProfile: OsProfile = {
   id: "dos",
+  identity: getOsIdentity("dos"),
   version: 1,
   username: "COMPUTER",
   home: "/drives/c/users/computer",
@@ -158,10 +177,12 @@ const dosProfile: OsProfile = {
   environment: new Map([
     ["HOME", "/drives/c/users/computer"],
     ["PATH", "C:\\DOS;C:\\COMMAND"],
+    ["PROMPT", "$P$G"],
     ["SHELL", "C:\\COMMAND.COM"],
     ["TERM", "computer-system"],
     ["USER", "COMPUTER"],
     ["LOGNAME", "COMPUTER"],
+    ["OS", "CS-DOS"],
   ]),
   virtualDevices: new Map([
     ["/drives/c/con", discardDevice("/drives/c/con")],
@@ -171,7 +192,6 @@ const dosProfile: OsProfile = {
     ensureDirectories(filesystem, [
       "/drives/c/command",
       "/drives/c/dos",
-      "/drives/c/lib/python",
       "/drives/c/temp",
       "/drives/c/users/computer",
     ]);
@@ -184,7 +204,14 @@ const dosProfile: OsProfile = {
     ensureFile(
       filesystem,
       "/drives/c/config.sys",
-      "FILES=32\r\nBUFFERS=16\r\n",
+      [
+        "DEVICE=C:\\DOS\\HIMEM.SYS",
+        "DEVICE=C:\\DOS\\EMM386.EXE NOEMS",
+        "DOS=HIGH,UMB",
+        "FILES=32",
+        "BUFFERS=16",
+        "",
+      ].join("\r\n"),
     );
   },
 };
@@ -206,6 +233,22 @@ function ensureFile(
   contents: string,
 ): void {
   if (!filesystem.exists(path)) filesystem.writeFile(path, contents);
+}
+
+function ensureMigratedDefaultFile(
+  filesystem: InMemoryFilesystem,
+  path: string,
+  contents: string,
+  legacyDefaults: readonly string[],
+): void {
+  if (!filesystem.exists(path)) {
+    filesystem.writeFile(path, contents);
+    return;
+  }
+  if (filesystem.isDirectory(path)) return;
+  if (legacyDefaults.includes(filesystem.readFile(path))) {
+    filesystem.writeFile(path, contents);
+  }
 }
 
 function resetDirectory(filesystem: InMemoryFilesystem, path: string): void {

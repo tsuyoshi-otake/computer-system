@@ -10,8 +10,9 @@ import {
   discoverMonitorSurface,
   mapMonitorTouch,
 } from "../phase0/monitorSurface.js";
+import { adjacentDesktopComputers } from "./computerComponent.js";
 import { monitorTypeId } from "./probes/monitorProbe.js";
-import { openSelectedComputerTerminal } from "./computerTerminal.js";
+import { requestWebComputerTerminal } from "./webTerminalBridge.js";
 
 export function registerMonitorComponent(
   registry: BlockComponentRegistry,
@@ -72,14 +73,44 @@ function handleMonitorInteraction(
   event.player.sendMessage(
     `monitor_touch north ${String(touch.cell.x)} ${String(touch.cell.y)}`,
   );
+  const computers = new Map(
+    discovery.surface.tiles.flatMap((tile) => {
+      const monitor = block.dimension.getBlock({
+        x: tile.x,
+        y: tile.y,
+        z: block.z,
+      });
+      if (monitor === undefined) return [];
+      return adjacentDesktopComputers(monitor).map((record) => [
+        record.computerId,
+        record,
+      ]);
+    }),
+  );
+  if (computers.size === 0) {
+    event.player.sendMessage(
+      "Monitor is not connected. Place it next to one Desktop Computer System.",
+    );
+    return;
+  }
+  if (computers.size !== 1) {
+    event.player.sendMessage(
+      "Monitor connection is ambiguous. Keep only one adjacent Desktop Computer System.",
+    );
+    return;
+  }
+  const record = computers.values().next().value;
+  if (record === undefined) return;
   system.run((): void => {
     const player = event.player;
-    if (player === undefined) return;
-    void openSelectedComputerTerminal(player).catch((error: unknown) => {
+    if (player === undefined || !player.isValid) return;
+    try {
+      requestWebComputerTerminal(player, record, block);
+    } catch (error: unknown) {
       if (player.isValid)
         player.sendMessage(
           `Monitor terminal failed: ${error instanceof Error ? error.message : String(error)}`,
         );
-    });
+    }
   });
 }

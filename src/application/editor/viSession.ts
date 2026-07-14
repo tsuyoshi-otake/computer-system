@@ -1,26 +1,11 @@
 import { highlightLine, type HighlightedCell } from "./syntaxHighlight.js";
+import type { EditorResult, EditorScreen } from "./editorScreen.js";
 
 export type ViMode = "command" | "insert" | "normal";
 export type ViState = "closed" | "editing";
 
-export interface ViScreen {
-  readonly cursor: { readonly x: number; readonly y: number };
-  readonly rows: readonly (readonly HighlightedCell[])[];
-}
-
-export type ViResult =
-  | { readonly kind: "continue"; readonly screen: ViScreen }
-  | {
-      readonly closeAfter: boolean;
-      readonly contents: string;
-      readonly kind: "save";
-      readonly screen: ViScreen;
-    }
-  | {
-      readonly discardedChanges: boolean;
-      readonly kind: "closed";
-      readonly screen: ViScreen;
-    };
+export type ViScreen = EditorScreen;
+export type ViResult = EditorResult;
 
 const maximumUndoStates = 32;
 

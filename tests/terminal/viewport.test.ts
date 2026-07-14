@@ -14,7 +14,7 @@ import {
 describe("terminal viewport", (): void => {
   it("renders only seven rows so primary form controls stay above the fold", (): void => {
     const terminal = new TerminalBuffer();
-    terminal.write("Computer System OS 0.1 (tty1)");
+    terminal.write("Computer System Linux 1.0 (tty1)");
     terminal.setCursorPosition(1, 3);
     terminal.write("~$ ");
 
@@ -22,7 +22,7 @@ describe("terminal viewport", (): void => {
 
     expect(terminalViewportRows).toBe(7);
     expect(rows).toHaveLength(7);
-    expect(rows[0]).toContain("Computer System OS 0.1 (tty1)");
+    expect(rows[0]).toContain("Computer System Linux 1.0 (tty1)");
     expect(rows[2]).toContain("~$");
   });
 

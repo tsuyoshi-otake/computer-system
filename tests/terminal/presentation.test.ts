@@ -24,7 +24,7 @@ describe("production terminal presentation", (): void => {
   it("renders exact fixed rows and cursor state", (): void => {
     const terminal = new TerminalBuffer();
     terminal.setCursorPosition(1, 1);
-    terminal.write("Computer System OS");
+    terminal.write("Computer System Linux");
     terminal.setCursorPosition(4, 2);
     terminal.setCursorBlink(true);
     const frame = new TerminalPresentation(terminal).frame();
@@ -33,7 +33,7 @@ describe("production terminal presentation", (): void => {
     expect(frame.height).toBe(19);
     expect(frame.rows).toHaveLength(19);
     expect(frame.rows.every((row) => [...row].length === 51)).toBe(true);
-    expect(frame.rows[0]).toMatch(/^Computer System OS/u);
+    expect(frame.rows[0]).toMatch(/^Computer System Linux/u);
     expect(frame.cursor).toEqual({ x: 4, y: 2, blink: true });
   });
 

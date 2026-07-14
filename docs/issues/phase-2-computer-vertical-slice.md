@@ -8,10 +8,10 @@ Parent: #1 Blocked by: #2 and #3
 - [x] Add Computer and Advanced Computer blocks and items.
 - [x] Transfer stable computer identity between block and item forms.
 - [x] Integrate the VM scheduler with Bedrock ticks and lifecycle events.
-- [x] Implement the Computer System OS shell and editor.
+- [x] Implement the CS-Linux and CS-DOS shells and editors.
 - [x] Replace the Phase 0 probe implementation with a production terminal view
-      coordinator shared by Computers, Pocket Computers, and the Monitor
-      fallback.
+      coordinator shared by Desktop and Portable Computer Systems and the
+      Monitor fallback.
 - [ ] Verify the dedicated ComputerCraft-inspired terminal view on the supported
       GDK client at the reference resolution.
 - [x] Model and render 51x19 fixed cells, monospace rows, cursor state, and all
@@ -59,11 +59,11 @@ the Resource Pack's attempted DDUI header/label factory remapping: the native
 large header and right-side scrolling container remain. Indexed exact-RGB planes
 also failed to resolve at runtime and were removed instead of being left as
 test-only behavior. The background palette and disconnect path have not yet been
-recorded manually. A dedicated Pocket Computer texture now renders in the hotbar
-and first-person hand. GDK confirmed a newly issued `computer-5` opens the
-production terminal, remains in its selected slot after Close, and reopens as
-the same identity with restored terminal history after saving and reloading the
-world. A north-face touch on a generated 3x2 Monitor produced
+recorded manually. A dedicated Portable Computer System texture now renders in
+the hotbar and first-person hand. GDK confirmed a newly issued `computer-5`
+opens the production terminal, remains in its selected slot after Close, and
+reopens as the same identity with restored terminal history after saving and
+reloading the world. A north-face touch on a generated 3x2 Monitor produced
 `monitor_touch north 43 2` and opened that same `computer-5` terminal.
 
 A separate clean creative world then passed the complete in-client headless
@@ -109,11 +109,11 @@ Only the final detached browser session emits `terminal_closed`; different
 Computers remain independently writable.
 
 An explicit `WEB_COMPANION_AUTO_OPEN=1` option provides the local one-action
-workflow: using a Pocket Computer opens the newly minted handoff once in the
-host default browser. It is eligible only when the listener and published origin
-are both loopback. Launch work is serialized and bounded, does not use a command
-shell, and never removes the 60-second in-game fallback URL when disabled,
-blocked, or failed.
+workflow: interacting with a Desktop/Advanced block or using a Portable Computer
+System opens the newly minted handoff once in the host default browser. It is
+eligible only when the listener and published origin are both loopback. Launch
+work is serialized and bounded, does not use a command shell, and never removes
+the 60-second in-game fallback URL when disabled, blocked, or failed.
 
 Output selection and clipboard behavior now follow terminal conventions: Ctrl+C
 copies selected output or command text and interrupts only when no text is
@@ -138,9 +138,10 @@ real GDK acceptance because legacy identity snapshots are deliberately ignored.
 mirror left redstone input to right output, break and replace the computer,
 reload the world, and terminate an infinite program.
 
-Open the same terminal from a Computer and Pocket Computer, then from a Monitor
-touch. Exercise typed input, continuous output, all 16 colors, cursor movement,
-Terminate, normal Close, disconnect, and a competing form.
+Open the same terminal from a Desktop Computer System and Portable Computer
+System, then from a Monitor touch. Exercise typed input, continuous output, all
+16 colors, cursor movement, Terminate, normal Close, disconnect, and a competing
+form.
 
 `Expect:` Identity and files remain stable, startup runs after reload, redstone
 events and output work, all lifecycle paths are visible, and Minecraft remains
@@ -186,15 +187,17 @@ production pack build. A preserved-world BDS restart then completed headless run
 
 ## July 2026 virtual hardware update
 
-Computer snapshots now persist a validated CPU clock and RAM size, defaulting
-legacy machines to 33 MHz and 1 MiB. Snapshots containing the former default 20
-kHz clock migrate to 33 MHz. CPU clock controls per-tick CPU-cycle credit under
-the existing global round-robin scheduler cap. Python-generated CS486
-instructions, bounded shell/Bash native work, and CS486 programs share
-deterministic 486DX-equivalent cycle accounting. Aggregate reachable VM data is
-limited by RAM and fails explicitly with `MemoryError`; pressure-triggered live
-graph measurement permits unreachable values to be reclaimed without adding an
-O(N) scan to every instruction.
+Computer snapshots now persist a validated CPU clock and RAM size. Standard
+Desktop Computer Systems use CS486DX at 33 MHz and 2 MiB RAM; Advanced Desktop
+Computer Systems use CS486DX2 at 66 MHz and 8 MiB RAM; Portable Computer Systems
+use CS386SX at 16 MHz and 2 MiB RAM. Exactly recognized former defaults migrate
+to their family profile without overwriting customized hardware. CPU clock
+controls per-tick CPU-cycle credit under the existing global round-robin
+scheduler cap. Python-generated CS486 instructions, bounded shell/Bash native
+work, and CS486 programs share deterministic 486DX-equivalent cycle accounting.
+Aggregate reachable VM data is limited by RAM and fails explicitly with
+`MemoryError`; pressure-triggered live graph measurement permits unreachable
+values to be reclaimed without adding an O(N) scan to every instruction.
 
 Linux reports the same profile through `cpuinfo`, `free`, and dynamic read-only
 `/proc` files. DOS reports it through `CPU`, `MEM`, `SYSTEMINFO`, and `VER`
@@ -216,3 +219,81 @@ four-byte object-relative data layout, C/C++ external zero-argument functions,
 and restricted statement-boundary inline assembly. Local symbol rewriting and
 Map-backed global resolution keep linking linear in instructions, symbols, and
 relocations. Dynamic libraries remain a later increment after ABI validation.
+
+## July 2026 authored machine artwork and display topology update
+
+The seven authored machine/CPU plates are now part of Web Terminal Manual
+Chapter 2. The four machine plates are also the source for transparent 256 px
+inventory icons. A separate bounded generator creates purpose-built 16 px block
+textures, a terrain atlas, and custom geometry for Desktop, Advanced Desktop,
+Monitor, and the open-laptop Portable Computer System rather than stretching an
+isometric plate across cube faces. Resource Pack version 0.1.8 forces clients to
+fetch the shipped artwork.
+
+Desktop and Advanced Desktop browser handoffs now require an adjacent Monitor. A
+bare Computer is selected but does not open Web Terminal. Monitor touch resolves
+the physically adjacent Desktop identity and terminates explicitly for zero or
+multiple candidates. Portable Computer Systems retain a built-in display and can
+open Web Terminal while held or placed. Item-to-block placement and breaking
+transfer the same persistent identity, while stationary redstone synchronization
+explicitly ignores Portable block observations.
+
+`Verify:` Run `npm run validate`.
+
+`Expect:` Formatting, lint, type checking, all 72 test files / 320 tests, and
+the production pack build pass.
+
+`Verify:` Restart the preserved MCP BDS runtime and run the headless probe
+suite.
+
+`Expect:` The suite completes with `failures: 0` and no new diagnostics after
+the restart cursor.
+
+`Verify:` Reconnect Minecraft so Resource Pack 0.1.8 is downloaded, place each
+machine, touch a bare Desktop, then connect one Monitor and repeat. Place and
+break a Portable Computer System.
+
+`Expect:` Authored machine geometry replaces the stone/gold/black placeholders;
+the bare Desktop does not open Web Terminal; exactly one adjacent Monitor does;
+and the Portable opens without a Monitor and keeps the same Computer identity
+across the item/block round trip. This client-visible check remains pending
+because the in-app Browser was unavailable and no Minecraft player was connected
+after the final BDS restart.
+
+## July 2026 orientation, LAN access, login, and EDIT correction
+
+Resource Pack 0.1.9 adds four-way placement traits and transformations to every
+Desktop, Advanced Desktop, Monitor, and Portable block. Programmatic item
+placement selects the player's cardinal direction, redstone mask swaps preserve
+that state, and the Desktop body expands to 15.5 by 16 by 14.5 model units.
+
+The BDS Web companion now selects a physical LAN IPv4 address by default. Each
+Computer has a permanent four-digit connection number; interacting with an
+eligible machine activates that number once for two minutes. Guess attempts are
+rate-limited per client and an active modulo collision fails explicitly. A
+placed-machine session continually requires its player to remain within a
+three-block radius and owns `out_of_range` finalization.
+
+Production CS-Linux now stops on first boot for password plus confirmation and
+stops on later boots for login. `/etc/shadow` stores a salted, bounded 512-round
+SHA-256 record. Native output never echoes the submitted secret; Web input is
+masked and excluded from browser history and completion. Three failed attempts
+produce a two-second VM wait, and MCP shell execution cannot bypass login.
+
+Bare DOS `EDIT` opens an `UNTITLED` buffer backed by `C:\NONAME.TXT`.
+Full-screen terminal color spans now fill each complete row height, removing the
+black gaps between blue EDIT rows.
+
+`Verify:` Run `npm run validate`.
+
+`Expect:` Formatting, lint, type checking, all 73 test files / 331 tests, and
+the production pack build pass.
+
+`Verify:` Restart the preserved MCP BDS runtime, reconnect a real client to
+fetch Resource Pack 0.1.9, and follow the orientation, four-digit activation,
+three-block cutoff, CS-Linux login, and bare EDIT checks in
+`docs/manual-verification.md`.
+
+`Expect:` Headless probes complete without new diagnostics; client-visible
+orientation, password masking, distance finalization, and gap-free EDIT
+rendering match the documented states.

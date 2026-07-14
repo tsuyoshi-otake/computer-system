@@ -31,6 +31,16 @@ describe("BDS debug session", () => {
     ).toBe(true);
     expect(
       isAllowedBdsCommand(
+        "execute as @a at @s run scriptevent computer_system:probe computer",
+      ),
+    ).toBe(true);
+    expect(
+      isAllowedBdsCommand(
+        "execute as @a at @s run scriptevent computer_system:probe portable",
+      ),
+    ).toBe(true);
+    expect(
+      isAllowedBdsCommand(
         "scriptevent computer_system:debug-command dabc-1 c-9dwhx6 vwhoami",
       ),
     ).toBe(true);
@@ -38,6 +48,11 @@ describe("BDS debug session", () => {
     expect(isAllowedBdsCommand("stop")).toBe(false);
     expect(isAllowedBdsCommand("op @a")).toBe(false);
     expect(isAllowedBdsCommand("say hello")).toBe(false);
+    expect(
+      isAllowedBdsCommand(
+        "execute as @a at @s run scriptevent computer_system:probe pocket",
+      ),
+    ).toBe(false);
     expect(isAllowedBdsCommand("scriptevent computer_system:probe ui")).toBe(
       false,
     );

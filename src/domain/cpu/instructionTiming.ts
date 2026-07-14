@@ -10,6 +10,7 @@ export interface InstructionTimingContext {
  * Deterministic O(1) instruction timing for the selected Computer System CPU.
  * CS386SX arithmetic follows Intel 80386 clocks. Four-byte RAM and stack
  * transfers pay an additional bus cycle pair for the 386SX 16-bit data bus.
+ * CS486DX2 retains the CS486DX instruction costs at twice the nominal clock.
  * CS-only print/syscall costs remain explicit sandbox-runtime charges.
  */
 export function instructionCycleCost(

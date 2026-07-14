@@ -58,16 +58,24 @@ describe("Web terminal field manual", () => {
 
     for (const required of [
       "CS486DX",
+      "CS486DX2",
       "CS386SX",
       "33 MHz",
+      "66 MHz",
+      "8 MiB",
       "386SX 16 MHz",
       "2 MB RAM",
+      "3,300,000 cycles/tick",
       "800,000 cycles/tick",
       "16-bit data bus",
       "operand early-out",
       "Assembly language",
       "MicroPython",
       "Computer System Bash",
+      "Computer System Linux 1.0",
+      "CS-Linux 1.0",
+      "Computer System DOS 6.2",
+      "CS-DOS 6.2",
       "BASIC",
       "C and C++",
       "CS486OBJ",
@@ -77,8 +85,15 @@ describe("Web terminal field manual", () => {
       "MemoryAccessError",
       "Amdahl / Gustafson",
       "Terminal control and source editing",
+      "DOS-style EDIT",
+      "Save, Discard, or Cancel",
       "Connecting programs to Minecraft",
-      "Operating in the DOS environment",
+      "Requires exactly one adjacent Monitor",
+      "held or placed",
+      "Breaking it returns an identity-carrying Portable Computer System item",
+      "Operating CS-DOS 6.2 on the CS386SX portable",
+      "2000-02-29",
+      "2038 boundary",
       "Build a signal threshold controller",
       "Runtime function reference",
       "Limits, units, and terminology",
@@ -97,11 +112,63 @@ describe("Web terminal field manual", () => {
     expect(architecture?.html).toContain(
       'alt="Desktop Computer System with a 486DX 33 MHz system unit',
     );
+    for (const image of [
+      "/assets/machines/cs-computer.png",
+      "/assets/machines/cs-advanced-computer.png",
+      "/assets/machines/cs-monitor.png",
+      "/assets/machines/cs-portable-computer.png",
+      "/assets/cpu/CS386SX.png",
+      "/assets/cpu/CS486DX.png",
+      "/assets/cpu/CS486DX2.png",
+    ]) {
+      expect(architecture?.html).toContain(`src="${image}"`);
+    }
+    expect(architecture?.html).toContain(
+      'alt="CS386SX processor identification plate"',
+    );
+    expect(architecture?.html).toContain(
+      'alt="CS486DX processor identification plate"',
+    );
+    expect(architecture?.html).toContain(
+      'alt="CS486DX2 processor identification plate"',
+    );
     expect(dos?.html).toContain(
       'src="/assets/manual/portable-computer-system.png"',
     );
     expect(dos?.html).toContain(
       'alt="Portable 386SX 16 MHz Computer System with 2 MB RAM',
+    );
+  });
+
+  it("documents the bounded DOS 6.2-style runtime without claiming native emulation", () => {
+    const dos =
+      manualChapters.find(({ id }) => id === "dos-profile")?.html ?? "";
+
+    for (const required of [
+      "CONFIG.SYS",
+      "AUTOEXEC.BAT",
+      "HIMEM.SYS",
+      "EMM386.EXE NOEMS",
+      "DOS=HIGH,UMB",
+      "Conventional",
+      "Upper memory blocks",
+      "Extended / XMS",
+      "protected sandbox",
+      "virtual-8086",
+      "%ERRORLEVEL%",
+      "C++",
+      "MicroPython commands",
+      "BIOS interrupts",
+      "TSR",
+      "256",
+    ]) {
+      expect(dos).toContain(required);
+    }
+    expect(dos).toContain(
+      "A downloaded DOS <code>.COM</code> or <code>.EXE</code> cannot run",
+    );
+    expect(dos).toContain(
+      "No paging, swap, process table, or MMU page emulation",
     );
   });
 });

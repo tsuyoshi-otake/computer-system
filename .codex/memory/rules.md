@@ -14,7 +14,7 @@
   resolve indexed text, and native label/header templates ignored attempted
   factory remapping. Keep generator tests, but require a client check for
   visible layout, colors, and scrolling.
-- A Bedrock custom item's `onUse` needs a built-in use driver. For the Pocket
+- A Bedrock custom item's `onUse` needs a built-in use driver. For the Portable
   Computer, Food plus a 0.05-second use modifier makes a click observable while
   the terminal form interrupts consumption; verify on-client that the item stays
   in its slot and keeps its dynamic identity across a world reload.
@@ -65,3 +65,45 @@
   process into timing creates a reverse dependency when the process selects its
   timing model. — Evidence: the architecture cycle test passes after extracting
   `instructionSet.ts` from `cs486.ts`.
+- A hardware capability gate must cover every user-visible entry point: boot
+  artifact selection, shell/debug dispatch, and MCP reporting. Keep the flag on
+  the CPU specification so one frontend cannot silently re-enable an unavailable
+  language. — Evidence: portable CS386SX tests retain C++ execution, ignore a
+  user `/startup.py`, and return status 127 for MCP MicroPython.
+- DOS compatibility boot must parse bounded files sequentially and surface every
+  unsupported `CONFIG.SYS` directive. Store modeled HIMEM/EMM386/DOS-high flags
+  in the same session environment consumed by `MEM` so startup, diagnostics, and
+  batch execution cannot disagree. — Evidence: DOS profile tests verify the
+  conventional/UMB/XMS map, boot variables, explicit warnings, and line/depth
+  termination.
+- Gate profile-specific interactive commands twice: filter discovery and
+  completion in the command runtime, and guard the `ShellSession` TUI intercept
+  itself. A runtime-only gate can be bypassed when the session starts an editor
+  before dispatch. — Evidence: Linux returns status 127 for `edit` and status 1
+  for `which edit`, while DOS opens the bounded full-screen EDIT session and MCP
+  rejects it as TUI without retaining editor state.
+- Treat a portable item's persistent Computer identity separately from its
+  current player session owner. On an owner conflict, inspect only the bounded
+  former-owner inventory, reject a true duplicate, and otherwise explicitly
+  finalize that Computer's former native and Web sessions before reassignment;
+  do not disconnect the player's unrelated Computers. — Evidence: lifecycle and
+  Bedrock adapter tests cover duplicate rejection, transfer finalization, and
+  scoped session teardown.
+- Migrate persisted family hardware only from an exactly recognized former
+  default. Standard Desktop, Advanced Desktop, and Portable profiles may evolve,
+  but a customized CPU, clock, or RAM value remains authoritative. — Evidence:
+  hardware profile tests cover CS486DX 33 MHz/2 MiB, CS486DX2 66 MHz/8 MiB,
+  CS386SX 16 MHz/2 MiB, one-time migration, and customized-profile preservation.
+- Keep high-resolution isometric machine plates as manual/inventory sources and
+  derive purpose-built block geometry, face textures, and terrain-atlas entries
+  separately. Stretching one isometric view across cube faces cannot represent a
+  placed machine. — Evidence: machine asset tests cover four bounded geometries,
+  six 16 px face textures, the terrain atlas, and four transparent item icons;
+  the production pack builds with no new BDS diagnostics.
+- Resolve hardware-gated terminal access from current physical topology at every
+  entry point. A selected Desktop identity is not proof that a Monitor exists;
+  require exactly one adjacent Desktop/Monitor connection and terminate missing
+  or ambiguous paths explicitly. Portable machines may bypass that gate only as
+  an explicit built-in-display capability. — Evidence: Bedrock adapter tests
+  cover the Desktop gate, adjacent Monitor resolution, Portable held/placed
+  paths, and stationary-redstone exclusion for Portable blocks.

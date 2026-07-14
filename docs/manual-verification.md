@@ -12,8 +12,22 @@ Record the exact client and server versions with each result.
 
 Verify lifecycle and persistence:
 
-- Place each Computer family and confirm interaction opens its 51x19 terminal.
-- Run `edit /startup.py`, enter a program, and finish with `.save`.
+- Place each Computer family while facing north, east, south, and west. Confirm
+  the front faces the placer, the Desktop body is wider than the Monitor base,
+  and redstone output changes do not reset orientation.
+- Put one Monitor adjacent to a Desktop, interact within three blocks, and
+  verify Minecraft prints the stable LAN entry page plus a permanent four-digit
+  number. Enter it within two minutes. Move beyond three blocks and expect one
+  `out_of_range` close; the same number must be reused on the next activation.
+- On a fresh CS-Linux Computer, set an eight-or-more-character password twice.
+  Confirm input is masked and absent from command history, then reboot and
+  verify a wrong password is rejected while the correct password reaches `~$ `.
+- On a DOS-profile Portable Computer, run `EDIT C:\DEMO.TXT`, enter text in the
+  blue full-screen viewport, save with F2, and exit through File > Exit. Modify
+  it again and verify the Save/Discard/Cancel prompt owns the dirty exit. On a
+  Linux Computer, verify `edit` is unavailable and use `vi /startup.py`. Also
+  run bare `EDIT`, type text, press F2, and verify `C:\NONAME.TXT` is created
+  without horizontal gaps between the blue editor rows.
 - Break the Computer, confirm exactly one non-stackable item is returned, place
   it elsewhere, and confirm its numeric computer ID and file remain unchanged.
 - Reload the world and confirm `startup.py` runs from a fresh VM.
@@ -30,7 +44,8 @@ and calls `redstone.set_output("right", value)`:
 - Reload and repeat to prove identity, program, and output configuration
   survive.
 
-Verify the shared terminal from a Computer, Pocket Computer, and Monitor touch:
+Verify the shared terminal from a Computer, Portable Computer System, and
+Monitor touch:
 
 - All 51 columns and 19 rows remain visible with monospace alignment.
 - Cursor position/blink and every foreground/background combination from the 16
@@ -160,7 +175,7 @@ An invalid player maps to `disconnected`, and `UserBusy` maps to
 The following checks remain manual when their probes are implemented:
 
 - monitor text readability and interaction alignment;
-- computer, pocket computer, and turtle visual appearance;
+- computer, portable computer, and turtle visual appearance;
 - registered sound audibility, pitch, attenuation, and note timing;
 - overall keyboard, mouse, touch, and controller usability.
 
@@ -186,17 +201,18 @@ The automated BDS suite proves that both stable API calls are accepted. This
 manual check covers only audibility and perceived pitch; it does not replace the
 automated result.
 
-## Phase 0 Pocket Computer checklist
+## Phase 0 Portable Computer System checklist
 
 Run this command as a player:
 
 ```text
-/scriptevent computer_system:probe pocket
+/scriptevent computer_system:probe portable
 ```
 
 Verify:
 
-- Chat reports that one Pocket Computer was granted with an instance ID.
+- Chat reports that one Portable Computer System was granted with an instance
+  ID.
 - The item appears with a clock icon and cannot stack above one.
 - Holding and using the item opens `Computer System Phase 0 Terminal`.
 - Dropping the item closes ownership cleanly; picking it up and using it opens
@@ -207,10 +223,10 @@ covers the real player's item-use interaction and presentation only.
 
 ### Result: Windows GDK 1.26.33
 
-- Item grant and presentation: `PASS` — the Pocket Computer was granted and
-  appeared as a usable held item.
-- Item use: `PASS` — using the held Pocket Computer opened the Computer System
-  terminal.
+- Item grant and presentation: `PASS` — the Portable Computer System was granted
+  and appeared as a usable held item.
+- Item use: `PASS` — using the held Portable Computer System opened the Computer
+  System terminal.
 - Drop and pickup reuse: `NOT_RECORDED` — identity preservation through an item
   entity is covered by BDS, but the player interaction was not separately
   recorded in this manual run.
@@ -250,12 +266,12 @@ Use a clean managed debug world for this checklist. Identity snapshot schema 2
 does not migrate the previous sequential `computer-N` registry.
 
 1. Set `WEB_COMPANION_AUTO_OPEN=1`, run `npm run dev:bds:web`, connect
-   Minecraft, and use a Pocket Computer.
+   Minecraft, and use a Portable Computer System.
 2. Confirm the default browser opens without typing the URL and the printed
    one-use fallback opens a Computer whose identity matches
    `c-[0-9a-hjkmnp-tv-z]{6}` and whose status shows `CONTROL`.
-3. Use the same Pocket Computer again to mint a second link and open it in a
-   second browser session.
+3. Use the same Portable Computer System again to mint a second link and open it
+   in a second browser session.
 4. Confirm the second session shows `VIEW ONLY`, its inline input is disabled,
    and the first session remains writable.
 5. Choose **Take control** in the second session. Confirm it changes to

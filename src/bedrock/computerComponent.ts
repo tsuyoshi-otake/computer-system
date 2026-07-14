@@ -24,9 +24,15 @@ import {
   ensureComputer,
   identityService,
 } from "./computerRegistry.js";
-import { openComputerTerminal } from "./computerTerminal.js";
+import { selectComputerTerminal } from "./computerTerminal.js";
+import { requestWebComputerTerminal } from "./webTerminalBridge.js";
+import {
+  placeMachineFacingPlayer,
+  replaceMachinePreservingDirection,
+} from "./machinePlacement.js";
 
 export { computerIdentityProperty } from "./computerRegistry.js";
+export const desktopComputerDisplayName = "Desktop Computer System";
 const blockComponentId = "computer_system:computer";
 const itemComponentId = "computer_system:computer_item";
 const breakingBlocks = new Set<string>();
@@ -61,6 +67,13 @@ export function startComputerComponents(): void {
   system.runInterval(syncComputerOutputs, 1);
 }
 
+export function giveNewComputerItem(
+  player: Player,
+  family: ComputerFamily = "standard",
+): void {
+  giveComputerItem(player, undefined, family);
+}
+
 function handleItemUseOn(
   event: ItemComponentUseOnEvent,
   parameters: CustomComponentParameters,
@@ -81,7 +94,7 @@ function handleItemUseOn(
   }
   try {
     ensureComputer(result.computerId, family);
-    target.setType(blockType(family, 0));
+    placeMachineFacingPlayer(target, blockType(family, 0), event.source);
     const inventory = event.source.getComponent(
       EntityComponentTypes.Inventory,
     )?.container;
@@ -142,15 +155,44 @@ function handleInteraction(event: BlockComponentPlayerInteractEvent): void {
     event.player.sendMessage("Computer identity is unavailable.");
     return;
   }
-  const record = ensureComputer(observation.computerId, observation.family);
+  const player = event.player;
+  selectComputerTerminal(player.id, observation.computerId);
+  if (!hasAdjacentMonitor(event.block)) {
+    player.sendMessage(
+      "Computer selected. Place a Monitor next to it to open Web Terminal.",
+    );
+    return;
+  }
   system.run((): void => {
-    if (event.player === undefined) return;
-    const player = event.player;
-    void openComputerTerminal(player, record).catch((error: unknown) => {
-      if (player.isValid)
+    if (!player.isValid) return;
+    try {
+      const record = ensureComputer(observation.computerId, observation.family);
+      requestWebComputerTerminal(player, record, event.block);
+    } catch (error: unknown) {
+      if (player.isValid) {
         player.sendMessage(`Computer terminal failed: ${errorMessage(error)}`);
-    });
+      }
+    }
   });
+}
+
+export function adjacentDesktopComputers(
+  block: Block,
+): readonly ReturnType<typeof ensureComputer>[] {
+  const records = new Map<string, ReturnType<typeof ensureComputer>>();
+  for (const adjacentBlock of adjacentBlocks(block)) {
+    if (adjacentBlock === undefined || !isComputerBlock(adjacentBlock.typeId))
+      continue;
+    const observation = identityService().atPhysicalKey(
+      blockKey(adjacentBlock),
+    );
+    if (observation === undefined) continue;
+    records.set(
+      observation.computerId,
+      ensureComputer(observation.computerId, observation.family),
+    );
+  }
+  return [...records.values()];
 }
 
 function handleRedstoneUpdate(event: BlockComponentRedstoneUpdateEvent): void {
@@ -181,22 +223,30 @@ function syncComputerOutputs(): void {
     if (observation === undefined) continue;
     const block = blockFromKey(observation.physicalKey);
     const record = computerHost.get(observation.computerId);
-    if (block === undefined || record === undefined) continue;
+    if (
+      block === undefined ||
+      record === undefined ||
+      !isComputerBlock(block.typeId)
+    )
+      continue;
     const expected = blockType(observation.family, record.redstone.outputMask);
-    if (block.typeId !== expected) block.setType(expected);
+    if (block.typeId !== expected)
+      replaceMachinePreservingDirection(block, expected);
   }
 }
 
 function giveComputerItem(
   player: Player,
-  computerId: string,
+  computerId: string | undefined,
   family: ComputerFamily,
 ): void {
   const item = new ItemStack(
     `computer_system:${family === "advanced" ? "advanced_computer" : "computer"}_item`,
     1,
   );
-  item.setDynamicProperty(computerIdentityProperty, computerId);
+  if (computerId !== undefined) {
+    item.setDynamicProperty(computerIdentityProperty, computerId);
+  }
   const inventory = player.getComponent(
     EntityComponentTypes.Inventory,
   )?.container;
@@ -223,6 +273,12 @@ function isComputerBlock(typeId: string): boolean {
   return (
     typeId.startsWith("computer_system:computer_") ||
     typeId.startsWith("computer_system:advanced_computer_")
+  );
+}
+
+function hasAdjacentMonitor(block: Block): boolean {
+  return adjacentBlocks(block).some(
+    (candidate) => candidate?.typeId === "computer_system:monitor",
   );
 }
 
