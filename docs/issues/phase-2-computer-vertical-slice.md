@@ -273,7 +273,11 @@ Computer has a permanent four-digit connection number; interacting with an
 eligible machine activates that number once for two minutes. Guess attempts are
 rate-limited per client and an active modulo collision fails explicitly. A
 placed-machine session continually requires its player to remain within a
-three-block radius and owns `out_of_range` finalization.
+three-block radius. Leaving pauses it as `out_of_range`; returning resumes it as
+`in_range` without allocating another session. The browser stores the permanent
+number locally and updates its bookmark to `/?computer=NNNN`; bookmark reloads
+rotate the bearer token. The code index is O(1), range logs are transition-only,
+and the single reconnect loop uses bounded exponential backoff.
 
 Production CS-Linux now stops on first boot for password plus confirmation and
 stops on later boots for login. `/etc/shadow` stores a salted, bounded 512-round
@@ -294,14 +298,14 @@ black gaps between blue EDIT rows.
 
 `Verify:` Run `npm run validate`.
 
-`Expect:` Formatting, lint, type checking, all 73 test files / 331 tests, and
-the production pack build pass.
+`Expect:` Formatting, lint, type checking, all tests, and the production pack
+build pass.
 
 `Verify:` Restart the preserved MCP BDS runtime, reconnect a real client to
 fetch Resource Pack 0.1.9, and follow the orientation, four-digit activation,
-three-block cutoff, CS-Linux login, and bare EDIT checks in
-`docs/manual-verification.md`.
+three-block pause/resume, bookmark reconnect, CS-Linux login, and bare EDIT
+checks in `docs/manual-verification.md`.
 
 `Expect:` Headless probes complete without new diagnostics; client-visible
-orientation, password masking, distance finalization, and gap-free EDIT
+orientation, password masking, distance pause/resume, and gap-free EDIT
 rendering match the documented states.

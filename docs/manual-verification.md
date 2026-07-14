@@ -17,8 +17,13 @@ Verify lifecycle and persistence:
   and redstone output changes do not reset orientation.
 - Put one Monitor adjacent to a Desktop, interact within three blocks, and
   verify Minecraft prints the stable LAN entry page plus a permanent four-digit
-  number. Enter it within two minutes. Move beyond three blocks and expect one
-  `out_of_range` close; the same number must be reused on the next activation.
+  number. Enter it within two minutes. Confirm the URL becomes
+  `/?computer=NNNN`, the number is in browser local storage, and no bearer token
+  appears in the query. Move beyond three blocks and expect one `out_of_range`
+  transition with input disabled but no session close. Return within three
+  blocks and expect one automatic `in_range` resume. Reload the bookmark and
+  verify it reconnects after proximity is valid, rotates the bearer token, and
+  does not create parallel reconnect requests.
 - On a fresh CS-Linux Computer, set an eight-or-more-character password twice.
   Confirm the boot banner, first-boot notice, and `New password:` prompt each
   appear exactly once; input is masked and absent from command history. Reboot

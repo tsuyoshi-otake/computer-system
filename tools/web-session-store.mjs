@@ -28,6 +28,7 @@ export class WebSessionStore {
     this.sessionsById = new Map();
     this.sessionsByToken = new Map();
     this.sessionsByComputer = new Map();
+    this.sessionsByCode = new Map();
     this.writersByComputer = new Map();
     this.handoffs = new Map();
   }
@@ -44,6 +45,18 @@ export class WebSessionStore {
     }
     const now = this.clock();
     const handoffCode = permanentComputerCode(identity.computerId);
+    const codeOwner = this.sessionsByCode.get(handoffCode);
+    if (
+      codeOwner !== undefined &&
+      isActive(codeOwner) &&
+      codeOwner.computerId !== identity.computerId
+    ) {
+      throw new WebSessionError(
+        "code_collision",
+        "Another active Computer has the same four-digit code.",
+        409,
+      );
+    }
     const conflicting = this.handoffs.get(handoffCode);
     if (conflicting !== undefined) {
       if (conflicting.computerId !== identity.computerId) {
@@ -64,6 +77,7 @@ export class WebSessionStore {
       playerId: identity.playerId,
       computerId: identity.computerId,
       mode: "viewer",
+      access: "in_range",
       state: "issued",
       createdAt: now,
       expiresAt: now + this.sessionTtlMs,
@@ -128,6 +142,31 @@ export class WebSessionStore {
     return session;
   }
 
+  reconnect(code) {
+    if (typeof code !== "string" || !handoffPattern.test(code)) {
+      throw unauthorized();
+    }
+    const session = this.sessionsByCode.get(code);
+    if (session === undefined || !isActive(session)) throw unauthorized();
+    if (session.access !== "in_range") {
+      throw new WebSessionError(
+        "out_of_range",
+        "Move within 3 blocks of the Computer to reconnect.",
+        409,
+      );
+    }
+    const nextToken = this.uniqueValue(32, this.sessionsByToken);
+    this.emit(session, {
+      type: "replaced",
+      session: this.publicSession(session),
+    });
+    session.listeners.clear();
+    this.sessionsByToken.delete(session.token);
+    session.token = nextToken;
+    this.sessionsByToken.set(nextToken, session);
+    return { token: nextToken, session: this.publicSession(session) };
+  }
+
   subscribe(token, listener) {
     const session = this.authenticate(token);
     if (session.listeners.size >= this.maxConnectionsPerSession) {
@@ -162,10 +201,37 @@ export class WebSessionStore {
     return true;
   }
 
+  updateAccess(sessionId, access) {
+    const session = this.sessionsById.get(sessionId);
+    if (
+      session === undefined ||
+      !isActive(session) ||
+      (access !== "in_range" && access !== "out_of_range")
+    ) {
+      return false;
+    }
+    if (session.access === access) return true;
+    session.access = access;
+    this.emit(session, {
+      type: "access",
+      session: this.publicSession(session),
+    });
+    return true;
+  }
+
   isWriter(sessionId) {
     const session = this.sessionsById.get(sessionId);
     return (
       session !== undefined && isActive(session) && session.mode === "writer"
+    );
+  }
+
+  isInRange(sessionId) {
+    const session = this.sessionsById.get(sessionId);
+    return (
+      session !== undefined &&
+      isActive(session) &&
+      session.access === "in_range"
     );
   }
 
@@ -191,6 +257,7 @@ export class WebSessionStore {
     }
     session.mode = "writer";
     this.writersByComputer.set(session.computerId, sessionId);
+    this.sessionsByCode.set(session.handoffCode, session);
     this.emit(session, { type: "state", session: this.publicSession(session) });
     return this.publicSession(session);
   }
@@ -246,6 +313,8 @@ export class WebSessionStore {
       requestId: session.requestId,
       computerId: session.computerId,
       mode: session.mode,
+      access: session.access,
+      connectionCode: session.handoffCode,
       state: session.state,
       createdAt: session.createdAt,
       expiresAt: session.expiresAt,
@@ -293,6 +362,9 @@ export class WebSessionStore {
       this.sessionsByComputer.delete(session.computerId);
     if (this.writersByComputer.get(session.computerId) === session.sessionId) {
       this.writersByComputer.delete(session.computerId);
+    }
+    if (this.sessionsByCode.get(session.handoffCode) === session) {
+      this.sessionsByCode.delete(session.handoffCode);
     }
     session.state = state;
     session.finalReason = reason;

@@ -182,10 +182,15 @@ explicitly rather than connecting the wrong Computer. Opening the entry page and
 entering the active number exchanges it for a browser-only bearer token that is
 never written to BDS logs. The authenticated session lasts at most 30 minutes.
 Placed machines remain usable only while that player stays within three blocks;
-leaving the radius finalizes the session as `out_of_range`. A held Portable is
-the access point itself and does not use the placed-block distance check. If the
-companion does not answer within 10 seconds, the add-on opens the native in-game
-terminal instead.
+leaving the radius pauses input as `out_of_range` without destroying the bounded
+session, and returning resumes the existing browser stream. After the first
+successful connection the browser stores only the permanent four-digit number in
+local storage and changes the bookmarkable URL to `/?computer=NNNN`. Opening
+that bookmark rotates the bearer token and reconnects through one deduplicated,
+30-minute bounded exponential-backoff loop. No bearer token or password is put
+in the query. Code lookup is O(1), and access notifications are emitted only on
+range-state transitions rather than on every scheduler check. A held Portable is
+the access point itself and does not use the placed-block distance check.
 
 Each two-minute activation is already bound to one Computer; the companion root
 page accepts only an active four-digit number, not an arbitrary Computer ID.

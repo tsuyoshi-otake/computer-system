@@ -133,7 +133,8 @@ describe("Bedrock terminal adapters", () => {
     expect(bridge).toContain("detached.wasLast");
     expect(bridge).toContain("rejectSession");
     expect(bridge).toContain("x * x + y * y + z * z <= 9");
-    expect(bridge).toContain('finalizeSession(session, "out_of_range")');
+    expect(bridge).toContain('setSessionAccess(session, "out_of_range")');
+    expect(bridge).toContain('setSessionAccess(session, "in_range")');
     expect(bridge).toContain("Connection code:");
   });
 

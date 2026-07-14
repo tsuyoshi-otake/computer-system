@@ -14,6 +14,7 @@ const projectRoot = path.resolve(
 );
 const requestMarker = "CS_WEB_SESSION_REQUEST ";
 const snapshotMarker = "CS_WEB_TERMINAL ";
+const accessMarker = "CS_WEB_ACCESS ";
 const completionMarker = "CS_WEB_COMPLETION ";
 const finalMarker = "CS_WEB_SESSION_FINAL ";
 const maximumOperationWaitersPerComputer = 8;
@@ -251,6 +252,15 @@ export class WebCompanionServer {
       return;
     }
 
+    const access = markerPayload(entry.line, accessMarker);
+    if (access !== undefined) {
+      const payload = JSON.parse(access);
+      if (typeof payload.sessionId === "string") {
+        this.store.updateAccess(payload.sessionId, payload.access);
+      }
+      return;
+    }
+
     const final = markerPayload(entry.line, finalMarker);
     if (final !== undefined) {
       const payload = JSON.parse(final);
@@ -396,7 +406,7 @@ export class WebCompanionServer {
       const code = url.pathname.slice(3);
       const consumed = this.consumeHandoffCode(request, code);
       response.writeHead(302, {
-        Location: `/#${consumed.token}`,
+        Location: `/?computer=${encodeURIComponent(code)}#${consumed.token}`,
         "Cache-Control": "no-store",
       });
       response.end();
@@ -406,7 +416,14 @@ export class WebCompanionServer {
       requireSameOrigin(request, this.allowedOrigins);
       const body = await readJson(request, 1_024);
       const consumed = this.consumeHandoffCode(request, body?.code);
-      writeJson(response, 200, { token: consumed.token });
+      writeJson(response, 200, { code: body.code, token: consumed.token });
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/api/reconnect") {
+      requireSameOrigin(request, this.allowedOrigins);
+      const body = await readJson(request, 1_024);
+      const reconnected = this.reconnectCode(request, body?.code);
+      writeJson(response, 200, reconnected);
       return;
     }
     if (request.method === "GET" && url.pathname === "/api/session") {
@@ -473,6 +490,10 @@ export class WebCompanionServer {
         return;
       }
       blocked = !response.write(`${JSON.stringify(event)}\n`);
+      if (event.type === "replaced") {
+        response.end();
+        return;
+      }
       if (blocked) {
         response.once("drain", () => {
           blocked = false;
@@ -510,6 +531,7 @@ export class WebCompanionServer {
   async relayInput(session, body) {
     return this.serializeComputerOperation(session.computerId, async () => {
       const active = this.store.authenticate(session.token);
+      this.requireInRange(active);
       if (!this.store.isWriter(active.sessionId)) {
         throw new WebSessionError(
           "read_only",
@@ -576,6 +598,7 @@ export class WebCompanionServer {
   async completeInput(session, body) {
     return this.serializeComputerOperation(session.computerId, async () => {
       const active = this.store.authenticate(session.token);
+      this.requireInRange(active);
       if (!this.store.isWriter(active.sessionId)) {
         throw new WebSessionError(
           "read_only",
@@ -648,6 +671,7 @@ export class WebCompanionServer {
   async resizeTerminal(session, body) {
     return this.serializeComputerOperation(session.computerId, async () => {
       const active = this.store.authenticate(session.token);
+      this.requireInRange(active);
       if (!this.store.isWriter(active.sessionId)) {
         throw new WebSessionError(
           "read_only",
@@ -682,6 +706,7 @@ export class WebCompanionServer {
   async takeControl(session) {
     return this.serializeComputerOperation(session.computerId, async () => {
       const active = this.store.authenticate(session.token);
+      this.requireInRange(active);
       if (this.store.isWriter(active.sessionId)) {
         return this.store.publicSession(active);
       }
@@ -755,6 +780,29 @@ export class WebCompanionServer {
     }
   }
 
+  reconnectCode(request, code) {
+    const client = request.socket.remoteAddress ?? "unknown";
+    this.requireHandoffAttemptAllowed(client);
+    try {
+      const reconnected = this.store.reconnect(code);
+      this.handoffFailures.delete(client);
+      return reconnected;
+    } catch (error) {
+      if (error?.code !== "out_of_range") this.recordHandoffFailure(client);
+      throw error;
+    }
+  }
+
+  requireInRange(session) {
+    if (!this.store.isInRange(session.sessionId)) {
+      throw new WebSessionError(
+        "out_of_range",
+        "Move within 3 blocks of the Computer to continue.",
+        409,
+      );
+    }
+  }
+
   recordHandoffFailure(client) {
     const now = Date.now();
     const existing = this.handoffFailures.get(client);
@@ -816,6 +864,7 @@ export class WebCompanionServer {
     }
     const status = error instanceof WebSessionError ? error.status : 500;
     writeJson(response, status, {
+      code: error instanceof WebSessionError ? error.code : "internal",
       error: status >= 500 ? "Internal companion error." : message(error),
     });
   }

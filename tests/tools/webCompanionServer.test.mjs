@@ -157,7 +157,7 @@ describe("Web companion HTTP server", () => {
     expect(bds.commands[0]).toContain("http://192.0.2.1:");
     const localOrigin = new URL(launches[0]).origin;
     const handoff = await fetch(launches[0], { redirect: "manual" });
-    const token = handoff.headers.get("location").slice(2);
+    const token = handoffToken(handoff);
     const input = await post(localOrigin, "/api/input", token, {
       kind: "line",
       value: "local-auto-open",
@@ -338,8 +338,10 @@ describe("Web companion HTTP server", () => {
     const handoff = await fetch(handoffUrl, { redirect: "manual" });
     expect(handoff.status).toBe(302);
     const location = handoff.headers.get("location");
-    expect(location).toMatch(/^\/#[-_A-Za-z0-9]+$/u);
-    const token = location.slice(2);
+    expect(location).toMatch(/^\/\?computer=0001#[-_A-Za-z0-9]+$/u);
+    const redirect = new URL(location, status.origin);
+    expect([...redirect.searchParams]).toEqual([["computer", "0001"]]);
+    const token = redirect.hash.slice(1);
     expect((await fetch(handoffUrl, { redirect: "manual" })).status).toBe(401);
 
     expect((await fetch(`${status.origin}/api/session`)).status).toBe(401);
@@ -447,7 +449,7 @@ describe("Web companion HTTP server", () => {
     const sessionId = bds.commands[0].split(" ")[3];
     const handoffUrl = bds.commands[0].split(" ").at(-1);
     const handoff = await fetch(handoffUrl, { redirect: "manual" });
-    const token = handoff.headers.get("location").slice(2);
+    const token = handoffToken(handoff);
 
     bds.log(
       `CS_WEB_TERMINAL ${JSON.stringify({
@@ -514,6 +516,61 @@ describe("Web companion HTTP server", () => {
         })
       ).status,
     ).toBe(409);
+  });
+
+  it("reconnects a remembered code only after proximity resumes", async () => {
+    const bds = new FakeBds();
+    const server = new WebCompanionServer({ bds, port: 0 });
+    servers.push(server);
+    const status = await server.start();
+    bds.log(
+      'CS_WEB_SESSION_REQUEST {"requestId":"r1-1","playerId":"player-1","computerId":"c-000001"}',
+    );
+    await until(() => bds.commands.length === 1);
+    const connected = await consumeResponse(bds.commands[0]);
+    const session = server.store.activeSessions()[0];
+    server.store.updateAccess(session.sessionId, "out_of_range");
+
+    expect(
+      (
+        await post(status.origin, "/api/input", connected.token, {
+          kind: "line",
+          value: "must-not-relay",
+        })
+      ).status,
+    ).toBe(409);
+    expect(bds.commands).toHaveLength(1);
+    const waiting = await fetch(`${status.origin}/api/reconnect`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Origin: status.origin,
+      },
+      body: JSON.stringify({ code: "0001" }),
+    });
+    expect(waiting.status).toBe(409);
+
+    server.store.updateAccess(session.sessionId, "in_range");
+    const resumed = await fetch(`${status.origin}/api/reconnect`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Origin: status.origin,
+      },
+      body: JSON.stringify({ code: "0001" }),
+    });
+    expect(resumed.status).toBe(200);
+    const replacement = await resumed.json();
+    expect(replacement.token).not.toBe(connected.token);
+    expect(
+      (
+        await post(status.origin, "/api/input", replacement.token, {
+          kind: "line",
+          value: "resumed",
+        })
+      ).status,
+    ).toBe(202);
+    expect(bds.commands.at(-1)).toMatch(/ line resumed$/u);
   });
 
   it("serializes and bounds terminal operations per computer", async () => {
@@ -602,8 +659,13 @@ async function consumeResponse(command) {
     redirect: "manual",
   });
   return {
-    token: response.headers.get("location").slice(2),
+    token: handoffToken(response),
   };
+}
+
+function handoffToken(response) {
+  const location = response.headers.get("location");
+  return new URL(location, "http://companion.invalid").hash.slice(1);
 }
 
 function post(origin, pathname, token, body) {

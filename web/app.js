@@ -54,9 +54,15 @@ const elements = {
 };
 
 const tokenStorageKey = "computer-system.web-terminal-token";
+const codeStorageKey = "computer-system.web-terminal-code";
+const queryCode = new URLSearchParams(location.search).get("computer") ?? "";
 let token =
   location.hash.slice(1) || sessionStorage.getItem(tokenStorageKey) || "";
+let connectionCode = /^[0-9]{4}$/u.test(queryCode)
+  ? queryCode
+  : localStorage.getItem(codeStorageKey) || "";
 let streamGeneration = 0;
+let reconnectGeneration = 0;
 let sessionClosed = false;
 let commandPending = false;
 let completionPending = false;
@@ -229,7 +235,9 @@ elements.manualDialog.addEventListener("keydown", (event) => {
 });
 renderManualToc();
 window.addEventListener("resize", scheduleTerminalFit);
-if (!/^[A-Za-z0-9_-]{20,}$/u.test(token)) {
+if (!/^[A-Za-z0-9_-]{20,}$/u.test(token) && /^[0-9]{4}$/u.test(queryCode)) {
+  void reconnectWithCode(queryCode);
+} else if (!/^[A-Za-z0-9_-]{20,}$/u.test(token)) {
   showHandoffPrompt(
     "Enter this Computer's permanent four-digit number from Minecraft. Each activation lasts two minutes.",
   );
@@ -292,7 +300,11 @@ async function bootstrap() {
     scheduleTerminalFit();
     await connectStream();
   } catch (error) {
-    fail(errorMessage(error));
+    if (/^[0-9]{4}$/u.test(connectionCode)) {
+      void reconnectWithCode(connectionCode);
+    } else {
+      fail(errorMessage(error));
+    }
   }
 }
 
@@ -316,7 +328,11 @@ async function connectStream() {
       if (retry > 5) {
         setConnection("offline", "DISCONNECTED");
         setInputAvailable(false, "OFFLINE");
-        elements.reconnectButton.hidden = false;
+        if (/^[0-9]{4}$/u.test(connectionCode)) {
+          void reconnectWithCode(connectionCode);
+        } else {
+          elements.reconnectButton.hidden = false;
+        }
         return;
       }
       setConnection("loading", `RETRY ${String(retry)}/5`);
@@ -342,6 +358,12 @@ async function consumeEvents(response, generation) {
     for (const line of lines) {
       if (line.length === 0) continue;
       const event = JSON.parse(line);
+      if (event.type === "replaced") {
+        token = "";
+        sessionStorage.removeItem(tokenStorageKey);
+        void reconnectWithCode(connectionCode);
+        return;
+      }
       if (event.type === "terminal") renderTerminal(event.terminal);
       if (event.session !== undefined) updateSession(event.session);
     }
@@ -398,7 +420,11 @@ async function completeCommandLine() {
     if (completion.candidates.length > 1)
       showCompletions(completion.candidates);
   } catch (error) {
-    if (error?.status === 409) setInputAvailable(false, "VIEW ONLY");
+    if (error?.code === "read_only") setInputAvailable(false, "VIEW ONLY");
+    if (error?.code === "out_of_range") {
+      setConnection("offline", "OUT OF RANGE");
+      setInputAvailable(false, "MOVE WITHIN 3 BLOCKS");
+    }
   } finally {
     completionPending = false;
   }
@@ -432,9 +458,14 @@ async function sendInput(payload) {
     accepted = true;
     return true;
   } catch (error) {
-    if (error?.status === 409) {
+    if (error?.code === "read_only") {
       accessMode = "viewer";
       setInputAvailable(false, "VIEW ONLY");
+      return false;
+    }
+    if (error?.code === "out_of_range") {
+      setConnection("offline", "OUT OF RANGE");
+      setInputAvailable(false, "MOVE WITHIN 3 BLOCKS");
       return false;
     }
     setConnection("offline", "INPUT FAILED");
@@ -598,6 +629,9 @@ async function drainEditorKeys() {
 }
 
 function updateSession(session) {
+  if (/^[0-9]{4}$/u.test(session.connectionCode ?? "")) {
+    rememberConnectionCode(session.connectionCode);
+  }
   if (session.computerId !== undefined) {
     elements.computerId.textContent = session.computerId;
   }
@@ -610,6 +644,13 @@ function updateSession(session) {
       connectionState === "online",
       accessMode === "writer" ? "INPUT" : "VIEW ONLY",
     );
+  }
+  if (session.access === "out_of_range") {
+    setConnection("offline", "OUT OF RANGE");
+    setInputAvailable(false, "MOVE WITHIN 3 BLOCKS");
+  } else if (session.access === "in_range" && !sessionClosed) {
+    if (connectionState === "offline") setConnection("online", "CONNECTED");
+    setInputAvailable(connectionState === "online", "INPUT");
   }
   if (session.state === "closed" || session.state === "expired") {
     sessionClosed = true;
@@ -651,16 +692,7 @@ async function api(path, options = {}) {
     cache: "no-store",
   });
   if (response.ok) return response;
-  let detail = `Request failed (${String(response.status)}).`;
-  try {
-    const body = await response.json();
-    if (typeof body.error === "string") detail = body.error;
-  } catch {
-    // The bounded fallback message above owns finalization for non-JSON errors.
-  }
-  const error = new Error(detail);
-  error.status = response.status;
-  throw error;
+  throw await responseError(response);
 }
 
 function authorizationHeaders() {
@@ -766,8 +798,12 @@ async function closeSession() {
   try {
     await api("/api/close", { method: "POST" });
     sessionClosed = true;
+    reconnectGeneration += 1;
     streamGeneration += 1;
     sessionStorage.removeItem(tokenStorageKey);
+    localStorage.removeItem(codeStorageKey);
+    connectionCode = "";
+    window.history.replaceState(null, "", location.pathname);
     setConnection("offline", "CLOSED");
     elements.lifecycleState.textContent = "LOGOUT";
     elements.inputState.textContent = "OFFLINE";
@@ -919,14 +955,8 @@ async function connectWithCode() {
       );
     }
     const body = await response.json();
-    if (!/^[A-Za-z0-9_-]{20,}$/u.test(body.token ?? "")) {
-      throw new Error("The companion returned an invalid session token.");
-    }
-    token = body.token;
-    sessionStorage.setItem(tokenStorageKey, token);
-    window.history.replaceState(null, "", "/");
+    acceptConnection(body.token, body.code ?? code);
     elements.errorDialog.close();
-    sessionClosed = false;
     void bootstrap();
   } catch (error) {
     elements.errorMessage.textContent = errorMessage(error);
@@ -935,6 +965,84 @@ async function connectWithCode() {
     elements.handoffCode.disabled = false;
     elements.handoffCode.focus();
   }
+}
+
+async function reconnectWithCode(code) {
+  if (!/^[0-9]{4}$/u.test(code)) return;
+  const generation = ++reconnectGeneration;
+  const deadline = Date.now() + 30 * 60_000;
+  let attempt = 0;
+  sessionClosed = false;
+  rememberConnectionCode(code);
+  if (elements.errorDialog.open) elements.errorDialog.close();
+  setConnection("loading", "WAITING FOR RANGE");
+  setInputAvailable(false, "MOVE WITHIN 3 BLOCKS");
+  while (generation === reconnectGeneration && Date.now() < deadline) {
+    attempt += 1;
+    try {
+      const response = await fetch("/api/reconnect", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code }),
+        cache: "no-store",
+      });
+      if (!response.ok) throw await responseError(response);
+      const body = await response.json();
+      acceptConnection(body.token, body.session?.connectionCode ?? code);
+      updateSession(body.session ?? {});
+      void bootstrap();
+      return;
+    } catch {
+      if (generation !== reconnectGeneration) return;
+      const delay = Math.min(10_000, 500 * 2 ** Math.min(attempt - 1, 5));
+      setConnection("loading", "WAITING FOR RANGE");
+      setInputAvailable(false, "MOVE WITHIN 3 BLOCKS");
+      await wait(delay + Math.floor(Math.random() * 250));
+    }
+  }
+  if (generation !== reconnectGeneration) return;
+  setConnection("offline", "RECONNECT EXPIRED");
+  setInputAvailable(false, "OFFLINE");
+  showHandoffPrompt(
+    "Automatic reconnect expired. Activate the Computer in Minecraft and use its permanent code again.",
+  );
+}
+
+function acceptConnection(nextToken, code) {
+  if (!/^[A-Za-z0-9_-]{20,}$/u.test(nextToken ?? "")) {
+    throw new Error("The companion returned an invalid session token.");
+  }
+  reconnectGeneration += 1;
+  token = nextToken;
+  sessionStorage.setItem(tokenStorageKey, token);
+  rememberConnectionCode(code);
+  sessionClosed = false;
+}
+
+function rememberConnectionCode(code) {
+  if (!/^[0-9]{4}$/u.test(code ?? "")) return;
+  connectionCode = code;
+  localStorage.setItem(codeStorageKey, code);
+  const url = new URL(location.href);
+  url.searchParams.set("computer", code);
+  url.hash = "";
+  window.history.replaceState(null, "", `${url.pathname}${url.search}`);
+}
+
+async function responseError(response) {
+  let detail = `Request failed (${String(response.status)}).`;
+  let errorCode = "http_error";
+  try {
+    const body = await response.json();
+    if (typeof body.error === "string") detail = body.error;
+    if (typeof body.code === "string") errorCode = body.code;
+  } catch {
+    // The status-based message owns this bounded non-JSON failure.
+  }
+  const error = new Error(detail);
+  error.status = response.status;
+  error.code = errorCode;
+  return error;
 }
 
 function showError(message) {

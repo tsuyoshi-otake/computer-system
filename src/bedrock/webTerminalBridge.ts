@@ -11,6 +11,7 @@ import { selectComputerTerminal } from "./computerTerminal.js";
 
 const requestMarker = "CS_WEB_SESSION_REQUEST ";
 const snapshotMarker = "CS_WEB_TERMINAL ";
+const accessMarker = "CS_WEB_ACCESS ";
 const completionMarker = "CS_WEB_COMPLETION ";
 const finalMarker = "CS_WEB_SESSION_FINAL ";
 const requestLifetimeTicks = 200;
@@ -36,6 +37,7 @@ interface ActiveSession {
   readonly playerId: string;
   readonly player: Player;
   readonly sessionId: string;
+  access: "in_range" | "out_of_range";
   lastSnapshot?: string;
 }
 
@@ -220,6 +222,7 @@ function handleResponse(message: string): void {
     playerId: request.player.id,
     player: request.player,
     sessionId,
+    access: "in_range",
   };
   try {
     snapshotScheduler.attach(sessionId);
@@ -365,7 +368,7 @@ function handleTakeControl(message: string): void {
 function handleClose(message: string): void {
   const match = /^([A-Za-z0-9_-]{12,32})$/u.exec(message);
   if (match === null) return;
-  const session = requireActiveSession(match[1] ?? "");
+  const session = activeSessions.get(match[1] ?? "");
   if (session !== undefined) finalizeSession(session, "browser_closed");
 }
 
@@ -377,15 +380,32 @@ function requireActiveSession(sessionId: string): ActiveSession | undefined {
     return undefined;
   }
   if (!isWithinAccessRange(session.player, session.accessPoint)) {
-    if (session.player.isValid) {
-      session.player.sendMessage(
-        "Web Terminal closed: move within 3 blocks of the Computer to reconnect.",
-      );
-    }
-    finalizeSession(session, "out_of_range");
+    setSessionAccess(session, "out_of_range");
     return undefined;
   }
+  if (setSessionAccess(session, "in_range")) {
+    snapshotScheduler.requestEager(session.sessionId);
+  }
   return session;
+}
+
+function setSessionAccess(
+  session: ActiveSession,
+  access: "in_range" | "out_of_range",
+): boolean {
+  if (session.access === access) return false;
+  session.access = access;
+  if (session.player.isValid) {
+    session.player.sendMessage(
+      access === "in_range"
+        ? "Web Terminal reconnected: Computer is within 3 blocks."
+        : "Web Terminal paused: move within 3 blocks of the Computer to reconnect.",
+    );
+  }
+  console.warn(
+    `${accessMarker}${JSON.stringify({ sessionId: session.sessionId, access })}`,
+  );
+  return true;
 }
 
 function isWithinAccessRange(
@@ -421,14 +441,10 @@ function emitEagerSnapshots(): void {
 
 function emitSnapshot(session: ActiveSession, force: boolean): boolean {
   if (!isWithinAccessRange(session.player, session.accessPoint)) {
-    if (session.player.isValid) {
-      session.player.sendMessage(
-        "Web Terminal closed: move within 3 blocks of the Computer to reconnect.",
-      );
-    }
-    finalizeSession(session, "out_of_range");
+    setSessionAccess(session, "out_of_range");
     return false;
   }
+  const resumed = setSessionAccess(session, "in_range");
   const record = computerHost.get(session.computerId);
   if (record === undefined) {
     finalizeSession(session, "computer_missing");
@@ -444,7 +460,7 @@ function emitSnapshot(session: ActiveSession, force: boolean): boolean {
       secretInput: computerHost.runtime.isShellSecretInput(record.computerId),
     },
   });
-  if (!force && session.lastSnapshot === serialized) return false;
+  if (!force && !resumed && session.lastSnapshot === serialized) return false;
   session.lastSnapshot = serialized;
   console.warn(`${snapshotMarker}${serialized}`);
   return true;

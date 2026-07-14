@@ -215,11 +215,16 @@ Desktop Web Terminal requests require exactly one physically adjacent Monitor.
 Touching a connected Monitor resolves its adjacent desktop rather than a stale
 global target; zero and multiple candidates terminate with explicit messages.
 Placed access is valid only within a three-block Euclidean radius of the touched
-Computer, Monitor, or Portable block. Range or dimension failure owns
-finalization as `out_of_range`. Portable Computer System items can be used
-directly or placed as `computer_system:portable_computer_block`; the item/block
-round trip must retain the same identity and the portable CS386SX/CS-DOS
-profile.
+Computer, Monitor, or Portable block. Range or dimension failure transitions the
+bounded session to `out_of_range` and rejects input without finalizing it;
+returning transitions it to `in_range` and requests one eager snapshot. The
+existing bounded round-robin scheduler performs the proximity check, and the
+bridge emits work only when the access state changes. Permanent four-digit codes
+are indexed for O(1) lookup. Browser bookmark retries are deduplicated, use
+exponential backoff with jitter capped at ten seconds, and stop at the session's
+30-minute deadline. Portable Computer System items can be used directly or
+placed as `computer_system:portable_computer_block`; the item/block round trip
+must retain the same identity and the portable CS386SX/CS-DOS profile.
 
 After activating both packs in a test world, run:
 

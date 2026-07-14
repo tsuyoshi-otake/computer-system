@@ -15,6 +15,11 @@ describe("Web terminal UI", () => {
     expect(html).toContain('id="handoff-code"');
     expect(html).toContain('pattern="[0-9]{4}"');
     expect(script).toContain('fetch("/api/handoff"');
+    expect(script).toContain('fetch("/api/reconnect"');
+    expect(script).toContain("localStorage.setItem(codeStorageKey, code)");
+    expect(script).toContain('url.searchParams.set("computer", code)');
+    expect(script).toContain("reconnectGeneration");
+    expect(script).toContain("Math.min(10_000");
   });
 
   it("masks secret input and paints full-height terminal cell backgrounds", async () => {
@@ -128,7 +133,8 @@ describe("Web terminal UI", () => {
     expect(script).toContain('api("/api/take-control"');
     expect(script).toContain('accessMode === "writer"');
     expect(script).toContain('accessMode === "viewer" ? "LOCKED" : state');
-    expect(script).toContain("error?.status === 409");
+    expect(script).toContain('error?.code === "read_only"');
+    expect(script).toContain('error?.code === "out_of_range"');
   });
 
   it("fits and requests bounded terminal dimensions while keeping disconnected input disabled", async () => {

@@ -148,6 +148,34 @@ describe("Web terminal session store", () => {
     expect(third.session.mode).toBe("writer");
     expect(store.isWriter(first.session.sessionId)).toBe(false);
   });
+
+  it("rotates the bearer token only after the Computer returns in range", () => {
+    const store = createStore();
+    const connected = consume(store, identity());
+    const listener = vi.fn();
+    store.subscribe(connected.token, listener);
+    expect(
+      store.updateAccess(connected.session.sessionId, "out_of_range"),
+    ).toBe(true);
+    expect(() => store.reconnect("0001")).toThrow(/within 3 blocks/u);
+    expect(store.isInRange(connected.session.sessionId)).toBe(false);
+
+    expect(store.updateAccess(connected.session.sessionId, "in_range")).toBe(
+      true,
+    );
+    const reconnected = store.reconnect("0001");
+    expect(reconnected.token).not.toBe(connected.token);
+    expect(reconnected.session).toMatchObject({
+      access: "in_range",
+      connectionCode: "0001",
+      mode: "writer",
+    });
+    expect(listener).toHaveBeenCalledWith(
+      expect.objectContaining({ type: "replaced" }),
+    );
+    expect(() => store.authenticate(connected.token)).toThrow(/valid/u);
+    expect(store.authenticate(reconnected.token).computerId).toBe("c-000001");
+  });
 });
 
 function createStore(options = {}) {

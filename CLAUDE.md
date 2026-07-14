@@ -138,7 +138,11 @@ The July 2026 live GDK verification established the following:
   minutes; invalid guesses are rate-limited per client and simultaneous code
   collisions fail explicitly. Browser bearer tokens do not pass through BDS
   logs. Placed-machine sessions require the player to remain within three blocks
-  and finalize as `out_of_range` otherwise.
+  and pause as `out_of_range` otherwise. Returning resumes the same live stream;
+  a bookmark at `/?computer=NNNN` reconnects with the locally remembered number
+  and rotates the bearer token. Access logs are transition-only, connection-code
+  lookup is O(1), and browser retry work is deduplicated, exponentially backed
+  off, and bounded by the 30-minute session lifetime.
 - `bds_wait_for_web_handoff` owns at most one bounded wait per Computer ID and
   suppresses auto-open for its matching handoff, preventing one-use URL races.
   `bds_execute_computer_command` returns bounded stdout, stderr, exit code, and

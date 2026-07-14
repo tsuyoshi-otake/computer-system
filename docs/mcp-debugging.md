@@ -111,8 +111,14 @@ from BDS logs and unrelated Computer IDs cannot satisfy the wait.
 
 Placed-machine sessions recheck the requesting player against the access block
 during attachment, input, completion, resize, and snapshot work. Moving beyond
-three blocks or changing dimension finalizes once as `out_of_range`. A held
-Portable remains exempt because the access point moves with its owner.
+three blocks or changing dimension pauses the bounded session as `out_of_range`;
+returning transitions it to `in_range` and resumes the existing browser stream.
+After a successful connection the browser remembers only the permanent
+four-digit number and updates the URL to `/?computer=NNNN`. Reloading that
+bookmark rotates the bearer token through one deduplicated exponential-backoff
+reconnect loop. The query never contains the bearer token. Range messages are
+transition-only, and the permanent-code session index avoids a linear scan. A
+held Portable remains exempt because the access point moves with its owner.
 
 The browser input is overlaid at the terminal cursor rather than rendered as a
 separate form field. Physical Enter sends one bounded `terminal_line` event,
