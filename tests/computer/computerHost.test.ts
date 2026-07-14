@@ -19,6 +19,26 @@ describe("ComputerRuntime", (): void => {
     expect(record.terminal.line(1)).toMatch(/^booted/u);
   });
 
+  it("runs a bounded MicroPython file through the MCP debug path", (): void => {
+    const record = computer("c-000001", "import os\nos.pull_event()\n");
+    const runtime = runtimeWith(record);
+    runtime.powerOn(record.computerId);
+    record.filesystem.writeFile("/tmp/demo.py", "print(6 * 7)\n");
+
+    const result = runtime.executeDebugShellCommand(
+      record.computerId,
+      "python /tmp/demo.py",
+    );
+    expect(result).toMatchObject({
+      outcome: "completed",
+      exitCode: 0,
+      stdout: "42\n",
+    });
+    expect(result.outcome === "completed" && result.stderr).toMatch(
+      /^MicroPython: \d+ VM cycles/u,
+    );
+  });
+
   it("yields infinite work and synchronizes sleep and event waits", (): void => {
     const record = computer(
       "computer-2",

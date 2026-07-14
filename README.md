@@ -115,7 +115,12 @@ modeled work cycles from the sandboxed shell; it never invokes host
 PowerShell/Bash or arbitrary BDS administration commands.
 `bds_wait_for_web_handoff` returns the next one-use URL for one exact Computer
 ID while preventing browser auto-open from consuming it first. Both paths bound
-input, concurrency, output, and waits.
+input, concurrency, output, and waits. The MCP-only `python <file>` and
+`micropython <file>` forms run a bounded source file with the target Computer's
+MicroPython-compatible VM, filesystem, hardware profile, and RAM limit. They
+reject waits and long-running work and report VM cycles; those cycles are not
+directly interchangeable with CS486 instruction cycles reported by
+`run --stats`.
 
 ## Browser terminal
 
@@ -253,6 +258,13 @@ format; `basic` runs BASIC source directly, `run --stats` reports instructions
 and cycles, and `objdump` exposes generated instructions for optimization. No
 frontend invokes a host compiler or native binary. Compile work and execution
 cycles return to the same bounded VM debt used by shell scripts.
+
+The Bedrock pack includes placeable `Computer` and `Advanced Computer` items
+(`computer_system:computer_item` and `computer_system:advanced_computer_item`).
+Placed blocks use internal `computer_system:computer_00..63` or
+`computer_system:advanced_computer_00..63` identifiers for their six-face
+redstone-output mask. The current display block is `computer_system:monitor`; it
+is named Monitor rather than Display.
 
 Examples:
 

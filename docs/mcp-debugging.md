@@ -60,6 +60,14 @@ Input, output, concurrency, and timeout are bounded; vi/editor, sleep,
 shutdown/reboot, and other TUI or asynchronous control flows return an explicit
 unsupported result.
 
+For a bounded MicroPython comparison, pass `python <file>` or
+`micropython <file>` through the same tool. This MCP-only form compiles and runs
+the file with the target Computer's filesystem, hardware profile, and RAM limit.
+It rejects waits and long-running work after a fixed cycle ceiling. Returned
+MicroPython stack-VM cycles must be reported separately from the CS486
+instruction cycles produced by `run --stats`; they are different execution
+models rather than directly interchangeable timing units.
+
 BDS prints `Server started` before Script API world initialization is fully
 settled. The MCP session therefore applies the same bounded one-second startup
 grace period as the established headless runner before it reports `running`.

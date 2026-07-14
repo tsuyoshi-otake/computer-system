@@ -127,6 +127,10 @@ The July 2026 live GDK verification established the following:
   `bds_execute_computer_command` returns bounded stdout, stderr, exit code, and
   modeled work cycles for one exact Computer. TUI, sleep, and lifecycle-control
   commands fail explicitly on this debug path.
+- The MCP-only `python <file>`/`micropython <file>` debug forms execute a
+  bounded source file with the target Computer's VM, filesystem, hardware, and
+  RAM limit. They reject waits and long-running execution. Report their stack-VM
+  cycles separately from CS486 cycles; the units are not directly comparable.
 - Periodic snapshot work is fixed-batch O(K), without an O(N) allocation per
   pass. Writer input uses an amortized-O(1), deduplicated, attempt-bounded eager
   queue so interactive latency does not inherit the viewer round-robin delay.

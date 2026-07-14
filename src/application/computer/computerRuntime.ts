@@ -11,6 +11,7 @@ import { StackVm, type VmState } from "../runtime/vm.js";
 import type { ComputerRecord } from "../../domain/computer/computer.js";
 import { numericComputerId } from "../../domain/computer/identity.js";
 import type { RuntimeValue } from "../../domain/runtime/value.js";
+import { TerminalBuffer } from "../../domain/terminal/terminalBuffer.js";
 import { defaultSystemBootSource } from "../os/systemPrograms.js";
 import type { ShellClockSource } from "../os/clock.js";
 import type { ShellCompletionResult } from "../os/shellCommands.js";
@@ -176,6 +177,9 @@ export class ComputerRuntime {
     if (entry.shell === undefined)
       return { outcome: "ignored", reason: "not_running" };
     try {
+      const python = /^(?:micropython|python)\s+(\S+)$/u.exec(line.trim());
+      if (python !== null)
+        return this.executeDebugPython(entry, python[1] ?? "");
       const result = entry.shell.submitDebugCommand(line);
       return {
         outcome: "completed",
@@ -190,6 +194,77 @@ export class ComputerRuntime {
         error: error instanceof Error ? error : new Error(String(error)),
       };
     }
+  }
+
+  private executeDebugPython(
+    entry: RuntimeEntry,
+    path: string,
+  ): DebugShellCommandResult {
+    const source = entry.record.filesystem.readFile(path);
+    const terminal = new TerminalBuffer(80, 25);
+    const environment = createNativeEnvironment({
+      clock: this.clock,
+      computerId: numericComputerId(entry.record.computerId),
+      computerName: entry.record.computerId,
+      osProfile: entry.record.osProfile,
+      filesystem: entry.record.filesystem,
+      terminal,
+      hardware: entry.record.hardware,
+      memoryUsageBytes: () => 0,
+      currentTick: () => this.scheduler.tickNumber,
+      ticksPerSecond: this.ticksPerSecond,
+    });
+    const vm = new StackVm(
+      {
+        code: compileSource(source, path),
+        globals: environment.globals,
+      },
+      environment.moduleLoader,
+      {
+        ...defaultVmLimits,
+        maxMemoryBytes: entry.record.hardware.memoryBytes,
+      },
+    );
+    const maximumCycles = 100_000;
+    let cycles = 0;
+    while (vm.state.kind === "ready" && cycles < maximumCycles) {
+      const slice = vm.runSlice(Math.min(10_000, maximumCycles - cycles));
+      if (slice.executedInstructions === 0) break;
+      cycles += slice.executedInstructions;
+    }
+    const output = terminal.snapshot().rows.join("\n").trimEnd();
+    const stdout = output.length === 0 ? "" : `${output}\n`;
+    if (vm.state.kind === "completed") {
+      return {
+        outcome: "completed",
+        exitCode: 0,
+        stdout,
+        stderr: `MicroPython: ${String(cycles)} VM cycles, completed\n`,
+        workCycles: cycles,
+      };
+    }
+    if (vm.state.kind === "crashed") {
+      return {
+        outcome: "completed",
+        exitCode: 1,
+        stdout,
+        stderr: `${vm.state.error.name}: ${vm.state.error.message}\n`,
+        workCycles: cycles,
+      };
+    }
+    vm.terminate(
+      "MCP debug execution does not support waits or long-running work",
+    );
+    return {
+      outcome: "completed",
+      exitCode: 2,
+      stdout,
+      stderr:
+        cycles >= maximumCycles
+          ? `MicroPython: cycle limit ${String(maximumCycles)} exceeded\n`
+          : "MicroPython: waits and asynchronous work are not supported through MCP\n",
+      workCycles: cycles,
+    };
   }
 
   resizeTerminal(computerId: string, width: number, height: number): boolean {
