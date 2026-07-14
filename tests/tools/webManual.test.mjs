@@ -58,9 +58,13 @@ describe("Web terminal field manual", () => {
 
     for (const required of [
       "CS486DX",
+      "CS386SX",
       "33 MHz",
       "386SX 16 MHz",
       "2 MB RAM",
+      "800,000 cycles/tick",
+      "16-bit data bus",
+      "operand early-out",
       "Assembly language",
       "MicroPython",
       "Computer System Bash",

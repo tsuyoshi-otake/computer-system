@@ -214,7 +214,11 @@ describe("Computer System OS shell and editor", (): void => {
       computerId: 7,
       computerName: "c-info01",
       currentTick: (): number => tick,
-      hardware: { clockHz: 10_000, memoryBytes: 2_097_152 },
+      hardware: {
+        clockHz: 10_000,
+        cpuModel: "cs486dx",
+        memoryBytes: 2_097_152,
+      },
       memoryUsageBytes: (): number => 65_536,
       ticksPerSecond: 20,
     });
@@ -241,7 +245,7 @@ describe("Computer System OS shell and editor", (): void => {
       expect.stringMatching(/^Disk quota: \d+ \/ 1000000 bytes used/u),
       "Limits: 256000 bytes/file, 4096 entries",
     ]);
-    expect(shell.submit("cpuinfo").lines).toContain("clock\t\t: 33 MHz");
+    expect(shell.submit("cpuinfo").lines).toContain("clock\t\t: 10 kHz");
     expect(shell.submit("free -h").lines[1]).toContain("2.0 MiB");
     expect(shell.submit("cat /proc/cpuinfo").lines).toContain(
       "model name\t: Computer System 486DX",

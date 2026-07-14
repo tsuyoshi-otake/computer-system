@@ -12,7 +12,7 @@ import type { ComputerIdentityObservation } from "../domain/computer/identity.js
 import {
   computerIdentityProperty,
   createPortableComputer,
-  ensureComputer,
+  ensurePortableComputer,
   identityService,
 } from "./computerRegistry.js";
 import { disconnectComputerTerminalPlayer } from "./computerTerminal.js";
@@ -43,7 +43,7 @@ export function registerPocketComputerComponent(
       }
       system.run((): void => {
         try {
-          const record = ensureComputer(
+          const record = ensurePortableComputer(
             observation.computerId,
             observation.family,
           );

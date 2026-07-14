@@ -13,7 +13,9 @@ import { RedstoneState } from "../redstone/redstoneState.js";
 import {
   defaultComputerHardware,
   requireComputerHardware,
+  restoreComputerHardware,
   type ComputerHardwareProfile,
+  type ComputerHardwareSnapshot,
 } from "./hardware.js";
 
 const legacyDefaultClockHz = 20_000;
@@ -29,7 +31,7 @@ export interface ComputerSnapshot {
   readonly terminal: TerminalBufferSnapshot;
   readonly redstoneOutputMask: number;
   readonly osProfile?: ComputerOsProfile;
-  readonly hardware?: ComputerHardwareProfile;
+  readonly hardware?: ComputerHardwareSnapshot;
 }
 
 export interface ComputerRecordOptions {
@@ -46,7 +48,7 @@ export class ComputerRecord {
   readonly filesystem: InMemoryFilesystem;
   readonly terminal: TerminalBuffer;
   readonly redstone = new RedstoneState();
-  readonly osProfile: ComputerOsProfile;
+  private osProfileValue: ComputerOsProfile;
   private hardwareValue: ComputerHardwareProfile;
   private labelValue: string | undefined;
   private metadataRevision = 0;
@@ -62,7 +64,7 @@ export class ComputerRecord {
       options.terminalWidth ?? 51,
       options.terminalHeight ?? 19,
     );
-    this.osProfile = options.osProfile ?? "linux";
+    this.osProfileValue = options.osProfile ?? "linux";
     this.hardwareValue = requireComputerHardware(
       options.hardware ?? defaultComputerHardware,
     );
@@ -75,6 +77,10 @@ export class ComputerRecord {
 
   get redstoneOutputMask(): number {
     return this.redstone.outputMask;
+  }
+
+  get osProfile(): ComputerOsProfile {
+    return this.osProfileValue;
   }
 
   get hardware(): ComputerHardwareProfile {
@@ -104,13 +110,30 @@ export class ComputerRecord {
   }
 
   configureHardware(hardware: ComputerHardwareProfile): void {
-    const next = requireComputerHardware(hardware);
+    this.configureSystemProfile({
+      hardware,
+      osProfile: this.osProfileValue,
+    });
+  }
+
+  configureOsProfile(osProfile: ComputerOsProfile): void {
+    this.configureSystemProfile({ hardware: this.hardwareValue, osProfile });
+  }
+
+  configureSystemProfile(profile: {
+    readonly hardware: ComputerHardwareProfile;
+    readonly osProfile: ComputerOsProfile;
+  }): void {
+    const next = requireComputerHardware(profile.hardware);
     if (
+      profile.osProfile === this.osProfileValue &&
+      next.cpuModel === this.hardwareValue.cpuModel &&
       next.clockHz === this.hardwareValue.clockHz &&
       next.memoryBytes === this.hardwareValue.memoryBytes
     ) {
       return;
     }
+    this.osProfileValue = profile.osProfile;
     this.hardwareValue = next;
     this.metadataRevision += 1;
   }
@@ -124,7 +147,7 @@ export class ComputerRecord {
       filesystem: this.filesystem.snapshot(),
       terminal: this.terminal.snapshot(),
       redstoneOutputMask: this.redstone.outputMask,
-      osProfile: this.osProfile,
+      osProfile: this.osProfileValue,
       hardware: this.hardwareValue,
     };
   }
@@ -141,17 +164,21 @@ export class ComputerRecord {
       terminalWidth: snapshot.terminal.width,
       terminalHeight: snapshot.terminal.height,
       osProfile: snapshot.osProfile ?? "linux",
-      hardware:
-        snapshot.hardware?.clockHz === legacyDefaultClockHz
-          ? {
-              ...snapshot.hardware,
-              clockHz: defaultComputerHardware.clockHz,
-            }
-          : (snapshot.hardware ?? defaultComputerHardware),
+      hardware: restoreSnapshotHardware(snapshot.hardware),
     });
     record.filesystem.restore(snapshot.filesystem);
     record.terminal.restore(snapshot.terminal);
     record.setRedstoneOutputMask(snapshot.redstoneOutputMask);
     return record;
   }
+}
+
+function restoreSnapshotHardware(
+  hardware: ComputerHardwareSnapshot | undefined,
+): ComputerHardwareProfile {
+  const restored = restoreComputerHardware(hardware);
+  return hardware?.cpuModel === undefined &&
+    restored.clockHz === legacyDefaultClockHz
+    ? { ...defaultComputerHardware }
+    : restored;
 }

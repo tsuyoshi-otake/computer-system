@@ -1,4 +1,7 @@
-export const computerNominalClockHz = 33_000_000;
+import { cpuModelSpecification, defaultCpuModel } from "./models.js";
+
+export const computerNominalClockHz =
+  cpuModelSpecification(defaultCpuModel).nominalClockHz;
 
 export function cpuCyclesPerTick(
   clockHz: number,

@@ -60,3 +60,8 @@
   command and the program that consumes its output. — Evidence: the Computer
   host integration test compiles `/tmp/fastmath.o`, imports it from Python, and
   observes `42` without losing the object during debug-environment creation.
+- Keep the guest instruction schema in a stable CPU module below both the
+  process and model-specific timing tables. Importing instructions from the
+  process into timing creates a reverse dependency when the process selects its
+  timing model. — Evidence: the architecture cycle test passes after extracting
+  `instructionSet.ts` from `cs486.ts`.

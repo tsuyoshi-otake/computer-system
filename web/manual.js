@@ -10,7 +10,7 @@ const chapters = [
         <h2>From powered block to running program</h2>
         <p class="manual-lead">A Computer is a persistent, sandboxed machine. Its terminal, files, redstone state, CPU budget, and RAM belong to its identity and survive normal world reloads.</p>
       </header>
-      <div class="manual-spec-line"><span>CPU ID</span><b>CS486DX</b><span>Nominal clock</span><b>33 MHz</b><span>Byte order</span><b>Little-endian</b></div>
+      <div class="manual-spec-line"><span>Desktop</span><b>CS486DX · 33 MHz · 1 MiB</b><span>Portable</span><b>CS386SX · 16 MHz · 2 MiB</b><span>Byte order</span><b>Little-endian</b></div>
       <section class="manual-section">
         <h3>1.1 Operating cycle</h3>
         <ol class="manual-procedure">
@@ -23,7 +23,7 @@ const chapters = [
       </section>
       <section class="manual-section manual-grid-2">
         <div><h3>Persistent</h3><p><code>/etc</code>, <code>/usr</code>, home files, executables, terminal snapshot, identity, and configured hardware.</p></div>
-        <div><h3>Volatile or bounded</h3><p><code>/tmp</code>, active VM frames, event queues, compiler work, terminal output, retries, and each direct CS486 run.</p></div>
+        <div><h3>Volatile or bounded</h3><p><code>/tmp</code>, active VM frames, event queues, compiler work, terminal output, retries, and each direct machine run.</p></div>
       </section>
       <aside class="manual-callout"><b>Safety boundary</b><p>No guest language launches PowerShell, cmd.exe, a host compiler, BDS administration, or native binaries. Unsupported behavior fails inside the guest.</p></aside>
       <section class="manual-section"><h3>1.2 First inspection</h3><pre><code>whoami
@@ -40,7 +40,7 @@ ls -la /</code></pre></section>`,
     title: "Machine architecture",
     summary: "Registers, memory, cycles, faults",
     html: `
-      <header class="manual-page-header"><p class="manual-kicker">Chapter 02 · Hardware model</p><h2>The CS486DX execution core</h2><p class="manual-lead">The visible 33 MHz identity is nominal. A separate persisted scheduler scale bounds actual BDS work and arbitrates multiple Computers fairly.</p></header>
+      <header class="manual-page-header"><p class="manual-kicker">Chapter 02 · Hardware model</p><h2>Two processors, one safe instruction format</h2><p class="manual-lead">Desktop Computers select a CS486DX at 33 MHz; portable and Pocket Computers select a CS386SX at 16 MHz. Each persisted model has its own timing table while the bounded scheduler arbitrates actual BDS work fairly.</p></header>
       <figure class="manual-figure manual-figure--desktop"><img src="/assets/manual/desktop-computer-system.png" alt="Desktop Computer System with a 486DX 33 MHz system unit, monochrome CRT, keyboard, mouse, and floppy drives" loading="lazy" decoding="async"><figcaption><b>Desktop Computer System.</b> The workstation illustration establishes the nominal CS486DX hardware identity. The Minecraft implementation models the machine rather than emulating the pictured host hardware literally.</figcaption></figure>
       <section class="manual-section"><h3>2.1 Register file</h3>
         <table><thead><tr><th>Register</th><th>Conventional use</th><th>Width</th></tr></thead><tbody>
@@ -49,8 +49,8 @@ ls -la /</code></pre></section>`,
           <tr><td>ESI / EDI</td><td>Source / destination index</td><td>32 bit</td></tr><tr><td>ESP / EBP</td><td>Stack top / initial stack base</td><td>32 bit</td></tr>
         </tbody></table>
       </section>
-      <section class="manual-section manual-grid-2"><div><h3>2.2 Memory model</h3><p>RAM is a checked, little-endian linear byte array. <code>LOAD</code> and <code>STORE</code> transfer signed 32-bit words. The stack begins at the top of RAM and grows downward.</p></div><div class="manual-memory-map"><span>LOW ADDRESS</span><b>compiler variables</b><b>free / heap convention</b><b>↓ stack growth</b><span>HIGH ADDRESS</span></div></section>
-      <section class="manual-section"><h3>2.3 Cycle classes</h3><table><thead><tr><th>Class</th><th>Examples</th><th>Cost</th></tr></thead><tbody><tr><td>Simple</td><td>MOV, ADD, SUB, CMP, branch</td><td>1</td></tr><tr><td>Memory / stack</td><td>LOAD, STORE, PUSH, POP</td><td>2</td></tr><tr><td>Call control</td><td>CALL, RET</td><td>3</td></tr><tr><td>Multiply</td><td>MUL</td><td>9</td></tr><tr><td>Divide</td><td>DIV, MOD</td><td>40</td></tr><tr><td>Output</td><td>PRINT</td><td>8 + payload</td></tr></tbody></table></section>
+      <section class="manual-section manual-grid-2"><div><h3>2.2 Memory model</h3><p>RAM is a checked, little-endian linear byte array. <code>LOAD</code> and <code>STORE</code> transfer signed 32-bit words. CS386SX exposes a 24-bit address bus and a 16-bit data bus, with 2 MiB installed in the portable profile; dword transfers pay the narrower-bus timing. The stack begins at the top of RAM and grows downward.</p></div><div class="manual-memory-map"><span>LOW ADDRESS</span><b>compiler variables</b><b>free / heap convention</b><b>↓ stack growth</b><span>HIGH ADDRESS</span></div></section>
+      <section class="manual-section"><h3>2.3 Model-specific cycle classes</h3><table><thead><tr><th>Class</th><th>CS486DX</th><th>CS386SX</th></tr></thead><tbody><tr><td>Simple ALU</td><td>1</td><td>2</td></tr><tr><td>LOAD / STORE</td><td>2 / 2</td><td>6 / 4</td></tr><tr><td>PUSH / POP</td><td>2 / 2</td><td>4 / 6</td></tr><tr><td>Conditional branch</td><td>1</td><td>7 taken / 3 not taken</td></tr><tr><td>CALL / RET</td><td>3 / 3</td><td>9 / 12</td></tr><tr><td>MUL</td><td>9</td><td>9–38, operand early-out</td></tr><tr><td>DIV / MOD</td><td>40</td><td>43</td></tr><tr><td>PRINT</td><td>8 + payload</td><td>12 + 16-bit bus payload</td></tr></tbody></table><p>At 20 ticks per second the desktop receives 1,650,000 cycles/tick; the portable receives 800,000 cycles/tick. Timing lookup is O(1), so selecting a model does not add a scan to the execution hot path.</p></section>
       <aside class="manual-warning"><b>Terminal condition required</b><p>A direct run halts normally, faults, or yields after 10,000 instructions with exit status 124. It never owns the server tick indefinitely.</p></aside>`,
   },
   {
@@ -90,12 +90,12 @@ halt</code></pre></section>
   {
     id: "micropython",
     number: "06",
-    title: "MicroPython on CS486",
+    title: "MicroPython on CS processors",
     summary: "Boot, imports, and native modules",
     html: `
-      <header class="manual-page-header"><p class="manual-kicker">Chapter 06 · CS486 language runtime</p><h2>Computer System MicroPython</h2><p class="manual-lead">The MicroPython-compatible language compiles to the same resumable CS486 process as C, C++, ASM, and BASIC. Source in <code>/startup.py</code> starts when the Computer powers on; there is no separate Python VM.</p></header>
+      <header class="manual-page-header"><p class="manual-kicker">Chapter 06 · Shared language runtime</p><h2>Computer System MicroPython</h2><p class="manual-lead">The MicroPython-compatible language compiles to the same resumable guest process as C, C++, ASM, and BASIC. The process charges the selected CS486DX or CS386SX timing table; there is no separate Python VM. Source in <code>/startup.py</code> starts when the Computer powers on.</p></header>
       <section class="manual-section manual-grid-2"><div><h3>6.1 Edit and boot</h3><pre><code>vi /startup.py
-        reboot</code></pre><p>Normal completion powers the program down. Infinite work remains preemptible by the common CS486 scheduler.</p></div><div><h3>6.2 Core language</h3><p>Variables, numbers, strings, booleans, lists, tuples, dictionaries, functions, imports, conditionals, loops, exceptions, formatting, and bounded built-ins compile to CS486 call/jump control flow and allowlisted managed-runtime syscalls.</p></div></section>
+        reboot</code></pre><p>Normal completion powers the program down. Infinite work remains preemptible by the common scheduler.</p></div><div><h3>6.2 Core language</h3><p>Variables, numbers, strings, booleans, lists, tuples, dictionaries, functions, imports, conditionals, loops, exceptions, formatting, and bounded built-ins compile to shared call/jump control flow and allowlisted managed-runtime syscalls.</p></div></section>
       <section class="manual-section"><h3>6.3 Native modules</h3><table><thead><tr><th>Module</th><th>Purpose</th><th>Representative calls</th></tr></thead><tbody>
         <tr><td>os</td><td>Identity, time, events, timers, lifecycle</td><td>get_computer_id, clock, sleep, pull_event, queue_event, shutdown, reboot</td></tr>
         <tr><td>term</td><td>Fixed-cell terminal</td><td>write, clear, set_cursor_pos, set_text_color</td></tr>
@@ -237,17 +237,19 @@ while True:
     title: "DOS profile",
     summary: "386SX portable command and path conventions",
     html: `
-      <header class="manual-page-header"><p class="manual-kicker">Chapter 14 · Compatibility profile</p><h2>Operating in the DOS environment</h2><p class="manual-lead">The portable profile presents a 386SX 16 MHz machine with 2 MB RAM and a DOS command environment. The current sandbox keeps execution, storage, identity, and security policy on the shared verified core while adapting the operator-facing machine profile.</p></header>
-      <figure class="manual-figure manual-figure--portable"><img src="/assets/manual/portable-computer-system.png" alt="Portable 386SX 16 MHz Computer System with 2 MB RAM showing a DOS prompt, monochrome LCD, keyboard, trackball, floppy drive, rear ports, and battery pack" loading="lazy" decoding="async"><figcaption><b>Portable Computer System.</b> A DOS laptop concept built around a 386SX at 16 MHz with 2 MB RAM. Its tighter clock and memory targets distinguish it from the desktop workstation; a CPU-specific instruction timing table remains separate from the current shared execution core.</figcaption></figure>
+      <header class="manual-page-header"><p class="manual-kicker">Chapter 14 · Compatibility profile</p><h2>Operating in the DOS environment</h2><p class="manual-lead">The portable profile is an active CS386SX 16 MHz machine with 2 MiB RAM and a DOS command environment. Execution uses its persisted model-specific clock, cycle table, bus width, and memory limit while storage, identity, and security policy remain shared.</p></header>
+      <figure class="manual-figure manual-figure--portable"><img src="/assets/manual/portable-computer-system.png" alt="Portable 386SX 16 MHz Computer System with 2 MB RAM showing a DOS prompt, monochrome LCD, keyboard, trackball, floppy drive, rear ports, and battery pack" loading="lazy" decoding="async"><figcaption><b>Portable Computer System.</b> The CS386SX profile runs at 16 MHz with 2 MiB RAM, a 24-bit address bus, a 16-bit data bus, and 800,000 cycles/tick. Its narrower bus and 80386-derived timing are active execution constraints rather than display-only labels.</figcaption></figure>
       <section class="manual-section"><h3>14.1 Correspondence table</h3><table><thead><tr><th>Task</th><th>Linux profile</th><th>DOS profile</th></tr></thead><tbody><tr><td>List</td><td>ls</td><td>DIR</td></tr><tr><td>Read</td><td>cat FILE</td><td>TYPE FILE</td></tr><tr><td>Change directory</td><td>cd /tmp</td><td>CD C:\\TMP</td></tr><tr><td>Copy / move</td><td>cp / mv</td><td>COPY / MOVE</td></tr><tr><td>Remove</td><td>rm</td><td>DEL</td></tr><tr><td>Machine info</td><td>cpuinfo / free</td><td>CPU / MEM</td></tr><tr><td>Version</td><td>uname</td><td>VER</td></tr></tbody></table></section>
       <section class="manual-section manual-grid-2"><div><h3>14.2 Layout</h3><pre><code>C:\\
 ├─ DOS
 ├─ TEMP
         └─ USERS\\COMPUTER</code></pre></div><div><h3>14.3 Conventions</h3><p>Commands and drive paths are case-insensitive. Backslash is the displayed separator, CRLF is the text convention, and <code>NUL</code> is the null device. DOS paths resolve through the same checked guest filesystem.</p></div></section>
-      <section class="manual-section"><h3>14.4 Toolchain continuity</h3><pre><code>CC PROGRAM.C -O PROGRAM
+      <section class="manual-section"><h3>14.4 Toolchain continuity</h3><pre><code>CPU
+MEM
+CC PROGRAM.C -O PROGRAM
 RUN --STATS PROGRAM
-OBJDUMP PROGRAM</code></pre><p>The assembler and language compilers target the same CS486 executable format. Switching profiles does not turn guest programs into host DOS or x86 binaries.</p></section>
-      <aside class="manual-callout"><b>One core, two shells</b><p>New profiles should adapt naming and syntax at the shell boundary. They must not fork persistence, execution accounting, identity, or security policy.</p></aside>`,
+OBJDUMP PROGRAM</code></pre><p>The assembler and language compilers target the same safe CS486 executable format, but execution charges the active processor model. Switching profiles does not turn guest programs into host DOS or native x86 binaries.</p></section>
+      <aside class="manual-callout"><b>Safe legacy migration</b><p>A newly created Pocket selects DOS plus CS386SX automatically. An exact older default Linux/CS486DX/33 MHz/1 MiB Pocket migrates once; customized OS, CPU, clock, or RAM settings are preserved.</p></aside>`,
   },
   {
     id: "worked-project",
@@ -292,7 +294,7 @@ while True:
     html: `
       <header class="manual-page-header"><p class="manual-kicker">Chapter 13 · Performance engineering</p><h2>Optimization is part of the machine</h2><p class="manual-lead">Use deterministic guest metrics. Host timing is affected by Minecraft ticks, other Computers, and the global scheduler cap.</p></header>
       <section class="manual-section"><h3>13.1 The loop</h3><ol class="manual-procedure"><li><b>Establish correctness.</b> Save expected output.</li><li><b>Measure.</b> Record instructions and cycles with <code>run --stats</code>.</li><li><b>Find the dominant term.</b> Count loop iterations and expensive opcodes.</li><li><b>Change one idea.</b> Algorithm, invariant motion, strength reduction, or memory layout.</li><li><b>Compare.</b> Require equal output and lower cost.</li></ol></section>
-      <section class="manual-section"><h3>13.2 Cost priorities</h3><table><thead><tr><th>Priority</th><th>Question</th><th>Typical action</th></tr></thead><tbody><tr><td>O(N)</td><td>Does work scale with input or nested iteration?</td><td>Change the algorithm first</td></tr><tr><td>Serial fraction</td><td>What remains under global scheduling?</td><td>Remove repeated setup and output</td></tr><tr><td>Opcode cost</td><td>Are DIV/MOD or PRINT dominant?</td><td>Strength-reduce or batch</td></tr><tr><td>Memory pressure</td><td>Are live objects forcing O(N) scans?</td><td>Release references and reuse buffers</td></tr></tbody></table></section>
+      <section class="manual-section"><h3>13.2 Cost priorities</h3><table><thead><tr><th>Priority</th><th>Question</th><th>Typical action</th></tr></thead><tbody><tr><td>O(N)</td><td>Does work scale with input or nested iteration?</td><td>Change the algorithm first</td></tr><tr><td>Serial fraction</td><td>What remains under global scheduling?</td><td>Remove repeated setup and output</td></tr><tr><td>Opcode cost</td><td>Are DIV/MOD, taken branches, dword bus transfers, or PRINT dominant?</td><td>Strength-reduce, improve locality, or batch</td></tr><tr><td>Memory pressure</td><td>Are live objects forcing O(N) scans?</td><td>Release references and reuse buffers</td></tr></tbody></table><p>Compare optimizations on the same processor profile: CS386SX and CS486DX intentionally assign different costs to the same instruction stream.</p></section>
       <section class="manual-section manual-grid-2"><div><h3>Before</h3><pre><code>mov eax, 0
 mov ecx, 100
 loop:

@@ -6,11 +6,11 @@ import type { ShellClockSource } from "./clock.js";
 import type { ComputerHardwareProfile } from "../../domain/computer/hardware.js";
 import type { VirtualDevice } from "./osProfile.js";
 import {
-  cs486NominalClockHz,
   runCs486,
   validateCs486Executable,
   type Cs486Executable,
 } from "../../domain/cpu/cs486.js";
+import { cpuModelSpecification } from "../../domain/cpu/models.js";
 import { cpuCyclesToMicroseconds } from "../../domain/cpu/timing.js";
 import {
   assembleCs486,
@@ -1067,11 +1067,14 @@ export class ShellCommandRuntime {
   }
 
   private linuxCpuInfo(): string {
+    const cpu = cpuModelSpecification(this.options.hardware.cpuModel);
     return (
       [
         "processor\t: 0",
-        "model name\t: Computer System 486DX",
-        `clock\t\t: ${formatClock(cs486NominalClockHz)}`,
+        `model name\t: ${cpu.displayName}`,
+        `model id\t: ${cpu.id}`,
+        `data bus\t: ${String(cpu.dataBusBits)} bit`,
+        `clock\t\t: ${formatClock(this.options.hardware.clockHz)}`,
       ].join("\n") + "\n"
     );
   }
@@ -1110,9 +1113,7 @@ export class ShellCommandRuntime {
     }
     const system =
       this.options.profile.id === "dos"
-        ? `Computer System DOS 0.1 [CPU ${formatClock(
-            cs486NominalClockHz,
-          )}, Memory ${formatBinaryBytes(this.options.hardware.memoryBytes)}]`
+        ? `Computer System DOS 0.1 [CPU ${cpuModelSpecification(this.options.hardware.cpuModel).runtimeName} ${formatClock(this.options.hardware.clockHz)}, Memory ${formatBinaryBytes(this.options.hardware.memoryBytes)}]`
         : "Computer System OS 0.3";
     return success(
       arguments_[0] === "-a"
@@ -1370,13 +1371,17 @@ export class ShellCommandRuntime {
     compileCycles = 0,
   ): ShellCommandResult {
     const result = runCs486(executable, {
+      cpuModel: this.options.hardware.cpuModel,
       instructionLimit: 10_000,
       memoryBytes: this.options.hardware.memoryBytes,
     });
+    const runtimeName = cpuModelSpecification(
+      this.options.hardware.cpuModel,
+    ).runtimeName;
     const stderr = stats
-      ? `CS486: ${result.executedInstructions} instructions, ${result.cycles} CPU cycles, ${cpuCyclesToMicroseconds(result.cycles).toFixed(3)} us at 33 MHz, ${result.state}\n`
+      ? `${runtimeName}: ${result.executedInstructions} instructions, ${result.cycles} CPU cycles, ${cpuCyclesToMicroseconds(result.cycles, this.options.hardware.clockHz).toFixed(3)} us at ${formatClock(this.options.hardware.clockHz)}, ${result.state}\n`
       : result.state === "yielded"
-        ? "CS486: execution limit reached\n"
+        ? `${runtimeName}: execution limit reached\n`
         : "";
     return {
       exitCode: result.state === "halted" ? 0 : 124,
@@ -1490,10 +1495,13 @@ export class ShellCommandRuntime {
 
   private dosCpu(arguments_: readonly string[]): ShellCommandResult {
     if (arguments_.length !== 0) return usage("CPU");
+    const cpu = cpuModelSpecification(this.options.hardware.cpuModel);
     return success(
       [
-        "Computer System 486DX",
-        `Clock speed: ${formatClock(cs486NominalClockHz)}`,
+        cpu.displayName,
+        `Model ID: ${cpu.id}`,
+        `Data bus: ${String(cpu.dataBusBits)} bit`,
+        `Clock speed: ${formatClock(this.options.hardware.clockHz)}`,
       ].join("\r\n") + "\r\n",
     );
   }
@@ -1525,13 +1533,15 @@ export class ShellCommandRuntime {
 
   private dosSystemInfo(arguments_: readonly string[]): ShellCommandResult {
     if (arguments_.length !== 0) return usage("SYSTEMINFO");
+    const cpu = cpuModelSpecification(this.options.hardware.cpuModel);
     const capacity = this.filesystem.limits.capacityBytes;
     const usedDisk = capacity - this.filesystem.getFreeSpace();
     return success(
       [
         `Computer ID: ${this.options.computerName}`,
         "Operating System: Computer System DOS 0.1",
-        `CPU: Computer System 486DX, ${formatClock(cs486NominalClockHz)}`,
+        `CPU: ${cpu.displayName}, ${formatClock(this.options.hardware.clockHz)}`,
+        `Data bus: ${String(cpu.dataBusBits)} bit`,
         `Memory: ${this.options.hardware.memoryBytes} bytes`,
         `Disk: ${usedDisk} / ${capacity} bytes used`,
       ].join("\r\n") + "\r\n",

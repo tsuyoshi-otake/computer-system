@@ -122,17 +122,18 @@ safety constraints.
 
 `bds_execute_computer_command` provides a direct debug path for a specific
 Computer without using its TUI. It returns stdout, stderr, exit code, and
-modeled 486DX CPU cycles from the sandboxed shell; it never invokes host
-PowerShell/Bash or arbitrary BDS administration commands.
-`bds_wait_for_web_handoff` returns the next one-use URL for one exact Computer
-ID while preventing browser auto-open from consuming it first. Both paths bound
-input, concurrency, output, and waits. The MCP-only `python <file>` and
-`micropython <file>` forms run a bounded source file with the target Computer's
-MicroPython-compatible language, filesystem, hardware profile, and RAM limit.
-Python is compiled to CS486 control flow and an allowlisted managed-runtime
-syscall ABI; there is no separate Python VM. MCP execution rejects waits and
-long-running work and reports CS486 machine instructions, CPU cycles, and the
-same 33 MHz virtual-time units as `run --stats`.
+modeled CPU cycles for the target Computer's persisted hardware model from the
+sandboxed shell; it never invokes host PowerShell/Bash or arbitrary BDS
+administration commands. `bds_wait_for_web_handoff` returns the next one-use URL
+for one exact Computer ID while preventing browser auto-open from consuming it
+first. Both paths bound input, concurrency, output, and waits. The MCP-only
+`python <file>` and `micropython <file>` forms run a bounded source file with
+the target Computer's MicroPython-compatible language, filesystem, hardware
+profile, and RAM limit. Python is compiled to CS486 control flow and an
+allowlisted managed-runtime syscall ABI; there is no separate Python VM. MCP
+execution rejects waits and long-running work and reports machine instructions,
+CPU cycles, and virtual time at the target Computer's clock, using the same
+units as `run --stats`.
 
 ## Browser terminal
 
@@ -249,33 +250,42 @@ future non-Bedrock host can add a SQLite repository behind the same boundary.
 bounded subtree usage from one filesystem snapshot. `date` defaults to wall UTC,
 with `date --game` and `date --virtual` for Minecraft and deterministic VM time.
 
-Each Computer also has a persisted virtual hardware profile. User-facing CPU
-information and the execution model identify a Computer System 486DX at 33 MHz.
-At 20 server ticks per second, one Computer receives at most 1,650,000 modeled
-CPU cycles per tick, while the scheduler retains the same global cap and
-round-robin fairness across Computers. Computer System Python compiles branches,
-calls, returns, and waits to the CS486 process and uses bounded `python`
-syscalls for managed values and native modules. Collection and call costs scale
-with their input size. Native shell commands and Bash scripts currently use the
-separate shell interpreter but return bounded CPU-cycle charges, so they cannot
-bypass the same budget. Snapshots created with the former 20 kHz default migrate
-to 33 MHz when restored. The default 1 MiB RAM limit applies to the VM's
-aggregate reachable runtime data and raises `MemoryError` on overflow;
-unreachable values are reclaimed during pressure checks. Linux exposes
-`cpuinfo`, `free`, `/proc/cpuinfo`, and `/proc/meminfo`. The DOS profile exposes
-`CPU`, `MEM`, and `SYSTEMINFO`, and `VER` includes the hardware summary. RAM,
-persistent disk quota, collection size, and output bounds are independent
-limits.
+Each Computer also has a persisted virtual hardware profile. Desktop Computers
+default to a Computer System 486DX at 33 MHz. Portable and Pocket Computers
+default to DOS on a Computer System 386SX at 16 MHz with 2 MiB RAM. At 20 server
+ticks per second those profiles receive at most 1,650,000 and 800,000 modeled
+CPU cycles per tick respectively, while the scheduler retains the same global
+cap and round-robin fairness across Computers. The 386SX profile uses Intel
+80386-derived instruction clocks, value-dependent early-out multiplication,
+taken/not-taken branch costs, and explicit penalties for four-byte RAM and stack
+transfers over its 16-bit data bus. Timing dispatch remains O(1) per
+instruction.
 
-The sandboxed CS486DX toolchain adds real 32-bit `EAX` through `EBP` registers,
+Computer System Python compiles branches, calls, returns, and waits to the same
+validated process representation and uses bounded `python` syscalls for managed
+values and native modules. The selected CPU model owns instruction timing;
+collection and call costs still scale with their input size. Native shell
+commands and Bash scripts currently use the separate shell interpreter but
+return bounded CPU-cycle charges, so they cannot bypass the same budget. Former
+20 kHz snapshots migrate to the desktop default when restored. A legacy-default
+Pocket record migrates once at the portable item boundary; any customized OS,
+CPU, clock, or RAM configuration remains authoritative. The desktop installs 1
+MiB RAM and the portable installs and enforces 2 MiB. Aggregate runtime data
+raises `MemoryError` on overflow, while unreachable values are reclaimed during
+pressure checks. Linux exposes `cpuinfo`, `free`, `/proc/cpuinfo`, and
+`/proc/meminfo`. The DOS profile exposes `CPU`, `MEM`, and `SYSTEMINFO`, and
+`VER` includes the active hardware summary. RAM, persistent disk quota,
+collection size, and output bounds are independent limits.
+
+The sandboxed CS486 toolchain adds real 32-bit `EAX` through `EBP` registers,
 checked little-endian linear memory, stack/call control flow, terminal CPU
-faults, and instruction-specific cycle costs. `as`, `cc`, `c++`, and `basicc`
-compile safe initial language subsets to the same validated textual executable
-format. `as`, `cc`, `c++`, and `basicc` accept `-c` to emit a bounded `CS486OBJ`
-relocatable object. Objects carry text symbols, text-target relocations, and
-object-relative data size; `ld` resolves them into the existing validated
-`CS486` executable in O(instructions + symbols + relocations) work. `nm` and
-`objdump` inspect both formats. C and C++ support external and defined
+faults, and model-specific instruction cycle costs. `as`, `cc`, `c++`, and
+`basicc` compile safe initial language subsets to the same validated textual
+executable format. `as`, `cc`, `c++`, and `basicc` accept `-c` to emit a bounded
+`CS486OBJ` relocatable object. Objects carry text symbols, text-target
+relocations, and object-relative data size; `ld` resolves them into the existing
+validated `CS486` executable in O(instructions + symbols + relocations) work.
+`nm` and `objdump` inspect both formats. C and C++ support external and defined
 zero-argument integer functions plus statement-boundary `asm("...")`; inline
 assembly rejects labels, control flow, stack operations, and ESP/EBP access.
 Python resolves same-directory modules followed by `/lib/python` and
@@ -285,19 +295,23 @@ global zero-argument integer functions as Python attributes and executes them in
 the same CS486 process with EAX returns. For example,
 `cc -c fastmath.c -o fastmath.o` beside a script enables `import fastmath`.
 Missing, circular, oversized, corrupt, or ABI-incompatible imports fail
-explicitly. `basic` runs BASIC source directly, while `run --stats` reports
-instructions, CPU cycles, and virtual microseconds at 33 MHz. No frontend
-invokes a host compiler, linker, or native binary. General dynamic/shared
-libraries remain a follow-up on the versioned object and ABI foundation. MCP's
-`cpuCycles` field uses one unit across ASM, C, C++, BASIC, and Python;
-machine-instruction counts remain diagnostic values, not timing units.
+explicitly. `basic` runs BASIC source directly, while `run --stats` reports the
+active CS486DX or CS386SX model, instructions, CPU cycles, and virtual
+microseconds at its persisted clock. No frontend invokes a host compiler,
+linker, or native binary. General dynamic/shared libraries remain a follow-up on
+the versioned object and ABI foundation. MCP's `cpuCycles` field uses one unit
+across ASM, C, C++, BASIC, and Python; machine-instruction counts remain
+diagnostic values, not timing units.
 
 The Bedrock pack includes placeable `Computer` and `Advanced Computer` items
 (`computer_system:computer_item` and `computer_system:advanced_computer_item`).
 Placed blocks use internal `computer_system:computer_00..63` or
 `computer_system:advanced_computer_00..63` identifiers for their six-face
 redstone-output mask. The current display block is `computer_system:monitor`; it
-is named Monitor rather than Display.
+is named Monitor rather than Display. `computer_system:pocket_computer` is the
+portable DOS machine and applies the CS386SX 16 MHz / 2 MiB profile when its
+persistent item identity is created or a legacy-default pocket identity is
+safely migrated.
 
 Examples:
 

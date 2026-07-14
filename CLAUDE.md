@@ -4,14 +4,16 @@
 
 Computer System is a ComputerCraft-inspired Minecraft Bedrock Add-On. Computer
 System Python is a deterministic, sandboxed, MicroPython-compatible language
-compiled to the shared CS486DX process; it has no dedicated Python VM.
+compiled to the shared validated CS process; it has no dedicated Python VM. The
+persisted Computer hardware profile selects CS486DX or CS386SX execution timing.
 Minecraft-specific behavior is implemented by thin Bedrock adapters around
 host-testable domain and application layers.
 
 GitHub Issue #4 tracks the Phase 2 Bedrock Computer vertical slice. GitHub Issue
 #12 tracks the OS 0.3 shell, CS486 toolchain, Web Terminal, and operator manual
 expansion. GitHub Issue #13 tracks Python-to-CS486 compilation, filesystem
-imports, and CS486 C/C++ extension modules. Most Phase 2 behavior is implemented
+imports, and CS486 C/C++ extension modules. GitHub Issue #14 tracks the portable
+CS386SX 16 MHz / 2 MiB hardware profile. Most Phase 2 behavior is implemented
 and verified. The native GDK terminal is a bounded fallback; the preferred
 interactive terminal is the local Web Terminal companion started with
 `npm run dev:bds:web`.
@@ -128,13 +130,13 @@ The July 2026 live GDK verification established the following:
 - `bds_wait_for_web_handoff` owns at most one bounded wait per Computer ID and
   suppresses auto-open for its matching handoff, preventing one-use URL races.
   `bds_execute_computer_command` returns bounded stdout, stderr, exit code, and
-  modeled 486DX CPU cycles for one exact Computer. TUI, sleep, and
-  lifecycle-control commands fail explicitly on this debug path.
+  modeled CPU cycles for one exact Computer's selected hardware model. TUI,
+  sleep, and lifecycle-control commands fail explicitly on this debug path.
 - The MCP-only `python <file>`/`micropython <file>` debug forms execute a
   bounded source file with the target Computer's VM, filesystem, hardware, and
   RAM limit. They reject waits and long-running execution. Bytecode instruction
-  counts are diagnostic only; the returned `cpuCycles` use the same
-  deterministic 486DX-equivalent unit as ASM, C, C++, and BASIC.
+  counts are diagnostic only; the returned `cpuCycles` use the same selected
+  CS486DX or CS386SX timing model as ASM, C, C++, and BASIC.
 - Periodic snapshot work is fixed-batch O(K), without an O(N) allocation per
   pass. Writer input uses an amortized-O(1), deduplicated, attempt-bounded eager
   queue so interactive latency does not inherit the viewer round-robin delay.
@@ -182,6 +184,17 @@ not introduce labels, control flow, stack operations, or ESP/EBP access. Dynamic
 linking is not implemented yet; extend the versioned object/ABI boundary rather
 than dispatching to a host linker or loader.
 
+CPU identity, clock, and RAM are one persisted hardware profile. Desktop
+Computers default to CS486DX at 33 MHz with 1 MiB RAM. Portable/Pocket Computers
+default to DOS on CS386SX at 16 MHz with 2 MiB RAM. `instructionTiming.ts`
+selects timing in O(1): preserve the existing CS486DX costs and the Intel
+80386-derived CS386SX arithmetic, branch, early-out multiply, and 16-bit
+data-bus penalties. The scheduler derives per-tick credit from the persisted
+clock. Keep the shared executable and ABI representation; never fork a
+language-specific CPU engine. `applyPortableComputerProfile` may migrate only an
+exact legacy-default Pocket record and must leave every customized OS or
+hardware field unchanged.
+
 Computer System Python parses directly to CS486 control flow plus the
 allowlisted `python` syscall ABI in `pythonCs486.ts`. Calls, returns, branches,
 waits, instruction accounting, and cycle debt belong to `Cs486Process`; do not
@@ -196,9 +209,10 @@ and charge extension instructions to the same process.
 Keep OS-specific behavior behind `osProfile.ts`: path dialect, boot layout,
 environment, aliases, and virtual devices must not leak into the domain
 filesystem. Linux is the default persisted profile; the DOS fixture protects
-future drive-letter, case-insensitive, CRLF, and `NUL` semantics. `vi` uses
-bounded `terminal_keys` batches and renders only its fixed viewport. Syntax and
-indent highlighting must scan no more than the visible columns/rows per redraw.
+drive-letter, case-insensitive, CRLF, and `NUL` semantics, and Pocket Computers
+select DOS explicitly. `vi` uses bounded `terminal_keys` batches and renders
+only its fixed viewport. Syntax and indent highlighting must scan no more than
+the visible columns/rows per redraw.
 
 World Dynamic Properties remain the Bedrock source of truth (physically the
 world LevelDB). Clean persistence checks use component revision tokens, not

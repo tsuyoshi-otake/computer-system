@@ -17,7 +17,11 @@ import { defaultSystemBootSource } from "../os/systemPrograms.js";
 import type { ShellClockSource } from "../os/clock.js";
 import type { ShellCompletionResult } from "../os/shellCommands.js";
 import type { ShellSession } from "../os/shellSession.js";
-import { hardwareCpuCyclesPerTick } from "../../domain/computer/hardware.js";
+import {
+  hardwareCpuCyclesPerTick,
+  type ComputerHardwareProfile,
+} from "../../domain/computer/hardware.js";
+import { cpuModelSpecification } from "../../domain/cpu/models.js";
 import { cpuCyclesToMicroseconds } from "../../domain/cpu/timing.js";
 
 export interface ComputerRuntimeOptions {
@@ -224,6 +228,7 @@ export class ComputerRuntime {
       ticksPerSecond: this.ticksPerSecond,
     });
     const vm = createPythonCs486Program({
+      cpuModel: entry.record.hardware.cpuModel,
       environment,
       filesystem: entry.record.filesystem,
       memoryBytes: entry.record.hardware.memoryBytes,
@@ -251,7 +256,12 @@ export class ComputerRuntime {
         outcome: "completed",
         exitCode: 0,
         stdout,
-        stderr: pythonStats(instructions, cpuCycles, "completed"),
+        stderr: pythonStats(
+          instructions,
+          cpuCycles,
+          "completed",
+          entry.record.hardware,
+        ),
         cpuCycles,
       };
     }
@@ -273,8 +283,8 @@ export class ComputerRuntime {
       stdout,
       stderr:
         cpuCycles >= maximumCpuCycles
-          ? `Python/CS486: CPU cycle limit ${String(maximumCpuCycles)} exceeded\n`
-          : "Python/CS486: waits and asynchronous work are not supported through MCP\n",
+          ? `Python/${cpuModelSpecification(entry.record.hardware.cpuModel).runtimeName}: CPU cycle limit ${String(maximumCpuCycles)} exceeded\n`
+          : `Python/${cpuModelSpecification(entry.record.hardware.cpuModel).runtimeName}: waits and asynchronous work are not supported through MCP\n`,
       cpuCycles,
     };
   }
@@ -316,6 +326,7 @@ export class ComputerRuntime {
         ticksPerSecond: this.ticksPerSecond,
       });
       const vm = createPythonCs486Program({
+        cpuModel: entry.record.hardware.cpuModel,
         environment,
         filesystem: entry.record.filesystem,
         memoryBytes: entry.record.hardware.memoryBytes,
@@ -416,9 +427,17 @@ function pythonStats(
   instructions: number,
   cpuCycles: number,
   state: string,
+  hardware: ComputerHardwareProfile,
 ): string {
-  const microseconds = cpuCyclesToMicroseconds(cpuCycles);
-  return `Python/CS486: ${String(instructions)} machine instructions, ${String(cpuCycles)} CPU cycles, ${microseconds.toFixed(3)} us at 33 MHz, ${state}\n`;
+  const microseconds = cpuCyclesToMicroseconds(cpuCycles, hardware.clockHz);
+  const runtimeName = cpuModelSpecification(hardware.cpuModel).runtimeName;
+  return `Python/${runtimeName}: ${String(instructions)} machine instructions, ${String(cpuCycles)} CPU cycles, ${microseconds.toFixed(3)} us at ${formatClock(hardware.clockHz)}, ${state}\n`;
+}
+
+function formatClock(clockHz: number): string {
+  return clockHz >= 1_000_000
+    ? `${(clockHz / 1_000_000).toFixed(2).replace(/\.00$/u, "")} MHz`
+    : `${String(clockHz)} Hz`;
 }
 
 function failure(error: unknown): RuntimeCommandResult {

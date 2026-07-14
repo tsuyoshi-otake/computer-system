@@ -1,4 +1,16 @@
 import { computerNominalClockHz } from "./timing.js";
+import { instructionCycleCost } from "./instructionTiming.js";
+import {
+  cs486RegisterNames,
+  type Cs486Instruction,
+  type Cs486Operand,
+  type Cs486Register,
+} from "./instructionSet.js";
+import {
+  cpuModelSpecification,
+  defaultCpuModel,
+  type CpuModel,
+} from "./models.js";
 import {
   isTerminalCpuProcessState,
   type CpuProcess,
@@ -10,63 +22,8 @@ import type { RuntimeValue } from "../runtime/value.js";
 
 export const cs486NominalClockHz = computerNominalClockHz;
 
-export const cs486RegisterNames = [
-  "eax",
-  "ebx",
-  "ecx",
-  "edx",
-  "esi",
-  "edi",
-  "esp",
-  "ebp",
-] as const;
-
-export type Cs486Register = (typeof cs486RegisterNames)[number];
-export type Cs486Operand =
-  | { readonly kind: "immediate"; readonly value: number }
-  | { readonly kind: "register"; readonly register: Cs486Register };
-
-export type Cs486Instruction =
-  | {
-      readonly op: "mov";
-      readonly destination: Cs486Register;
-      readonly source: Cs486Operand;
-    }
-  | {
-      readonly op: "load";
-      readonly destination: Cs486Register;
-      readonly address: Cs486Operand;
-    }
-  | {
-      readonly op: "store";
-      readonly address: Cs486Operand;
-      readonly source: Cs486Register;
-    }
-  | {
-      readonly op: "add" | "sub" | "mul" | "div" | "mod" | "and" | "or" | "xor";
-      readonly destination: Cs486Register;
-      readonly source: Cs486Operand;
-    }
-  | {
-      readonly op: "shl" | "shr";
-      readonly destination: Cs486Register;
-      readonly source: Cs486Operand;
-    }
-  | {
-      readonly op: "cmp";
-      readonly left: Cs486Register;
-      readonly right: Cs486Operand;
-    }
-  | {
-      readonly op: "jmp" | "je" | "jne" | "jl" | "jle" | "jg" | "jge";
-      readonly target: number;
-    }
-  | { readonly op: "push"; readonly source: Cs486Operand }
-  | { readonly op: "pop"; readonly destination: Cs486Register }
-  | { readonly op: "call"; readonly target: number }
-  | { readonly op: "ret" | "halt" }
-  | { readonly op: "syscall"; readonly name: string }
-  | { readonly op: "print"; readonly source: Cs486Operand | string };
+export { cs486RegisterNames };
+export type { Cs486Instruction, Cs486Operand, Cs486Register };
 
 export interface Cs486Executable {
   readonly dataBytes?: number;
@@ -138,7 +95,11 @@ const maximumOutputBytes = 64_000;
 
 export function runCs486(
   executable: Cs486Executable,
-  options: { readonly memoryBytes: number; readonly instructionLimit?: number },
+  options: {
+    readonly cpuModel?: CpuModel;
+    readonly memoryBytes: number;
+    readonly instructionLimit?: number;
+  },
 ): Cs486RunResult {
   const instructionLimit = options.instructionLimit ?? 100_000;
   if (!Number.isSafeInteger(instructionLimit) || instructionLimit <= 0)
@@ -168,6 +129,7 @@ export function runCs486(
 export class Cs486Process implements CpuProcess {
   private readonly memory: DataView;
   private readonly registerValues = new Int32Array(cs486RegisterNames.length);
+  private readonly cpuModel: CpuModel;
   private readonly memoryBytes: number;
   private stateValue: CpuProcessState = { kind: "ready" };
   private instructionPointer = 0;
@@ -181,12 +143,18 @@ export class Cs486Process implements CpuProcess {
     private readonly executable: Cs486Executable,
     private readonly options: {
       readonly externalMemoryUsageBytes?: () => number;
+      readonly cpuModel?: CpuModel;
       readonly memoryBytes: number;
       readonly syscallHandler?: Cs486SyscallHandler;
     },
   ) {
     validateCs486Executable(executable);
-    this.memoryBytes = Math.min(options.memoryBytes, 16 * 1_024 * 1_024);
+    this.cpuModel = options.cpuModel ?? defaultCpuModel;
+    this.memoryBytes = Math.min(
+      options.memoryBytes,
+      16 * 1_024 * 1_024,
+      cpuModelSpecification(this.cpuModel).maximumMemoryBytes,
+    );
     if (
       !Number.isSafeInteger(this.memoryBytes) ||
       this.memoryBytes < 64 * 1_024
@@ -332,7 +300,11 @@ export class Cs486Process implements CpuProcess {
       return undefined;
     }
     this.instructionPointer += 1;
-    const cycles = cycleCost(instruction);
+    const cycles = instructionCycleCost(this.cpuModel, instruction, {
+      branchTaken: this.branchTaken(instruction),
+      multiplier:
+        instruction.op === "mul" ? this.read(instruction.source) : undefined,
+    });
     switch (instruction.op) {
       case "mov":
         this.write(instruction.destination, this.read(instruction.source));
@@ -510,6 +482,27 @@ export class Cs486Process implements CpuProcess {
         break;
     }
     return cycles;
+  }
+
+  private branchTaken(instruction: Cs486Instruction): boolean | undefined {
+    switch (instruction.op) {
+      case "jmp":
+        return true;
+      case "je":
+        return this.compared === 0;
+      case "jne":
+        return this.compared !== 0;
+      case "jl":
+        return this.compared < 0;
+      case "jle":
+        return this.compared <= 0;
+      case "jg":
+        return this.compared > 0;
+      case "jge":
+        return this.compared >= 0;
+      default:
+        return undefined;
+    }
   }
 
   private read(operand: Cs486Operand): number {
@@ -773,33 +766,4 @@ function isCs486Operand(value: unknown): value is Cs486Operand {
 
 function indexOf(register: Cs486Register): number {
   return cs486RegisterNames.indexOf(register);
-}
-
-function cycleCost(instruction: Cs486Instruction): number {
-  switch (instruction.op) {
-    case "load":
-    case "store":
-    case "push":
-    case "pop":
-      return 2;
-    case "mul":
-      return 9;
-    case "div":
-    case "mod":
-      return 40;
-    case "call":
-    case "ret":
-      return 3;
-    case "syscall":
-      return 8;
-    case "print":
-      return (
-        8 +
-        (typeof instruction.source === "string"
-          ? Math.ceil(instruction.source.length / 4)
-          : 1)
-      );
-    default:
-      return 1;
-  }
 }

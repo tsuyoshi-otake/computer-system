@@ -29,10 +29,11 @@ describe("Bedrock terminal adapters", () => {
   });
 
   it("routes Computer and Pocket Computer through the production coordinator", async () => {
-    const [computer, pocket, coordinator] = await Promise.all([
+    const [computer, pocket, coordinator, registry] = await Promise.all([
       source("src/bedrock/computerComponent.ts"),
       source("src/bedrock/pocketComputer.ts"),
       source("src/bedrock/computerTerminal.ts"),
+      source("src/bedrock/computerRegistry.ts"),
     ]);
 
     expect(computer).toContain("openComputerTerminal");
@@ -46,6 +47,10 @@ describe("Bedrock terminal adapters", () => {
     expect(coordinator).toContain("showTerminalView");
     expect(coordinator).toContain('"terminal_line"');
     expect(coordinator).toContain('"terminal_closed"');
+    expect(pocket).toContain("ensurePortableComputer");
+    expect(registry).toContain("applyPortableComputerProfile");
+    expect(registry).toContain("hardware: portableComputerHardware");
+    expect(registry).toContain('osProfile: "dos"');
   });
 
   it("normalizes the GDK single-entity item-drop shape and keeps the world in daytime", async () => {

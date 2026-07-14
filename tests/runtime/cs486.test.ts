@@ -76,4 +76,73 @@ describe("CS486DX execution core", (): void => {
       ),
     ).toThrow(/invalid unknown instruction/u);
   });
+
+  it("applies 386SX execution clocks without changing program semantics", (): void => {
+    const executable = assembleCs486(`
+      mov eax, 6
+      mul eax, 7
+      push eax
+      pop edx
+      cmp edx, 42
+      je done
+      mov edx, 0
+    done:
+      print edx
+      halt
+    `);
+    const cs486dx = runCs486(executable, {
+      cpuModel: "cs486dx",
+      memoryBytes: 65_536,
+    });
+    const cs386sx = runCs486(executable, {
+      cpuModel: "cs386sx",
+      memoryBytes: 65_536,
+    });
+
+    expect(cs386sx.output).toBe(cs486dx.output);
+    expect(cs386sx.output).toBe("42");
+    expect(cs386sx.executedInstructions).toBe(cs486dx.executedInstructions);
+    expect(cs486dx.cycles).toBe(26);
+    expect(cs386sx.cycles).toBe(48);
+  });
+
+  it("models 386 early-out multiplication and taken branch cost", (): void => {
+    const fastMultiply = runCs486(
+      assembleCs486("mov eax, 2\nmul eax, 0\nhalt"),
+      { cpuModel: "cs386sx", memoryBytes: 65_536 },
+    );
+    const slowMultiply = runCs486(
+      assembleCs486("mov eax, 2\nmul eax, 1073741824\nhalt"),
+      { cpuModel: "cs386sx", memoryBytes: 65_536 },
+    );
+    const notTaken = runCs486(
+      assembleCs486("mov eax, 0\ncmp eax, 1\nje done\ndone:\nhalt"),
+      { cpuModel: "cs386sx", memoryBytes: 65_536 },
+    );
+    const taken = runCs486(
+      assembleCs486("mov eax, 1\ncmp eax, 1\nje done\ndone:\nhalt"),
+      { cpuModel: "cs386sx", memoryBytes: 65_536 },
+    );
+
+    expect(fastMultiply.cycles).toBe(16);
+    expect(slowMultiply.cycles).toBe(43);
+    expect(taken.cycles - notTaken.cycles).toBe(4);
+  });
+
+  it("faults when executable data exceeds a portable 2 MiB ceiling", (): void => {
+    expect(() =>
+      runCs486(
+        {
+          dataBytes: 2_097_156,
+          format: "cs486-executable",
+          instructions: [{ op: "halt" }],
+          version: 1,
+        },
+        {
+          cpuModel: "cs386sx",
+          memoryBytes: 2_097_152,
+        },
+      ),
+    ).toThrow(/executable data exceeds available RAM/u);
+  });
 });

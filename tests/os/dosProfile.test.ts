@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { ShellSession } from "../../src/application/os/shellSession.js";
+import { portableComputerHardware } from "../../src/domain/computer/hardware.js";
 import { InMemoryFilesystem } from "../../src/domain/filesystem/inMemoryFilesystem.js";
 
 describe("DOS profile contract", (): void => {
@@ -35,13 +36,16 @@ describe("DOS profile contract", (): void => {
   it("reports shared virtual hardware with DOS commands and no proc filesystem", (): void => {
     const shell = new ShellSession(new InMemoryFilesystem(), {
       computerName: "c-dos002",
-      hardware: { clockHz: 10_000, memoryBytes: 2_097_152 },
+      hardware: portableComputerHardware,
       memoryUsageBytes: (): number => 65_536,
       osProfile: "dos",
       ticksPerSecond: 20,
     });
 
-    expect(shell.submit("CPU").lines).toContain("Clock speed: 33 MHz");
+    expect(shell.submit("CPU").lines).toContain("Computer System 386SX");
+    expect(shell.submit("CPU").lines).toContain("Model ID: cs386sx");
+    expect(shell.submit("CPU").lines).toContain("Data bus: 16 bit");
+    expect(shell.submit("CPU").lines).toContain("Clock speed: 16 MHz");
     expect(shell.submit("MEM").lines).toContain(
       "     2097152 bytes total memory",
     );
@@ -50,7 +54,28 @@ describe("DOS profile contract", (): void => {
     );
     expect(shell.submit("MEM /P").exitCode).toBe(2);
     expect(shell.submit("SYSTEMINFO").lines).toContain("Computer ID: c-dos002");
+    expect(shell.submit("SYSTEMINFO").stdout).toContain(
+      "CPU: Computer System 386SX, 16 MHz",
+    );
     expect(shell.submit("CPUINFO").exitCode).toBe(127);
     expect(shell.submit("TYPE C:\\PROC\\CPUINFO").exitCode).toBe(1);
+  });
+
+  it("runs CS486-format programs with CS386SX timing at 16 MHz", (): void => {
+    const filesystem = new InMemoryFilesystem();
+    const shell = new ShellSession(filesystem, {
+      hardware: portableComputerHardware,
+      osProfile: "dos",
+    });
+    filesystem.writeFile(
+      "/drives/c/answer.asm",
+      "mov eax, 6\nmul eax, 7\nprint eax\nhalt\n",
+    );
+
+    expect(shell.submit("as C:\\answer.asm -o C:\\answer").exitCode).toBe(0);
+    expect(shell.submit("C:\\answer").stdout).toBe("42");
+    expect(shell.submit("run --stats C:\\answer").stderr).toMatch(
+      /^CS386SX: 4 instructions, 29 CPU cycles, 1\.813 us at 16 MHz, halted/u,
+    );
   });
 });

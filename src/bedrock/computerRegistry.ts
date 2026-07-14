@@ -2,7 +2,9 @@ import { world } from "@minecraft/server";
 
 import { DynamicPropertyIdentityRepository } from "../adapters/storage/dynamicPropertyIdentityRepository.js";
 import { PersistentComputerIdentityService } from "../application/computer/identityPersistence.js";
+import { applyPortableComputerProfile } from "../application/computer/hardwareProfiles.js";
 import { ComputerRecord } from "../domain/computer/computer.js";
+import { portableComputerHardware } from "../domain/computer/hardware.js";
 import type { ComputerFamily } from "../domain/computer/identity.js";
 import { computerHost, registerComputer } from "./computerHost.js";
 
@@ -36,5 +38,28 @@ export function createPortableComputer(family: ComputerFamily): ComputerRecord {
   if (created.outcome !== "placed") {
     throw new Error(`Unable to allocate portable computer identity`);
   }
-  return ensureComputer(created.computerId, created.family);
+  return ensurePortableComputer(created.computerId, created.family);
+}
+
+export function ensurePortableComputer(
+  computerId: string,
+  family: ComputerFamily,
+): ComputerRecord {
+  const existing = computerHost.get(computerId);
+  if (existing !== undefined) {
+    applyPortableComputerProfile(existing);
+    return existing;
+  }
+  const restored = computerHost.restore(computerId);
+  if (restored.outcome === "registered") {
+    applyPortableComputerProfile(restored.record);
+    return restored.record;
+  }
+  if (restored.outcome === "failed") throw restored.error;
+  const record = new ComputerRecord(computerId, family, {
+    hardware: portableComputerHardware,
+    osProfile: "dos",
+  });
+  registerComputer(record);
+  return record;
 }

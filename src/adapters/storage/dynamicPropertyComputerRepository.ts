@@ -1,6 +1,7 @@
 import type { ComputerSnapshotRepository } from "../../application/computer/persistence.js";
 import type { ComputerSnapshot } from "../../domain/computer/computer.js";
 import { requireComputerId } from "../../domain/computer/identity.js";
+import { isCpuModel } from "../../domain/cpu/models.js";
 import { TransactionalPagedStore } from "./transactionalPagedStore.js";
 
 export interface DynamicPropertyOwner {
@@ -79,6 +80,8 @@ function isComputerSnapshot(value: unknown): value is ComputerSnapshot {
       (typeof candidate.hardware === "object" &&
         candidate.hardware !== null &&
         Number.isSafeInteger(candidate.hardware.clockHz) &&
+        (candidate.hardware.cpuModel === undefined ||
+          isCpuModel(candidate.hardware.cpuModel)) &&
         Number.isSafeInteger(candidate.hardware.memoryBytes))) &&
     (candidate.osProfile === undefined ||
       candidate.osProfile === "linux" ||

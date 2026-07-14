@@ -1,22 +1,42 @@
 import { computerNominalClockHz, cpuCyclesPerTick } from "../cpu/timing.js";
+import {
+  cpuModelSpecification,
+  defaultCpuModel,
+  requireCpuModel,
+  type CpuModel,
+} from "../cpu/models.js";
 
 export interface ComputerHardwareProfile {
   readonly clockHz: number;
+  readonly cpuModel: CpuModel;
+  readonly memoryBytes: number;
+}
+
+export interface ComputerHardwareSnapshot {
+  readonly clockHz: number;
+  readonly cpuModel?: CpuModel;
   readonly memoryBytes: number;
 }
 
 export const defaultComputerHardware: ComputerHardwareProfile = {
   clockHz: computerNominalClockHz,
+  cpuModel: defaultCpuModel,
   memoryBytes: 1_048_576,
 };
 
+export const portableComputerHardware: ComputerHardwareProfile = {
+  clockHz: cpuModelSpecification("cs386sx").nominalClockHz,
+  cpuModel: "cs386sx",
+  memoryBytes: 2 * 1_048_576,
+};
+
 const maximumClockHz = 100_000_000;
-const maximumMemoryBytes = 64 * 1_048_576;
 const minimumMemoryBytes = 65_536;
 
 export function requireComputerHardware(
   hardware: ComputerHardwareProfile,
 ): ComputerHardwareProfile {
+  const cpuModel = requireCpuModel(hardware.cpuModel);
   if (
     !Number.isSafeInteger(hardware.clockHz) ||
     hardware.clockHz < 1 ||
@@ -29,13 +49,22 @@ export function requireComputerHardware(
   if (
     !Number.isSafeInteger(hardware.memoryBytes) ||
     hardware.memoryBytes < minimumMemoryBytes ||
-    hardware.memoryBytes > maximumMemoryBytes
+    hardware.memoryBytes > cpuModelSpecification(cpuModel).maximumMemoryBytes
   ) {
     throw new RangeError(
-      `Memory must be between ${String(minimumMemoryBytes)} and ${String(maximumMemoryBytes)} bytes`,
+      `Memory must be between ${String(minimumMemoryBytes)} and ${String(cpuModelSpecification(cpuModel).maximumMemoryBytes)} bytes for ${cpuModel}`,
     );
   }
-  return { ...hardware };
+  return { ...hardware, cpuModel };
+}
+
+export function restoreComputerHardware(
+  hardware: ComputerHardwareSnapshot | undefined,
+): ComputerHardwareProfile {
+  return requireComputerHardware({
+    ...(hardware ?? defaultComputerHardware),
+    cpuModel: hardware?.cpuModel ?? defaultCpuModel,
+  });
 }
 
 export function hardwareCpuCyclesPerTick(

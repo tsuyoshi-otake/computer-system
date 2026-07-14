@@ -8,6 +8,7 @@ import {
   ComputerRecord,
   type ComputerSnapshot,
 } from "../../src/domain/computer/computer.js";
+import { portableComputerHardware } from "../../src/domain/computer/hardware.js";
 
 describe("Computer persistence boundary", (): void => {
   it("round-trips identity, filesystem, terminal, label, and redstone without live VM state", (): void => {
@@ -25,7 +26,11 @@ describe("Computer persistence boundary", (): void => {
     record.terminal.setCursorPosition(2, 2);
     record.terminal.setCursorBlink(true);
     record.setRedstoneOutputMask(34);
-    record.configureHardware({ clockHz: 10_000, memoryBytes: 2_097_152 });
+    record.configureHardware({
+      clockHz: 10_000,
+      cpuModel: "cs486dx",
+      memoryBytes: 2_097_152,
+    });
 
     expect(persistence.saveIfDirty(record)).toEqual({
       outcome: "saved",
@@ -52,6 +57,7 @@ describe("Computer persistence boundary", (): void => {
     expect(loaded.record.redstoneOutputMask).toBe(34);
     expect(loaded.record.hardware).toEqual({
       clockHz: 10_000,
+      cpuModel: "cs486dx",
       memoryBytes: 2_097_152,
     });
     expect(Object.keys(repository.load("computer-7")!)).not.toContain("vm");
@@ -134,6 +140,7 @@ describe("Computer persistence boundary", (): void => {
   it("persists DOS selection and defaults legacy snapshots to Linux", (): void => {
     const repository = new MemoryRepository();
     const dos = new ComputerRecord("computer-14", "standard", {
+      hardware: portableComputerHardware,
       osProfile: "dos",
     });
     repository.save(dos.snapshot());
@@ -143,6 +150,7 @@ describe("Computer persistence boundary", (): void => {
     expect(loadedDos.outcome).toBe("loaded");
     if (loadedDos.outcome === "loaded") {
       expect(loadedDos.record.osProfile).toBe("dos");
+      expect(loadedDos.record.hardware).toEqual(portableComputerHardware);
     }
 
     const linux = new ComputerRecord("computer-15", "standard").snapshot();
@@ -155,6 +163,7 @@ describe("Computer persistence boundary", (): void => {
       expect(loadedLegacy.record.osProfile).toBe("linux");
       expect(loadedLegacy.record.hardware).toEqual({
         clockHz: 33_000_000,
+        cpuModel: "cs486dx",
         memoryBytes: 1_048_576,
       });
     }

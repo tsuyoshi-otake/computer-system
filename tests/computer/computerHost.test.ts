@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { ComputerRuntime } from "../../src/application/computer/computerRuntime.js";
 import { ComputerRecord } from "../../src/domain/computer/computer.js";
+import { portableComputerHardware } from "../../src/domain/computer/hardware.js";
 
 describe("ComputerRuntime", (): void => {
   it("boots startup.py and stops explicitly when the program completes", (): void => {
@@ -35,14 +36,14 @@ describe("ComputerRuntime", (): void => {
       stdout: "42\n",
     });
     expect(result.outcome === "completed" && result.stderr).toMatch(
-      /^Python\/CS486: \d+ machine instructions, \d+ CPU cycles, \d+\.\d{3} us at 33 MHz/u,
+      /^Python\/CS486DX: \d+ machine instructions, \d+ CPU cycles, \d+\.\d{3} us at 33 MHz/u,
     );
     if (result.outcome === "completed") {
       expect(result.cpuCycles).toBeGreaterThan(20);
     }
   });
 
-  it("reports comparable CPU cycles across ASM, C++, and Python/CS486", (): void => {
+  it("reports comparable CPU cycles across ASM, C++, and Python/CS486DX", (): void => {
     const record = computer("c-000002", "import os\nos.pull_event()\n");
     const runtime = runtimeWith(record);
     runtime.powerOn(record.computerId);
@@ -133,8 +134,37 @@ describe("ComputerRuntime", (): void => {
       stdout: "42\n",
     });
     if (result.outcome === "completed") {
-      expect(result.stderr).toMatch(/^Python\/CS486:/u);
+      expect(result.stderr).toMatch(/^Python\/CS486DX:/u);
       expect(result.cpuCycles).toBeGreaterThan(0);
+    }
+  });
+
+  it("runs Python debug work with portable CS386SX timing", (): void => {
+    const record = new ComputerRecord("c-000104", "advanced", {
+      hardware: portableComputerHardware,
+      osProfile: "dos",
+    });
+    record.filesystem.writeFile("/startup.py", "import os\nos.pull_event()\n");
+    const runtime = runtimeWith(record);
+    runtime.powerOn(record.computerId);
+    record.filesystem.writeFile(
+      "/drives/c/users/computer/demo.py",
+      "print(6 * 7)\n",
+    );
+
+    const result = runtime.executeDebugShellCommand(
+      record.computerId,
+      "python /drives/c/users/computer/demo.py",
+    );
+    expect(result).toMatchObject({
+      outcome: "completed",
+      exitCode: 0,
+      stdout: "42\n",
+    });
+    if (result.outcome === "completed") {
+      expect(result.stderr).toMatch(
+        /^Python\/CS386SX: \d+ machine instructions, \d+ CPU cycles, \d+\.\d{3} us at 16 MHz/u,
+      );
     }
   });
 
@@ -202,7 +232,11 @@ describe("ComputerRuntime", (): void => {
 
   it("does not finalize a terminal VM until its CPU cycle debt is paid", (): void => {
     const record = new ComputerRecord("computer-16", "standard", {
-      hardware: { clockHz: 1, memoryBytes: 1_048_576 },
+      hardware: {
+        clockHz: 1,
+        cpuModel: "cs486dx",
+        memoryBytes: 1_048_576,
+      },
     });
     record.filesystem.writeFile("/startup.py", "pass\n");
     const runtime = new ComputerRuntime({

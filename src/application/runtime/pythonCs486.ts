@@ -33,6 +33,7 @@ import {
 import { utf8ByteLength } from "../../domain/text/utf8.js";
 import { linkCs486Objects } from "../toolchain/cs486Linker.js";
 import type { NativeEnvironment } from "./nativeModules.js";
+import type { CpuModel } from "../../domain/cpu/models.js";
 import {
   defaultPythonRuntimeLimits,
   type PythonRuntimeLimits,
@@ -44,6 +45,7 @@ const maximumImportDepth = 16;
 const maximumTotalSourceBytes = 512_000;
 
 export interface PythonCs486Options {
+  readonly cpuModel?: CpuModel;
   readonly environment: NativeEnvironment;
   readonly filesystem: InMemoryFilesystem;
   readonly memoryBytes: number;
@@ -86,6 +88,7 @@ export function createPythonCs486Program(
     extensionModules: executable.extensionModules,
   });
   const process = new Cs486Process(executable.executable, {
+    cpuModel: options.cpuModel,
     externalMemoryUsageBytes: (): number => runtime.memoryUsageBytes,
     memoryBytes: options.memoryBytes,
     syscallHandler: (name, context): Cs486SyscallResult =>
