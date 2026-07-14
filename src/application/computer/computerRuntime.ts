@@ -318,6 +318,10 @@ export class ComputerRuntime {
 
   private boot(entry: RuntimeEntry): RuntimeCommandResult {
     try {
+      entry.record.terminal.setTextColor(0);
+      entry.record.terminal.setBackgroundColor(15);
+      entry.record.terminal.clear();
+      entry.record.terminal.setCursorPosition(1, 1);
       const supportsMicroPython = cpuModelSpecification(
         entry.record.hardware.cpuModel,
       ).supportsMicroPython;

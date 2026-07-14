@@ -226,9 +226,12 @@ describe("ComputerRuntime", (): void => {
     rebootRuntime.queueEvent(rebooted.computerId, "reboot");
     rebootRuntime.runTick();
     expect(rebooted.lifecycle.state.kind).toBe("running");
-    expect(rebooted.terminal.line(1)).toMatch(/^boot/u);
+    expect(rebooted.terminal.line(1).trim()).toBe("");
     rebootRuntime.runTick();
-    expect(rebooted.terminal.line(2)).toMatch(/^boot/u);
+    expect(rebooted.terminal.line(1)).toMatch(/^boot/u);
+    expect(
+      rebooted.terminal.snapshot().rows.filter((line) => /^boot/u.test(line)),
+    ).toHaveLength(1);
   });
 
   it("does not finalize a terminal VM until its CPU cycle debt is paid", (): void => {
