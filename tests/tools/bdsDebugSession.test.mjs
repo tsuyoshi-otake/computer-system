@@ -80,9 +80,19 @@ describe("BDS debug session", () => {
   it("accepts only the internal browser-terminal relay protocol", () => {
     expect(
       isAllowedWebRelayCommand(
-        "scriptevent computer_system:web-response r1-1 abcdefghijkl writer http://127.0.0.1:19144/p/abcdefghijkl",
+        "scriptevent computer_system:web-response r1-1 abcdefghijkl writer http://127.0.0.1:19144/p/0042",
       ),
     ).toBe(true);
+    expect(
+      isAllowedWebRelayCommand(
+        "scriptevent computer_system:web-response r1-1 abcdefghijkl writer http://127.0.0.1:19144/p/042",
+      ),
+    ).toBe(false);
+    expect(
+      isAllowedWebRelayCommand(
+        "scriptevent computer_system:web-response r1-1 abcdefghijkl writer http://127.0.0.1:19144/p/abcdefghijkl",
+      ),
+    ).toBe(false);
     expect(
       isAllowedWebRelayCommand(
         "scriptevent computer_system:web-input abcdefghijkl line hello%20world",

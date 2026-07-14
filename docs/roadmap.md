@@ -238,8 +238,9 @@ suppressed error may leave a device accidentally marked as running.
     input controls without scrolling at the reference resolution
   - coalesced bounded redraws and explicit close/disconnect/competing-form
     finalization
-  - native GDK CustomForm remains a bounded fallback; the Web Terminal provides
-    the full-width keyboard-first interface and one-writer multi-session control
+  - native GDK CustomForm remains isolated for diagnostics; the Web Terminal
+    provides the full-width keyboard-first interface and one-writer
+    multi-session control
 - [x] paged and transactional filesystem persistence
 - [x] `startup.py`, shutdown, reboot, and crash reporting
 

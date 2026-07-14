@@ -16,9 +16,9 @@ GitHub Issue #4 tracks the Phase 2 Bedrock Computer vertical slice. GitHub Issue
 Terminal, and operator manual expansion. GitHub Issue #13 tracks Python-to-CS486
 compilation, filesystem imports, and CS486 C/C++ extension modules. GitHub Issue
 #14 tracks the portable CS386SX 16 MHz / 2 MiB hardware profile. Most Phase 2
-behavior is implemented and verified. The native GDK terminal is a bounded
-fallback; the preferred interactive terminal is the local Web Terminal companion
-started with `npm run dev:bds:web`.
+behavior is implemented and verified. Production interaction uses the local Web
+Terminal companion started with `npm run dev:bds:web`; companion failures must
+remain explicit and must not open the native GDK terminal as a fallback.
 
 ## Architecture rules
 

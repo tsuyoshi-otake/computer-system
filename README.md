@@ -40,16 +40,16 @@ return bounded server logs, acquire a computer-scoped one-use Web handoff, and
 execute bounded non-TUI shell commands inside an exact `c-xxxxxx` Computer. The
 real MCP-to-BDS headless workflow passes with zero diagnostics.
 
-The native in-game terminal remains available as a bounded fallback, but the
-preferred interactive experience is now the local Web Terminal companion. Using
-a Portable Computer System activates its permanent four-digit connection number
-for two minutes and connects the browser directly to the same fixed-cell
-terminal model. The Web Terminal provides a full-width Linux-style screen,
-inline cursor-positioned input, physical Enter, selection-aware copy and Ctrl+C,
-bounded plain-text paste, and command history without relying on Bedrock's
-narrow CustomForm container. Interactive commands use a targeted bounded
-snapshot path, so their visible response does not wait for every viewer in the
-periodic round-robin.
+The production interaction path uses the local Web Terminal companion. It does
+not fall back to the native in-game terminal when the companion is unavailable;
+instead, it reports an explicit retryable error. Using a Portable Computer
+System activates its permanent four-digit connection number for two minutes and
+connects the browser directly to the same fixed-cell terminal model. The Web
+Terminal provides a full-width Linux-style screen, inline cursor-positioned
+input, physical Enter, selection-aware copy and Ctrl+C, bounded plain-text
+paste, and command history without relying on Bedrock's narrow CustomForm
+container. Interactive commands use a targeted bounded snapshot path, so their
+visible response does not wait for every viewer in the periodic round-robin.
 
 On the DOS profile, `EDIT [path]` opens an original DOS-era full-screen editor.
 Running `EDIT` by itself starts an `UNTITLED` buffer backed by `C:\NONAME.TXT`.

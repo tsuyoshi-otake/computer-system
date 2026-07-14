@@ -7,10 +7,7 @@ import {
   type WebTerminalAccessMode,
 } from "../application/terminal/webTerminalAccess.js";
 import { computerHost } from "./computerHost.js";
-import {
-  openComputerTerminal,
-  selectComputerTerminal,
-} from "./computerTerminal.js";
+import { selectComputerTerminal } from "./computerTerminal.js";
 
 const requestMarker = "CS_WEB_SESSION_REQUEST ";
 const snapshotMarker = "CS_WEB_TERMINAL ";
@@ -68,9 +65,8 @@ export function requestWebComputerTerminal(
   pruneExpiredRequests();
   if (pendingRequests.size >= maxPendingRequests) {
     player.sendMessage(
-      "Browser terminal is busy. Opening the in-game terminal instead.",
+      "Web Terminal is busy. Try again after another request finishes.",
     );
-    openFallback(player, record);
     return;
   }
 
@@ -113,9 +109,8 @@ export function requestWebComputerTerminal(
     pendingRequests.delete(requestId);
     if (!pending.player.isValid) return;
     pending.player.sendMessage(
-      "Browser companion did not respond. Opening the in-game terminal.",
+      "Web Terminal companion did not respond. Check that the companion is running, then try again.",
     );
-    openFallback(pending.player, record);
   }, requestLifetimeTicks + 1);
 }
 
@@ -212,10 +207,8 @@ function handleResponse(message: string): void {
   pruneExpiredSessions();
   if (activeSessions.size >= maxActiveSessions) {
     request.player.sendMessage(
-      "Browser terminal capacity was reached. Opening the in-game terminal.",
+      "Web Terminal capacity was reached. Close another session and try again.",
     );
-    const record = computerHost.get(request.computerId);
-    if (record !== undefined) openFallback(request.player, record);
     rejectSession(sessionId, "capacity");
     return;
   }
@@ -238,10 +231,8 @@ function handleResponse(message: string): void {
   } catch {
     snapshotScheduler.detach(sessionId);
     request.player.sendMessage(
-      "Browser terminal session could not be attached. Opening the in-game terminal.",
+      "Web Terminal session could not be attached. Try again.",
     );
-    const record = computerHost.get(request.computerId);
-    if (record !== undefined) openFallback(request.player, record);
     rejectSession(sessionId, "attach_failed");
     return;
   }
@@ -494,14 +485,4 @@ function finalizeSession(session: ActiveSession, reason: string): void {
 
 function rejectSession(sessionId: string, reason: string): void {
   console.warn(`${finalMarker}${JSON.stringify({ sessionId, reason })}`);
-}
-
-function openFallback(player: Player, record: ComputerRecord): void {
-  void openComputerTerminal(player, record).catch((error: unknown) => {
-    if (player.isValid) {
-      player.sendMessage(
-        `In-game terminal failed: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    }
-  });
 }

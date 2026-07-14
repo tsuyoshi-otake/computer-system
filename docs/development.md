@@ -91,15 +91,15 @@ a successful takeover demotes the prior writer before later input can pass.
 Closing one view leaves the terminal open; only the final detach emits
 `terminal_closed`. Different Computers have independent writer leases.
 
-The Web Terminal and native fallback send `terminal_line`; DOS `EDIT` and
-cross-profile `vi` additionally use bounded `terminal_keys` batches. Writer-only
-`web-complete` and `web-resize` requests provide command/path completion and
-negotiate a 51x19 through 160x60 Web viewport without changing the native
-fallback contract. CS-Linux 1.0 parses a bounded Computer System Bash language
-with pipelines, redirects, control operators, quoting, variables, positional
-parameters, conditionals, loops, and functions. Production first boot requires
-password setup twice and later boots require login; the salted record is stored
-in `/etc/shadow`, while secret Web input is masked and excluded from history and
+The Web Terminal sends `terminal_line`; DOS `EDIT` and cross-profile `vi`
+additionally use bounded `terminal_keys` batches. Writer-only `web-complete` and
+`web-resize` requests provide command/path completion and negotiate a 51x19
+through 160x60 Web viewport without changing the native fallback contract.
+CS-Linux 1.0 parses a bounded Computer System Bash language with pipelines,
+redirects, control operators, quoting, variables, positional parameters,
+conditionals, loops, and functions. Production first boot requires password
+setup twice and later boots require login; the salted record is stored in
+`/etc/shadow`, while secret Web input is masked and excluded from history and
 completion. The Linux profile owns `/etc`, `/dev`, volatile `/tmp`, `/usr`,
 `/var`, `/home/computer`, identity/time applets, and `/dev/null`. The shared OS
 profile boundary owns path dialects, aliases, boot images, and virtual devices;

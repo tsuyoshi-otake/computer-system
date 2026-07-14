@@ -64,6 +64,15 @@ describe("Bedrock terminal adapters", () => {
     expect(registry).toContain('osProfile: "dos"');
   });
 
+  it("does not expose the native terminal as an automatic Web fallback", async () => {
+    const bridge = await source("src/bedrock/webTerminalBridge.ts");
+
+    expect(bridge).not.toContain("openComputerTerminal");
+    expect(bridge).not.toContain("openFallback");
+    expect(bridge).not.toContain("Opening the in-game terminal");
+    expect(bridge).toContain("Web Terminal companion did not respond");
+  });
+
   it("normalizes the GDK single-entity item-drop shape and keeps the world in daytime", async () => {
     const [portable, daylight, main, headless] = await Promise.all([
       source("src/bedrock/portableComputer.ts"),
@@ -119,7 +128,6 @@ describe("Bedrock terminal adapters", () => {
     expect(bridge).toContain('"terminal_keys"');
     expect(bridge).toContain("isTerminalKeyBatch");
     expect(bridge).toContain('"terminal_closed"');
-    expect(bridge).toContain("openFallback");
     expect(bridge).toContain("WebTerminalAccessRegistry");
     expect(bridge).toContain("terminalAccess.canWrite");
     expect(bridge).toContain("detached.wasLast");
