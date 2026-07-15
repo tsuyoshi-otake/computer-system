@@ -333,6 +333,11 @@ non-virtual LAN IPv4 address. `WEB_COMPANION_HOST` controls the listener, while
 `WEB_COMPANION_PUBLIC_HOST` overrides the detected address. For Internet access,
 keep the process on loopback, set `WEB_COMPANION_PUBLIC_ORIGIN` to an HTTPS
 origin, and use a TLS reverse proxy. Never publish plain HTTP to the Internet.
+Administrators persist the listener port and complete public origin with
+`npm run web:config -- set --port PORT --url ORIGIN`. The versioned system-wide
+JSON is loaded by both companion entry points; environment values remain
+explicit per-process overrides. Reject unknown fields and invalid origins, and
+require a restart after configuration changes.
 
 `WEB_COMPANION_DEBUG_IGNORE_RANGE=1` is a managed-debug-only escape hatch for
 the placed-machine three-block and dimension check. It is disabled by default

@@ -29,11 +29,32 @@ The server uses these optional environment variables:
 | `WEB_COMPANION_PORT`               | `19144`                                             | Web listener TCP port                                          |
 | `WEB_COMPANION_PUBLIC_HOST`        | Listener host                                       | Reachable host used in generated HTTP links                    |
 | `WEB_COMPANION_PUBLIC_ORIGIN`      | unset                                               | Complete HTTPS origin advertised behind a reverse proxy        |
+| `WEB_COMPANION_CONFIG_FILE`        | system-wide platform path                           | Persistent administrator configuration file                    |
 | `WEB_COMPANION_ALLOWED_ORIGINS`    | unset                                               | Extra origins, or `*` to accept every request Origin           |
 | `WEB_COMPANION_AUTO_OPEN`          | automatic local-address match                       | `0` disables and `1` explicitly enables host-browser opening   |
 | `WEB_COMPANION_DEBUG_IGNORE_RANGE` | `0`                                                 | Debug only: skip the placed-machine range and dimension check  |
 
 No API key or `.env` file is required.
+
+### Persistent administrator networking configuration
+
+Use the host command below to persist the Web listener port and advertised
+public origin across process and machine restarts:
+
+```powershell
+npm run web:config -- set --port 80 --url http://10.255.10.90
+npm run web:config -- show
+```
+
+The default file is `%ProgramData%\Computer System\web-companion.json` on
+Windows and `/etc/computer-system/web-companion.json` on Linux. The command
+fails explicitly when the caller cannot write the system location, the port is
+outside 1 through 65534, the URL is not an absolute HTTP(S) origin, or the JSON
+contains an unknown field. Restart `npm run dev:bds:web` or the MCP companion
+after changing the file. Use `--clear-port`, `--clear-url`, or `reset` to remove
+settings. `WEB_COMPANION_PORT` and `WEB_COMPANION_PUBLIC_ORIGIN` override the
+file for one process, which preserves isolated test and emergency recovery
+workflows.
 
 ## MCP workflow
 

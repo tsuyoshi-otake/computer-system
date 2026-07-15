@@ -1185,7 +1185,7 @@ function canonicalIpAddress(value) {
   return new URL(`http://[${unwrapped}]/`).hostname.slice(1, -1);
 }
 
-function normalizePublicOrigin(value) {
+export function normalizePublicOrigin(value) {
   if (value === undefined) return undefined;
   let parsed;
   try {

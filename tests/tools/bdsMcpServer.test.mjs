@@ -88,6 +88,7 @@ function createClient() {
         BDS_HOME: "C:/not-accessed-by-status",
         BDS_MCP_PORT: "19151",
         WEB_COMPANION_PORT: "0",
+        WEB_COMPANION_CONFIG_FILE: "",
       },
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,

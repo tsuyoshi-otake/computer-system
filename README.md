@@ -242,6 +242,27 @@ $env:WEB_COMPANION_PUBLIC_HOST = "192.168.1.10"
 npm run dev:bds:web
 ```
 
+An administrator can persist a different listener port and complete public
+HTTP(S) origin without editing repository files or recreating environment
+variables on every boot:
+
+```powershell
+npm run web:config -- set --port 80 --url http://10.255.10.90
+npm run web:config -- show
+npm run dev:bds:web
+```
+
+On Windows the default system-wide file is
+`%ProgramData%\Computer System\web-companion.json`; on Linux it is
+`/etc/computer-system/web-companion.json`. Run the configuration command with
+the permissions required to write that location. `--clear-port` and
+`--clear-url` restore the corresponding default, while `reset` removes the
+complete persisted configuration. A restart is required after any change.
+`WEB_COMPANION_PORT` and `WEB_COMPANION_PUBLIC_ORIGIN` remain temporary
+per-process overrides and take precedence over persisted values. Use
+`WEB_COMPANION_CONFIG_FILE` to select a different configuration file; an empty
+value disables persisted configuration for an isolated test process.
+
 Minecraft/BDS and the Web Terminal use different transports: the managed BDS
 defaults to UDP 19142, while the browser companion defaults to TCP 19144. For
 Internet access, keep the companion bound to loopback and put an HTTPS reverse

@@ -2,6 +2,11 @@ import readline from "node:readline";
 
 import { BdsDebugSession } from "./bds-debug-session.mjs";
 import {
+  defaultWebCompanionConfigPath,
+  loadWebCompanionAdminConfig,
+  resolveWebCompanionAdminOptions,
+} from "./web-companion-admin-config.mjs";
+import {
   parseBooleanFlag,
   parseOptionalBooleanFlag,
   WebCompanionServer,
@@ -14,12 +19,18 @@ const serverInfo = {
   version: "0.1.0",
 };
 const session = new BdsDebugSession();
+const adminConfigPath = defaultWebCompanionConfigPath();
+const persistedAdminConfig = await loadWebCompanionAdminConfig(adminConfigPath);
+const adminOptions = resolveWebCompanionAdminOptions(
+  process.env,
+  persistedAdminConfig,
+);
 const webCompanion = new WebCompanionServer({
   bds: session,
   host: process.env.WEB_COMPANION_HOST ?? "0.0.0.0",
-  port: process.env.WEB_COMPANION_PORT ?? "19144",
+  port: adminOptions.port,
   publicHost: process.env.WEB_COMPANION_PUBLIC_HOST,
-  publicOrigin: process.env.WEB_COMPANION_PUBLIC_ORIGIN,
+  publicOrigin: adminOptions.publicOrigin,
   allowedOrigins: process.env.WEB_COMPANION_ALLOWED_ORIGINS,
   autoOpenBrowser: parseOptionalBooleanFlag(
     process.env.WEB_COMPANION_AUTO_OPEN,

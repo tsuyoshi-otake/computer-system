@@ -1,11 +1,22 @@
 import { BdsDebugSession } from "./bds-debug-session.mjs";
 import {
+  defaultWebCompanionConfigPath,
+  loadWebCompanionAdminConfig,
+  resolveWebCompanionAdminOptions,
+} from "./web-companion-admin-config.mjs";
+import {
   parseBooleanFlag,
   parseOptionalBooleanFlag,
   WebCompanionServer,
 } from "./web-companion-server.mjs";
 
 const bds = new BdsDebugSession();
+const adminConfigPath = defaultWebCompanionConfigPath();
+const persistedAdminConfig = await loadWebCompanionAdminConfig(adminConfigPath);
+const adminOptions = resolveWebCompanionAdminOptions(
+  process.env,
+  persistedAdminConfig,
+);
 const stopMigrationLogForwarding = bds.onLog((entry) => {
   if (
     entry.line.includes("CS_STORAGE_MIGRATION") ||
@@ -17,9 +28,9 @@ const stopMigrationLogForwarding = bds.onLog((entry) => {
 const web = new WebCompanionServer({
   bds,
   host: process.env.WEB_COMPANION_HOST ?? "0.0.0.0",
-  port: process.env.WEB_COMPANION_PORT ?? "19144",
+  port: adminOptions.port,
   publicHost: process.env.WEB_COMPANION_PUBLIC_HOST,
-  publicOrigin: process.env.WEB_COMPANION_PUBLIC_ORIGIN,
+  publicOrigin: adminOptions.publicOrigin,
   allowedOrigins: process.env.WEB_COMPANION_ALLOWED_ORIGINS,
   autoOpenBrowser: parseOptionalBooleanFlag(
     process.env.WEB_COMPANION_AUTO_OPEN,
@@ -47,6 +58,14 @@ try {
         world: bdsStatus.world,
       },
       web: webStatus,
+      webConfiguration: {
+        path: adminConfigPath ?? null,
+        persisted: persistedAdminConfig,
+        environmentOverrides: {
+          port: process.env.WEB_COMPANION_PORT !== undefined,
+          publicOrigin: process.env.WEB_COMPANION_PUBLIC_ORIGIN !== undefined,
+        },
+      },
     })}\n`,
   );
 } catch (error) {

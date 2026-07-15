@@ -296,6 +296,38 @@ covers the real player's item-use interaction and presentation only.
   entity is covered by BDS, but the player interaction was not separately
   recorded in this manual run.
 
+## Persistent Web companion networking checklist
+
+Use a temporary configuration path for this verification so the system-wide
+administrator configuration is not changed:
+
+```powershell
+$config = Join-Path $env:TEMP "computer-system-web-verification.json"
+npm run web:config -- set --port 18080 --url http://127.0.0.1:18080 --config-file $config
+npm run web:config -- show --config-file $config
+$env:WEB_COMPANION_CONFIG_FILE = $config
+npm run dev:bds:web
+```
+
+Verify:
+
+- `Verify:` Inspect `show` output. `Expect:` Version 1, port 18080, and the
+  normalized public origin are present and `restartRequired` was reported by
+  `set`.
+- `Verify:` Open `http://127.0.0.1:18080/`. `Expect:` The stable Web Terminal
+  entry page loads and a Computer handoff uses the configured public origin.
+- `Verify:` Restart the companion without setting `WEB_COMPANION_PORT` or
+  `WEB_COMPANION_PUBLIC_ORIGIN`. `Expect:` It listens on 18080 again.
+- `Verify:` Start once with `WEB_COMPANION_PORT=18081`. `Expect:` The temporary
+  environment override wins without changing the persisted 18080 value.
+- `Verify:` Run `npm run web:config -- reset --config-file $config`. `Expect:`
+  the file is removed and the next unmodified start returns to port 19144.
+
+For the real system-wide configuration, repeat `set` without `--config-file`
+from an administrator/root shell. Open only the selected LAN firewall port.
+Never expose the plain HTTP listener directly to the Internet; use an HTTPS
+reverse proxy and persist its HTTPS origin instead.
+
 ## Preserved-world storage migration checklist
 
 Run the host checks first:
