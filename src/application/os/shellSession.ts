@@ -43,6 +43,7 @@ export interface ShellResult {
   readonly resetTerminal?: boolean;
   readonly cpuCycles?: number;
   readonly foreground?: ShellForegroundRequest;
+  readonly ioWaitEvent?: string;
 }
 
 export interface ShellSessionOptions {
@@ -61,6 +62,10 @@ export interface ShellSessionOptions {
   readonly virtualDevices?: ReadonlyMap<string, VirtualDevice>;
   readonly peripherals?: PeripheralBusBroker;
   readonly deferGuestExecution?: boolean;
+  readonly requestFilesystemIo?: (
+    operation: "read" | "write",
+    bytes: number,
+  ) => string | undefined;
 }
 
 const maximumScriptDepth = 8;
@@ -103,6 +108,7 @@ export class ShellSession {
   private terminalWidth: number;
   private cpuCyclesValue = 0;
   private dosBatchDepth = 0;
+  private suppressFilesystemWait = false;
 
   constructor(
     private readonly filesystem: InMemoryFilesystem,
@@ -127,6 +133,7 @@ export class ShellSession {
       virtualDevices: options.virtualDevices,
       peripherals: options.peripherals,
       deferGuestExecution: options.deferGuestExecution,
+      requestFilesystemIo: options.requestFilesystemIo,
     };
     this.hardware = runtimeOptions.hardware;
     profile.boot(filesystem, { computerName: runtimeOptions.computerName });
@@ -174,6 +181,7 @@ export class ShellSession {
 
   submit(line: string): ShellResult {
     this.cpuCyclesValue = 0;
+    this.commands.beginFilesystemIo();
     let result: ShellResult;
     if (this.vi !== undefined) result = this.submitViLine(line);
     else if (this.editor !== undefined) result = this.submitEditor(line);
@@ -193,6 +201,19 @@ export class ShellSession {
       }
       result = this.executeLine(line, 0);
     }
+    const ioWaitEvent = this.commands.completeFilesystemIo(
+      !this.suppressFilesystemWait,
+    );
+    if (
+      ioWaitEvent !== undefined &&
+      result.foreground === undefined &&
+      result.action === undefined
+    ) {
+      result = {
+        ...result,
+        ioWaitEvent,
+      };
+    }
     return this.withCpuCycles(result);
   }
 
@@ -211,7 +232,13 @@ export class ShellSession {
         2,
       );
     }
-    const result = this.submit(line);
+    this.suppressFilesystemWait = true;
+    let result: ShellResult;
+    try {
+      result = this.submit(line);
+    } finally {
+      this.suppressFilesystemWait = false;
+    }
     if (this.vi !== undefined || this.editor !== undefined) {
       this.vi = undefined;
       this.editor = undefined;
@@ -223,6 +250,7 @@ export class ShellSession {
     }
     if (
       result.action !== undefined ||
+      result.ioWaitEvent !== undefined ||
       result.sleepTicks !== undefined ||
       result.terminalScreen !== undefined
     ) {
@@ -548,6 +576,12 @@ export class ShellSession {
       }
     }
     const sessionCommand = this.frontend.sessionCommand(name);
+    if (
+      sessionCommand !== undefined &&
+      !this.commands.isBuiltInCommand(requestedName)
+    ) {
+      return this.commands.execute(command.words, stdin);
+    }
     if (sessionCommand === "linux-python") {
       if (
         depth !== 0 ||

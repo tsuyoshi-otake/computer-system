@@ -99,6 +99,13 @@ export class ComputerRuntime {
   private readonly clock: ShellClockSource | undefined;
   private readonly ticksPerSecond: number;
   private readonly requireLinuxLogin: boolean;
+  private filesystemIoRequester:
+    | ((
+        computerId: string,
+        operation: "read" | "write",
+        bytes: number,
+      ) => string | undefined)
+    | undefined;
   private nextRuntimeId = 1;
 
   constructor(options: ComputerRuntimeOptions = {}) {
@@ -114,6 +121,16 @@ export class ComputerRuntime {
 
   get tickNumber(): number {
     return this.scheduler.tickNumber;
+  }
+
+  configureFilesystemIo(
+    requester: (
+      computerId: string,
+      operation: "read" | "write",
+      bytes: number,
+    ) => string | undefined,
+  ): void {
+    this.filesystemIoRequester = requester;
   }
 
   register(record: ComputerRecord): RuntimeCommandResult {
@@ -870,6 +887,12 @@ export class ComputerRuntime {
         requireLinuxLogin: this.requireLinuxLogin,
         serial: this.serial,
         peripherals: this.peripherals,
+        requestFilesystemIo: (operation, bytes) =>
+          this.filesystemIoRequester?.(
+            entry.record.computerId,
+            operation,
+            bytes,
+          ),
         runHostWork: (lane, units, operation) =>
           this.runHostWork(lane, units, entry.record.computerId, operation),
       });

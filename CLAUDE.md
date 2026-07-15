@@ -12,15 +12,15 @@ CS386SX execution timing. Minecraft-specific behavior is implemented by thin
 Bedrock adapters around host-testable domain and application layers.
 
 GitHub Issue #4 tracks the Phase 2 Bedrock Computer vertical slice. GitHub Issue
-#12 tracks the CS-Linux 1.0 / CS-DOS 6.2 shell profiles, CS486 toolchain, Web
-Terminal, and operator manual expansion. GitHub Issue #13 tracks Python-to-CS486
-compilation, filesystem imports, and CS486 C/C++ extension modules. GitHub Issue
-#14 tracks the portable CS386SX 16 MHz / 2 MiB hardware profile. GitHub Issue
-#16 tracks tick-sliced guest/MCP execution, runnable-only scheduler bookkeeping,
-and real-BDS multi-user load evidence. Most Phase 2 behavior is implemented and
-verified. Production interaction uses the local Web Terminal companion started
-with `npm run dev:bds:web`; companion failures must remain explicit and must not
-open the native GDK terminal as a fallback.
+#12 tracks the CS-Linux 1.0 / CS-DOS 6.2 shell profiles, virtual disks, CS486
+toolchain, Web Terminal, and operator manual expansion. GitHub Issue #13 tracks
+Python-to-CS486 compilation, filesystem imports, and CS486 C/C++ extension
+modules. GitHub Issue #14 tracks the portable CS386SX 16 MHz / 2 MiB hardware
+profile. GitHub Issue #16 tracks tick-sliced guest/MCP execution, runnable-only
+scheduler bookkeeping, and real-BDS multi-user load evidence. Most Phase 2
+behavior is implemented and verified. Production interaction uses the local Web
+Terminal companion started with `npm run dev:bds:web`; companion failures must
+remain explicit and must not open the native GDK terminal as a fallback.
 
 ## Architecture rules
 
@@ -42,6 +42,13 @@ Bedrock adapters -> application services -> domain/runtime abstractions
   must each have one finalization owner.
 - Preserve computer identity and storage transactionally across block, item,
   portable, monitor, reload, and rollback paths.
+- Mount immutable OS-image bytes from one shared, prevalidated base. Persist
+  only per-Computer content-addressed overlays, metadata, hard links, and
+  deletion tombstones; never duplicate the base image for every Computer or
+  generation.
+- Keep guest device deadlines independent from host admission. WorkMonitor may
+  defer a due completion, but host elapsed time must never rewrite guest CPU,
+  memory, disk, or wire timing.
 - Unsupported Bedrock behavior must fail explicitly rather than silently
   approximating incompatible behavior.
 
@@ -195,6 +202,11 @@ The July 2026 live GDK verification established the following:
 - Memory reports add bounded OS residency to dynamic guest usage: CS-Linux
   separates kernel, services, buffers, and guest runtime; CS-DOS separates its
   system/driver footprint while preserving conventional/UMB/XMS totals.
+- Portable, Desktop, and Advanced Desktop Computers expose 20 MiB, 40 MiB, and
+  80 MiB fixed IDE disks. A fresh CS-Linux image uses roughly 2–4 MiB and a
+  fresh CS-DOS image roughly 0.5–1 MiB. Utilities are sized executable files
+  under the shared base image; deleting one creates a persistent per-Computer
+  tombstone and makes the command unavailable until its file is restored.
 - CS-DOS commands return CRLF and DOS-specific text. `TIME` displays the guest
   clock while `TIMER` measures bounded command execution; `DIR`, `COPY`,
   `DEL`/`ERASE`, `MD`/`RD`, `MOVE`, `REN`/`RENAME`, `TYPE`, `TREE`, `VOL`,
@@ -253,14 +265,16 @@ The July 2026 live GDK verification established the following:
   pass. Writer input uses an amortized-O(1), deduplicated, attempt-bounded eager
   queue so interactive latency does not inherit the viewer round-robin delay.
 - `ComputerWorkMonitor` owns one host-time scope per BDS tick and fixed lanes
-  for CPU, compilation, MCP, RS-232C, I2C, SPI, redstone, topology, terminal,
-  and persistence work. Host time is admission/observability only and must never
-  be converted into guest cycles or wire timing. Normal `run` and MCP
-  Python/CS486 execution are resumable scheduler jobs with machine-instruction
-  ceilings. RS-232C uses an O(1) ready deque with exact removal on disconnect.
-  I2C/SPI remain bounded 256-byte synchronous atoms accounted inside the guest
-  CPU lane until their adapters expose explicit resumable/deferred outcomes; do
-  not claim their reserved lanes as separate production measurements yet. See
+  for CPU, compilation, MCP, block I/O, RS-232C, I2C, SPI, redstone, topology,
+  terminal, and persistence work. The `block_io` lane admits only due HDD/FDD
+  completions from one bounded deadline heap; idle devices are never polled.
+  Host time is admission/observability only and must never be converted into
+  guest cycles or wire timing. Normal `run` and MCP Python/CS486 execution are
+  resumable scheduler jobs with machine-instruction ceilings. RS-232C uses an
+  O(1) ready deque with exact removal on disconnect. I2C/SPI remain bounded
+  256-byte synchronous atoms accounted inside the guest CPU lane until their
+  adapters expose explicit resumable/deferred outcomes; do not claim their
+  reserved lanes as separate production measurements yet. See
   `docs/work-monitor.md`.
 - `WEB_COMPANION_AUTO_OPEN=1` opens the activated path through loopback in the
   companion host's default browser even while the published entry page uses a
@@ -345,6 +359,22 @@ pipeline or prefetch flushes. Keep `run --stats`, CPU identity output, CSBIOS,
 tests, and the manual synchronized with L1/L2 hits and misses, bus transfers,
 unaligned accesses, pipeline flushes, and the default SIMM descriptions.
 
+Each Computer selects one versioned fixed-disk profile: Portable uses 20 MiB,
+Desktop 40 MiB, and Advanced Desktop 80 MiB. Fixed IDE requests model controller
+setup, CHS seek, 3,600 RPM rotational latency, PIO transfer, and write settling.
+The future-ready 1.44 MiB FDD profile models 80 cylinders, two heads, 18 sectors
+per track, 300 RPM, motor spin-up/idle, media generations, write protection,
+ejection, and DMA/controller timing. No operator media-insertion command ships
+yet, so production FDD state remains `absent` until that adapter is added. Keep
+queues, request sizes, due completions, and per-tick delivery budgets bounded.
+
+OS image files have real sizes, modes, and inode identities. The Linux and DOS
+base images are immutable and shared; every mount must reuse their prevalidated
+content IDs in O(number of image files), while Computer snapshots store only
+copy-on-write blobs, metadata changes, hard-link identities, and tombstones.
+Command discovery and execution must validate the installed executable file, so
+deleting `/usr/bin/ls` or `C:\COMMAND\EDIT.COM` returns status 127 on later use.
+
 Each Computer also persists one versioned display-profile ID. Portable selects
 `portable-vga-256k`; Desktop selects `desktop-vga-512k`; Advanced Desktop
 selects `advanced-vga-512k`. All profiles stop at 640x480. Portable supports
@@ -417,9 +447,10 @@ columns/rows per redraw.
 World Dynamic Properties remain the Bedrock source of truth (physically the
 world LevelDB). Clean persistence checks use component revision tokens, not
 whole-snapshot JSON fingerprints. Retain only the current and previous complete
-paged generations, and preserve the checksum-backed fallback before expanding
-storage features. SQLite belongs only behind the repository boundary for a
-future non-Bedrock host.
+paged generations, address pages by content, reuse unchanged page properties,
+and preserve the checksum-backed fallback before expanding storage features.
+SQLite belongs only behind the repository boundary for a future non-Bedrock
+host.
 
 ## Development conventions
 

@@ -30,7 +30,7 @@ describe("DynamicPropertyComputerRepository", (): void => {
     );
     expect(loaded.record.displayProfileId).toBe("advanced-vga-512k");
     expect(
-      [...owner.values.keys()].filter((key) => key.includes(":page:")).length,
+      [...owner.values.keys()].filter((key) => key.includes(":blob:")).length,
     ).toBeGreaterThan(1);
   });
 

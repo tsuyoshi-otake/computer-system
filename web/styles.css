@@ -179,6 +179,75 @@ h1 {
   letter-spacing: 0.06em;
 }
 
+.machine-panel {
+  display: flex;
+  height: 38px;
+  align-items: stretch;
+  border: 1px solid var(--line-strong);
+  background: var(--black);
+}
+
+.hardware-indicator {
+  display: grid;
+  min-width: 34px;
+  place-content: center;
+  gap: 3px;
+  border-right: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 8px;
+  line-height: 1;
+  text-align: center;
+}
+
+.indicator-light {
+  width: 10px;
+  height: 5px;
+  margin-inline: auto;
+  background: #252b2c;
+  box-shadow: inset 0 0 0 1px #050606;
+}
+
+.hardware-indicator[data-state="on"] .indicator-light,
+.hardware-indicator[data-state="read"] .indicator-light {
+  background: var(--green);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--green) 65%, transparent);
+}
+
+.hardware-indicator[data-state="transition"] .indicator-light,
+.hardware-indicator[data-state="write"] .indicator-light {
+  background: var(--amber);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--amber) 65%, transparent);
+}
+
+.hardware-indicator[data-state="error"] .indicator-light,
+.hardware-indicator[data-state="fault"] .indicator-light {
+  background: var(--red);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--red) 65%, transparent);
+}
+
+.power-button {
+  display: flex;
+  min-width: 68px;
+  min-height: 36px;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  border: 0;
+  color: var(--muted);
+  font-size: 9px;
+  letter-spacing: 0.06em;
+}
+
+.power-button:active:not(:disabled) {
+  translate: 0 1px;
+}
+
+.power-symbol {
+  color: var(--green);
+  font-size: 16px;
+  line-height: 1;
+}
+
 .status-light {
   width: 7px;
   height: 7px;
@@ -1064,6 +1133,42 @@ dialog form {
 }
 
 @media (max-width: 620px) {
+  .topbar {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 6px;
+  }
+
+  .topbar-actions {
+    width: 100%;
+    justify-content: flex-end;
+    gap: 6px;
+  }
+
+  .identity p {
+    display: none;
+  }
+
+  .machine-panel {
+    height: 44px;
+  }
+
+  .hardware-indicator {
+    min-width: 28px;
+  }
+
+  .power-button {
+    min-width: 44px;
+  }
+
+  .power-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+  }
+
   .topbar {
     min-height: 50px;
   }

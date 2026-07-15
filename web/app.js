@@ -65,6 +65,11 @@ const elements = {
   inputState: document.querySelector("#input-state"),
   accessState: document.querySelector("#access-state"),
   copyButton: document.querySelector("#copy-button"),
+  powerIndicator: document.querySelector("#power-indicator"),
+  hddIndicator: document.querySelector("#hdd-indicator"),
+  fddIndicator: document.querySelector("#fdd-indicator"),
+  powerButton: document.querySelector("#power-button"),
+  powerFeedback: document.querySelector("#power-feedback"),
   manualButton: document.querySelector("#manual-button"),
   manualDialog: document.querySelector("#manual-dialog"),
   manualToc: document.querySelector("#manual-toc"),
@@ -92,6 +97,8 @@ let sessionClosed = false;
 let commandPending = false;
 let completionPending = false;
 let copyResetTimer = 0;
+let powerPending = false;
+let machineLifecycle = "unknown";
 let takeoverPending = false;
 let connectionState = "loading";
 let accessMode = "unknown";
@@ -239,6 +246,9 @@ elements.errorDismiss.addEventListener("click", () => {
 });
 elements.copyButton.addEventListener("click", () => {
   void copyTerminalText();
+});
+elements.powerButton.addEventListener("click", () => {
+  void requestPower();
 });
 elements.manualButton.addEventListener("click", () => {
   if (elements.manualDialog.open) return;
@@ -671,6 +681,7 @@ function renderTerminal(payload) {
   elements.lifecycleState.textContent = String(
     payload.lifecycle ?? "unknown",
   ).toUpperCase();
+  updateMachinePanel(payload);
   elements.terminalSize.textContent = `${String(terminal.width)} × ${String(terminal.height)}`;
   fitTerminal(hardwareTextColumns, hardwareTextRows);
   const cursorX = Number.isInteger(terminal.cursor?.x) ? terminal.cursor.x : 1;
@@ -849,6 +860,148 @@ async function drainEditorKeys() {
   }
 }
 
+const hardwareIndicatorStates = new Set([
+  "absent",
+  "error",
+  "fault",
+  "idle",
+  "off",
+  "on",
+  "read",
+  "transition",
+  "write",
+]);
+
+function updateMachinePanel(payload) {
+  const previousLifecycle = machineLifecycle;
+  machineLifecycle = String(payload?.lifecycle ?? "unknown");
+  const powerState =
+    machineLifecycle === "off"
+      ? "off"
+      : machineLifecycle === "crashed" || machineLifecycle === "orphaned"
+        ? "fault"
+        : ["booting", "rebooting", "stopping"].includes(machineLifecycle)
+          ? "transition"
+          : "on";
+  setHardwareIndicator(
+    elements.powerIndicator,
+    powerState,
+    `Power ${machineLifecycle.replaceAll("_", " ")}`,
+  );
+
+  const hddState =
+    machineLifecycle === "off"
+      ? "off"
+      : String(payload?.storage?.hdd?.state ?? "idle");
+  const fddState = String(payload?.storage?.fdd?.state ?? "absent");
+  setHardwareIndicator(
+    elements.hddIndicator,
+    hddState,
+    `Hard disk ${hddState}`,
+  );
+  setHardwareIndicator(
+    elements.fddIndicator,
+    fddState,
+    fddState === "absent"
+      ? "Floppy disk not present"
+      : `Floppy disk ${fddState}`,
+  );
+  updatePowerButton();
+
+  const wasInteractive = machineAcceptsInput(previousLifecycle);
+  const isInteractive = machineAcceptsInput(machineLifecycle);
+  if (!isInteractive) {
+    elements.commandInput.disabled = true;
+  } else if (!wasInteractive && connectionState === "online") {
+    setInputAvailable(true, "INPUT");
+  }
+}
+
+function setHardwareIndicator(element, requestedState, label) {
+  const state = hardwareIndicatorStates.has(requestedState)
+    ? requestedState
+    : "error";
+  element.dataset.state = state;
+  element.setAttribute("aria-label", label);
+}
+
+function machineAcceptsInput(lifecycle) {
+  return ["running", "sleeping", "waiting_event"].includes(lifecycle);
+}
+
+function powerAction() {
+  if (machineLifecycle === "off" || machineLifecycle === "crashed") {
+    return "power_on";
+  }
+  if (
+    ["booting", "running", "sleeping", "waiting_event"].includes(
+      machineLifecycle,
+    )
+  ) {
+    return "shutdown";
+  }
+  return undefined;
+}
+
+function updatePowerButton() {
+  const action = powerAction();
+  const available =
+    action !== undefined &&
+    accessMode === "writer" &&
+    connectionState === "online" &&
+    !powerPending &&
+    !sessionClosed;
+  elements.powerButton.disabled = !available;
+  elements.powerButton.setAttribute(
+    "aria-pressed",
+    machineLifecycle === "off" ? "false" : "true",
+  );
+  elements.powerButton.setAttribute(
+    "aria-busy",
+    powerPending ? "true" : "false",
+  );
+  elements.powerButton.title =
+    action === "power_on"
+      ? "Power on Computer"
+      : action === "shutdown"
+        ? "Shut down Computer"
+        : "Power transition in progress";
+}
+
+async function requestPower() {
+  const action = powerAction();
+  if (action === undefined || elements.powerButton.disabled) return;
+  powerPending = true;
+  elements.powerFeedback.textContent =
+    action === "power_on" ? "Powering on Computer." : "Shutting down Computer.";
+  updatePowerButton();
+  try {
+    const response = await api("/api/power", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action }),
+    });
+    const result = await response.json();
+    if (result.outcome === "failed" || result.outcome === "missing") {
+      throw new Error(
+        result.error ?? "Computer did not accept the power request.",
+      );
+    }
+    machineLifecycle = String(result.lifecycle ?? machineLifecycle);
+    elements.lifecycleState.textContent = machineLifecycle.toUpperCase();
+    elements.powerFeedback.textContent =
+      action === "power_on"
+        ? "Power-on request accepted."
+        : "Shutdown request accepted.";
+  } catch (error) {
+    elements.powerFeedback.textContent = `Power request failed: ${errorMessage(error)}`;
+    showError(errorMessage(error));
+  } finally {
+    powerPending = false;
+    updatePowerButton();
+  }
+}
+
 function updateSession(session) {
   if (/^[0-9]{4}$/u.test(session.connectionCode ?? "")) {
     rememberConnectionCode(session.connectionCode);
@@ -928,12 +1081,14 @@ function setConnection(state, label) {
     "aria-busy",
     state === "loading" ? "true" : "false",
   );
+  updatePowerButton();
 }
 
 function setInputAvailable(available, state) {
   const writable =
     available &&
     accessMode === "writer" &&
+    machineAcceptsInput(machineLifecycle) &&
     !commandPending &&
     !takeoverPending &&
     !sessionClosed;
@@ -949,6 +1104,7 @@ function setInputAvailable(available, state) {
   elements.takeControlButton.disabled =
     connectionState !== "online" || takeoverPending || sessionClosed;
   elements.inputState.textContent = accessMode === "viewer" ? "LOCKED" : state;
+  updatePowerButton();
   if (writable) elements.commandInput.focus();
 }
 

@@ -54,6 +54,7 @@ export interface ShellCommandResult {
   readonly resetTerminal?: boolean;
   readonly cpuCycles?: number;
   readonly foreground?: ShellForegroundRequest;
+  readonly ioWaitEvent?: string;
 }
 
 export interface ShellCompletionResult {

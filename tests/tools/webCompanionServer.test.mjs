@@ -533,6 +533,58 @@ describe("Web companion HTTP server", () => {
     expect(rejected.status).toBe(403);
   });
 
+  it("relays bounded writer-only power requests and waits for Bedrock finalization", async () => {
+    const bds = new FakeBds();
+    const server = new WebCompanionServer({ bds, port: 0 });
+    servers.push(server);
+    const status = await server.start();
+    bds.log(
+      'CS_WEB_SESSION_REQUEST {"requestId":"r1-1","playerId":"player-1","computerId":"c-000001"}',
+    );
+    await until(() => bds.commands.length === 1);
+    const connected = await consumeResponse(bds.commands[0]);
+
+    const pending = post(status.origin, "/api/power", connected.token, {
+      action: "shutdown",
+    });
+    await until(() =>
+      bds.commands.at(-1)?.includes("computer_system:web-power"),
+    );
+    const [, , sessionId, requestId, action] = bds.commands.at(-1).split(" ");
+    expect(action).toBe("shutdown");
+    bds.log(
+      `CS_WEB_POWER ${JSON.stringify({
+        action,
+        lifecycle: "stopping",
+        outcome: "accepted",
+        requestId,
+        sessionId,
+      })}`,
+    );
+    const response = await pending;
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      lifecycle: "stopping",
+      outcome: "accepted",
+    });
+
+    expect(
+      (
+        await post(status.origin, "/api/power", connected.token, {
+          action: "reset",
+        })
+      ).status,
+    ).toBe(400);
+    server.store.updateAccess(sessionId, "out_of_range");
+    expect(
+      (
+        await post(status.origin, "/api/power", connected.token, {
+          action: "power_on",
+        })
+      ).status,
+    ).toBe(409);
+  });
+
   it("gives the newest browser control and rejects the demoted writer", async () => {
     const bds = new FakeBds();
     const server = new WebCompanionServer({ bds, port: 0 });

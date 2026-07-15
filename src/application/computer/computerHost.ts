@@ -12,6 +12,24 @@ import type {
 import type { SerialLinkBroker } from "../io/serialLinkBroker.js";
 import type { PeripheralBusBroker } from "../io/peripheralBusBroker.js";
 import {
+  DeterministicBlockDevice,
+  type BlockDeviceActivity,
+  type BlockRequest,
+  type RemovableBlockMedia,
+} from "../../domain/storage/blockDevice.js";
+import {
+  advancedDiskProfile,
+  desktopDiskProfile,
+  floppy1440kProfile,
+  portableDiskProfile,
+  type ComputerDiskProfile,
+} from "../../domain/storage/storageProfiles.js";
+import {
+  BlockIoScheduler,
+  type BlockIoTickResult,
+  type ScheduledBlockSubmitResult,
+} from "../runtime/blockIoScheduler.js";
+import {
   type ComputerWorkClaim,
   type ComputerWorkMonitor,
   type ComputerWorkMonitorSnapshot,
@@ -20,9 +38,25 @@ import {
 } from "../runtime/computerWorkMonitor.js";
 
 export interface ComputerHostOptions {
+  readonly blockIoScheduler?: BlockIoScheduler;
   readonly maxPersistenceChecksPerTick?: number;
   readonly onPersistenceFailure?: (computerId: string, error: Error) => void;
   readonly workMonitor?: ComputerWorkMonitor;
+}
+
+export type ComputerBlockDeviceKind = "fdd" | "hdd";
+
+export interface ComputerStorageStatus {
+  readonly capacityBytes: number;
+  readonly diskProfileId: ComputerDiskProfile["id"];
+  readonly fdd: BlockDeviceActivity;
+  readonly hdd: BlockDeviceActivity;
+}
+
+interface ComputerBlockDevices {
+  readonly diskProfile: ComputerDiskProfile;
+  readonly fdd: DeterministicBlockDevice;
+  readonly hdd: DeterministicBlockDevice;
 }
 
 export type HostRegistrationResult =
@@ -34,7 +68,9 @@ export type HostRegistrationResult =
 export class ComputerHost {
   readonly serial: SerialLinkBroker;
   readonly peripherals: PeripheralBusBroker;
+  readonly blockIo: BlockIoScheduler;
   private readonly records = new Map<string, ComputerRecord>();
+  private readonly blockDevices = new Map<string, ComputerBlockDevices>();
   private readonly persistenceJobs = new Map<string, PersistenceSaveJob>();
   private readonly order: string[] = [];
   private readonly maxPersistenceChecksPerTick: number;
@@ -44,6 +80,11 @@ export class ComputerHost {
   ) => void;
   private readonly workMonitor: ComputerWorkMonitor | undefined;
   private hostTick = 0;
+  private filesystemIoSequence = 0;
+  private readonly pendingFilesystemIo = new Map<
+    string,
+    { readonly computerId: string; readonly event: string }
+  >();
   private lastWorkSummaryValue: TickWorkSummary | undefined;
   private persistenceCursor = 0;
 
@@ -54,6 +95,10 @@ export class ComputerHost {
   ) {
     this.serial = runtime.serial;
     this.peripherals = runtime.peripherals;
+    this.blockIo = options.blockIoScheduler ?? new BlockIoScheduler();
+    runtime.configureFilesystemIo((computerId, operation, bytes) =>
+      this.requestFilesystemIo(computerId, operation, bytes),
+    );
     const budget = options.maxPersistenceChecksPerTick ?? 4;
     if (!Number.isSafeInteger(budget) || budget <= 0) {
       throw new RangeError("Persistence checks per tick must be positive.");
@@ -91,6 +136,52 @@ export class ComputerHost {
     return this.records.get(computerId);
   }
 
+  storageStatus(computerId: string): ComputerStorageStatus | undefined {
+    const record = this.records.get(computerId);
+    if (record === undefined) return undefined;
+    const devices = this.ensureBlockDevices(record);
+    return {
+      capacityBytes: devices.diskProfile.capacityBytes,
+      diskProfileId: devices.diskProfile.id,
+      fdd: devices.fdd.activity,
+      hdd: devices.hdd.activity,
+    };
+  }
+
+  submitBlockIo(
+    computerId: string,
+    device: ComputerBlockDeviceKind,
+    request: BlockRequest,
+  ): ScheduledBlockSubmitResult {
+    const record = this.records.get(computerId);
+    if (record === undefined) {
+      return { outcome: "rejected", reason: "unknown_device" };
+    }
+    this.ensureBlockDevices(record);
+    return this.blockIo.submit(
+      blockDeviceId(computerId, device),
+      request,
+      this.guestNanoseconds,
+    );
+  }
+
+  insertFloppy(computerId: string, media: RemovableBlockMedia): number {
+    const record = this.records.get(computerId);
+    if (record === undefined) throw new Error(`Unknown Computer ${computerId}`);
+    this.ensureBlockDevices(record);
+    return this.blockIo.insertMedia(blockDeviceId(computerId, "fdd"), media);
+  }
+
+  ejectFloppy(computerId: string): void {
+    const record = this.records.get(computerId);
+    if (record === undefined) throw new Error(`Unknown Computer ${computerId}`);
+    this.ensureBlockDevices(record);
+    this.blockIo.ejectMedia(
+      blockDeviceId(computerId, "fdd"),
+      this.guestNanoseconds,
+    );
+  }
+
   get lastWorkSummary(): TickWorkSummary | undefined {
     return this.lastWorkSummaryValue;
   }
@@ -110,11 +201,13 @@ export class ComputerHost {
     const scope = this.workMonitor?.beginTick(this.hostTick);
     try {
       if (scope === undefined) {
+        this.deliverBlockIo(this.blockIo.runDue(this.guestNanoseconds));
         this.runtime.runTick();
         this.serial.runTick();
         this.runPersistenceChecks();
         return;
       }
+      this.deliverBlockIo(this.blockIo.runDue(this.guestNanoseconds, scope));
       this.runtime.runTick(scope);
       if (this.serial.hasPendingWork()) {
         scope.tryRun(
@@ -129,6 +222,73 @@ export class ComputerHost {
     } finally {
       if (scope !== undefined) this.lastWorkSummaryValue = scope.finish();
     }
+  }
+
+  private get guestNanoseconds(): bigint {
+    return BigInt(this.hostTick) * 50_000_000n;
+  }
+
+  private requestFilesystemIo(
+    computerId: string,
+    operation: "read" | "write",
+    bytes: number,
+  ): string | undefined {
+    const record = this.records.get(computerId);
+    if (record === undefined || bytes <= 0) return undefined;
+    const devices = this.ensureBlockDevices(record);
+    const sectorCount = Math.max(
+      1,
+      Math.min(
+        devices.hdd.profile.maximumRequestSectors,
+        Math.ceil(bytes / devices.hdd.profile.sectorBytes),
+      ),
+    );
+    this.filesystemIoSequence =
+      this.filesystemIoSequence === Number.MAX_SAFE_INTEGER
+        ? 1
+        : this.filesystemIoSequence + 1;
+    const requestId = `fs-${computerId}-${this.filesystemIoSequence.toString(36)}`;
+    const result = this.submitBlockIo(computerId, "hdd", {
+      id: requestId,
+      lba:
+        this.filesystemIoSequence %
+        (devices.hdd.profile.sectorCount - sectorCount),
+      operation,
+      sectorCount,
+    });
+    if (result.outcome !== "accepted") return undefined;
+    const event = `block_io:${requestId}`;
+    this.pendingFilesystemIo.set(requestId, { computerId, event });
+    return event;
+  }
+
+  private deliverBlockIo(result: BlockIoTickResult): void {
+    for (const { completion } of result.completions) {
+      const pending = this.pendingFilesystemIo.get(completion.request.id);
+      if (pending === undefined) continue;
+      this.pendingFilesystemIo.delete(completion.request.id);
+      this.runtime.queueEvent(
+        pending.computerId,
+        pending.event,
+        completion.outcome,
+        completion.code,
+      );
+    }
+  }
+
+  private ensureBlockDevices(record: ComputerRecord): ComputerBlockDevices {
+    const existing = this.blockDevices.get(record.computerId);
+    if (existing !== undefined) return existing;
+    const diskProfile = diskProfileFor(record);
+    const devices: ComputerBlockDevices = {
+      diskProfile,
+      fdd: new DeterministicBlockDevice(floppy1440kProfile),
+      hdd: new DeterministicBlockDevice(diskProfile.device),
+    };
+    this.blockDevices.set(record.computerId, devices);
+    this.blockIo.register(blockDeviceId(record.computerId, "hdd"), devices.hdd);
+    this.blockIo.register(blockDeviceId(record.computerId, "fdd"), devices.fdd);
+    return devices;
   }
 
   private runPersistenceChecks(scope?: TickWorkScope): void {
@@ -206,4 +366,19 @@ function runtimeRegistrationFailure(
   if (result.outcome === "failed") return result;
   if (result.outcome === "missing") return result;
   return { outcome: "duplicate", computerId };
+}
+
+function blockDeviceId(
+  computerId: string,
+  device: ComputerBlockDeviceKind,
+): string {
+  return `${computerId}:${device}`;
+}
+
+function diskProfileFor(record: ComputerRecord): ComputerDiskProfile {
+  if (record.displayProfileId === "portable-vga-256k")
+    return portableDiskProfile;
+  return record.family === "advanced"
+    ? advancedDiskProfile
+    : desktopDiskProfile;
 }

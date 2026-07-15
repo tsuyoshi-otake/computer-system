@@ -10,10 +10,15 @@ interface SavedDocument {
   readonly version: number;
 }
 
+interface TestManifest {
+  readonly pageIds: readonly string[];
+}
+
 class MemoryPropertyStore implements StringPropertyStore {
   readonly values = new Map<string, string>();
   failOnWrite: number | undefined;
   writes = 0;
+  readonly writeKeys: string[] = [];
 
   public get(key: string): string | undefined {
     return this.values.get(key);
@@ -29,6 +34,7 @@ class MemoryPropertyStore implements StringPropertyStore {
 
   public set(key: string, value: string): void {
     this.writes += 1;
+    this.writeKeys.push(key);
     if (this.writes === this.failOnWrite) {
       throw new Error("Injected write failure.");
     }
@@ -46,6 +52,23 @@ function isSavedDocument(value: unknown): value is SavedDocument {
   );
 }
 
+function manifestAt(
+  properties: MemoryPropertyStore,
+  key: string,
+): TestManifest {
+  const value: unknown = JSON.parse(properties.values.get(key) ?? "{}");
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    !("pageIds" in value) ||
+    !Array.isArray(value.pageIds) ||
+    value.pageIds.some((pageId) => typeof pageId !== "string")
+  ) {
+    throw new Error(`Invalid test manifest ${key}`);
+  }
+  return { pageIds: value.pageIds };
+}
+
 describe("TransactionalPagedStore", () => {
   it("round-trips a value split across several pages", () => {
     const properties = new MemoryPropertyStore();
@@ -59,9 +82,26 @@ describe("TransactionalPagedStore", () => {
       value: document,
     });
     expect(
-      [...properties.values.keys()].filter((key) => key.includes(":page:"))
+      [...properties.values.keys()].filter((key) => key.includes(":blob:"))
         .length,
     ).toBeGreaterThan(1);
+  });
+
+  it("reuses unchanged content-addressed pages across generations", () => {
+    const properties = new MemoryPropertyStore();
+    const store = new TransactionalPagedStore(properties, "computer:reuse", 8);
+    const document = { body: "same pages remain shared", version: 1 };
+    store.save(document);
+    const firstBlobWrites = properties.writeKeys.filter((key) =>
+      key.includes(":blob:"),
+    ).length;
+
+    store.save(document);
+    const allBlobWrites = properties.writeKeys.filter((key) =>
+      key.includes(":blob:"),
+    ).length;
+    expect(allBlobWrites).toBe(firstBlobWrites);
+    expect(store.load(isSavedDocument)?.value).toEqual(document);
   });
 
   it("keeps the previous generation readable when a staged write fails", () => {
@@ -88,7 +128,11 @@ describe("TransactionalPagedStore", () => {
     store.save(original);
     store.save({ body: "second", version: 2 });
 
-    properties.values.set("computer:9:page:2:0", "corrupt");
+    const manifest = manifestAt(properties, "computer:9:manifest:2");
+    properties.values.set(
+      `computer:9:blob:${String(manifest.pageIds[0])}`,
+      "corrupt",
+    );
     expect(store.load(isSavedDocument)).toEqual({
       generation: 1,
       recovered: true,
@@ -111,9 +155,13 @@ describe("TransactionalPagedStore", () => {
       "computer:10:manifest:4",
       "computer:10:manifest:5",
     ]);
-    expect(
-      [...properties.values.keys()].some((key) => /:page:[123]:/u.test(key)),
-    ).toBe(false);
+    const retainedPageIds = new Set(
+      generationManifests.flatMap((key) => manifestAt(properties, key).pageIds),
+    );
+    const blobIds = [...properties.values.keys()]
+      .filter((key) => key.includes(":blob:"))
+      .map((key) => key.slice(key.lastIndexOf(":") + 1));
+    expect(new Set(blobIds)).toEqual(retainedPageIds);
   });
 
   it("advances an incremental save by at most one property write per step", () => {

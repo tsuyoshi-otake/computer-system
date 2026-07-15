@@ -38,6 +38,10 @@ export class CommandRegistry {
     return this.publicNames.filter((name) => name.startsWith(normalizedPrefix));
   }
 
+  allNames(): readonly string[] {
+    return this.publicNames;
+  }
+
   private normalize(name: string): string {
     return this.caseInsensitive ? name.toLowerCase() : name;
   }
@@ -80,6 +84,8 @@ const linuxCommands = [
   "mkdir",
   "mv",
   "printf",
+  "python",
+  "micropython",
   "pwd",
   "quota",
   "reboot",
@@ -195,4 +201,8 @@ export function commandRegistryFor(
   profile: ComputerOsProfile,
 ): CommandRegistry {
   return registries[profile];
+}
+
+export function commandNamesFor(profile: ComputerOsProfile): readonly string[] {
+  return registries[profile].allNames();
 }

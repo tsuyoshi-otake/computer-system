@@ -111,6 +111,40 @@ describe("Web terminal UI", () => {
     expect(inputHelpers).toContain('replace(/\\r\\n?|\\n/gu, " ")');
   });
 
+  it("places accessible PWR/HDD/FDD controls beside Copy and relays power", async () => {
+    const [html, css, script] = await Promise.all([
+      source("web/index.html"),
+      source("web/styles.css"),
+      source("web/app.js"),
+    ]);
+
+    for (const id of [
+      "power-indicator",
+      "hdd-indicator",
+      "fdd-indicator",
+      "power-button",
+      "power-feedback",
+    ]) {
+      expect(html).toContain(`id="${id}"`);
+    }
+    expect(html.indexOf('id="copy-button"')).toBeLessThan(
+      html.indexOf('class="machine-panel"'),
+    );
+    expect(html.indexOf('class="machine-panel"')).toBeLessThan(
+      html.indexOf('id="manual-button"'),
+    );
+    expect(html).toContain('aria-describedby="lifecycle-state power-feedback"');
+    expect(css).toContain('.hardware-indicator[data-state="read"]');
+    expect(css).toContain('.hardware-indicator[data-state="write"]');
+    expect(css).toContain('.hardware-indicator[data-state="fault"]');
+    expect(css).toContain(".power-button:active:not(:disabled)");
+    expect(script).toContain('api("/api/power"');
+    expect(script).toContain("JSON.stringify({ action })");
+    expect(script).toContain("payload?.storage?.hdd?.state");
+    expect(script).toContain("payload?.storage?.fdd?.state");
+    expect(script).toContain("machineAcceptsInput(machineLifecycle)");
+  });
+
   it("detects vi and DOS EDIT screens and relays bounded editor key batches", async () => {
     const script = await source("web/app.js");
 

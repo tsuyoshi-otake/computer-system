@@ -73,6 +73,24 @@ describe("ComputerWorkMonitor", (): void => {
     tick.finish();
   });
 
+  it("keeps block I/O host work separate from persistence", (): void => {
+    const clock = new FakeClock();
+    const monitor = new ComputerWorkMonitor(clock);
+    const tick = monitor.beginTick(5);
+    tick.tryRun({ lane: "block_io", deterministicUnits: 8 }, () => {
+      clock.advance(20);
+    });
+    tick.tryRun({ lane: "persistence", deterministicUnits: 1 }, () => {
+      clock.advance(30);
+    });
+    tick.finish();
+
+    expect(monitor.snapshot().lanes).toMatchObject({
+      block_io: { admitted: 1, hostMicroseconds: 20, units: 8 },
+      persistence: { admitted: 1, hostMicroseconds: 30, units: 1 },
+    });
+  });
+
   it("uses host time only as a guard for the next bounded atom", (): void => {
     const clock = new FakeClock();
     const monitor = new ComputerWorkMonitor(clock);

@@ -1,4 +1,5 @@
 import type { InMemoryFilesystem } from "../../domain/filesystem/inMemoryFilesystem.js";
+import { installOsFilesystemImage } from "./osFilesystemImages.js";
 import type { ComputerOsProfile } from "../../domain/computer/computer.js";
 import { formatOsIdentity, getOsIdentity } from "./osIdentity.js";
 import type { OsIdentity } from "./osIdentity.js";
@@ -117,6 +118,7 @@ const linuxProfile: OsProfile = {
   ]),
   virtualDevices: new Map([["/dev/null", discardDevice("/dev/null")]]),
   boot: (filesystem, context) => {
+    installOsFilesystemImage(filesystem, "linux");
     ensureDirectories(filesystem, [
       "/bin",
       "/dev",
@@ -218,6 +220,7 @@ const dosProfile: OsProfile = {
     ["/drives/c/nul", discardDevice("/drives/c/nul")],
   ]),
   boot: (filesystem) => {
+    installOsFilesystemImage(filesystem, "dos");
     ensureDirectories(filesystem, [
       "/drives/c/command",
       "/drives/c/dos",

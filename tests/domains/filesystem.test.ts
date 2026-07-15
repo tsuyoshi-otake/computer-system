@@ -136,8 +136,11 @@ describe("in-memory filesystem", (): void => {
     filesystem.setMetadata("/data/original", { mode: 0o640 });
     filesystem.createSymbolicLink("/data/original", "/data/symbolic");
     filesystem.createHardLink("/data/original", "/data/hard");
+    const freeAfterHardLink = filesystem.getFreeSpace();
+    expect(freeAfterHardLink).toBe(997);
 
     filesystem.writeFile("/data/hard", "two");
+    expect(filesystem.getFreeSpace()).toBe(997);
     expect(filesystem.readFile("/data/original")).toBe("two");
     expect(filesystem.readFile("/data/symbolic")).toBe("two");
     expect(filesystem.readLink("/data/symbolic")).toBe("/data/original");

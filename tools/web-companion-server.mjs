@@ -16,12 +16,15 @@ const requestMarker = "CS_WEB_SESSION_REQUEST ";
 const snapshotMarker = "CS_WEB_TERMINAL ";
 const accessMarker = "CS_WEB_ACCESS ";
 const completionMarker = "CS_WEB_COMPLETION ";
+const powerMarker = "CS_WEB_POWER ";
 const finalMarker = "CS_WEB_SESSION_FINAL ";
 const maximumOperationWaitersPerComputer = 8;
 const maximumBrowserLaunchWaiters = 4;
 const defaultBrowserLaunchTimeoutMs = 5_000;
 const completionTimeoutMs = 2_000;
 const maximumPendingCompletions = 32;
+const powerTimeoutMs = 5_000;
+const maximumPendingPowerRequests = 32;
 const maximumHandoffWaitMs = 120_000;
 const maximumHandoffFailuresPerWindow = 8;
 const maximumHandoffFailureClients = 256;
@@ -75,8 +78,10 @@ export class WebCompanionServer {
     this.browserLaunchDepth = 0;
     this.browserLaunchTail = Promise.resolve();
     this.pendingCompletions = new Map();
+    this.pendingPowerRequests = new Map();
     this.pendingHandoffs = new Map();
     this.nextCompletion = 1;
+    this.nextPowerRequest = 1;
     this.browserLaunch = {
       enabled: this.browserAutoOpenEnabled,
       eligible: false,
@@ -193,6 +198,9 @@ export class WebCompanionServer {
       if (state === "idle" || state === "failed") {
         this.store.closeAll(state === "failed" ? "bds_failed" : "bds_stopped");
         this.failPendingCompletions("BDS stopped before completion finished.");
+        this.failPendingPowerRequests(
+          "BDS stopped before the power request finished.",
+        );
         this.failPendingHandoffs("BDS stopped before a handoff was issued.");
       }
     });
@@ -253,6 +261,25 @@ export class WebCompanionServer {
           cursor: payload.cursor,
           value: payload.value,
         });
+      }
+      return;
+    }
+
+    const power = markerPayload(entry.line, powerMarker);
+    if (power !== undefined) {
+      const payload = JSON.parse(power);
+      const pending = this.pendingPowerRequests.get(payload.requestId);
+      if (
+        pending !== undefined &&
+        pending.sessionId === payload.sessionId &&
+        (payload.outcome === "accepted" ||
+          payload.outcome === "failed" ||
+          payload.outcome === "ignored" ||
+          payload.outcome === "missing")
+      ) {
+        clearTimeout(pending.timer);
+        this.pendingPowerRequests.delete(payload.requestId);
+        pending.resolve(payload);
       }
       return;
     }
@@ -478,6 +505,14 @@ export class WebCompanionServer {
       const session = this.store.authenticate(bearerToken(request));
       const controlled = await this.takeControl(session);
       writeJson(response, 200, { outcome: "writer", session: controlled });
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/api/power") {
+      requireSameOrigin(request, this.allowedOrigins);
+      const session = this.store.authenticate(bearerToken(request));
+      const body = await readJson(request, 1_024);
+      const result = await this.requestPower(session, body);
+      writeJson(response, 200, result);
       return;
     }
     if (request.method === "POST" && url.pathname === "/api/close") {
@@ -730,6 +765,76 @@ export class WebCompanionServer {
       );
       return this.store.takeControl(active.sessionId);
     });
+  }
+
+  async requestPower(session, body) {
+    return this.serializeComputerOperation(session.computerId, async () => {
+      const active = this.store.authenticate(session.token);
+      this.requireInRange(active);
+      if (!this.store.isWriter(active.sessionId)) {
+        throw new WebSessionError(
+          "read_only",
+          "This browser terminal is view only. Take control before using power.",
+          409,
+        );
+      }
+      if (body?.action !== "power_on" && body?.action !== "shutdown") {
+        throw new WebSessionError("input", "Invalid power action.");
+      }
+      if (this.pendingPowerRequests.size >= maximumPendingPowerRequests) {
+        throw new WebSessionError(
+          "busy",
+          "Too many Web Terminal power requests are pending.",
+          503,
+        );
+      }
+      const requestId = `p${this.nextPowerRequest.toString(36).padStart(5, "0")}`;
+      this.nextPowerRequest =
+        this.nextPowerRequest === Number.MAX_SAFE_INTEGER
+          ? 1
+          : this.nextPowerRequest + 1;
+      let resolvePower;
+      let rejectPower;
+      const completion = new Promise((resolve, reject) => {
+        resolvePower = resolve;
+        rejectPower = reject;
+      });
+      const timer = setTimeout(() => {
+        this.pendingPowerRequests.delete(requestId);
+        rejectPower(
+          new WebSessionError(
+            "timeout",
+            "Computer power request timed out.",
+            504,
+          ),
+        );
+      }, powerTimeoutMs);
+      timer.unref();
+      this.pendingPowerRequests.set(requestId, {
+        reject: rejectPower,
+        resolve: resolvePower,
+        sessionId: active.sessionId,
+        timer,
+      });
+      try {
+        await this.bds.runWebRelay(
+          `scriptevent computer_system:web-power ${active.sessionId} ${requestId} ${body.action}`,
+        );
+      } catch (error) {
+        clearTimeout(timer);
+        this.pendingPowerRequests.delete(requestId);
+        throw error;
+      }
+      return completion;
+    });
+  }
+
+  failPendingPowerRequests(detail) {
+    for (const pending of this.pendingPowerRequests.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(new WebSessionError("closed", detail, 503));
+    }
+    this.pendingPowerRequests.clear();
   }
 
   async closeSession(session) {

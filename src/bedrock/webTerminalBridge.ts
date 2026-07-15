@@ -1,6 +1,7 @@
 import { system, world, type Block, type Player } from "@minecraft/server";
 
 import type { ComputerRecord } from "../domain/computer/computer.js";
+import type { RuntimeCommandResult } from "../application/computer/computerRuntime.js";
 import { TerminalSnapshotScheduler } from "../application/terminal/terminalSnapshotScheduler.js";
 import {
   WebTerminalAccessRegistry,
@@ -13,6 +14,7 @@ const requestMarker = "CS_WEB_SESSION_REQUEST ";
 const snapshotMarker = "CS_WEB_TERMINAL ";
 const accessMarker = "CS_WEB_ACCESS ";
 const completionMarker = "CS_WEB_COMPLETION ";
+const powerMarker = "CS_WEB_POWER ";
 const finalMarker = "CS_WEB_SESSION_FINAL ";
 const requestLifetimeTicks = 200;
 const sessionLifetimeTicks = 36_000;
@@ -139,6 +141,9 @@ export function handleWebTerminalScriptEvent(
       return true;
     case "computer_system:web-take-control":
       handleTakeControl(message);
+      return true;
+    case "computer_system:web-power":
+      handlePower(message);
       return true;
     case "computer_system:web-close":
       handleClose(message);
@@ -381,11 +386,58 @@ function handleTakeControl(message: string): void {
   if (session !== undefined) terminalAccess.takeControl(session.sessionId);
 }
 
+function handlePower(message: string): void {
+  const match =
+    /^([A-Za-z0-9_-]{12,32}) ([A-Za-z0-9_-]{6,20}) (power_on|shutdown)$/u.exec(
+      message,
+    );
+  if (match === null) return;
+  const session = requireActiveSession(match[1] ?? "");
+  if (session === undefined || !terminalAccess.canWrite(session.sessionId))
+    return;
+  const requestId = match[2] ?? "";
+  const action = match[3];
+  const record = computerHost.get(session.computerId);
+  let result: RuntimeCommandResult;
+  if (record === undefined) {
+    result = { outcome: "missing", computerId: session.computerId };
+  } else {
+    if (action === "power_on" && record.lifecycle.state.kind === "crashed") {
+      record.lifecycle.transition({ kind: "reset" });
+    }
+    result =
+      action === "power_on"
+        ? computerHost.runtime.powerOn(session.computerId)
+        : computerHost.runtime.shutdown(
+            session.computerId,
+            "web_terminal_power_button",
+          );
+  }
+  console.warn(
+    `${powerMarker}${JSON.stringify({
+      ...serializableRuntimeResult(result),
+      action,
+      lifecycle: record?.lifecycle.state.kind ?? "missing",
+      requestId,
+      sessionId: session.sessionId,
+    })}`,
+  );
+  snapshotScheduler.requestEager(session.sessionId);
+}
+
 function handleClose(message: string): void {
   const match = /^([A-Za-z0-9_-]{12,32})$/u.exec(message);
   if (match === null) return;
   const session = activeSessions.get(match[1] ?? "");
   if (session !== undefined) finalizeSession(session, "browser_closed");
+}
+
+function serializableRuntimeResult(
+  result: RuntimeCommandResult,
+): Record<string, unknown> {
+  return result.outcome === "failed"
+    ? { outcome: result.outcome, error: result.error.message }
+    : result;
 }
 
 function requireActiveSession(sessionId: string): ActiveSession | undefined {
@@ -485,6 +537,7 @@ function emitSnapshot(session: ActiveSession, force: boolean): boolean {
     computerId: session.computerId,
     label: record.label ?? record.computerId,
     lifecycle: record.lifecycle.state.kind,
+    storage: computerHost.storageStatus(record.computerId),
     terminal: {
       ...record.terminal.snapshot(),
       secretInput: computerHost.runtime.isShellSecretInput(record.computerId),

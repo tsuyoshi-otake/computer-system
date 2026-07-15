@@ -329,8 +329,8 @@ describe("Computer System Linux shell and editor", (): void => {
     expect(shell.submit("df").lines[0]).toContain("Filesystem");
     expect(shell.submit("du -s /etc").lines[0]).toMatch(/^\d+\t\/etc$/u);
     expect(shell.submit("quota").lines).toEqual([
-      expect.stringMatching(/^Disk quota: \d+ \/ 1000000 bytes used/u),
-      "Limits: 256000 bytes/file, 4096 entries",
+      expect.stringMatching(/^Disk quota: \d+ \/ 41943040 bytes used/u),
+      "Limits: 1048576 bytes/file, 4096 entries",
     ]);
     expect(shell.submit("cpuinfo").lines).toContain("clock\t\t: 10 kHz");
     expect(shell.submit("free -h").lines[1]).toContain("2.0 MiB");

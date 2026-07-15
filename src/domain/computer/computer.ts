@@ -1,8 +1,14 @@
 import {
   InMemoryFilesystem,
+  defaultFilesystemLimits,
   type FilesystemLimits,
   type InMemoryFilesystemSnapshot,
 } from "../filesystem/inMemoryFilesystem.js";
+import {
+  advancedDiskProfile,
+  desktopDiskProfile,
+  portableDiskProfile,
+} from "../storage/storageProfiles.js";
 import {
   TerminalBuffer,
   type TerminalBufferSnapshot,
@@ -31,7 +37,7 @@ const legacyDefaultClockHz = 20_000;
 export type ComputerOsProfile = "dos" | "linux";
 
 export interface ComputerSnapshot {
-  readonly schema: 1;
+  readonly schema: 2;
   readonly computerId: string;
   readonly family: ComputerFamily;
   readonly label?: string;
@@ -72,7 +78,17 @@ export class ComputerRecord {
     options: ComputerRecordOptions = {},
   ) {
     requireComputerId(computerId);
-    this.filesystem = new InMemoryFilesystem(options.filesystemLimits);
+    this.filesystem = new InMemoryFilesystem(
+      options.filesystemLimits ?? {
+        ...defaultFilesystemLimits,
+        capacityBytes:
+          options.displayProfileId === "portable-vga-256k"
+            ? portableDiskProfile.capacityBytes
+            : family === "advanced"
+              ? advancedDiskProfile.capacityBytes
+              : desktopDiskProfile.capacityBytes,
+      },
+    );
     this.terminal = new TerminalBuffer(
       options.terminalWidth ?? 51,
       options.terminalHeight ?? 19,
@@ -179,7 +195,7 @@ export class ComputerRecord {
 
   snapshot(): ComputerSnapshot {
     return {
-      schema: 1,
+      schema: 2,
       computerId: this.computerId,
       family: this.family,
       label: this.labelValue,
@@ -196,7 +212,7 @@ export class ComputerRecord {
     snapshot: ComputerSnapshot,
     options: Pick<ComputerRecordOptions, "filesystemLimits"> = {},
   ): ComputerRecord {
-    if (snapshot.schema !== 1)
+    if (snapshot.schema !== 2)
       throw new Error("Unsupported computer snapshot schema");
     const record = new ComputerRecord(snapshot.computerId, snapshot.family, {
       ...options,

@@ -10,7 +10,8 @@ interface GenerationManifest {
   readonly checksum: string;
   readonly generation: number;
   readonly pageCount: number;
-  readonly schema: 1;
+  readonly pageIds: readonly string[];
+  readonly schema: 2;
 }
 
 export interface PagedLoadResult<T> {
@@ -114,12 +115,14 @@ export class TransactionalPagedStore {
     }
 
     const pages = this.#splitPages(json);
+    const pageIds = pages.map(pageBlobId);
     const manifest: GenerationManifest = {
       characterLength: json.length,
       checksum: checksum(json),
       generation,
       pageCount: pages.length,
-      schema: 1,
+      pageIds,
+      schema: 2,
     };
 
     return new IncrementalPagedSave(
@@ -127,6 +130,7 @@ export class TransactionalPagedStore {
       this.#prefix,
       generation,
       pages,
+      pageIds,
       manifest,
     );
   }
@@ -150,11 +154,15 @@ export class TransactionalPagedStore {
     }
 
     const pages: string[] = [];
-    for (let index = 0; index < manifestValue.pageCount; index += 1) {
-      const page = this.#store.get(this.#pageKey(generation, index));
+    for (const pageId of manifestValue.pageIds) {
+      const page = this.#store.get(this.#blobKey(pageId));
       if (page === undefined) {
-        throw new Error(`Generation ${generation} is missing page ${index}.`);
+        throw new Error(`Generation ${generation} is missing page ${pageId}.`);
       }
+      if (pageBlobId(page) !== pageId)
+        throw new Error(
+          `Generation ${generation} has a corrupt page ${pageId}.`,
+        );
       pages.push(page);
     }
 
@@ -177,8 +185,8 @@ export class TransactionalPagedStore {
     return `${this.#prefix}:manifest:${generation}`;
   }
 
-  #pageKey(generation: number, index: number): string {
-    return `${this.#prefix}:page:${generation}:${index}`;
+  #blobKey(pageId: string): string {
+    return `${this.#prefix}:blob:${pageId}`;
   }
 
   #splitPages(value: string): string[] {
@@ -202,34 +210,37 @@ class IncrementalPagedSave implements PagedSaveTransaction {
   readonly #store: StringPropertyStore;
   readonly #prefix: string;
   readonly #pages: readonly string[];
+  readonly #pageIds: readonly string[];
   readonly #manifest: GenerationManifest;
   #stage: PagedSaveStage = "target_cleanup";
-  #targetCleanupIndex = 0;
   #targetManifestDeleted = false;
   #pageIndex = 0;
   #obsoleteCleanupIndex = 0;
   #obsoleteManifestDeleted = false;
-  readonly #targetOldPageCount: number;
   readonly #obsoleteGeneration: number;
-  readonly #obsoletePageCount: number;
+  readonly #obsoletePageIds: readonly string[];
+  readonly #retainedPageIds: ReadonlySet<string>;
 
   constructor(
     store: StringPropertyStore,
     prefix: string,
     readonly generation: number,
     pages: readonly string[],
+    pageIds: readonly string[],
     manifest: GenerationManifest,
   ) {
     this.#store = store;
     this.#prefix = prefix;
     this.#pages = pages;
+    this.#pageIds = pageIds;
     this.#manifest = manifest;
-    this.#targetOldPageCount = this.readPageCount(generation);
     this.#obsoleteGeneration = generation - 2;
-    this.#obsoletePageCount =
+    this.#obsoletePageIds =
       this.#obsoleteGeneration > 0
-        ? this.readPageCount(this.#obsoleteGeneration)
-        : 0;
+        ? (this.#readManifest(this.#obsoleteGeneration)?.pageIds ?? [])
+        : [];
+    const previousPageIds = this.#readManifest(generation - 1)?.pageIds ?? [];
+    this.#retainedPageIds = new Set([...pageIds, ...previousPageIds]);
   }
 
   get stage(): PagedSaveStage {
@@ -244,12 +255,7 @@ class IncrementalPagedSave implements PagedSaveTransaction {
     while (operations < maxOperations && this.#stage !== "complete") {
       switch (this.#stage) {
         case "target_cleanup":
-          if (this.#targetCleanupIndex < this.#targetOldPageCount) {
-            this.#store.delete(
-              this.pageKey(this.generation, this.#targetCleanupIndex++),
-            );
-            operations += 1;
-          } else if (!this.#targetManifestDeleted) {
+          if (!this.#targetManifestDeleted) {
             this.#store.delete(this.manifestKey(this.generation));
             this.#targetManifestDeleted = true;
             operations += 1;
@@ -266,10 +272,15 @@ class IncrementalPagedSave implements PagedSaveTransaction {
           operations += 1;
           break;
         case "pages":
-          this.#store.set(
-            this.pageKey(this.generation, this.#pageIndex),
-            this.#pages[this.#pageIndex]!,
-          );
+          {
+            const page = this.#pages[this.#pageIndex]!;
+            const pageId = this.#pageIds[this.#pageIndex]!;
+            const key = this.blobKey(pageId);
+            const existing = this.#store.get(key);
+            if (existing === undefined) this.#store.set(key, page);
+            else if (existing !== page)
+              throw new Error(`Content-addressed page collision for ${pageId}`);
+          }
           this.#pageIndex += 1;
           if (this.#pageIndex >= this.#pages.length) this.#stage = "commit";
           operations += 1;
@@ -282,13 +293,13 @@ class IncrementalPagedSave implements PagedSaveTransaction {
         case "obsolete_cleanup":
           if (this.#obsoleteGeneration <= 0) {
             this.#stage = "complete";
-          } else if (this.#obsoleteCleanupIndex < this.#obsoletePageCount) {
-            this.#store.delete(
-              this.pageKey(
-                this.#obsoleteGeneration,
-                this.#obsoleteCleanupIndex++,
-              ),
-            );
+          } else if (
+            this.#obsoleteCleanupIndex < this.#obsoletePageIds.length
+          ) {
+            const pageId = this.#obsoletePageIds[this.#obsoleteCleanupIndex++]!;
+            if (!this.#retainedPageIds.has(pageId)) {
+              this.#store.delete(this.blobKey(pageId));
+            }
             operations += 1;
           } else if (!this.#obsoleteManifestDeleted) {
             this.#store.delete(this.manifestKey(this.#obsoleteGeneration));
@@ -316,10 +327,6 @@ class IncrementalPagedSave implements PagedSaveTransaction {
     }
   }
 
-  private readPageCount(generation: number): number {
-    return this.#readManifest(generation)?.pageCount ?? 0;
-  }
-
   private headKey(): string {
     return `${this.#prefix}:head`;
   }
@@ -328,8 +335,8 @@ class IncrementalPagedSave implements PagedSaveTransaction {
     return `${this.#prefix}:manifest:${String(generation)}`;
   }
 
-  private pageKey(generation: number, index: number): string {
-    return `${this.#prefix}:page:${String(generation)}:${String(index)}`;
+  private blobKey(pageId: string): string {
+    return `${this.#prefix}:blob:${pageId}`;
   }
 }
 
@@ -342,6 +349,10 @@ function checksum(value: string): string {
   return (hash >>> 0).toString(16).padStart(8, "0");
 }
 
+function pageBlobId(value: string): string {
+  return `${value.length.toString(36)}-${checksum(value)}`;
+}
+
 function isGenerationManifest(
   value: unknown,
   expectedGeneration: number,
@@ -352,10 +363,16 @@ function isGenerationManifest(
 
   const candidate = value as Partial<GenerationManifest>;
   return (
-    candidate.schema === 1 &&
+    candidate.schema === 2 &&
     candidate.generation === expectedGeneration &&
     Number.isSafeInteger(candidate.pageCount) &&
     (candidate.pageCount ?? 0) > 0 &&
+    Array.isArray(candidate.pageIds) &&
+    candidate.pageIds.length === candidate.pageCount &&
+    candidate.pageIds.every(
+      (pageId) =>
+        typeof pageId === "string" && /^[0-9a-z]+-[0-9a-f]{8}$/u.test(pageId),
+    ) &&
     Number.isSafeInteger(candidate.characterLength) &&
     (candidate.characterLength ?? -1) >= 0 &&
     typeof candidate.checksum === "string"

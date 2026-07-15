@@ -29,6 +29,10 @@ import {
 import { linkCs486Objects } from "../toolchain/cs486Linker.js";
 import { sha256Hex } from "./passwordHash.js";
 import { commandRegistryFor, type CommandRegistry } from "./commandRegistry.js";
+import {
+  commandExecutablePath,
+  decodeSystemUtility,
+} from "./osFilesystemImages.js";
 import { DosCommandAdapter } from "./dosCommands.js";
 import {
   shellAccessPolicyFor,
@@ -66,6 +70,10 @@ export interface ShellCommandRuntimeOptions {
   readonly virtualDevices?: ReadonlyMap<string, VirtualDevice>;
   readonly peripherals?: PeripheralBusBroker;
   readonly deferGuestExecution?: boolean;
+  readonly requestFilesystemIo?: (
+    operation: "read" | "write",
+    bytes: number,
+  ) => string | undefined;
 }
 
 interface MemoryRegion {
@@ -103,6 +111,8 @@ export class ShellCommandRuntime {
   private dosEcho = true;
   private temporarySequence = 0;
   private xargsDepth = 0;
+  private ioReadBytes = 0;
+  private ioWriteBytes = 0;
 
   constructor(
     private readonly filesystem: InMemoryFilesystem,
@@ -187,7 +197,7 @@ export class ShellCommandRuntime {
   }
 
   isBuiltInCommand(name: string): boolean {
-    return this.registry.has(name);
+    return this.installedSystemUtility(name) !== undefined;
   }
 
   get dosEchoEnabled(): boolean {
@@ -294,7 +304,18 @@ export class ShellCommandRuntime {
     }
 
     const [requestedCommand = "", ...arguments_] = words;
-    const command = this.canonicalCommand(requestedCommand);
+    const command =
+      this.installedSystemUtility(requestedCommand) ??
+      this.canonicalCommand(requestedCommand);
+    if (this.registry.has(requestedCommand)) {
+      const executablePath = commandExecutablePath(
+        this.options.profile.id,
+        this.registry.canonical(requestedCommand),
+      );
+      if (this.filesystem.exists(executablePath)) {
+        this.ioReadBytes += this.filesystem.getSize(executablePath);
+      }
+    }
     try {
       const profileResult = this.dosCommands?.execute(
         requestedCommand,
@@ -303,7 +324,8 @@ export class ShellCommandRuntime {
       );
       if (profileResult !== undefined) return profileResult;
       if (
-        !this.registry.has(requestedCommand) &&
+        (!this.registry.has(requestedCommand) ||
+          this.installedSystemUtility(requestedCommand) === undefined) &&
         !isExecutableCommand(command)
       ) {
         return this.commandNotFound(requestedCommand);
@@ -432,7 +454,7 @@ export class ShellCommandRuntime {
   }
 
   isKnownCommand(name: string): boolean {
-    return this.registry.has(name);
+    return this.installedSystemUtility(name) !== undefined;
   }
 
   private dispatch(
@@ -1465,7 +1487,7 @@ export class ShellCommandRuntime {
     if (arguments_.length === 0) return usage(`${command} <command ...>`);
     const output: string[] = [];
     for (const name of arguments_) {
-      if (!this.registry.has(name))
+      if (this.installedSystemUtility(name) === undefined)
         return status(1, "", `${name}: not found\n`);
       output.push(
         command === "type"
@@ -1491,9 +1513,10 @@ export class ShellCommandRuntime {
     if (device === undefined && !this.accessPolicy.hasAccess(resolved, 0b100)) {
       throw new Error(`${path}: Permission denied`);
     }
-    return device === undefined
-      ? this.filesystem.readFile(resolved)
-      : device.read();
+    const contents =
+      device === undefined ? this.filesystem.readFile(resolved) : device.read();
+    if (device === undefined) this.ioReadBytes += utf8ByteLength(contents);
+    return contents;
   }
 
   writeFile(path: string, contents: string, append = false): void {
@@ -1511,6 +1534,7 @@ export class ShellCommandRuntime {
       throw new Error(`${path}: Permission denied`);
     if (append) this.filesystem.appendFile(resolved, contents);
     else this.filesystem.writeFile(resolved, contents);
+    this.ioWriteBytes += utf8ByteLength(contents);
   }
 
   currentTick(): number {
@@ -1546,12 +1570,47 @@ export class ShellCommandRuntime {
     return this.registry.canonical(name);
   }
 
+  beginFilesystemIo(): void {
+    this.ioReadBytes = 0;
+    this.ioWriteBytes = 0;
+  }
+
+  completeFilesystemIo(schedule = true): string | undefined {
+    const bytes = this.ioReadBytes + this.ioWriteBytes;
+    if (
+      !schedule ||
+      bytes === 0 ||
+      this.options.requestFilesystemIo === undefined
+    ) {
+      return undefined;
+    }
+    return this.options.requestFilesystemIo(
+      this.ioWriteBytes > 0 ? "write" : "read",
+      bytes,
+    );
+  }
+
+  private installedSystemUtility(name: string): string | undefined {
+    if (!this.registry.has(name)) return undefined;
+    const canonical = this.registry.canonical(name);
+    const path = commandExecutablePath(this.options.profile.id, canonical);
+    if (!this.filesystem.exists(path) || this.filesystem.isDirectory(path)) {
+      return undefined;
+    }
+    if ((this.filesystem.getMetadata(path).mode & 0o111) === 0)
+      return undefined;
+    return decodeSystemUtility(this.filesystem.readFile(path));
+  }
+
   private displayName(name: string): string {
     return this.textPolicy.displayName(name);
   }
 
   private commandCompletions(prefix: string): string[] {
-    return this.registry.names(prefix).slice(0, 64);
+    return this.registry
+      .names(prefix)
+      .filter((name) => this.installedSystemUtility(name) !== undefined)
+      .slice(0, 64);
   }
 
   private pathCompletions(token: string): string[] {
@@ -2224,9 +2283,17 @@ export class ShellCommandRuntime {
     arguments_ = arguments_.map((argument) => this.dosOption(argument));
     const stats = arguments_[0] === "--stats" || arguments_[0] === "-v";
     const path = arguments_[stats ? 1 : 0];
-    if (path === undefined || arguments_.length !== (stats ? 2 : 1))
-      return usage("run [--stats] <executable>");
+    if (path === undefined) return usage("run [--stats] <executable>");
     const encoded = this.readFile(path);
+    const utility = decodeSystemUtility(encoded);
+    if (utility !== undefined) {
+      if (stats)
+        return failure(path, "system utilities do not accept run --stats");
+      return this.dispatch(utility, arguments_.slice(1), "");
+    }
+    if (arguments_.length !== (stats ? 2 : 1)) {
+      return usage("run [--stats] <executable>");
+    }
     if (!encoded.startsWith("CS486\n"))
       return failure(path, "not a CS486 executable");
     let executable: unknown;

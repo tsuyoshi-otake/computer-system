@@ -328,7 +328,11 @@ to 16 keys per relay, while the BDS boundary rejects batches above 32 keys. Tab
 performs bounded command/path completion through the same writer-authorized
 relay.
 
-The Web Terminal **Copy** button beside **Manual** copies an active terminal
+The Web Terminal top bar places **PWR**, **HDD**, and **FDD** indicators plus an
+explicit writer-only **Power** button immediately after **Copy** and before
+**Manual**. The indicators follow the real lifecycle and block-device state; FDD
+reports absent media until a future media-attachment adapter inserts a floppy;
+no operator insertion command ships yet. **Copy** copies an active terminal
 selection, or the visible fixed-cell screen when nothing is selected. It uses
 the Clipboard API when available and a synchronous browser copy fallback for LAN
 HTTP deployments; no polling or background clipboard work is performed.
@@ -336,16 +340,26 @@ HTTP deployments; no polling or background clipboard work is performed.
 Computer snapshots remain canonical in Bedrock World Dynamic Properties, which
 BDS stores in the world's LevelDB. Clean persistence checks compare O(1)
 component revisions instead of serializing the whole snapshot. Filesystem child
-lookups use a parent index, capacity is cached, and transactional storage keeps
-only the current and previous complete generations. SQLite is intentionally not
-the BDS source of truth because Bedrock Script API cannot access it directly; a
-future non-Bedrock host can add a SQLite repository behind the same boundary.
-`quota` reports the enforced capacity, per-file, and entry limits; `du` computes
-bounded subtree usage from one filesystem snapshot. `date` defaults to wall UTC,
-with `date --game` and `date --virtual` for Minecraft and deterministic VM time.
-Both profiles keep four-digit UTC years without a two-digit-year pivot,
-represent the 2000 leap day correctly, and support timestamps beyond the signed
-32-bit 2038 boundary.
+lookups use a parent index, capacity is cached, and path entries refer to inodes
+and shared content-addressed blobs. Versioned OS images are immutable shared
+bases; each Computer persists only copy-on-write overlays and deletion
+tombstones. Transaction pages are content-addressed, reuse unchanged pages, and
+keep only the current and previous complete generations. SQLite is intentionally
+not the BDS source of truth because Bedrock Script API cannot access it
+directly; a future non-Bedrock host can add a SQLite repository behind the same
+boundary. Portable, Desktop, and Advanced Desktop profiles expose 20 MiB, 40
+MiB, and 80 MiB fixed IDE disks respectively. A fresh CS-Linux image consumes
+roughly 2–4 MiB and a fresh CS-DOS image roughly 0.5–1 MiB. OS utilities are
+real executable files, so deleting `/usr/bin/ls` or `C:\COMMAND\EDIT.COM`
+removes that command until the file is restored. Guest shell I/O waits for
+deterministic controller, seek, rotation, transfer, and settle completion;
+WorkMonitor accounts the bounded host completion in its separate `block_io`
+lane. `quota` reports the enforced capacity, per-file, and entry limits; `du`
+computes bounded subtree usage from one filesystem snapshot. `date` defaults to
+wall UTC, with `date --game` and `date --virtual` for Minecraft and
+deterministic VM time. Both profiles keep four-digit UTC years without a
+two-digit-year pivot, represent the 2000 leap day correctly, and support
+timestamps beyond the signed 32-bit 2038 boundary.
 
 Each Computer also has a persisted virtual hardware profile. Desktop Computer
 Systems default to a Computer System 486DX at 33 MHz with 2 MiB RAM. Advanced

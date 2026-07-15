@@ -66,6 +66,10 @@ export interface NativeModuleContext {
   ) => ForegroundProcessStartResult;
   readonly serial?: SerialLinkBroker;
   readonly peripherals?: PeripheralBusBroker;
+  readonly requestFilesystemIo?: (
+    operation: "read" | "write",
+    bytes: number,
+  ) => string | undefined;
   readonly runHostWork?: <T>(
     lane: ComputerWorkLane,
     deterministicUnits: number,
@@ -109,6 +113,7 @@ export function createNativeEnvironment(
       virtualDevices,
       peripherals: context.peripherals,
       deferGuestExecution: context.startForegroundProcess !== undefined,
+      requestFilesystemIo: context.requestFilesystemIo,
     });
   const modules = new Map<string, RuntimeNamespace>([
     ["os", createOsModule(context)],
@@ -207,6 +212,9 @@ function createShellModule(
         };
       }
       return { kind: "wait_event", filter: started.completionEvent };
+    }
+    if (result.ioWaitEvent !== undefined) {
+      return { kind: "wait_event", filter: result.ioWaitEvent };
     }
     if (result.sleepTicks !== undefined) {
       return { kind: "sleep", ticks: result.sleepTicks };

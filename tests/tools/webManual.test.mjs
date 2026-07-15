@@ -180,7 +180,7 @@ describe("Web terminal field manual", () => {
       "DOS-style EDIT",
       "[No Name]",
       "Ctrl+Home / Ctrl+End",
-      "Copy button beside Manual",
+      "PWR, HDD, and FDD indicators",
       "Save, Discard, or Cancel",
       "Connecting programs to Minecraft",
       "Requires exactly one adjacent Monitor",

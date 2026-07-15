@@ -71,6 +71,79 @@ describe("ComputerHost persistence bridge", (): void => {
     });
   });
 
+  it("selects fixed-disk profiles and exposes real HDD/FDD activity", (): void => {
+    const host = hostWith(new MemoryRepository());
+    host.register(new ComputerRecord("c-000410", "standard"));
+    host.register(new ComputerRecord("c-000411", "advanced"));
+    host.register(
+      new ComputerRecord("c-000412", "standard", {
+        displayProfileId: "portable-vga-256k",
+      }),
+    );
+
+    expect(host.storageStatus("c-000410")).toMatchObject({
+      capacityBytes: 40 * 1_048_576,
+      diskProfileId: "desktop-ide-40m",
+      fdd: { state: "absent" },
+      hdd: { state: "idle" },
+    });
+    expect(host.storageStatus("c-000411")?.capacityBytes).toBe(80 * 1_048_576);
+    expect(host.storageStatus("c-000412")?.capacityBytes).toBe(20 * 1_048_576);
+
+    expect(
+      host.submitBlockIo("c-000410", "hdd", {
+        id: "read-boot-sector",
+        lba: 0,
+        operation: "read",
+        sectorCount: 1,
+      }),
+    ).toMatchObject({ outcome: "accepted" });
+    expect(host.storageStatus("c-000410")?.hdd).toMatchObject({
+      pendingRequests: 1,
+      state: "read",
+    });
+    host.runTick();
+    expect(host.storageStatus("c-000410")?.hdd).toMatchObject({
+      pendingRequests: 0,
+      state: "idle",
+    });
+  });
+
+  it("holds the guest in block_io wait until the modeled HDD request completes", (): void => {
+    const host = hostWith(new MemoryRepository(), {
+      workMonitor: new ComputerWorkMonitor({
+        nowMicroseconds: (): number => 0,
+      }),
+    });
+    const record = new ComputerRecord("c-000413", "standard");
+    host.register(record);
+    host.runtime.powerOn(record.computerId);
+    for (let tick = 0; tick < 3; tick += 1) host.runTick();
+
+    host.runtime.queueEvent(record.computerId, "terminal_line", "ls /");
+    host.runTick();
+    expect(record.lifecycle.state.kind).toBe("waiting_event");
+    if (record.lifecycle.state.kind === "waiting_event") {
+      expect(record.lifecycle.state.filter).toMatch(/^block_io:fs-/u);
+    }
+    expect(host.storageStatus(record.computerId)?.hdd).toMatchObject({
+      pendingRequests: 1,
+      state: "read",
+    });
+
+    for (let tick = 0; tick < 4; tick += 1) host.runTick();
+    expect(host.storageStatus(record.computerId)?.hdd).toMatchObject({
+      pendingRequests: 0,
+      state: "idle",
+    });
+    if (record.lifecycle.state.kind === "waiting_event") {
+      expect(record.lifecycle.state.filter ?? "").not.toMatch(/^block_io:/u);
+    }
+    expect(host.workMetrics()).toMatchObject({
+      lanes: { block_io: { admitted: 1 } },
+    });
+  });
+
   it("accounts compile, MCP, terminal, buses, redstone, and topology on production paths", (): void => {
     const repository = new MemoryRepository();
     let microseconds = 0;
@@ -110,6 +183,12 @@ describe("ComputerHost persistence bridge", (): void => {
       "/tmp/io.py",
       'import term, redstone\nterm.write("io")\nredstone.set_output("right", True)\nprint(redstone.get_input("left"))\n',
     );
+    host.submitBlockIo(record.computerId, "hdd", {
+      id: "production-read",
+      lba: 0,
+      operation: "read",
+      sectorCount: 1,
+    });
 
     for (let index = 0; index < 3; index += 1) host.runTick();
     host.runtime.queueEvent(
@@ -122,13 +201,13 @@ describe("ComputerHost persistence bridge", (): void => {
     host.runTick();
     expect(record.filesystem.exists("/tmp/main")).toBe(true);
     host.runtime.queueEvent(record.computerId, "terminal_line", "spi 1 0 01");
-    host.runTick();
+    for (let index = 0; index < 4; index += 1) host.runTick();
     host.runtime.queueEvent(
       record.computerId,
       "terminal_line",
       "i2c 1 0x48 00 1",
     );
-    host.runTick();
+    for (let index = 0; index < 4; index += 1) host.runTick();
     host.runtime.queueEvent(
       record.computerId,
       "terminal_line",
@@ -164,6 +243,7 @@ describe("ComputerHost persistence bridge", (): void => {
       "redstone_output",
       "topology",
       "terminal",
+      "block_io",
       "persistence",
     ] as const) {
       expect(lanes[lane].admitted, lane).toBeGreaterThan(0);

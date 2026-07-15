@@ -11,6 +11,7 @@ export const computerWorkLanes = [
   "redstone_output",
   "topology",
   "terminal",
+  "block_io",
   "persistence",
 ] as const;
 
@@ -67,6 +68,7 @@ export const defaultComputerWorkMonitorLimits: ComputerWorkMonitorLimits = {
     redstone_output: 4,
     topology: 24,
     terminal: 4,
+    block_io: 256,
     persistence: 4,
   },
   histogramUpperBoundsMicroseconds: [

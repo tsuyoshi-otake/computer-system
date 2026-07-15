@@ -6,6 +6,18 @@ import { portableComputerHardware } from "../../src/domain/computer/hardware.js"
 import { InMemoryFilesystem } from "../../src/domain/filesystem/inMemoryFilesystem.js";
 
 describe("DOS profile contract", (): void => {
+  it("stores external commands as deletable DOS files", (): void => {
+    const filesystem = new InMemoryFilesystem();
+    const shell = new ShellSession(filesystem, { osProfile: "dos" });
+
+    expect(filesystem.getSize("/drives/c/command/edit.com")).toBe(65_536);
+    expect(shell.submit("DEL C:\\COMMAND\\EDIT.COM").exitCode).toBe(0);
+    expect(shell.submit("EDIT README.TXT")).toMatchObject({ exitCode: 127 });
+    expect(filesystem.snapshot().tombstones).toContain(
+      "/drives/c/command/edit.com",
+    );
+  });
+
   it("uses DOS command names, CRLF output, and bounded compatibility utilities", (): void => {
     let tick = 20;
     const filesystem = new InMemoryFilesystem();

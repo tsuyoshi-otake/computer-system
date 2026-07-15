@@ -63,6 +63,7 @@ const workMonitorLanes = [
   "redstone_output",
   "topology",
   "terminal",
+  "block_io",
   "persistence",
 ];
 

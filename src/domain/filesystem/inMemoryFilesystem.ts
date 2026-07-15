@@ -6,21 +6,37 @@ export interface FilesystemLimits {
 }
 
 export const defaultFilesystemLimits: FilesystemLimits = {
-  capacityBytes: 1_000_000,
+  capacityBytes: 40 * 1_048_576,
   maxEntries: 4_096,
-  maxFileBytes: 256_000,
+  maxFileBytes: 1_048_576,
   maxPathLength: 255,
 };
 
 export interface InMemoryFilesystemSnapshot {
+  readonly schema: 2;
+  readonly baseImageId?: string;
+  readonly blobs: readonly (readonly [id: string, contents: string])[];
   readonly directories: readonly string[];
-  readonly files: readonly (readonly [path: string, contents: string])[];
+  readonly files: readonly (readonly [path: string, blobId: string])[];
   readonly metadata?: readonly (readonly [
     path: string,
     metadata: FilesystemMetadata,
   ])[];
   readonly symbolicLinks?: readonly (readonly [path: string, target: string])[];
   readonly hardLinks?: readonly (readonly string[])[];
+  readonly tombstones?: readonly string[];
+}
+
+export interface FilesystemBaseImageFile {
+  readonly contents: string;
+  readonly metadata?: Partial<Pick<FilesystemMetadata, "gid" | "mode" | "uid">>;
+  readonly path: string;
+}
+
+export interface FilesystemBaseImage {
+  readonly directories: readonly string[];
+  readonly files: readonly FilesystemBaseImageFile[];
+  readonly id: string;
 }
 
 export interface FilesystemMetadata {
@@ -30,7 +46,32 @@ export interface FilesystemMetadata {
   readonly uid: number;
 }
 
+const baseImages = new Map<string, FilesystemBaseImage>();
+const contentBlobs = new Map<string, string>();
+
+export function registerFilesystemBaseImage(image: FilesystemBaseImage): void {
+  if (!/^[a-z0-9][a-z0-9._-]{0,63}$/u.test(image.id)) {
+    throw new Error("Filesystem base-image ID is invalid");
+  }
+  const existing = baseImages.get(image.id);
+  if (existing !== undefined && existing !== image) {
+    throw new Error(`Filesystem base image ${image.id} is already registered`);
+  }
+  baseImages.set(image.id, image);
+}
+
+export function filesystemBlobPoolStats(): {
+  readonly blobCount: number;
+  readonly contentBytes: number;
+} {
+  let contentBytes = 0;
+  for (const contents of contentBlobs.values())
+    contentBytes += utf8Size(contents);
+  return { blobCount: contentBlobs.size, contentBytes };
+}
+
 export class InMemoryFilesystem {
+  /** Path -> content-addressed blob ID. Inode identity is tracked separately. */
   private readonly files = new Map<string, string>();
   private readonly metadata = new Map<string, FilesystemMetadata>();
   private readonly symbolicLinks = new Map<string, string>();
@@ -40,6 +81,7 @@ export class InMemoryFilesystem {
   private readonly children = new Map<string, Set<string>>([["/", new Set()]]);
   private revisionValue = 0;
   private usedBytesValue = 0;
+  private baseImage: FilesystemBaseImage | undefined;
 
   constructor(readonly limits: FilesystemLimits = defaultFilesystemLimits) {
     for (const [name, value] of Object.entries(limits)) {
@@ -51,6 +93,50 @@ export class InMemoryFilesystem {
 
   get revision(): number {
     return this.revisionValue;
+  }
+
+  get baseImageId(): string | undefined {
+    return this.baseImage?.id;
+  }
+
+  attachBaseImage(image: FilesystemBaseImage): void {
+    if (this.baseImage?.id === image.id) return;
+    registerFilesystemBaseImage(image);
+    const imageState = baseImageState(image);
+    for (const directory of [...image.directories].sort(
+      (left, right) => left.length - right.length || left.localeCompare(right),
+    )) {
+      const path = this.normalize(directory);
+      const existed = this.exists(path);
+      this.makeDirectory(path);
+      if (!existed) {
+        this.metadata.set(path, {
+          ...defaultMetadata(true),
+          modifiedAtMilliseconds: 0,
+        });
+      }
+    }
+    for (const file of image.files) {
+      const path = this.normalize(file.path);
+      if (!this.exists(path)) {
+        const size = imageState.sizes.get(path)!;
+        if (size > this.limits.maxFileBytes)
+          throw new FilesystemError("file_limit", "File is too large");
+        if (this.usedBytesValue + size > this.limits.capacityBytes)
+          throw new FilesystemError("capacity", "Filesystem capacity exceeded");
+        this.requireParent(path);
+        this.checkEntryCount(1);
+        const inodeId = nextHardLinkId++;
+        this.files.set(path, imageState.files.get(path)!);
+        this.hardLinkIds.set(path, inodeId);
+        this.hardLinkCounts.set(inodeId, 1);
+        this.metadata.set(path, imageState.metadata.get(path)!);
+        this.addChild(path);
+        this.usedBytesValue += size;
+        this.revisionValue += 1;
+      }
+    }
+    this.baseImage = image;
   }
 
   exists(path: string): boolean {
@@ -103,13 +189,15 @@ export class InMemoryFilesystem {
     if (this.exists(destination))
       throw new FilesystemError("exists", `${path} already exists`);
     this.requireParent(destination);
-    this.writeFile(destination, this.files.get(source)!);
-    const id = this.hardLinkIds.get(source) ?? nextHardLinkId++;
-    if (!this.hardLinkIds.has(source)) this.hardLinkCounts.set(id, 1);
+    this.checkEntryCount(1);
+    const id = this.requireInodeId(source);
+    this.files.set(destination, this.files.get(source)!);
     this.hardLinkIds.set(source, id);
     this.hardLinkIds.set(destination, id);
     this.hardLinkCounts.set(id, (this.hardLinkCounts.get(id) ?? 1) + 1);
     this.metadata.set(destination, { ...this.getMetadata(source) });
+    this.addChild(destination);
+    this.revisionValue += 1;
   }
 
   getLinkCount(path: string): number {
@@ -176,10 +264,10 @@ export class InMemoryFilesystem {
 
   readFile(path: string): string {
     const normalized = this.resolveSymbolicLinks(path);
-    const contents = this.files.get(normalized);
-    if (contents === undefined)
+    const blobId = this.files.get(normalized);
+    if (blobId === undefined)
       throw new FilesystemError("not_found", `${path} is not a file`);
-    return contents;
+    return requireBlob(blobId);
   }
 
   writeFile(path: string, contents: string): void {
@@ -216,15 +304,17 @@ export class InMemoryFilesystem {
     const prefix = `${normalized}/`;
     for (const candidate of [...this.files.keys()]) {
       if (candidate === normalized || candidate.startsWith(prefix)) {
-        this.usedBytesValue -= utf8Size(this.files.get(candidate)!);
-        this.files.delete(candidate);
-        const hardLinkId = this.hardLinkIds.get(candidate);
-        this.hardLinkIds.delete(candidate);
-        if (hardLinkId !== undefined) {
-          const count = (this.hardLinkCounts.get(hardLinkId) ?? 1) - 1;
-          if (count <= 1) this.hardLinkCounts.delete(hardLinkId);
-          else this.hardLinkCounts.set(hardLinkId, count);
+        const inodeId = this.requireInodeId(candidate);
+        const count = this.hardLinkCounts.get(inodeId) ?? 1;
+        if (count === 1) {
+          this.usedBytesValue -= utf8Size(
+            requireBlob(this.files.get(candidate)!),
+          );
         }
+        this.files.delete(candidate);
+        this.hardLinkIds.delete(candidate);
+        if (count <= 1) this.hardLinkCounts.delete(inodeId);
+        else this.hardLinkCounts.set(inodeId, count - 1);
         this.metadata.delete(candidate);
         this.removeChild(candidate);
       }
@@ -271,8 +361,8 @@ export class InMemoryFilesystem {
 
   getSize(path: string): number {
     const normalized = this.resolveSymbolicLinks(path);
-    const contents = this.files.get(normalized);
-    if (contents !== undefined) return utf8Size(contents);
+    const blobId = this.files.get(normalized);
+    if (blobId !== undefined) return utf8Size(requireBlob(blobId));
     if (this.directories.has(normalized)) return 0;
     throw new FilesystemError("not_found", `${path} does not exist`);
   }
@@ -337,30 +427,69 @@ export class InMemoryFilesystem {
   }
 
   snapshot(): InMemoryFilesystemSnapshot {
+    const base =
+      this.baseImage === undefined ? undefined : baseImageState(this.baseImage);
+    const directories = [...this.directories]
+      .filter((path) => path !== "/" && !base?.directories.has(path))
+      .sort();
+    const files = [...this.files]
+      .filter(([path, blobId]) => base?.files.get(path) !== blobId)
+      .sort(([left], [right]) => left.localeCompare(right));
+    const blobIds = new Set(files.map(([, blobId]) => blobId));
+    const tombstones =
+      base === undefined
+        ? []
+        : [...base.paths]
+            .filter((path) => !this.exists(path))
+            .sort(
+              (left, right) =>
+                right.length - left.length || left.localeCompare(right),
+            );
     return {
-      directories: [...this.directories].filter((path) => path !== "/").sort(),
-      files: [...this.files].sort(([left], [right]) =>
-        left.localeCompare(right),
-      ),
+      schema: 2,
+      baseImageId: this.baseImage?.id,
+      blobs: [...blobIds].sort().map((id) => [id, requireBlob(id)] as const),
+      directories,
+      files,
       metadata: [...this.metadata]
-        .filter(([path]) => path !== "/")
+        .filter(
+          ([path, metadata]) =>
+            path !== "/" && !metadataEquals(base?.metadata.get(path), metadata),
+        )
         .sort(([left], [right]) => left.localeCompare(right)),
-      symbolicLinks: [...this.symbolicLinks].sort(([left], [right]) =>
-        left.localeCompare(right),
-      ),
+      symbolicLinks: [...this.symbolicLinks]
+        .filter(([path, target]) => base?.symbolicLinks.get(path) !== target)
+        .sort(([left], [right]) => left.localeCompare(right)),
       hardLinks: hardLinkGroups(this.hardLinkIds),
+      tombstones,
     };
   }
 
   restore(snapshot: InMemoryFilesystemSnapshot): void {
+    if (snapshot.schema !== 2) {
+      throw new Error("Unsupported filesystem snapshot schema");
+    }
     const restored = new InMemoryFilesystem(this.limits);
+    if (snapshot.baseImageId !== undefined) {
+      const image = baseImages.get(snapshot.baseImageId);
+      if (image === undefined) {
+        throw new Error(
+          `Unknown filesystem base image ${snapshot.baseImageId}`,
+        );
+      }
+      restored.attachBaseImage(image);
+    }
+    for (const path of snapshot.tombstones ?? []) {
+      if (restored.exists(path)) restored.delete(path);
+    }
+    for (const [id, contents] of snapshot.blobs) registerBlob(id, contents);
     for (const directory of [...snapshot.directories].sort(
       (left, right) => left.length - right.length || left.localeCompare(right),
     )) {
       restored.makeDirectory(directory);
     }
-    for (const [path, contents] of snapshot.files) {
-      restored.writeFile(path, contents);
+    for (const [path, blobId] of snapshot.files) {
+      restored.writeFile(path, requireBlob(blobId));
     }
     for (const [path, target] of snapshot.symbolicLinks ?? []) {
       restored.createSymbolicLink(target, path);
@@ -377,6 +506,8 @@ export class InMemoryFilesystem {
       }
       if (count > 1) restored.hardLinkCounts.set(id, count);
     }
+    restored.rebuildHardLinkCounts();
+    restored.rebuildUsedBytes();
     for (const [path, metadata] of snapshot.metadata ?? []) {
       if (restored.exists(path)) restored.metadata.set(path, { ...metadata });
     }
@@ -389,8 +520,7 @@ export class InMemoryFilesystem {
     this.hardLinkCounts.clear();
     for (const directory of restored.directories)
       this.directories.add(directory);
-    for (const [path, contents] of restored.files)
-      this.files.set(path, contents);
+    for (const [path, blobId] of restored.files) this.files.set(path, blobId);
     for (const [path, metadata] of restored.metadata)
       this.metadata.set(path, { ...metadata });
     for (const [path, target] of restored.symbolicLinks)
@@ -402,6 +532,7 @@ export class InMemoryFilesystem {
     for (const [path, names] of restored.children)
       this.children.set(path, new Set(names));
     this.usedBytesValue = restored.usedBytesValue;
+    this.baseImage = restored.baseImage;
     this.revisionValue += 1;
   }
 
@@ -447,9 +578,11 @@ export class InMemoryFilesystem {
     const size = utf8Size(contents);
     if (size > this.limits.maxFileBytes)
       throw new FilesystemError("file_limit", "File is too large");
+    const blobId = internBlob(contents);
     const previous = this.files.get(path);
-    if (previous === contents) return;
-    const previousSize = previous === undefined ? 0 : utf8Size(previous);
+    if (previous === blobId) return;
+    const previousSize =
+      previous === undefined ? 0 : utf8Size(requireBlob(previous));
     const linkId = this.hardLinkIds.get(path);
     const linkedPaths =
       linkId === undefined
@@ -457,13 +590,18 @@ export class InMemoryFilesystem {
         : [...this.hardLinkIds]
             .filter(([, candidate]) => candidate === linkId)
             .map(([candidate]) => candidate);
-    const delta = (size - previousSize) * linkedPaths.length;
+    const delta = size - previousSize;
     if (this.usedBytesValue + delta > this.limits.capacityBytes) {
       throw new FilesystemError("capacity", "Filesystem capacity exceeded");
     }
-    if (!this.files.has(path)) this.checkEntryCount(1);
+    if (!this.files.has(path)) {
+      this.checkEntryCount(1);
+      const inodeId = nextHardLinkId++;
+      this.hardLinkIds.set(path, inodeId);
+      this.hardLinkCounts.set(inodeId, 1);
+    }
     for (const linkedPath of linkedPaths) {
-      this.files.set(linkedPath, contents);
+      this.files.set(linkedPath, blobId);
       this.metadata.set(linkedPath, {
         ...(this.metadata.get(linkedPath) ?? defaultMetadata(false)),
         modifiedAtMilliseconds: Date.now(),
@@ -479,7 +617,7 @@ export class InMemoryFilesystem {
     if (file !== undefined)
       return {
         directories: [],
-        files: [[path, file]],
+        files: [[path, requireBlob(file)]],
         hardLinkIds: this.hardLinkIds.has(path)
           ? [[path, this.hardLinkIds.get(path)!]]
           : [],
@@ -502,9 +640,9 @@ export class InMemoryFilesystem {
     const directories = [...this.directories].filter(
       (candidate) => candidate === path || candidate.startsWith(prefix),
     );
-    const files = [...this.files].filter(([candidate]) =>
-      candidate.startsWith(prefix),
-    );
+    const files = [...this.files]
+      .filter(([candidate]) => candidate.startsWith(prefix))
+      .map(([candidate, blobId]) => [candidate, requireBlob(blobId)] as const);
     const symbolicLinks = [...this.symbolicLinks].filter(([candidate]) =>
       candidate.startsWith(prefix),
     );
@@ -623,6 +761,26 @@ export class InMemoryFilesystem {
     }
   }
 
+  private rebuildUsedBytes(): void {
+    const seen = new Set<number>();
+    let usedBytes = 0;
+    for (const [path, blobId] of this.files) {
+      const inodeId = this.requireInodeId(path);
+      if (seen.has(inodeId)) continue;
+      seen.add(inodeId);
+      usedBytes += utf8Size(requireBlob(blobId));
+    }
+    this.usedBytesValue = usedBytes;
+  }
+
+  private requireInodeId(path: string): number {
+    const id = this.hardLinkIds.get(path);
+    if (id === undefined) {
+      throw new Error(`Filesystem inode is missing for ${path}`);
+    }
+    return id;
+  }
+
   private transferPath(
     source: string,
     destination: string,
@@ -726,6 +884,106 @@ function parentPath(path: string): string {
 
 function baseName(path: string): string {
   return path.slice(path.lastIndexOf("/") + 1);
+}
+
+interface FilesystemBaseImageState {
+  readonly directories: ReadonlySet<string>;
+  readonly files: ReadonlyMap<string, string>;
+  readonly metadata: ReadonlyMap<string, FilesystemMetadata>;
+  readonly paths: ReadonlySet<string>;
+  readonly sizes: ReadonlyMap<string, number>;
+  readonly symbolicLinks: ReadonlyMap<string, string>;
+}
+
+const baseImageStates = new Map<string, FilesystemBaseImageState>();
+
+function baseImageState(image: FilesystemBaseImage): FilesystemBaseImageState {
+  const cached = baseImageStates.get(image.id);
+  if (cached !== undefined) return cached;
+  const directories = new Set(image.directories.map(normalizedImagePath));
+  const files = new Map<string, string>();
+  const sizes = new Map<string, number>();
+  const metadata = new Map<string, FilesystemMetadata>();
+  for (const directory of directories) {
+    metadata.set(directory, {
+      ...defaultMetadata(true),
+      modifiedAtMilliseconds: 0,
+    });
+  }
+  for (const file of image.files) {
+    const path = normalizedImagePath(file.path);
+    files.set(path, internBlob(file.contents));
+    sizes.set(path, utf8Size(file.contents));
+    metadata.set(path, {
+      ...defaultMetadata(false),
+      ...file.metadata,
+      modifiedAtMilliseconds: 0,
+    });
+  }
+  const state: FilesystemBaseImageState = {
+    directories,
+    files,
+    metadata,
+    paths: new Set([...directories, ...files.keys()]),
+    sizes,
+    symbolicLinks: new Map(),
+  };
+  baseImageStates.set(image.id, state);
+  return state;
+}
+
+function normalizedImagePath(path: string): string {
+  if (!path.startsWith("/") || path.includes("\0") || path.includes("//")) {
+    throw new Error(`Invalid filesystem image path ${path}`);
+  }
+  return path.length > 1 && path.endsWith("/") ? path.slice(0, -1) : path;
+}
+
+function metadataEquals(
+  left: FilesystemMetadata | undefined,
+  right: FilesystemMetadata,
+): boolean {
+  return (
+    left !== undefined &&
+    left.gid === right.gid &&
+    left.mode === right.mode &&
+    left.modifiedAtMilliseconds === right.modifiedAtMilliseconds &&
+    left.uid === right.uid
+  );
+}
+
+function internBlob(contents: string): string {
+  const id = contentBlobId(contents);
+  registerBlob(id, contents);
+  return id;
+}
+
+function registerBlob(id: string, contents: string): void {
+  if (contentBlobId(contents) !== id) {
+    throw new Error(`Filesystem blob ${id} failed content-address validation`);
+  }
+  const existing = contentBlobs.get(id);
+  if (existing !== undefined && existing !== contents) {
+    throw new Error(`Filesystem blob collision for ${id}`);
+  }
+  contentBlobs.set(id, contents);
+}
+
+function requireBlob(id: string): string {
+  const contents = contentBlobs.get(id);
+  if (contents === undefined) throw new Error(`Missing filesystem blob ${id}`);
+  return contents;
+}
+
+function contentBlobId(contents: string): string {
+  let first = 0x811c9dc5;
+  let second = 0x9e3779b9;
+  for (let index = 0; index < contents.length; index += 1) {
+    const value = contents.charCodeAt(index);
+    first = Math.imul(first ^ value, 0x01000193) >>> 0;
+    second = Math.imul(second ^ (value + index), 0x85ebca6b) >>> 0;
+  }
+  return `b${utf8Size(contents).toString(36)}-${first.toString(36)}-${second.toString(36)}`;
 }
 
 function utf8Size(value: string): number {

@@ -140,3 +140,12 @@
   status and derive p50/p95/p99 from fixed histogram buckets. — Evidence: BDS
   debug-session tests reject malformed records, and isolated MCP/BDS acceptance
   reports bounded WorkMonitor metrics with zero emergency deferrals.
+- Large immutable guest OS images must cache their validated content IDs and
+  logical sizes once. Per-Computer mounts may reference those cached descriptors
+  in O(number of image files), but must not rehash or duplicate the immutable
+  file contents. — Evidence: mounting shared Linux/DOS images stopped dominating
+  the parallel test suite after blob IDs and sizes were prevalidated once.
+- Guest storage deadlines are deterministic guest time. Host WorkMonitor
+  admission may defer delivery, but must never rewrite the modeled completion
+  deadline or convert host elapsed time into guest CPU, RAM, or device timing. —
+  Evidence: block-I/O scheduler tests preserve deadlines across host deferral.

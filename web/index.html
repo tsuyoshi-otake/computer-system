@@ -23,6 +23,52 @@
           <button id="copy-button" class="topbar-button" type="button">
             Copy
           </button>
+          <div class="machine-panel" aria-label="Computer hardware status">
+            <div
+              id="power-indicator"
+              class="hardware-indicator"
+              data-state="off"
+              aria-label="Power off"
+            >
+              <span class="indicator-light" aria-hidden="true"></span>
+              <span>PWR</span>
+            </div>
+            <div
+              id="hdd-indicator"
+              class="hardware-indicator"
+              data-state="idle"
+              aria-label="Hard disk idle"
+            >
+              <span class="indicator-light" aria-hidden="true"></span>
+              <span>HDD</span>
+            </div>
+            <div
+              id="fdd-indicator"
+              class="hardware-indicator"
+              data-state="absent"
+              aria-label="Floppy disk not present"
+            >
+              <span class="indicator-light" aria-hidden="true"></span>
+              <span>FDD</span>
+            </div>
+            <button
+              id="power-button"
+              class="power-button"
+              type="button"
+              aria-describedby="lifecycle-state power-feedback"
+              aria-pressed="false"
+              disabled
+            >
+              <span class="power-symbol" aria-hidden="true">&#x23FB;</span>
+              <span class="power-label">Power</span>
+            </button>
+            <span
+              id="power-feedback"
+              class="sr-only"
+              role="status"
+              aria-live="polite"
+            ></span>
+          </div>
           <button
             id="manual-button"
             class="topbar-button"

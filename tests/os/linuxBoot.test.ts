@@ -55,4 +55,26 @@ describe("Linux OS boot layout", (): void => {
     expect(shell.submit("echo ignored > /dev/null").exitCode).toBe(0);
     expect(filesystem.exists("/dev/null")).toBe(false);
   });
+
+  it("stores utilities as deletable executable files and persists only the COW delta", (): void => {
+    const filesystem = new InMemoryFilesystem();
+    const shell = new ShellSession(filesystem);
+
+    expect(filesystem.getSize("/usr/bin/ls")).toBe(8_192);
+    expect(filesystem.getMetadata("/usr/bin/ls").mode & 0o111).not.toBe(0);
+    expect(shell.submit("ls /").exitCode).toBe(0);
+    expect(shell.submit("rm /usr/bin/ls").exitCode).toBe(0);
+    expect(shell.submit("ls /")).toMatchObject({ exitCode: 127 });
+
+    const snapshot = filesystem.snapshot();
+    expect(snapshot.baseImageId).toBe("cs-linux-1.0-rootfs-v1");
+    expect(snapshot.tombstones).toContain("/usr/bin/ls");
+    expect(snapshot.files.some(([path]) => path === "/usr/bin/ls")).toBe(false);
+
+    const restored = new InMemoryFilesystem();
+    restored.restore(snapshot);
+    const restoredShell = new ShellSession(restored);
+    expect(restored.exists("/usr/bin/ls")).toBe(false);
+    expect(restoredShell.submit("ls /")).toMatchObject({ exitCode: 127 });
+  });
 });

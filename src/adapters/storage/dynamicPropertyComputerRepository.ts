@@ -75,12 +75,13 @@ function isComputerSnapshot(value: unknown): value is ComputerSnapshot {
   if (typeof value !== "object" || value === null) return false;
   const candidate = value as Partial<ComputerSnapshot>;
   return (
-    candidate.schema === 1 &&
+    candidate.schema === 2 &&
     typeof candidate.computerId === "string" &&
     (candidate.family === "standard" || candidate.family === "advanced") &&
     (candidate.label === undefined || typeof candidate.label === "string") &&
     typeof candidate.filesystem === "object" &&
     candidate.filesystem !== null &&
+    candidate.filesystem.schema === 2 &&
     typeof candidate.terminal === "object" &&
     candidate.terminal !== null &&
     typeof candidate.redstoneOutputMask === "number" &&

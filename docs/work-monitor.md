@@ -16,10 +16,11 @@ finishes the scope.
 
 The fixed lanes are control, event delivery, guest CPU, guest compilation, MCP
 debug execution, RS-232C, I2C, SPI, redstone input/output, topology, terminal,
-and persistence. Cumulative metrics contain admitted/deferred/failed counts,
-deterministic units, host microseconds, maximum atom time, and overruns. The
-fixed tick histogram derives conservative p50, p95, and p99 upper bounds. There
-are no per-user or per-Computer metric maps, so monitor storage stays O(1).
+block I/O, and persistence. Cumulative metrics contain admitted/deferred/failed
+counts, deterministic units, host microseconds, maximum atom time, and overruns.
+The fixed tick histogram derives conservative p50, p95, and p99 upper bounds.
+There are no per-user or per-Computer metric maps, so monitor storage stays
+O(1).
 
 Bedrock callbacks which are intrinsically bounded by a fixed face count use the
 external observation boundary. It rejects an atom larger than the lane limit and
@@ -48,11 +49,19 @@ timing.
   charged to `terminal`. Redstone guest access and fixed-face Bedrock input/
   output synchronization are charged separately. Topology refresh covers the six
   fixed faces.
+- `block_io` admits only due HDD/FDD completions from one global
+  minimum-deadline heap. Idle devices are not polled. Seek, rotational,
+  controller, transfer, and media timings use deterministic guest nanoseconds;
+  WorkMonitor host deferral never moves the guest deadline. A shell process
+  waits on the exact completion event, so host congestion cannot wake it before
+  the device finalizes. The `persistence` lane remains separate because Dynamic
+  Property work is host storage, not guest disk service.
 - Persistence checks visit at most four Computers per tick. A dirty revision
   creates a transaction with explicit target cleanup, manifest, page, commit,
   and obsolete-generation cleanup stages. Each job step performs at most one
-  Dynamic Property operation. The head changes only after all new pages exist,
-  and a record changed while saving remains dirty for another generation.
+  Dynamic Property operation. Pages are content-addressed and unchanged pages
+  are reused across generations. The head changes only after all new pages
+  exist, and a record changed while saving remains dirty for another generation.
 
 ## MCP observability
 
