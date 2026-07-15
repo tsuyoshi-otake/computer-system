@@ -44,11 +44,23 @@ export const computerHost = new ComputerHost(
 );
 
 let started = false;
+let workMonitorLogTick = 0;
+const workMonitorLogIntervalTicks = 20;
+const workMonitorLogPrefix = "CS_WORK_MONITOR ";
 
 export function startComputerHost(): void {
   if (started) return;
   started = true;
-  system.runInterval((): void => computerHost.runTick(), 1);
+  system.runInterval((): void => {
+    computerHost.runTick();
+    workMonitorLogTick += 1;
+    if (workMonitorLogTick % workMonitorLogIntervalTicks === 0) {
+      const snapshot = computerHost.workMetrics();
+      if (snapshot !== undefined) {
+        console.warn(`${workMonitorLogPrefix}${JSON.stringify(snapshot)}`);
+      }
+    }
+  }, 1);
 }
 
 export function registerComputer(record: ComputerRecord): void {

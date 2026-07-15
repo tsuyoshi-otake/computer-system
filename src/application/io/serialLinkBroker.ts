@@ -187,6 +187,10 @@ export class SerialLinkBroker {
     };
   }
 
+  hasPendingWork(): boolean {
+    return this.readyHead !== undefined;
+  }
+
   runTick(): number {
     const deferred: string[] = [];
     let dequeuedLinks = 0;

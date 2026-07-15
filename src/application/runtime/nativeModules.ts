@@ -37,6 +37,7 @@ import type { PeripheralBusBroker } from "../io/peripheralBusBroker.js";
 import { createPeripheralVirtualDevices } from "../os/peripheralVirtualDevices.js";
 import type { VirtualDevice } from "../os/osProfile.js";
 import { decodeUtf8Chunk, encodeUtf8 } from "../../domain/text/utf8.js";
+import type { ComputerWorkLane } from "./computerWorkMonitor.js";
 
 export interface NativeModuleContext {
   readonly clock?: ShellClockSource;
@@ -65,6 +66,11 @@ export interface NativeModuleContext {
   ) => ForegroundProcessStartResult;
   readonly serial?: SerialLinkBroker;
   readonly peripherals?: PeripheralBusBroker;
+  readonly runHostWork?: <T>(
+    lane: ComputerWorkLane,
+    deterministicUnits: number,
+    operation: () => T,
+  ) => T;
 }
 
 export type ForegroundProcessStartResult =
@@ -106,11 +112,11 @@ export function createNativeEnvironment(
     });
   const modules = new Map<string, RuntimeNamespace>([
     ["os", createOsModule(context)],
-    ["term", createTermModule(context.terminal)],
+    ["term", createTermModule(context)],
     ["fs", createFsModule(context.filesystem)],
     ...(context.redstone === undefined
       ? []
-      : ([["redstone", createRedstoneModule(context.redstone)]] as const)),
+      : ([["redstone", createRedstoneModule(context)]] as const)),
     ["shell", createShellModule(shell, context)],
   ]);
   if ((context.osProfile ?? "linux") === "linux") {
@@ -127,7 +133,7 @@ export function createNativeEnvironment(
   }
   return {
     modules,
-    globals: new Map([["print", createPrint(context.terminal)]]),
+    globals: new Map([["print", createPrint(context)]]),
     shell,
   };
 }
@@ -165,17 +171,19 @@ function createShellModule(
   const applyResult = (
     result: ShellResult,
   ): RuntimeValue | VmWaitRequest | VmWorkRequest => {
-    if (result.terminalScreen !== undefined) {
-      renderTerminalScreen(context.terminal, result.terminalScreen);
-    } else {
-      if (result.action === "clear" || result.resetTerminal) {
-        context.terminal.setTextColor(0);
-        context.terminal.setBackgroundColor(15);
-        context.terminal.clear();
-        context.terminal.setCursorPosition(1, 1);
+    runHostWork(context, "terminal", 1, () => {
+      if (result.terminalScreen !== undefined) {
+        renderTerminalScreen(context.terminal, result.terminalScreen);
+      } else {
+        if (result.action === "clear" || result.resetTerminal) {
+          context.terminal.setTextColor(0);
+          context.terminal.setBackgroundColor(15);
+          context.terminal.clear();
+          context.terminal.setCursorPosition(1, 1);
+        }
+        writeTerminalLines(context.terminal, result.lines);
       }
-      writeTerminalLines(context.terminal, result.lines);
-    }
+    });
     if (result.action === "shutdown") {
       requireCapability(context.shutdown, "shutdown")();
     } else if (result.action === "reboot") {
@@ -309,24 +317,33 @@ function advanceTerminalLine(terminal: TerminalBuffer): void {
   } else terminal.setCursorPosition(1, terminal.cursorY + 1);
 }
 
-function createRedstoneModule(redstone: RedstoneState): RuntimeNamespace {
+function createRedstoneModule(context: NativeModuleContext): RuntimeNamespace {
+  const redstone = context.redstone!;
   const getInput = fn("get_input", (positional, keywords) => {
     requireArity(positional, keywords, 1, 1);
-    return redstone.getInput(redstoneSideArgument(positional[0]));
+    return runHostWork(context, "redstone_input", 1, () =>
+      redstone.getInput(redstoneSideArgument(positional[0])),
+    );
   });
   const getAnalogInput = fn("get_analog_input", (positional, keywords) => {
     requireArity(positional, keywords, 1, 1);
-    return redstone.getAnalogInput(redstoneSideArgument(positional[0]));
+    return runHostWork(context, "redstone_input", 1, () =>
+      redstone.getAnalogInput(redstoneSideArgument(positional[0])),
+    );
   });
   const getOutput = fn("get_output", (positional, keywords) => {
     requireArity(positional, keywords, 1, 1);
-    return redstone.getOutput(redstoneSideArgument(positional[0]));
+    return runHostWork(context, "redstone_input", 1, () =>
+      redstone.getOutput(redstoneSideArgument(positional[0])),
+    );
   });
   const setOutput = fn("set_output", (positional, keywords) => {
     requireArity(positional, keywords, 2, 2);
-    redstone.setOutput(
-      redstoneSideArgument(positional[0]),
-      booleanArgument(positional[1]),
+    runHostWork(context, "redstone_output", 1, () =>
+      redstone.setOutput(
+        redstoneSideArgument(positional[0]),
+        booleanArgument(positional[1]),
+      ),
     );
     return null;
   });
@@ -543,92 +560,85 @@ function createOsModule(context: NativeModuleContext): RuntimeNamespace {
   });
 }
 
-function createPrint(terminal: TerminalBuffer): NativeFunction {
-  return terminalFunction("print", (positional, keywords) => {
-    if (keywords.size > 0) {
-      throw new VmRuntimeError(
-        "TypeError",
-        "print accepts positional arguments only",
-      );
-    }
-    terminal.write(positional.map(displayValue).join(" "));
-    if (terminal.cursorY >= terminal.height) {
-      terminal.scroll(1);
-      terminal.setCursorPosition(1, terminal.height);
-    } else {
-      terminal.setCursorPosition(1, terminal.cursorY + 1);
-    }
-    return null;
-  });
+function createPrint(context: NativeModuleContext): NativeFunction {
+  const terminal = context.terminal;
+  return terminalFunction(
+    "print",
+    (positional, keywords) => {
+      if (keywords.size > 0) {
+        throw new VmRuntimeError(
+          "TypeError",
+          "print accepts positional arguments only",
+        );
+      }
+      terminal.write(positional.map(displayValue).join(" "));
+      if (terminal.cursorY >= terminal.height) {
+        terminal.scroll(1);
+        terminal.setCursorPosition(1, terminal.height);
+      } else {
+        terminal.setCursorPosition(1, terminal.cursorY + 1);
+      }
+      return null;
+    },
+    context.runHostWork,
+  );
 }
 
-function createTermModule(terminal: TerminalBuffer): RuntimeNamespace {
-  const clear = terminalFunction("clear", (positional, keywords) => {
+function createTermModule(context: NativeModuleContext): RuntimeNamespace {
+  const terminal = context.terminal;
+  const termFn = (name: string, call: NativeFunction["call"]): NativeFunction =>
+    terminalFunction(name, call, context.runHostWork);
+  const clear = termFn("clear", (positional, keywords) => {
     requireArity(positional, keywords, 0, 0);
     terminal.clear();
     return null;
   });
-  const clearLine = terminalFunction("clear_line", (positional, keywords) => {
+  const clearLine = termFn("clear_line", (positional, keywords) => {
     requireArity(positional, keywords, 0, 0);
     terminal.clearLine();
     return null;
   });
-  const write = terminalFunction("write", (positional, keywords) => {
+  const write = termFn("write", (positional, keywords) => {
     requireArity(positional, keywords, 1, 1);
     terminal.write(stringArgument(positional[0]));
     return null;
   });
-  const setCursorPos = terminalFunction(
-    "set_cursor_pos",
-    (positional, keywords) => {
-      requireArity(positional, keywords, 2, 2);
-      terminal.setCursorPosition(
-        integerArgument(positional[0]),
-        integerArgument(positional[1]),
-      );
-      return null;
-    },
-  );
-  const getCursorPos = terminalFunction(
-    "get_cursor_pos",
-    (positional, keywords) => {
-      requireArity(positional, keywords, 0, 0);
-      return tuple(terminal.cursorX, terminal.cursorY);
-    },
-  );
-  const setCursorBlink = terminalFunction(
-    "set_cursor_blink",
-    (positional, keywords) => {
-      requireArity(positional, keywords, 1, 1);
-      terminal.setCursorBlink(booleanArgument(positional[0]));
-      return null;
-    },
-  );
-  const getSize = terminalFunction("get_size", (positional, keywords) => {
+  const setCursorPos = termFn("set_cursor_pos", (positional, keywords) => {
+    requireArity(positional, keywords, 2, 2);
+    terminal.setCursorPosition(
+      integerArgument(positional[0]),
+      integerArgument(positional[1]),
+    );
+    return null;
+  });
+  const getCursorPos = termFn("get_cursor_pos", (positional, keywords) => {
+    requireArity(positional, keywords, 0, 0);
+    return tuple(terminal.cursorX, terminal.cursorY);
+  });
+  const setCursorBlink = termFn("set_cursor_blink", (positional, keywords) => {
+    requireArity(positional, keywords, 1, 1);
+    terminal.setCursorBlink(booleanArgument(positional[0]));
+    return null;
+  });
+  const getSize = termFn("get_size", (positional, keywords) => {
     requireArity(positional, keywords, 0, 0);
     return tuple(terminal.width, terminal.height);
   });
-  const scroll = terminalFunction("scroll", (positional, keywords) => {
+  const scroll = termFn("scroll", (positional, keywords) => {
     requireArity(positional, keywords, 1, 1);
     terminal.scroll(integerArgument(positional[0]));
     return null;
   });
-  const setTextColor = terminalFunction(
-    "set_text_color",
-    (positional, keywords) => {
-      requireArity(positional, keywords, 1, 1);
-      terminal.setTextColor(colorIndex(positional[0]));
-      return null;
-    },
-  );
-  const getTextColor = terminalFunction(
-    "get_text_color",
-    (positional, keywords) => {
-      requireArity(positional, keywords, 0, 0);
-      return 2 ** terminal.foreground;
-    },
-  );
-  const setBackgroundColor = terminalFunction(
+  const setTextColor = termFn("set_text_color", (positional, keywords) => {
+    requireArity(positional, keywords, 1, 1);
+    terminal.setTextColor(colorIndex(positional[0]));
+    return null;
+  });
+  const getTextColor = termFn("get_text_color", (positional, keywords) => {
+    requireArity(positional, keywords, 0, 0);
+    return 2 ** terminal.foreground;
+  });
+  const setBackgroundColor = termFn(
     "set_background_color",
     (positional, keywords) => {
       requireArity(positional, keywords, 1, 1);
@@ -636,14 +646,14 @@ function createTermModule(terminal: TerminalBuffer): RuntimeNamespace {
       return null;
     },
   );
-  const getBackgroundColor = terminalFunction(
+  const getBackgroundColor = termFn(
     "get_background_color",
     (positional, keywords) => {
       requireArity(positional, keywords, 0, 0);
       return 2 ** terminal.background;
     },
   );
-  const isColor = terminalFunction("is_color", (positional, keywords) => {
+  const isColor = termFn("is_color", (positional, keywords) => {
     requireArity(positional, keywords, 0, 0);
     return true;
   });
@@ -784,13 +794,27 @@ function fn(name: string, call: NativeFunction["call"]): NativeFunction {
   return nativeFunction(name, call);
 }
 
+function runHostWork<T>(
+  context: NativeModuleContext,
+  lane: ComputerWorkLane,
+  deterministicUnits: number,
+  operation: () => T,
+): T {
+  return context.runHostWork === undefined
+    ? operation()
+    : context.runHostWork(lane, deterministicUnits, operation);
+}
+
 function terminalFunction(
   name: string,
   call: NativeFunction["call"],
+  work?: NativeModuleContext["runHostWork"],
 ): NativeFunction {
   return fn(name, (positional, keywords) => {
     try {
-      return call(positional, keywords);
+      return work === undefined
+        ? call(positional, keywords)
+        : work("terminal", 1, () => call(positional, keywords));
     } catch (error: unknown) {
       if (error instanceof TerminalError)
         throw new VmRuntimeError("TerminalError", error.message);

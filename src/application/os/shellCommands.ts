@@ -866,6 +866,11 @@ export class ShellCommandRuntime {
           );
         case "detached":
           return this.protocolFailure("spi", "no peripheral attached");
+        case "deferred":
+          return this.protocolFailure(
+            "spi",
+            `host work budget exhausted; retry after tick ${String(result.retryTick)}`,
+          );
         case "missing_computer":
           return this.protocolFailure("spi", "controller unavailable");
         case "powered_off":
@@ -899,6 +904,12 @@ export class ShellCommandRuntime {
         }
         if (result.outcome === "powered_off") {
           return this.protocolFailure("i2c", "controller is powered off");
+        }
+        if (result.outcome === "deferred") {
+          return this.protocolFailure(
+            "i2c",
+            `host work budget exhausted; retry after tick ${String(result.retryTick)}`,
+          );
         }
         if (result.conflicts.length > 0) {
           return this.protocolFailure(
@@ -945,6 +956,11 @@ export class ShellCommandRuntime {
           return this.protocolFailure(
             "i2c",
             `address ${formatI2cAddress(result.address)} conflict`,
+          );
+        case "deferred":
+          return this.protocolFailure(
+            "i2c",
+            `host work budget exhausted; retry after tick ${String(result.retryTick)}`,
           );
         case "missing_computer":
           return this.protocolFailure("i2c", "controller unavailable");
@@ -2070,6 +2086,32 @@ export class ShellCommandRuntime {
     const source = this.readFile(sourcePath);
     if (source.length > 128_000)
       return failure(language, "source limit exceeded");
+    if (this.options.deferGuestExecution === true) {
+      return {
+        exitCode: 0,
+        foreground: {
+          command:
+            language === "asm"
+              ? "as"
+              : language === "cpp"
+                ? "c++"
+                : language === "basic"
+                  ? "basicc"
+                  : "c",
+          kind: "compile",
+          task: {
+            compileOnly: compileOnly === 1,
+            kind: "source",
+            language,
+            outputPath,
+            runAfterCompile: false,
+            source,
+          },
+        },
+        stderr: "",
+        stdout: "",
+      };
+    }
     const output =
       compileOnly === 1
         ? language === "asm"
@@ -2122,6 +2164,18 @@ export class ShellCommandRuntime {
     if (paths.length === 0 || paths.length > 64)
       return usage("ld <objects...> [-o output] [--entry symbol]");
     const objects = paths.map((path) => this.readCs486Object(path));
+    if (this.options.deferGuestExecution === true) {
+      return {
+        exitCode: 0,
+        foreground: {
+          command: "ld",
+          kind: "compile",
+          task: { entry, kind: "link", objects, outputPath },
+        },
+        stderr: "",
+        stdout: "",
+      };
+    }
     const executable = linkCs486Objects(objects, { entry });
     this.writeFile(outputPath, `CS486\n${JSON.stringify(executable)}`);
     return {
@@ -2144,6 +2198,24 @@ export class ShellCommandRuntime {
     const source = this.readFile(arguments_[0]!);
     if (source.length > 128_000)
       return failure("basic", "source limit exceeded");
+    if (this.options.deferGuestExecution === true) {
+      return {
+        exitCode: 0,
+        foreground: {
+          command: "basic",
+          kind: "compile",
+          task: {
+            compileOnly: false,
+            kind: "source",
+            language: "basic",
+            runAfterCompile: true,
+            source,
+          },
+        },
+        stderr: "",
+        stdout: "",
+      };
+    }
     const executable = compileCs486Source("basic", source);
     return this.executeCs486(executable, false, Math.ceil(source.length / 4));
   }

@@ -15,6 +15,10 @@ import {
   type SpiPeripheral,
   type SpiTransferResult,
 } from "../../domain/io/spiBus.js";
+import type {
+  ComputerWorkLane,
+  TickWorkScope,
+} from "../runtime/computerWorkMonitor.js";
 
 export interface PeripheralEndpoint {
   readonly computerId: string;
@@ -24,13 +28,19 @@ export interface PeripheralEndpoint {
 export type PeripheralAccessFailure =
   | { readonly outcome: "missing_computer" }
   | { readonly outcome: "powered_off" };
+export type PeripheralWorkDeferral = {
+  readonly outcome: "deferred";
+  readonly retryTick: number;
+};
 
 export type PeripheralSpiTransferResult =
-  SpiTransferResult | PeripheralAccessFailure;
+  SpiTransferResult | PeripheralAccessFailure | PeripheralWorkDeferral;
 export type PeripheralI2cTransactionResult =
-  I2cTransactionResult | PeripheralAccessFailure;
+  I2cTransactionResult | PeripheralAccessFailure | PeripheralWorkDeferral;
 export type PeripheralI2cScanResult =
-  ({ readonly outcome: "completed" } & I2cScanResult) | PeripheralAccessFailure;
+  | ({ readonly outcome: "completed" } & I2cScanResult)
+  | PeripheralAccessFailure
+  | PeripheralWorkDeferral;
 
 interface FaceBuses {
   readonly i2c: I2cSegment;
@@ -41,6 +51,11 @@ interface FaceBuses {
 export class PeripheralBusBroker {
   private readonly hardware = new Map<string, FaceIoHardware>();
   private readonly buses = new Map<string, FaceBuses>();
+  private workScope: TickWorkScope | undefined;
+
+  setWorkScope(scope: TickWorkScope | undefined): void {
+    this.workScope = scope;
+  }
 
   register(record: ComputerRecord): void {
     this.hardware.set(record.computerId, record.faceIo);
@@ -75,9 +90,13 @@ export class PeripheralBusBroker {
     transmit: Uint8Array,
   ): PeripheralSpiTransferResult {
     const access = this.access(endpoint);
-    return "outcome" in access
-      ? access
-      : access.spi.transfer(chipSelect, transmit);
+    if ("outcome" in access) return access;
+    return this.runWork(
+      "spi",
+      Math.max(1, transmit.length),
+      endpoint.computerId,
+      () => access.spi.transfer(chipSelect, transmit),
+    );
   }
 
   attachI2c(
@@ -95,7 +114,10 @@ export class PeripheralBusBroker {
   scanI2c(endpoint: PeripheralEndpoint): PeripheralI2cScanResult {
     const access = this.access(endpoint);
     if ("outcome" in access) return access;
-    return { outcome: "completed", ...access.i2c.scan() };
+    return this.runWork("i2c", 112, endpoint.computerId, () => ({
+      outcome: "completed" as const,
+      ...access.i2c.scan(),
+    }));
   }
 
   transactI2c(
@@ -105,9 +127,13 @@ export class PeripheralBusBroker {
     readLength: number,
   ): PeripheralI2cTransactionResult {
     const access = this.access(endpoint);
-    return "outcome" in access
-      ? access
-      : access.i2c.transact(address, write, readLength);
+    if ("outcome" in access) return access;
+    return this.runWork(
+      "i2c",
+      Math.max(1, write.length + readLength),
+      endpoint.computerId,
+      () => access.i2c.transact(address, write, readLength),
+    );
   }
 
   clearFace(endpoint: PeripheralEndpoint): void {
@@ -141,6 +167,22 @@ export class PeripheralBusBroker {
   ): FaceBuses | PeripheralAccessFailure {
     const buses = this.buses.get(endpointKey(endpoint));
     return buses ?? { outcome: "missing_computer" };
+  }
+
+  private runWork<T>(
+    lane: Extract<ComputerWorkLane, "i2c" | "spi">,
+    deterministicUnits: number,
+    computerId: string,
+    operation: () => T,
+  ): T | PeripheralWorkDeferral {
+    if (this.workScope === undefined) return operation();
+    const attempt = this.workScope.tryRun(
+      { lane, deterministicUnits, computerId },
+      operation,
+    );
+    return attempt.outcome === "ran"
+      ? attempt.value
+      : { outcome: "deferred", retryTick: attempt.retryTick };
   }
 }
 

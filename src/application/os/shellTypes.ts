@@ -1,5 +1,6 @@
 import type { EditorScreen } from "../editor/editorScreen.js";
 import type { Cs486Executable } from "../../domain/cpu/cs486.js";
+import type { Cs486Object } from "../../domain/cpu/cs486Object.js";
 
 export type ShellAction = "clear" | "reboot" | "shutdown";
 
@@ -18,8 +19,30 @@ export interface ShellForegroundCs486 {
   readonly stats: boolean;
 }
 
+export type ShellCompileTask =
+  | {
+      readonly kind: "source";
+      readonly language: "asm" | "basic" | "c" | "cpp";
+      readonly source: string;
+      readonly outputPath?: string;
+      readonly compileOnly: boolean;
+      readonly runAfterCompile: boolean;
+    }
+  | {
+      readonly kind: "link";
+      readonly objects: readonly Cs486Object[];
+      readonly outputPath: string;
+      readonly entry?: string;
+    };
+
+export interface ShellForegroundCompile {
+  readonly command: "as" | "basic" | "basicc" | "c" | "c++" | "ld";
+  readonly kind: "compile";
+  readonly task: ShellCompileTask;
+}
+
 export type ShellForegroundRequest =
-  ShellForegroundCs486 | ShellForegroundPython;
+  ShellForegroundCompile | ShellForegroundCs486 | ShellForegroundPython;
 
 export interface ShellCommandResult {
   readonly action?: ShellAction;

@@ -126,4 +126,23 @@ describe("ComputerWorkMonitor", (): void => {
     tick.finish();
     expect(() => monitor.beginTick(3)).toThrow("increase monotonically");
   });
+
+  it("reports bounded p50, p95, and p99 tick latency estimates", (): void => {
+    const clock = new FakeClock();
+    const monitor = new ComputerWorkMonitor(clock);
+    const durations = [
+      100, 200, 300, 900, 1_800, 3_500, 7_000, 11_000, 20_000, 30_000,
+    ];
+    for (const [index, duration] of durations.entries()) {
+      const tick = monitor.beginTick(index + 1);
+      clock.advance(duration);
+      tick.finish();
+    }
+
+    expect(monitor.snapshot().tickHostMicroseconds).toEqual({
+      p50: 2_000,
+      p95: 24_001,
+      p99: 24_001,
+    });
+  });
 });

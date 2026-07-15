@@ -3,7 +3,10 @@ import type { ComputerSnapshot } from "../../domain/computer/computer.js";
 import { requireComputerId } from "../../domain/computer/identity.js";
 import { isCpuModel } from "../../domain/cpu/models.js";
 import { isDisplayProfileId } from "../../domain/display/displayProfile.js";
-import { TransactionalPagedStore } from "./transactionalPagedStore.js";
+import {
+  TransactionalPagedStore,
+  type PagedSaveTransaction,
+} from "./transactionalPagedStore.js";
 
 export interface DynamicPropertyOwner {
   getDynamicProperty(identifier: string): unknown;
@@ -35,6 +38,10 @@ export class DynamicPropertyComputerRepository implements ComputerSnapshotReposi
 
   save(snapshot: ComputerSnapshot): number {
     return this.store(snapshot.computerId).save(snapshot);
+  }
+
+  beginSave(snapshot: ComputerSnapshot): PagedSaveTransaction {
+    return this.store(snapshot.computerId).beginSave(snapshot);
   }
 
   private store(computerId: string): TransactionalPagedStore {

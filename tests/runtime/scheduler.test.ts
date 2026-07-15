@@ -160,6 +160,26 @@ describe("round-robin scheduler", (): void => {
       cpuCycles: 1_000,
     });
   });
+
+  it("bounds preparation and result materialization independently of population", (): void => {
+    const scheduler = new RoundRobinScheduler({
+      ...limits,
+      computersPerTick: 7,
+      cpuCyclesPerTick: 7_000,
+    });
+    for (let id = 0; id < 1_000; id += 1) {
+      scheduler.add(id, vm("while True:\n    pass\n"));
+    }
+
+    const visited = new Set<number>();
+    for (let tick = 0; tick < 143; tick += 1) {
+      const result = scheduler.runTick();
+      expect(result.computers.length).toBeLessThanOrEqual(7);
+      for (const computer of result.computers) visited.add(computer.id);
+    }
+
+    expect(visited.size).toBe(1_000);
+  });
 });
 
 function vm(

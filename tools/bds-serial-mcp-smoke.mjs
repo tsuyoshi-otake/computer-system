@@ -68,6 +68,12 @@ try {
     afterCursor: probe.afterCursor,
     timeoutMs: 120_000,
   });
+  await call("bds_wait_for_log", {
+    contains: "CS_WORK_MONITOR ",
+    afterCursor: probe.afterCursor,
+    timeoutMs: 30_000,
+  });
+  const monitored = await call("bds_status", {});
   const serial = parseProbe(serialLog.line);
   const terminal = parseProbe(terminalLog.line);
   requireEqual(started.state, "running", "BDS state after start");
@@ -78,6 +84,16 @@ try {
   requireEqual(serial.details.links, 36, "serial link count");
   requireEqual(serial.details.transmissions, 72, "serial transmission count");
   requireEqual(terminal.status, "PASS", "headless suite status");
+  if (monitored.workMonitor === null) {
+    throw new Error("BDS status did not expose WorkMonitor metrics.");
+  }
+  for (const percentile of ["p50", "p95", "p99"]) {
+    if (
+      !Number.isFinite(monitored.workMonitor.tickHostMicroseconds[percentile])
+    ) {
+      throw new Error(`WorkMonitor ${percentile} is not finite.`);
+    }
+  }
   const stopped = await call("bds_stop", {});
   running = false;
   requireEqual(stopped.state, "idle", "BDS state after stop");
@@ -88,6 +104,7 @@ try {
         endpoint: `${started.address}:${String(started.port)}`,
         serial,
         suite: terminal,
+        workMonitor: monitored.workMonitor,
         finalState: stopped.state,
       },
       null,

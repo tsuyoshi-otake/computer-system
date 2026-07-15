@@ -2,85 +2,87 @@
 
 Issue #16 tracks this work. `ComputerWorkMonitor` is the BDS-thread admission
 and observability boundary for Computer System work. It measures host time, but
-deterministic guest CPU cycles and device wire clocks remain independent model
-inputs. Host timing must never change a program's modeled result.
+guest CPU cycles and device wire clocks remain independent deterministic model
+inputs. Host timing never changes a guest program's modeled result.
 
-## P0 contract
+## Production contract
 
 Each host tick opens exactly one `TickWorkScope`. A caller submits an already
 bounded atom with a lane, deterministic unit count, and optional Computer ID.
-Admission checks the lane unit ceiling first, then the tick soft and emergency
-host-time guards. A deferral does not run the atom and returns the next retry
-tick; the caller retains finalization ownership. Exceptions are measured once
-and rethrown. `finish()` is required on every host branch.
+Admission checks the lane ceiling and then the tick soft and emergency guards. A
+deferral does not run the atom, returns a retry tick, and leaves finalization
+with the caller. Exceptions are measured once and rethrown. Every host branch
+finishes the scope.
 
 The fixed lanes are control, event delivery, guest CPU, guest compilation, MCP
 debug execution, RS-232C, I2C, SPI, redstone input/output, topology, terminal,
-and persistence. The cumulative snapshot contains admitted/deferred/failed
-counts, deterministic units, host microseconds, maximum atom time, overruns, and
-a fixed-bucket tick histogram. It has no per-user or per-Computer maps, so
-monitor storage remains O(1).
+and persistence. Cumulative metrics contain admitted/deferred/failed counts,
+deterministic units, host microseconds, maximum atom time, and overruns. The
+fixed tick histogram derives conservative p50, p95, and p99 upper bounds. There
+are no per-user or per-Computer metric maps, so monitor storage stays O(1).
 
-Production currently admits the runtime scheduler as one bounded `guest_cpu`
-atom, RS-232C delivery as one bounded `rs232` atom, and up to four individual
-persistence checks. The shared CPU scheduler separately caps both cycles and
-machine instructions. Normal `run` and MCP Python/CS486 execution are resumable
-scheduler jobs, so a command cannot execute its complete instruction ceiling on
-the BDS event callback stack. The RS-232C ready queue is an intrusive O(1)
-deque; disconnect removes its exact node, so stale churn cannot consume the next
-tick's dequeue budget.
+Bedrock callbacks which are intrinsically bounded by a fixed face count use the
+external observation boundary. It rejects an atom larger than the lane limit and
+measures redstone and topology work without changing device state or guest
+timing.
 
-I2C and SPI transactions are synchronous bounded atoms today: both cap one
-transfer at 256 bytes and validate adapter response length. Their WorkMonitor
-lanes are reserved for the Bedrock adapter/job increment. Until that increment,
-their host cost is included in the enclosing `guest_cpu` measurement; separate
-I2C/SPI metrics must not be claimed. Redstone and topology adapters follow the
-same rule. The next increment must add explicit deferred protocol outcomes or
-resumable jobs before enforcing those separate lane admissions; silently
-dropping a transaction is not allowed.
+## Bounded execution paths
 
-## Scaling model
+- The shared scheduler inspects at most 64 processes per tick by default. Event
+  preparation, CPU slices, and returned views use only that rotating window;
+  none enumerates the full scheduled population. Cycle and machine-instruction
+  budgets remain separate.
+- Normal Python/CS486 execution and MCP debug execution are scheduler jobs.
+  Debug slices use `mcp_debug`, not `guest_cpu`, and every limit, detach,
+  interrupt, and completion path has one callback/event owner.
+- `as`, `cc`, `c++`, `basicc`, `basic`, and `ld` submit explicit compile jobs. A
+  shell invocation cannot compile on its initiating event callback. The job is
+  admitted on a later tick in `guest_compile`; BASIC then hands the compiled
+  executable to the normal bounded CPU scheduler. Source, object-count, memory,
+  and instruction ceilings still apply.
+- RS-232C uses an intrusive O(1) ready-link deque and admits work only when the
+  deque is non-empty. Link, dequeue, and byte budgets are fixed. I2C and SPI
+  charge bounded payload/address units and return `deferred` plus `retryTick`
+  when a lane is exhausted; overflow is never silently dropped.
+- Terminal mutations performed by native modules and shell result rendering are
+  charged to `terminal`. Redstone guest access and fixed-face Bedrock input/
+  output synchronization are charged separately. Topology refresh covers the six
+  fixed faces.
+- Persistence checks visit at most four Computers per tick. A dirty revision
+  creates a transaction with explicit target cleanup, manifest, page, commit,
+  and obsolete-generation cleanup stages. Each job step performs at most one
+  Dynamic Property operation. The head changes only after all new pages exist,
+  and a record changed while saving remains dirty for another generation.
 
-- Scheduler execution is bounded by fixed global cycle and instruction budgets
-  per tick. Current iteration cost is O(S), where S is scheduled processes; the
-  executed guest work remains capped even when S grows.
-- RS-232C delivery is O(K) per tick for fixed dequeue and byte budgets. Link
-  lookup, enqueue, dequeue, and queued-link removal are O(1).
-- Persistence checks are O(K) per tick for a fixed K of four. One snapshot save
-  is still an atomic overrun risk and remains visible in the persistence lane.
-- I2C scan covers at most the usable 7-bit address space. SPI chip select is
-  fixed at 0..7. Transfer payloads are capped at 256 bytes.
-- WorkMonitor metrics and histograms are fixed-size O(1) state. They do not add
-  cardinality proportional to Computers, sessions, or players.
+## MCP observability
 
-This bounds deterministic work, but it is not proof that an arbitrary player
-count is safe. Remaining dominant risks are O(S) scheduler traversal, atomic
-persistence serialization, synchronous compiler/linker work, terminal fan-out,
-and future adapter callbacks. Scale acceptance therefore requires a real-BDS
-soak with percentiles and overrun counts, not only unit tests.
+The Bedrock host publishes a `CS_WORK_MONITOR` record every 20 ticks. The local
+MCP companion validates and normalizes it to the fixed lane schema before
+exposing it as `bds_status.workMonitor`. The status includes lane totals,
+deferrals, overruns, and p50/p95/p99 without Computer or player cardinality.
+Malformed or unbounded records are not cached, and telemetry records do not
+count as BDS diagnostics.
 
 ## Verification rubric
 
-- `Verify:` Run `npx vitest run tests/runtime/computerWorkMonitor.test.ts`.
-  `Expect:` Lane overflow and host-time guards defer without executing work;
-  exceptions are accounted once; tick scopes cannot overlap.
-- `Verify:` Run
-  `npx vitest run tests/runtime/scheduler.test.ts tests/computer/computerHost.test.ts`.
-  `Expect:` Cycle and instruction ceilings hold; terminal and MCP guest commands
-  progress on later ticks and every completion or interruption is observable.
-- `Verify:` Run
-  `npx vitest run tests/io/serialLinkBroker.test.ts tests/io/peripheralProtocols.test.ts`.
-  `Expect:` RS-232C churn cannot starve an active link and I2C/SPI payload and
-  response limits fail explicitly.
-- `Verify:` Run `npm run test:mcp:serial:bds` with isolated free ports and a new
-  dedicated BDS work directory. `Expect:` A real BDS reports
-  `serial_matrix/PASS` for three machines, all six ttyS/COM mappings, 36 ordered
-  links, and 72 bidirectional transmissions.
-- `Verify:` Run `npm run validate`. `Expect:` Formatting, lint, types, all host
-  tests, and pack build pass.
-- `Verify:` Run `npm run test:mcp:bds`, then execute one bounded benchmark on
-  each registered hardware profile through MCP. `Expect:` Commands complete
-  across host ticks, modeled cycles remain reproducible, BDS stays responsive,
-  and WorkMonitor reports no unexplained emergency deferrals. This final
-  observation still requires a future MCP metrics probe before it can be
-  automated end to end.
+- `Verify:`
+  `npx vitest run tests/runtime/scheduler.test.ts tests/runtime/workMonitorScale.test.ts`
+  `Expect:` 10,000 processes still inspect and return only 64 records per tick,
+  every process progresses in 157 ticks, and no soft/emergency deferral occurs.
+- `Verify:`
+  `npx vitest run tests/computer/computerHostPersistence.test.ts tests/io/peripheralProtocols.test.ts`
+  `Expect:` every production lane records real work; I2C overflow is explicit;
+  compile and MCP jobs advance on later ticks.
+- `Verify:`
+  `npx vitest run tests/computer/persistence.test.ts tests/phase0/transactionalPagedStore.test.ts`
+  `Expect:` one property operation per transaction step, previous-generation
+  recovery, bounded cleanup, and mutation-during-save dirty retention.
+- `Verify:`
+  `npx vitest run tests/runtime/computerWorkMonitor.test.ts tests/tools/bdsDebugSession.test.mjs`
+  `Expect:` fixed-histogram percentiles and normalized MCP status records pass.
+- `Verify:` `npm run validate` `Expect:` formatting, lint, types, all host
+  tests, and the pack build pass.
+- `Verify:` run `npm run test:mcp:serial:bds` with free isolated ports and a new
+  dedicated `BDS_MCP_WORKDIR`. `Expect:` three machines, six faces, 36 links,
+  and 72 transmissions pass; WorkMonitor p50/p95/p99 are present, emergency
+  deferrals are zero, and the isolated BDS reaches `idle` after cleanup.

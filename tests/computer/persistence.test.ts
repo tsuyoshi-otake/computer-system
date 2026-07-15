@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   ComputerPersistenceService,
+  type ComputerSnapshotSaveTransaction,
   type ComputerSnapshotRepository,
 } from "../../src/application/computer/persistence.js";
 import {
@@ -228,6 +229,22 @@ describe("Computer persistence boundary", (): void => {
       }
     }
   });
+
+  it("keeps a revision changed during an incremental save dirty", (): void => {
+    const persistence = new ComputerPersistenceService(
+      new DeferredRepository(),
+    );
+    const record = new ComputerRecord("computer-82", "standard");
+    const started = persistence.startSaveIfDirty(record);
+    expect(started.outcome).toBe("started");
+    if (started.outcome !== "started") return;
+
+    record.setLabel("changed while saving");
+    expect(started.job.step()).toMatchObject({ outcome: "pending" });
+    expect(started.job.step()).toMatchObject({ outcome: "saved" });
+
+    expect(persistence.startSaveIfDirty(record).outcome).toBe("started");
+  });
 });
 
 class MemoryRepository implements ComputerSnapshotRepository {
@@ -244,5 +261,27 @@ class MemoryRepository implements ComputerSnapshotRepository {
     if (this.fail) throw new Error("storage unavailable");
     this.snapshots.set(snapshot.computerId, structuredClone(snapshot));
     return ++this.generation;
+  }
+}
+
+class DeferredRepository implements ComputerSnapshotRepository {
+  load(): ComputerSnapshot | undefined {
+    return undefined;
+  }
+
+  save(): number {
+    return 1;
+  }
+
+  beginSave(): ComputerSnapshotSaveTransaction {
+    let step = 0;
+    return {
+      step: (): ReturnType<ComputerSnapshotSaveTransaction["step"]> => {
+        step += 1;
+        return step === 1
+          ? ({ outcome: "pending", stage: "pages" } as const)
+          : ({ outcome: "complete", generation: 1 } as const);
+      },
+    };
   }
 }

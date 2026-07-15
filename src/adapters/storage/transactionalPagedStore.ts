@@ -19,6 +19,25 @@ export interface PagedLoadResult<T> {
   readonly value: T;
 }
 
+export type PagedSaveStage =
+  | "target_cleanup"
+  | "manifest"
+  | "pages"
+  | "commit"
+  | "obsolete_cleanup"
+  | "complete";
+
+export type PagedSaveStepResult =
+  | { readonly outcome: "pending"; readonly stage: PagedSaveStage }
+  | { readonly outcome: "complete"; readonly generation: number };
+
+/** A single-generation transaction advanced by a bounded number of writes. */
+export interface PagedSaveTransaction {
+  readonly generation: number;
+  readonly stage: PagedSaveStage;
+  step(maxOperations?: number): PagedSaveStepResult;
+}
+
 export class TransactionalPagedStore {
   readonly #pageCharacterLimit: number;
   readonly #prefix: string;
@@ -73,6 +92,14 @@ export class TransactionalPagedStore {
   }
 
   public save(value: unknown): number {
+    const transaction = this.beginSave(value);
+    while (transaction.step(64).outcome !== "complete") {
+      // Compatibility path for callers that explicitly request a synchronous save.
+    }
+    return transaction.generation;
+  }
+
+  public beginSave(value: unknown): PagedSaveTransaction {
     const currentHeadText = this.#store.get(this.#headKey());
     const currentHead =
       currentHeadText === undefined ? 0 : Number.parseInt(currentHeadText, 10);
@@ -95,15 +122,13 @@ export class TransactionalPagedStore {
       schema: 1,
     };
 
-    this.#deleteGeneration(generation);
-    this.#store.set(this.#manifestKey(generation), JSON.stringify(manifest));
-    for (const [index, page] of pages.entries()) {
-      this.#store.set(this.#pageKey(generation, index), page);
-    }
-    this.#store.set(this.#headKey(), String(generation));
-    this.#pruneGenerations(generation);
-
-    return generation;
+    return new IncrementalPagedSave(
+      this.#store,
+      this.#prefix,
+      generation,
+      pages,
+      manifest,
+    );
   }
 
   #headKey(): string {
@@ -148,40 +173,6 @@ export class TransactionalPagedStore {
     return value;
   }
 
-  #deleteGeneration(generation: number): void {
-    const manifestText = this.#store.get(this.#manifestKey(generation));
-    if (manifestText === undefined) return;
-    try {
-      const manifest: unknown = JSON.parse(manifestText);
-      if (isGenerationManifest(manifest, generation)) {
-        for (let index = 0; index < manifest.pageCount; index += 1) {
-          this.#store.delete(this.#pageKey(generation, index));
-        }
-      }
-    } finally {
-      this.#store.delete(this.#manifestKey(generation));
-    }
-  }
-
-  #pruneGenerations(head: number): void {
-    const manifestPrefix = `${this.#prefix}:manifest:`;
-    const keys = this.#store.keys?.(manifestPrefix);
-    if (keys === undefined) {
-      if (head > 2) this.#deleteGeneration(head - 2);
-      return;
-    }
-    for (const key of keys) {
-      const generation = Number.parseInt(key.slice(manifestPrefix.length), 10);
-      if (
-        Number.isSafeInteger(generation) &&
-        generation > 0 &&
-        generation < head - 1
-      ) {
-        this.#deleteGeneration(generation);
-      }
-    }
-  }
-
   #manifestKey(generation: number): string {
     return `${this.#prefix}:manifest:${generation}`;
   }
@@ -204,6 +195,141 @@ export class TransactionalPagedStore {
       pages.push(value.slice(offset, offset + this.#pageCharacterLimit));
     }
     return pages;
+  }
+}
+
+class IncrementalPagedSave implements PagedSaveTransaction {
+  readonly #store: StringPropertyStore;
+  readonly #prefix: string;
+  readonly #pages: readonly string[];
+  readonly #manifest: GenerationManifest;
+  #stage: PagedSaveStage = "target_cleanup";
+  #targetCleanupIndex = 0;
+  #targetManifestDeleted = false;
+  #pageIndex = 0;
+  #obsoleteCleanupIndex = 0;
+  #obsoleteManifestDeleted = false;
+  readonly #targetOldPageCount: number;
+  readonly #obsoleteGeneration: number;
+  readonly #obsoletePageCount: number;
+
+  constructor(
+    store: StringPropertyStore,
+    prefix: string,
+    readonly generation: number,
+    pages: readonly string[],
+    manifest: GenerationManifest,
+  ) {
+    this.#store = store;
+    this.#prefix = prefix;
+    this.#pages = pages;
+    this.#manifest = manifest;
+    this.#targetOldPageCount = this.readPageCount(generation);
+    this.#obsoleteGeneration = generation - 2;
+    this.#obsoletePageCount =
+      this.#obsoleteGeneration > 0
+        ? this.readPageCount(this.#obsoleteGeneration)
+        : 0;
+  }
+
+  get stage(): PagedSaveStage {
+    return this.#stage;
+  }
+
+  step(maxOperations = 1): PagedSaveStepResult {
+    if (!Number.isSafeInteger(maxOperations) || maxOperations <= 0) {
+      throw new RangeError("Paged save operations must be positive.");
+    }
+    let operations = 0;
+    while (operations < maxOperations && this.#stage !== "complete") {
+      switch (this.#stage) {
+        case "target_cleanup":
+          if (this.#targetCleanupIndex < this.#targetOldPageCount) {
+            this.#store.delete(
+              this.pageKey(this.generation, this.#targetCleanupIndex++),
+            );
+            operations += 1;
+          } else if (!this.#targetManifestDeleted) {
+            this.#store.delete(this.manifestKey(this.generation));
+            this.#targetManifestDeleted = true;
+            operations += 1;
+          } else {
+            this.#stage = "manifest";
+          }
+          break;
+        case "manifest":
+          this.#store.set(
+            this.manifestKey(this.generation),
+            JSON.stringify(this.#manifest),
+          );
+          this.#stage = "pages";
+          operations += 1;
+          break;
+        case "pages":
+          this.#store.set(
+            this.pageKey(this.generation, this.#pageIndex),
+            this.#pages[this.#pageIndex]!,
+          );
+          this.#pageIndex += 1;
+          if (this.#pageIndex >= this.#pages.length) this.#stage = "commit";
+          operations += 1;
+          break;
+        case "commit":
+          this.#store.set(this.headKey(), String(this.generation));
+          this.#stage = "obsolete_cleanup";
+          operations += 1;
+          break;
+        case "obsolete_cleanup":
+          if (this.#obsoleteGeneration <= 0) {
+            this.#stage = "complete";
+          } else if (this.#obsoleteCleanupIndex < this.#obsoletePageCount) {
+            this.#store.delete(
+              this.pageKey(
+                this.#obsoleteGeneration,
+                this.#obsoleteCleanupIndex++,
+              ),
+            );
+            operations += 1;
+          } else if (!this.#obsoleteManifestDeleted) {
+            this.#store.delete(this.manifestKey(this.#obsoleteGeneration));
+            this.#obsoleteManifestDeleted = true;
+            operations += 1;
+          } else {
+            this.#stage = "complete";
+          }
+          break;
+      }
+    }
+    return this.#stage === "complete"
+      ? { outcome: "complete", generation: this.generation }
+      : { outcome: "pending", stage: this.#stage };
+  }
+
+  #readManifest(generation: number): GenerationManifest | undefined {
+    const text = this.#store.get(this.manifestKey(generation));
+    if (text === undefined) return undefined;
+    try {
+      const value: unknown = JSON.parse(text);
+      return isGenerationManifest(value, generation) ? value : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private readPageCount(generation: number): number {
+    return this.#readManifest(generation)?.pageCount ?? 0;
+  }
+
+  private headKey(): string {
+    return `${this.#prefix}:head`;
+  }
+
+  private manifestKey(generation: number): string {
+    return `${this.#prefix}:manifest:${String(generation)}`;
+  }
+
+  private pageKey(generation: number, index: number): string {
+    return `${this.#prefix}:page:${String(generation)}:${String(index)}`;
   }
 }
 

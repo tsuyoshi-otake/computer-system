@@ -164,6 +164,10 @@ export class ShellSession {
     return this.authentication.isSecretInput();
   }
 
+  writeCompilerOutput(path: string, contents: string): void {
+    this.commands.writeFile(path, contents);
+  }
+
   takeStartupLines(): readonly string[] {
     return this.startupLines.splice(0);
   }

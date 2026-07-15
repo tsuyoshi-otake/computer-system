@@ -5,6 +5,7 @@ import { SpiBus } from "../../src/domain/io/spiBus.js";
 import { PeripheralBusBroker } from "../../src/application/io/peripheralBusBroker.js";
 import { ComputerRecord } from "../../src/domain/computer/computer.js";
 import { ShellSession } from "../../src/application/os/shellSession.js";
+import { ComputerWorkMonitor } from "../../src/application/runtime/computerWorkMonitor.js";
 
 describe("SpiBus", (): void => {
   it("performs one atomic fixed-length transfer", (): void => {
@@ -159,5 +160,48 @@ describe("PeripheralBusBroker OS boundary", (): void => {
         Uint8Array.of(1),
       ),
     ).toEqual({ outcome: "powered_off" });
+  });
+
+  it("accounts I2C and SPI independently and exposes deterministic overflow", (): void => {
+    const broker = new PeripheralBusBroker();
+    const record = new ComputerRecord("c-000302", "standard");
+    record.faceIo.powerOn();
+    broker.register(record);
+    const endpoint = { computerId: record.computerId, face: "right" } as const;
+    broker.attachSpi(endpoint, 0, {
+      id: "fixture-spi",
+      transfer: (bytes) => bytes,
+    });
+    broker.attachI2c(endpoint, {
+      address: 0x48,
+      id: "fixture-i2c",
+      transact: ({ readLength }) => new Uint8Array(readLength),
+    });
+    let clock = 0;
+    const monitor = new ComputerWorkMonitor({
+      nowMicroseconds: (): number => clock++,
+    });
+    const tick = monitor.beginTick(1);
+    broker.setWorkScope(tick);
+
+    expect(broker.transferSpi(endpoint, 0, Uint8Array.of(1))).toMatchObject({
+      outcome: "completed",
+    });
+    expect(
+      broker.transactI2c(endpoint, 0x48, Uint8Array.of(1), 1),
+    ).toMatchObject({ outcome: "completed" });
+    for (let index = 0; index < 7; index += 1) {
+      broker.transactI2c(endpoint, 0x48, new Uint8Array(255), 1);
+    }
+    expect(
+      broker.transactI2c(endpoint, 0x48, new Uint8Array(255), 1),
+    ).toMatchObject({ outcome: "deferred", retryTick: 2 });
+
+    broker.setWorkScope(undefined);
+    tick.finish();
+    expect(monitor.snapshot().lanes).toMatchObject({
+      i2c: { admitted: 8, deferred: 1 },
+      spi: { admitted: 1 },
+    });
   });
 });

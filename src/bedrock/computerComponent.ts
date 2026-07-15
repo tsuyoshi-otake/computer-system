@@ -205,6 +205,15 @@ export function adjacentDesktopComputers(
 }
 
 function handleRedstoneUpdate(event: BlockComponentRedstoneUpdateEvent): void {
+  computerHost.observeExternalWork(
+    { lane: "redstone_input", deterministicUnits: redstoneSides.length },
+    () => handleRedstoneUpdateBounded(event),
+  );
+}
+
+function handleRedstoneUpdateBounded(
+  event: BlockComponentRedstoneUpdateEvent,
+): void {
   const observation = identityService().atPhysicalKey(blockKey(event.block));
   if (observation === undefined) return;
   const record = ensureComputer(observation.computerId, observation.family);
@@ -248,9 +257,21 @@ function syncComputerOutputs(): void {
     }
     refreshFaceIoTopology(block);
     if (!isComputerBlock(block.typeId)) continue;
-    const expected = blockType(observation.family, record.redstone.outputMask);
-    if (block.typeId !== expected)
-      replaceMachinePreservingDirection(block, expected);
+    computerHost.observeExternalWork(
+      {
+        lane: "redstone_output",
+        deterministicUnits: 1,
+        computerId: observation.computerId,
+      },
+      () => {
+        const expected = blockType(
+          observation.family,
+          record.redstone.outputMask,
+        );
+        if (block.typeId !== expected)
+          replaceMachinePreservingDirection(block, expected);
+      },
+    );
   }
 }
 

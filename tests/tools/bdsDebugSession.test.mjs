@@ -5,6 +5,7 @@ import {
   isAllowedBdsCommand,
   isAllowedWebRelayCommand,
   isDiagnosticLine,
+  parseWorkMonitorLine,
   parseBdsPort,
 } from "../../tools/bds-debug-session.mjs";
 
@@ -165,6 +166,24 @@ describe("BDS debug session", () => {
     expect(isDiagnosticLine("[Scripting] Error: boom")).toBe(true);
     expect(isDiagnosticLine("[Json] warning: invalid control")).toBe(true);
     expect(isDiagnosticLine("Server started.")).toBe(false);
+    expect(
+      isDiagnosticLine(
+        '[Scripting][warning]-CS_WORK_MONITOR {"completedTicks":1}',
+      ),
+    ).toBe(false);
+  });
+
+  it("parses only bounded WorkMonitor status records", () => {
+    const line = `[Scripting][warning]-CS_WORK_MONITOR ${JSON.stringify({
+      completedTicks: 20,
+      tickHostMicroseconds: { p50: 500, p95: 2_000, p99: 4_000 },
+      lanes: { guest_cpu: { admitted: 4 } },
+    })}`;
+    expect(parseWorkMonitorLine(line)).toMatchObject({
+      completedTicks: 20,
+      tickHostMicroseconds: { p95: 2_000 },
+    });
+    expect(parseWorkMonitorLine("CS_WORK_MONITOR not-json")).toBeUndefined();
   });
 
   it("exposes an explicit idle terminal state before startup", () => {

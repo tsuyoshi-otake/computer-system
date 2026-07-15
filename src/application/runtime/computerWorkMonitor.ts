@@ -91,6 +91,12 @@ export interface ComputerWorkMonitorSnapshot {
   readonly histogramUpperBoundsMicroseconds: readonly number[];
   readonly lanes: Readonly<Record<ComputerWorkLane, ComputerWorkLaneSnapshot>>;
   readonly softLimitDeferrals: number;
+  /** Conservative upper-bound estimates derived from the fixed histogram. */
+  readonly tickHostMicroseconds: {
+    readonly p50: number;
+    readonly p95: number;
+    readonly p99: number;
+  };
 }
 
 export interface TickWorkSummary {
@@ -177,6 +183,12 @@ export class ComputerWorkMonitor {
   }
 
   snapshot(): ComputerWorkMonitorSnapshot {
+    const percentile = (ratio: number): number =>
+      histogramPercentileUpperBound(
+        this.histogram,
+        this.limits.histogramUpperBoundsMicroseconds,
+        ratio,
+      );
     return {
       completedTicks: this.completedTicksValue,
       emergencyLimitDeferrals: this.emergencyLimitDeferralsValue,
@@ -186,7 +198,38 @@ export class ComputerWorkMonitor {
       ],
       lanes: laneRecord((lane) => ({ ...this.cumulative[lane] })),
       softLimitDeferrals: this.softLimitDeferralsValue,
+      tickHostMicroseconds: {
+        p50: percentile(0.5),
+        p95: percentile(0.95),
+        p99: percentile(0.99),
+      },
     };
+  }
+
+  /** Measures an intrinsically bounded Bedrock callback outside the host loop. */
+  observeExternal<T>(claim: ComputerWorkClaim, operation: () => T): T {
+    requirePositiveInteger(claim.deterministicUnits, "deterministicUnits");
+    if (claim.deterministicUnits > this.laneLimit(claim.lane)) {
+      throw new RangeError(
+        `${claim.lane} external work exceeds its deterministic lane limit`,
+      );
+    }
+    const started = this.nowMicroseconds();
+    let failed = true;
+    try {
+      const value = operation();
+      failed = false;
+      return value;
+    } finally {
+      const hostMicroseconds = Math.max(0, this.nowMicroseconds() - started);
+      this.noteRun(
+        claim.lane,
+        claim.deterministicUnits,
+        hostMicroseconds,
+        failed,
+        hostMicroseconds > this.maximumAtomicLimit(),
+      );
+    }
   }
 
   laneLimit(lane: ComputerWorkLane): number {
@@ -385,4 +428,22 @@ function validateHistogramBounds(bounds: readonly number[]): void {
       throw new RangeError("Histogram bounds must increase strictly");
     previous = bound;
   }
+}
+
+function histogramPercentileUpperBound(
+  histogram: readonly number[],
+  bounds: readonly number[],
+  ratio: number,
+): number {
+  const samples = histogram.reduce((total, count) => total + count, 0);
+  if (samples === 0) return 0;
+  const rank = Math.max(1, Math.ceil(samples * ratio));
+  let cumulative = 0;
+  for (let index = 0; index < histogram.length; index += 1) {
+    cumulative += histogram[index] ?? 0;
+    if (cumulative >= rank) {
+      return bounds[index] ?? (bounds.at(-1) ?? 0) + 1;
+    }
+  }
+  return (bounds.at(-1) ?? 0) + 1;
 }

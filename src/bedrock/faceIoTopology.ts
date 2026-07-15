@@ -14,6 +14,13 @@ import { identityService } from "./computerRegistry.js";
 const cardinalDirectionState = "minecraft:cardinal_direction";
 
 export function refreshFaceIoTopology(block: Block): void {
+  computerHost.observeExternalWork(
+    { lane: "topology", deterministicUnits: machineFaces.length },
+    () => refreshFaceIoTopologyBounded(block),
+  );
+}
+
+function refreshFaceIoTopologyBounded(block: Block): void {
   const localObservation = identityService().atPhysicalKey(blockKey(block));
   const localDirection = machineDirection(block);
   if (localObservation === undefined) return;

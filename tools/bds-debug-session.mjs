@@ -49,6 +49,22 @@ const allowedPlayerProbes = new Set([
   "ui-nano",
 ]);
 const allowedServerProbes = new Set(["headless"]);
+const workMonitorLogPrefix = "CS_WORK_MONITOR ";
+const workMonitorLanes = [
+  "control",
+  "event_delivery",
+  "guest_cpu",
+  "guest_compile",
+  "mcp_debug",
+  "rs232",
+  "i2c",
+  "spi",
+  "redstone_input",
+  "redstone_output",
+  "topology",
+  "terminal",
+  "persistence",
+];
 
 export function parseBdsPort(value) {
   const text = value ?? "19142";
@@ -63,9 +79,73 @@ export function parseBdsPort(value) {
 }
 
 export function isDiagnosticLine(line) {
+  if (line.includes(workMonitorLogPrefix)) return false;
   return /\[(?:Blocks|Item|Items|Json|Scripting|UI)\].*(?:error|warning)|(?:exception|stack trace|syntax error)/iu.test(
     line,
   );
+}
+
+export function parseWorkMonitorLine(line) {
+  const marker = line.indexOf(workMonitorLogPrefix);
+  if (marker < 0) return undefined;
+  try {
+    const value = JSON.parse(line.slice(marker + workMonitorLogPrefix.length));
+    if (
+      typeof value !== "object" ||
+      value === null ||
+      !Number.isSafeInteger(value.completedTicks) ||
+      typeof value.tickHostMicroseconds !== "object" ||
+      value.tickHostMicroseconds === null ||
+      typeof value.lanes !== "object" ||
+      value.lanes === null ||
+      !isFiniteMetric(value.tickHostMicroseconds.p50) ||
+      !isFiniteMetric(value.tickHostMicroseconds.p95) ||
+      !isFiniteMetric(value.tickHostMicroseconds.p99)
+    ) {
+      return undefined;
+    }
+    const lanes = {};
+    for (const lane of workMonitorLanes) {
+      const metrics = value.lanes[lane];
+      if (typeof metrics !== "object" || metrics === null) continue;
+      lanes[lane] = Object.fromEntries(
+        [
+          "admitted",
+          "deferred",
+          "failed",
+          "hostMicroseconds",
+          "maximumAtomicHostMicroseconds",
+          "overruns",
+          "units",
+        ]
+          .filter((key) => isFiniteMetric(metrics[key]))
+          .map((key) => [key, metrics[key]]),
+      );
+    }
+    return {
+      completedTicks: value.completedTicks,
+      emergencyLimitDeferrals: finiteMetricOrZero(
+        value.emergencyLimitDeferrals,
+      ),
+      softLimitDeferrals: finiteMetricOrZero(value.softLimitDeferrals),
+      tickHostMicroseconds: {
+        p50: value.tickHostMicroseconds.p50,
+        p95: value.tickHostMicroseconds.p95,
+        p99: value.tickHostMicroseconds.p99,
+      },
+      lanes,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+function isFiniteMetric(value) {
+  return Number.isFinite(value) && value >= 0;
+}
+
+function finiteMetricOrZero(value) {
+  return isFiniteMetric(value) ? value : 0;
 }
 
 export function isAllowedBdsCommand(command) {
@@ -155,6 +235,7 @@ export class BdsDebugSession {
     this.pendingDebugCommands = 0;
     this.nextWebRequest = 1;
     this.pendingWebRequests = 0;
+    this.workMonitor = undefined;
     this.serverPort = parseBdsPort(this.environment.BDS_MCP_PORT);
     this.worldName = this.environment.BDS_MCP_WORLD ?? defaultWorldName;
     this.sourceRoot = path.resolve(
@@ -180,6 +261,7 @@ export class BdsDebugSession {
       logCursor: this.logCursor,
       diagnostics: this.logLines.filter((entry) => entry.diagnostic).length,
       lastError: this.lastError ?? null,
+      workMonitor: this.workMonitor ?? null,
     };
   }
 
@@ -785,6 +867,8 @@ export class BdsDebugSession {
   }
 
   #appendLog(source, stream, line) {
+    const workMonitor = parseWorkMonitorLine(line);
+    if (workMonitor !== undefined) this.workMonitor = workMonitor;
     this.logCursor += 1;
     const entry = {
       cursor: this.logCursor,

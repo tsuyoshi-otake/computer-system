@@ -123,3 +123,20 @@
   Evidence: the 1,500-iteration strength-reduction matrix completed all 28
   supported live-BDS/MCP runs on CS486DX2, CS486DX, and CS386SX, while both
   Portable Python cells terminated with DOS status 127.
+- A bounded CPU budget is insufficient when scheduler preparation or result
+  materialization still enumerates every process. Rotate one fixed-size window
+  through event preparation, execution, and returned views, and test fairness at
+  a population much larger than the window. — Evidence: the WorkMonitor scale
+  gate reaches all 10,000 processes in 157 ticks while exposing at most 64 views
+  per tick with zero soft/emergency deferrals.
+- Incremental persistence must mark the exact revision captured at job start as
+  saved, not the record's revision at commit. Otherwise a mutation during a
+  multi-tick page transaction is silently treated as durable. Change the head
+  only after every new page exists and retain the previous complete generation.
+  — Evidence: paged-store tests permit one property operation per step and the
+  persistence test observes a second dirty job after mutation during save.
+- Export host-load telemetry through a fixed schema, never raw per-Computer or
+  per-player maps. Normalize Bedrock log records before caching them in MCP
+  status and derive p50/p95/p99 from fixed histogram buckets. — Evidence: BDS
+  debug-session tests reject malformed records, and isolated MCP/BDS acceptance
+  reports bounded WorkMonitor metrics with zero emergency deferrals.

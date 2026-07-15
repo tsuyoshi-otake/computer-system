@@ -5,6 +5,7 @@ import {
 import { VmRuntimeError } from "../../domain/runtime/errors.js";
 import type {
   CpuProcess,
+  CpuProcessSliceResult,
   CpuProcessState,
 } from "../../domain/runtime/cpuProcess.js";
 import type { RuntimeValue } from "../../domain/runtime/value.js";
@@ -17,6 +18,8 @@ export interface SchedulerLimits {
   readonly cpuCyclesPerTick: number;
   readonly instructionsPerComputer?: number;
   readonly instructionsPerTick?: number;
+  /** Maximum number of Computer records inspected by one host tick. */
+  readonly computersPerTick?: number;
 }
 
 export const defaultSchedulerLimits: SchedulerLimits = {
@@ -26,7 +29,16 @@ export const defaultSchedulerLimits: SchedulerLimits = {
   cpuCyclesPerTick: Math.floor(computerNominalClockHz / 20),
   instructionsPerComputer: 200,
   instructionsPerTick: 1_000,
+  computersPerTick: 64,
 };
+
+export interface SchedulerWorkObserver {
+  prepare(computerId: number, operation: () => void): boolean;
+  runCpuSlice(
+    computerId: number,
+    operation: () => CpuProcessSliceResult,
+  ): CpuProcessSliceResult | undefined;
+}
 
 export interface ScheduledComputerView {
   readonly cpuCycles: number;
@@ -45,10 +57,12 @@ export interface SchedulerTickResult {
 export class RoundRobinScheduler {
   private readonly computers = new Map<number, ScheduledComputer>();
   private order: number[] = [];
+  private readonly orderIndices = new Map<number, number>();
   private cursor = 0;
   private tickValue = 0;
   private readonly instructionsPerComputer: number;
   private readonly instructionsPerTick: number;
+  private readonly computersPerTick: number;
 
   constructor(
     private readonly limits: SchedulerLimits = defaultSchedulerLimits,
@@ -61,11 +75,14 @@ export class RoundRobinScheduler {
       limits.instructionsPerComputer ?? Number.MAX_SAFE_INTEGER;
     this.instructionsPerTick =
       limits.instructionsPerTick ?? Number.MAX_SAFE_INTEGER;
+    this.computersPerTick =
+      limits.computersPerTick ?? defaultSchedulerLimits.computersPerTick!;
     requirePositiveInteger(
       this.instructionsPerComputer,
       "instructionsPerComputer",
     );
     requirePositiveInteger(this.instructionsPerTick, "instructionsPerTick");
+    requirePositiveInteger(this.computersPerTick, "computersPerTick");
   }
 
   get tickNumber(): number {
@@ -91,13 +108,25 @@ export class RoundRobinScheduler {
       executedInstructions: 0,
       cpuCyclesPerTick,
     });
+    this.orderIndices.set(id, this.order.length);
     this.order.push(id);
   }
 
   remove(id: number): boolean {
     const removed = this.computers.delete(id);
     if (!removed) return false;
-    this.order = this.order.filter((candidate) => candidate !== id);
+    const index = this.orderIndices.get(id);
+    if (index === undefined)
+      throw new Error(`Computer ${id} has no order index`);
+    const lastIndex = this.order.length - 1;
+    const lastId = this.order[lastIndex]!;
+    this.order.pop();
+    this.orderIndices.delete(id);
+    if (index < lastIndex) {
+      this.order[index] = lastId;
+      this.orderIndices.set(lastId, index);
+    }
+    if (index < this.cursor) this.cursor -= 1;
     if (this.order.length === 0) this.cursor = 0;
     else this.cursor %= this.order.length;
     return true;
@@ -127,16 +156,26 @@ export class RoundRobinScheduler {
     return this.requireComputer(id).process.state;
   }
 
-  runTick(): SchedulerTickResult {
+  runTick(observer?: SchedulerWorkObserver): SchedulerTickResult {
     this.tickValue += 1;
     let remaining = this.limits.cpuCyclesPerTick;
     let remainingInstructions = this.instructionsPerTick;
     let executedInstructions = 0;
-    const count = this.order.length;
+    let executedComputers = 0;
+    const scheduledCount = this.order.length;
+    const count = Math.min(scheduledCount, this.computersPerTick);
+    const visited: ScheduledComputer[] = [];
 
-    for (const id of this.order) {
-      const computer = this.computers.get(id);
-      if (computer !== undefined) this.prepare(computer);
+    for (let offset = 0; offset < count; offset += 1) {
+      const index = (this.cursor + offset) % scheduledCount;
+      const computer = this.computers.get(this.order[index]!);
+      if (computer === undefined) continue;
+      const prepared =
+        observer === undefined
+          ? (this.prepare(computer), true)
+          : observer.prepare(computer.id, () => this.prepare(computer));
+      if (!prepared) break;
+      visited.push(computer);
     }
 
     for (
@@ -144,8 +183,7 @@ export class RoundRobinScheduler {
       offset < count && remaining > 0 && remainingInstructions > 0;
       offset += 1
     ) {
-      const index = (this.cursor + offset) % count;
-      const computer = this.computers.get(this.order[index]!);
+      const computer = visited[offset];
       if (computer === undefined) continue;
       if (
         computer.process.state.kind !== "ready" &&
@@ -157,28 +195,43 @@ export class RoundRobinScheduler {
         this.instructionsPerComputer,
         remainingInstructions,
       );
-      const result = computer.process.runCpuSlice(budget, instructionBudget);
+      const operation = (): CpuProcessSliceResult =>
+        computer.process.runCpuSlice(budget, instructionBudget);
+      const result =
+        observer === undefined
+          ? operation()
+          : observer.runCpuSlice(computer.id, operation);
+      if (result === undefined) break;
       computer.cpuCycles += result.cpuCycles;
       computer.executedInstructions += result.executedInstructions;
+      executedComputers += 1;
       executedInstructions += result.executedInstructions;
       remaining -= result.cpuCycles;
       remainingInstructions -= result.executedInstructions;
     }
-    if (count > 0) this.cursor = (this.cursor + 1) % count;
+    if (scheduledCount > 0 && visited.length > 0) {
+      const advance =
+        scheduledCount <= this.computersPerTick
+          ? 1
+          : executedComputers > 0
+            ? executedComputers
+            : visited.length;
+      this.cursor = (this.cursor + advance) % scheduledCount;
+    }
 
-    const computers = this.order.flatMap((id) => {
-      const computer = this.computers.get(id);
-      return computer === undefined
-        ? []
-        : [
-            {
-              id,
-              state: computer.process.state,
-              cpuCycles: computer.cpuCycles,
-              executedInstructions: computer.executedInstructions,
-            },
-          ];
-    });
+    const outputComputers =
+      scheduledCount <= this.computersPerTick
+        ? this.order.flatMap((id) => {
+            const computer = this.computers.get(id);
+            return computer === undefined ? [] : [computer];
+          })
+        : visited;
+    const computers = outputComputers.map((computer) => ({
+      id: computer.id,
+      state: computer.process.state,
+      cpuCycles: computer.cpuCycles,
+      executedInstructions: computer.executedInstructions,
+    }));
     return {
       cpuCycles: this.limits.cpuCyclesPerTick - remaining,
       tick: this.tickValue,

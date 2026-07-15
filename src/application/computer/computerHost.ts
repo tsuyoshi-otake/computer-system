@@ -5,11 +5,14 @@ import type {
 } from "./computerRuntime.js";
 import type {
   ComputerPersistenceService,
+  PersistenceJobStepResult,
+  PersistenceSaveJob,
   PersistenceResult,
 } from "./persistence.js";
 import type { SerialLinkBroker } from "../io/serialLinkBroker.js";
 import type { PeripheralBusBroker } from "../io/peripheralBusBroker.js";
 import {
+  type ComputerWorkClaim,
   type ComputerWorkMonitor,
   type ComputerWorkMonitorSnapshot,
   type TickWorkScope,
@@ -32,6 +35,7 @@ export class ComputerHost {
   readonly serial: SerialLinkBroker;
   readonly peripherals: PeripheralBusBroker;
   private readonly records = new Map<string, ComputerRecord>();
+  private readonly persistenceJobs = new Map<string, PersistenceSaveJob>();
   private readonly order: string[] = [];
   private readonly maxPersistenceChecksPerTick: number;
   private readonly onPersistenceFailure: (
@@ -95,6 +99,12 @@ export class ComputerHost {
     return this.workMonitor?.snapshot();
   }
 
+  observeExternalWork<T>(claim: ComputerWorkClaim, operation: () => T): T {
+    return this.workMonitor === undefined
+      ? operation()
+      : this.workMonitor.observeExternal(claim, operation);
+  }
+
   runTick(): void {
     this.hostTick += 1;
     const scope = this.workMonitor?.beginTick(this.hostTick);
@@ -105,20 +115,16 @@ export class ComputerHost {
         this.runPersistenceChecks();
         return;
       }
-      scope.tryRun(
-        {
-          lane: "guest_cpu",
-          deterministicUnits: this.workMonitor!.laneLimit("guest_cpu"),
-        },
-        () => this.runtime.runTick(),
-      );
-      scope.tryRun(
-        {
-          lane: "rs232",
-          deterministicUnits: this.workMonitor!.laneLimit("rs232"),
-        },
-        () => this.serial.runTick(),
-      );
+      this.runtime.runTick(scope);
+      if (this.serial.hasPendingWork()) {
+        scope.tryRun(
+          {
+            lane: "rs232",
+            deterministicUnits: this.workMonitor!.laneLimit("rs232"),
+          },
+          () => this.serial.runTick(),
+        );
+      }
       this.runPersistenceChecks(scope);
     } finally {
       if (scope !== undefined) this.lastWorkSummaryValue = scope.finish();
@@ -134,14 +140,14 @@ export class ComputerHost {
       const computerId = this.order[this.persistenceCursor];
       if (computerId === undefined) continue;
       if (scope === undefined) {
-        this.persist(computerId);
+        this.advancePersistence(computerId);
         this.persistenceCursor =
           (this.persistenceCursor + 1) % this.order.length;
         continue;
       }
       const attempt = scope.tryRun(
         { lane: "persistence", deterministicUnits: 1, computerId },
-        () => this.persist(computerId),
+        () => this.advancePersistence(computerId),
       );
       if (attempt.outcome === "deferred") break;
       this.persistenceCursor = (this.persistenceCursor + 1) % this.order.length;
@@ -151,7 +157,35 @@ export class ComputerHost {
   flush(computerId: string): PersistenceResult {
     if (!this.records.has(computerId))
       return { outcome: "missing", computerId };
+    this.persistenceJobs.delete(computerId);
     return this.persist(computerId);
+  }
+
+  private advancePersistence(
+    computerId: string,
+  ): PersistenceResult | PersistenceJobStepResult {
+    const record = this.records.get(computerId);
+    if (record === undefined) return { outcome: "missing", computerId };
+    let job = this.persistenceJobs.get(computerId);
+    if (job === undefined) {
+      const started = this.persistence.startSaveIfDirty(record);
+      if (started.outcome !== "started") {
+        if (started.outcome === "failed") {
+          this.onPersistenceFailure(computerId, started.error);
+        }
+        return started;
+      }
+      job = started.job;
+      this.persistenceJobs.set(computerId, job);
+    }
+    const result = job.step();
+    if (result.outcome !== "pending") {
+      this.persistenceJobs.delete(computerId);
+    }
+    if (result.outcome === "failed") {
+      this.onPersistenceFailure(computerId, result.error);
+    }
+    return result;
   }
 
   private persist(computerId: string): PersistenceResult {
