@@ -4,7 +4,9 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
+  formatHttpOrigin,
   isPublishedAddressLocal,
+  normalizePublicOrigin,
   parseOptionalBooleanFlag,
   selectLanIpv4,
   WebCompanionServer,
@@ -28,6 +30,19 @@ afterEach(async () => {
 });
 
 describe("Web companion HTTP server", () => {
+  it("omits standard ports without mislabeling a plain HTTP listener as HTTPS", () => {
+    expect(formatHttpOrigin("10.255.10.90", 80)).toBe("http://10.255.10.90");
+    expect(formatHttpOrigin("10.255.10.90", 443)).toBe(
+      "http://10.255.10.90:443",
+    );
+    expect(normalizePublicOrigin("http://10.255.10.90:80")).toBe(
+      "http://10.255.10.90",
+    );
+    expect(normalizePublicOrigin("https://terminal.example.test:443")).toBe(
+      "https://terminal.example.test",
+    );
+  });
+
   it("serves manual PNG illustrations with an image content type", async () => {
     const server = newTestWebCompanionServer({
       bds: new FakeBds(),

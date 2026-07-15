@@ -85,6 +85,10 @@ describe("persistent Web companion administrator configuration", () => {
   });
 
   it("gives environment variables precedence over persisted values", () => {
+    expect(resolveWebCompanionAdminOptions({}, {})).toEqual({
+      port: "80",
+      publicOrigin: undefined,
+    });
     expect(
       resolveWebCompanionAdminOptions(
         {
@@ -111,7 +115,7 @@ describe("persistent Web companion administrator configuration", () => {
       "--port",
       "80",
       "--url",
-      "http://10.255.10.90",
+      "http://10.255.10.90:80",
       "--config-file",
       configPath,
     ]);

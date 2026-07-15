@@ -321,7 +321,7 @@ Verify:
 - `Verify:` Start once with `WEB_COMPANION_PORT=18081`. `Expect:` The temporary
   environment override wins without changing the persisted 18080 value.
 - `Verify:` Run `npm run web:config -- reset --config-file $config`. `Expect:`
-  the file is removed and the next unmodified start returns to port 19144.
+  the file is removed and the next unmodified start returns to port 80.
 
 For the real system-wide configuration, repeat `set` without `--config-file`
 from an administrator/root shell. Open only the selected LAN firewall port.

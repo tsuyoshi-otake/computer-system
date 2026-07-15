@@ -26,7 +26,7 @@ The server uses these optional environment variables:
 | `BDS_MCP_PORT`                     | `19142`                                             | IPv4 server port; IPv6 uses the following port                 |
 | `BDS_MCP_WORLD`                    | `ComputerSystemMcpDebug`                            | Debug world name                                               |
 | `WEB_COMPANION_HOST`               | `0.0.0.0`                                           | Web listener interface for trusted LAN access                  |
-| `WEB_COMPANION_PORT`               | `19144`                                             | Web listener TCP port                                          |
+| `WEB_COMPANION_PORT`               | `80`                                                | Web listener TCP port                                          |
 | `WEB_COMPANION_PUBLIC_HOST`        | Listener host                                       | Reachable host used in generated HTTP links                    |
 | `WEB_COMPANION_PUBLIC_ORIGIN`      | unset                                               | Complete HTTPS origin advertised behind a reverse proxy        |
 | `WEB_COMPANION_CONFIG_FILE`        | system-wide platform path                           | Persistent administrator configuration file                    |
@@ -54,7 +54,11 @@ contains an unknown field. Restart `npm run dev:bds:web` or the MCP companion
 after changing the file. Use `--clear-port`, `--clear-url`, or `reset` to remove
 settings. `WEB_COMPANION_PORT` and `WEB_COMPANION_PUBLIC_ORIGIN` override the
 file for one process, which preserves isolated test and emergency recovery
-workflows.
+workflows. Generated HTTP links omit `:80`. Explicit origins are URL-normalized,
+so `http://host:80` is displayed as `http://host` and `https://host:443` is
+displayed as `https://host`. The latter is valid only when a TLS reverse proxy
+actually terminates HTTPS; the Node companion does not turn into an HTTPS server
+merely by listening on TCP 443.
 
 ## MCP workflow
 
@@ -236,8 +240,8 @@ demoted when control moves, and Bedrock emits `terminal_closed` only after the
 last browser session for that Computer detaches. Sessions attached to different
 Computers remain independently writable.
 
-LAN clients require TCP 19144 (or the configured companion port) in addition to
-the BDS UDP port. Internet access must use an HTTPS reverse proxy: bind the
+LAN clients require TCP 80 (or the configured companion port) in addition to the
+BDS UDP port. Internet access must use an HTTPS reverse proxy: bind the
 companion to `127.0.0.1`, set `WEB_COMPANION_PUBLIC_ORIGIN`, and proxy only from
 the TLS endpoint. The configured custom origin and the host's loopback auto-open
 origin are accepted explicitly. Set `WEB_COMPANION_ALLOWED_ORIGINS=*` when

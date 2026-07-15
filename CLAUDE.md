@@ -328,7 +328,7 @@ chapter/header agreement.
 
 ## Web companion networking
 
-The BDS companion entry points listen on `0.0.0.0:19144` by default and select a
+The BDS companion entry points listen on `0.0.0.0:80` by default and select a
 non-virtual LAN IPv4 address. `WEB_COMPANION_HOST` controls the listener, while
 `WEB_COMPANION_PUBLIC_HOST` overrides the detected address. For Internet access,
 keep the process on loopback, set `WEB_COMPANION_PUBLIC_ORIGIN` to an HTTPS

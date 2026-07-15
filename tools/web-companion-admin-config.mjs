@@ -122,7 +122,7 @@ export async function removeWebCompanionAdminConfig(configPath) {
 
 export function resolveWebCompanionAdminOptions(environment, persisted) {
   return {
-    port: environment.WEB_COMPANION_PORT ?? persisted.port ?? "19144",
+    port: environment.WEB_COMPANION_PORT ?? persisted.port ?? "80",
     publicOrigin:
       environment.WEB_COMPANION_PUBLIC_ORIGIN ?? persisted.publicOrigin,
   };

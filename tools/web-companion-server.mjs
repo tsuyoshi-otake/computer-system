@@ -43,7 +43,7 @@ export class WebCompanionServer {
   constructor(options = {}) {
     this.bds = options.bds;
     this.host = options.host ?? "127.0.0.1";
-    this.port = parsePort(options.port ?? 19_144);
+    this.port = parsePort(options.port ?? 80);
     this.networkInterfaces = options.networkInterfaces ?? networkInterfaces();
     this.publicHost =
       options.publicHost ??
@@ -128,11 +128,10 @@ export class WebCompanionServer {
         ? address.port
         : this.port;
     this.origin =
-      this.publicOrigin ??
-      `http://${formatHost(this.publicHost)}:${String(actualPort)}`;
+      this.publicOrigin ?? formatHttpOrigin(this.publicHost, actualPort);
     this.browserOrigin =
       isLoopbackHost(this.host) || this.host === "0.0.0.0"
-        ? `http://127.0.0.1:${String(actualPort)}`
+        ? formatHttpOrigin("127.0.0.1", actualPort)
         : undefined;
     this.allowedOrigins = new Set(
       [...this.configuredOrigins, this.origin, this.browserOrigin].filter(
@@ -1208,6 +1207,11 @@ export function normalizePublicOrigin(value) {
     );
   }
   return parsed.origin;
+}
+
+export function formatHttpOrigin(host, port) {
+  const suffix = port === 80 ? "" : `:${String(port)}`;
+  return `http://${formatHost(host)}${suffix}`;
 }
 
 function normalizeAllowedOrigins(value) {

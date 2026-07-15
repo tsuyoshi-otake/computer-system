@@ -232,10 +232,10 @@ Bedrock bridge, and closing one view does not emit `terminal_closed` while
 another view of the same Computer remains active. Different Computers remain
 independently writable.
 
-The BDS Web companion listens on `0.0.0.0:19144` by default and chooses a
+The BDS Web companion listens on `0.0.0.0:80` by default and chooses a
 non-virtual LAN IPv4 address for the entry page. Trusted LAN clients therefore
-need TCP 19144 in addition to the BDS UDP port. Override the detected address
-when the host has unusual routing:
+need TCP 80 in addition to the BDS UDP port. Override the detected address when
+the host has unusual routing:
 
 ```powershell
 $env:WEB_COMPANION_PUBLIC_HOST = "192.168.1.10"
@@ -261,10 +261,14 @@ complete persisted configuration. A restart is required after any change.
 `WEB_COMPANION_PORT` and `WEB_COMPANION_PUBLIC_ORIGIN` remain temporary
 per-process overrides and take precedence over persisted values. Use
 `WEB_COMPANION_CONFIG_FILE` to select a different configuration file; an empty
-value disables persisted configuration for an isolated test process.
+value disables persisted configuration for an isolated test process. Displayed
+origins omit standard ports: HTTP 80 is shown as `http://host` and an explicit
+HTTPS origin on 443 is shown as `https://host`. The companion itself is plain
+HTTP; an HTTPS origin requires a real TLS reverse proxy rather than merely
+binding the companion to TCP 443.
 
 Minecraft/BDS and the Web Terminal use different transports: the managed BDS
-defaults to UDP 19142, while the browser companion defaults to TCP 19144. For
+defaults to UDP 19142, while the browser companion defaults to TCP 80. For
 Internet access, keep the companion bound to loopback and put an HTTPS reverse
 proxy on TCP 443 in front of it:
 
@@ -275,11 +279,74 @@ npm run dev:bds:web
 ```
 
 Do not expose the plain HTTP companion port directly to the Internet. The
-reverse proxy should terminate TLS and forward only to `127.0.0.1:19144`.
+reverse proxy should terminate TLS and forward only to `127.0.0.1:80`.
 State-changing terminal requests normally accept the exact configured public
 origin and the companion host's loopback auto-open origin. Wildcard mode accepts
 every Origin but still requires a valid terminal bearer token; use it only when
 the deployment intentionally permits arbitrary proxy domains.
+
+### Publishing through Cloudflare
+
+Keep the companion on local HTTP port 80 and persist the public HTTPS URL first.
+The standard HTTPS port is intentionally omitted from the URL shown to users:
+
+```powershell
+npm run web:config -- set --port 80 --url https://terminal.example.com
+```
+
+Restart the companion after changing the configuration. Configure the process or
+Windows service with `WEB_COMPANION_HOST=127.0.0.1` so the plain HTTP listener
+is not exposed beyond the host.
+
+#### Pattern A: Cloudflare Tunnel (recommended)
+
+1. In the Cloudflare dashboard, open **Networking > Tunnels**, create a
+   Cloudflare Tunnel, and add a published application route for
+   `terminal.example.com`.
+2. Set the route's service URL to `http://127.0.0.1:80`. Cloudflare serves the
+   public hostname over HTTPS while `cloudflared` reaches the companion through
+   loopback.
+3. Install the connector on the Computer System host using the command supplied
+   by the dashboard. On Windows this has the following form and must run from an
+   Administrator terminal:
+
+   ```powershell
+   cloudflared.exe service install <TUNNEL_TOKEN>
+   ```
+
+4. Keep the tunnel token out of Git, logs, screenshots, and repository `.env`
+   files. No inbound Internet firewall rule for companion TCP 80 is required;
+   the connector establishes outbound tunnel connections.
+5. Open `https://terminal.example.com` and confirm that the Web Terminal entry
+   page loads. Cloudflare Access can be placed in front of the hostname as an
+   additional operator-controlled authentication layer.
+
+See Cloudflare's official guides for
+[creating a remotely managed tunnel](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/get-started/create-remote-tunnel/)
+and the
+[Cloudflare Tunnel architecture](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/).
+
+#### Pattern B: proxied DNS with Full (strict)
+
+Use this pattern when the origin must accept direct Cloudflare proxy traffic
+instead of running `cloudflared`:
+
+1. Keep the companion on `127.0.0.1:80` and place Caddy, nginx, IIS, or another
+   TLS reverse proxy on origin TCP 443.
+2. Install a publicly trusted certificate or a
+   [Cloudflare Origin CA certificate](https://developers.cloudflare.com/ssl/origin-configuration/origin-ca/)
+   on that reverse proxy, then forward requests to `http://127.0.0.1:80`.
+3. Create a proxied Cloudflare DNS record for `terminal.example.com` and set the
+   zone's SSL/TLS encryption mode to
+   [Full (strict)](https://developers.cloudflare.com/ssl/origin-configuration/ssl-modes/full-strict/).
+4. Restrict origin TCP 443 to Cloudflare's networks or use an equivalent
+   authenticated-origin control. Do not expose companion TCP 80 publicly.
+
+Do not use Cloudflare **Flexible** mode for the Web Terminal. Flexible leaves
+the Cloudflare-to-origin connection on HTTP, which is inappropriate for a
+password-authenticated terminal. Cloudflare also recommends Full or Full
+(strict) whenever possible; see its
+[SSL/TLS encryption mode guidance](https://developers.cloudflare.com/ssl/origin-configuration/ssl-modes/).
 
 ## CS-Linux and CS-DOS
 
