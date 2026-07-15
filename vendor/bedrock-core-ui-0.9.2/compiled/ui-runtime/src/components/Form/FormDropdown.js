@@ -125,7 +125,7 @@ export const formDropdownWriter = (payload, form, ctx, _callbacks, props, native
     // Label position is TS-COMPUTED (alignment left the RP): popup rows are as wide as the
     // closed box (the cell); left inset 4 matches the old label box margin.
     const rowWidth = typeof props?.jsonUIWidth === 'number' ? props.jsonUIWidth : 0;
-    const encodedOptions = opts.map(o => serializeSelectOption(o.text, o.style, NO_OPTION_GEOMETRY,
+    const encodedOptions = opts.map(o => serializeSelectOption(o.text, o.style, NO_OPTION_GEOMETRY, 
     // Center the label in the VISIBLE face (flow slot + the 1px border overlap): the face
     // center is also the center of the interior between the two shared border lines.
     optionLabelPosition(o.text, o.style, rowWidth, OPTION_ROW_HEIGHT + OPTION_ROW_OVERLAP, 4)));

@@ -43,9 +43,9 @@ export { resolveStateBackgrounds } from './stateBackground';
  * @returns Object with all control properties filled with defaults and canonical ordering
  */
 export function withControl(props) {
-    const { visible, enabled, background,
+    const { visible, enabled, background, 
     // Layout props
-    width, height, display, flexDirection, justifyContent, alignItems, alignContent, wrap, gap, padding, paddingTop, paddingRight, paddingBottom, paddingLeft, flexGrow, flexShrink, flexBasis, flex, alignSelf, margin, marginTop, marginRight, marginBottom, marginLeft, minWidth, minHeight, maxWidth, maxHeight, aspectRatio,
+    width, height, display, flexDirection, justifyContent, alignItems, alignContent, wrap, gap, padding, paddingTop, paddingRight, paddingBottom, paddingLeft, flexGrow, flexShrink, flexBasis, flex, alignSelf, margin, marginTop, marginRight, marginBottom, marginLeft, minWidth, minHeight, maxWidth, maxHeight, aspectRatio, 
     // Positioning
     position, top, right, bottom, left, zIndex, } = props;
     // Create object with properties in exact canonical order for stable serialization
