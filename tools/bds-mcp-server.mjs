@@ -3,6 +3,7 @@ import readline from "node:readline";
 import { BdsDebugSession } from "./bds-debug-session.mjs";
 import {
   parseBooleanFlag,
+  parseOptionalBooleanFlag,
   WebCompanionServer,
 } from "./web-companion-server.mjs";
 
@@ -20,7 +21,7 @@ const webCompanion = new WebCompanionServer({
   publicHost: process.env.WEB_COMPANION_PUBLIC_HOST,
   publicOrigin: process.env.WEB_COMPANION_PUBLIC_ORIGIN,
   allowedOrigins: process.env.WEB_COMPANION_ALLOWED_ORIGINS,
-  autoOpenBrowser: parseBooleanFlag(
+  autoOpenBrowser: parseOptionalBooleanFlag(
     process.env.WEB_COMPANION_AUTO_OPEN,
     "WEB_COMPANION_AUTO_OPEN",
   ),

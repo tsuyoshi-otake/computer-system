@@ -1,10 +1,19 @@
 import { BdsDebugSession } from "./bds-debug-session.mjs";
 import {
   parseBooleanFlag,
+  parseOptionalBooleanFlag,
   WebCompanionServer,
 } from "./web-companion-server.mjs";
 
 const bds = new BdsDebugSession();
+const stopMigrationLogForwarding = bds.onLog((entry) => {
+  if (
+    entry.line.includes("CS_STORAGE_MIGRATION") ||
+    entry.line.includes("Computer System storage migration")
+  ) {
+    process.stdout.write(`${entry.line}\n`);
+  }
+});
 const web = new WebCompanionServer({
   bds,
   host: process.env.WEB_COMPANION_HOST ?? "0.0.0.0",
@@ -12,7 +21,7 @@ const web = new WebCompanionServer({
   publicHost: process.env.WEB_COMPANION_PUBLIC_HOST,
   publicOrigin: process.env.WEB_COMPANION_PUBLIC_ORIGIN,
   allowedOrigins: process.env.WEB_COMPANION_ALLOWED_ORIGINS,
-  autoOpenBrowser: parseBooleanFlag(
+  autoOpenBrowser: parseOptionalBooleanFlag(
     process.env.WEB_COMPANION_AUTO_OPEN,
     "WEB_COMPANION_AUTO_OPEN",
   ),
@@ -60,6 +69,7 @@ async function shutdown(exitCode) {
       `BDS Web companion shutdown failed: ${message(error)}\n`,
     );
   } finally {
+    stopMigrationLogForwarding();
     process.exit(code);
   }
 }

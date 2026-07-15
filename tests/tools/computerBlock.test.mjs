@@ -35,6 +35,7 @@ describe("computer block generator", () => {
       for (let mask = 0; mask < 64; mask += 1) {
         const block = createComputerBlock(family, mask)["minecraft:block"];
         const producer = block.components["minecraft:redstone_producer"];
+        const consumer = block.components["minecraft:redstone_consumer"];
         expect(block.description.identifier).toBe(
           computerBlockIdentifier(family, mask),
         );
@@ -43,6 +44,7 @@ describe("computer block generator", () => {
             (_face, bit) => (mask & (1 << bit)) !== 0,
           ),
         );
+        expect(consumer).toBeUndefined();
         expect(block.components["computer_system:computer"]).toEqual({
           family,
         });

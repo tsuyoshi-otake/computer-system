@@ -1,8 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { createNativeEnvironment } from "../../src/application/runtime/nativeModules.js";
 import { RoundRobinScheduler } from "../../src/application/runtime/scheduler.js";
+import { ShellSession } from "../../src/application/os/shellSession.js";
 import { InMemoryFilesystem } from "../../src/domain/filesystem/inMemoryFilesystem.js";
+import type { NativeFunction } from "../../src/domain/runtime/value.js";
 import { TerminalBuffer } from "../../src/domain/terminal/terminalBuffer.js";
 import { RedstoneState } from "../../src/domain/redstone/redstoneState.js";
 import { PythonCs486Harness } from "./pythonCs486Harness.js";
@@ -160,6 +162,44 @@ output = redstone.get_output("right")
     expect(vm.globals.get("level")).toBe(12);
     expect(vm.globals.get("output")).toBe(true);
     expect(redstone.outputMask).toBe(2);
+  });
+
+  it("admits a shell command before executing and rendering it", (): void => {
+    const filesystem = new InMemoryFilesystem();
+    const terminal = new TerminalBuffer();
+    const shell = new ShellSession(filesystem, { osProfile: "dos" });
+    let insideTerminalLane = false;
+    let admissionCount = 0;
+    const originalSubmit = shell.submit.bind(shell);
+    const submitSpy = vi.spyOn(shell, "submit").mockImplementation((line) => {
+      expect(insideTerminalLane).toBe(true);
+      return originalSubmit(line);
+    });
+    const environment = createNativeEnvironment({
+      computerId: 3,
+      filesystem,
+      osProfile: "dos",
+      shell,
+      terminal,
+      runHostWork: (lane, units, operation) => {
+        expect(lane).toBe("terminal");
+        expect(units).toBe(1);
+        expect(insideTerminalLane).toBe(false);
+        admissionCount += 1;
+        insideTerminalLane = true;
+        try {
+          return operation();
+        } finally {
+          insideTerminalLane = false;
+        }
+      },
+    });
+    const shellModule = environment.modules.get("shell");
+    const submit = shellModule?.values.get("submit") as NativeFunction;
+
+    expect(submit.call(["DIR"], new Map())).toMatchObject({ kind: "work" });
+    expect(admissionCount).toBe(1);
+    expect(submitSpy).toHaveBeenCalledWith("DIR");
   });
 });
 

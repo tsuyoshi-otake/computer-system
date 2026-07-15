@@ -27,6 +27,21 @@ export interface InMemoryFilesystemSnapshot {
   readonly tombstones?: readonly string[];
 }
 
+/**
+ * The filesystem payload written by Computer snapshot schema 1. It predates
+ * base images and stores file contents inline instead of by content ID.
+ */
+export interface LegacyInMemoryFilesystemSnapshot {
+  readonly directories: readonly string[];
+  readonly files: readonly (readonly [path: string, contents: string])[];
+  readonly metadata?: readonly (readonly [
+    path: string,
+    metadata: FilesystemMetadata,
+  ])[];
+  readonly symbolicLinks?: readonly (readonly [path: string, target: string])[];
+  readonly hardLinks?: readonly (readonly string[])[];
+}
+
 export interface FilesystemBaseImageFile {
   readonly contents: string;
   readonly metadata?: Partial<Pick<FilesystemMetadata, "gid" | "mode" | "uid">>;
@@ -44,6 +59,152 @@ export interface FilesystemMetadata {
   readonly mode: number;
   readonly modifiedAtMilliseconds: number;
   readonly uid: number;
+}
+
+export function isInMemoryFilesystemSnapshot(
+  value: unknown,
+): value is InMemoryFilesystemSnapshot {
+  if (!isRecord(value) || value.schema !== 2) return false;
+  if (
+    !hasOnlyKeys(value, [
+      "schema",
+      "baseImageId",
+      "blobs",
+      "directories",
+      "files",
+      "metadata",
+      "symbolicLinks",
+      "hardLinks",
+      "tombstones",
+    ]) ||
+    (value.baseImageId !== undefined &&
+      (typeof value.baseImageId !== "string" ||
+        !/^[a-z0-9][a-z0-9._-]{0,63}$/u.test(value.baseImageId))) ||
+    !isStringTupleArray(value.blobs) ||
+    !isStringArray(value.directories) ||
+    !isStringTupleArray(value.files) ||
+    (value.metadata !== undefined && !isMetadataTupleArray(value.metadata)) ||
+    (value.symbolicLinks !== undefined &&
+      !isStringTupleArray(value.symbolicLinks)) ||
+    (value.hardLinks !== undefined && !isHardLinkGroups(value.hardLinks)) ||
+    (value.tombstones !== undefined && !isStringArray(value.tombstones))
+  ) {
+    return false;
+  }
+
+  const blobIds = new Set<string>();
+  for (const [id, contents] of value.blobs) {
+    if (blobIds.has(id) || contentBlobId(contents) !== id) return false;
+    blobIds.add(id);
+  }
+  if (!areUniqueValidPaths(value.directories, false)) return false;
+  const filePaths = value.files.map(([path]) => path);
+  if (
+    !areUniqueValidPaths(filePaths, false) ||
+    value.files.some(([, blobId]) => !blobIds.has(blobId))
+  ) {
+    return false;
+  }
+  const symbolicLinkPaths = (value.symbolicLinks ?? []).map(([path]) => path);
+  if (
+    !areUniqueValidPaths(symbolicLinkPaths, false) ||
+    (value.symbolicLinks ?? []).some(([, target]) => target.includes("\0")) ||
+    !pathsAreDisjoint(value.directories, filePaths, symbolicLinkPaths) ||
+    (value.metadata !== undefined &&
+      !areUniqueValidPaths(
+        value.metadata.map(([path]) => path),
+        false,
+      )) ||
+    (value.tombstones !== undefined &&
+      !areUniqueValidPaths(value.tombstones, false)) ||
+    !hardLinkPathsAreUnique(value.hardLinks ?? [])
+  ) {
+    return false;
+  }
+  return true;
+}
+
+export function isLegacyInMemoryFilesystemSnapshot(
+  value: unknown,
+): value is LegacyInMemoryFilesystemSnapshot {
+  if (!isRecord(value) || "schema" in value) return false;
+  if (
+    !hasOnlyKeys(value, [
+      "directories",
+      "files",
+      "metadata",
+      "symbolicLinks",
+      "hardLinks",
+    ]) ||
+    !isStringArray(value.directories) ||
+    !isStringTupleArray(value.files) ||
+    (value.metadata !== undefined && !isMetadataTupleArray(value.metadata)) ||
+    (value.symbolicLinks !== undefined &&
+      !isStringTupleArray(value.symbolicLinks)) ||
+    (value.hardLinks !== undefined && !isHardLinkGroups(value.hardLinks))
+  ) {
+    return false;
+  }
+
+  const directoryPaths = value.directories;
+  const filePaths = value.files.map(([path]) => path);
+  const symbolicLinkPaths = (value.symbolicLinks ?? []).map(([path]) => path);
+  const existingPaths = new Set([
+    ...directoryPaths,
+    ...filePaths,
+    ...symbolicLinkPaths,
+  ]);
+  if (
+    !areUniqueValidPaths(directoryPaths, false) ||
+    !areUniqueValidPaths(filePaths, false) ||
+    !areUniqueValidPaths(symbolicLinkPaths, false) ||
+    !pathsAreDisjoint(directoryPaths, filePaths, symbolicLinkPaths) ||
+    !allParentsExist(existingPaths, directoryPaths) ||
+    (value.symbolicLinks ?? []).some(([, target]) => target.includes("\0")) ||
+    (value.metadata !== undefined &&
+      (!areUniqueValidPaths(
+        value.metadata.map(([path]) => path),
+        false,
+      ) ||
+        value.metadata.some(([path]) => !existingPaths.has(path)))) ||
+    !hardLinksAreValid(value.hardLinks ?? [], new Map(value.files))
+  ) {
+    return false;
+  }
+  return true;
+}
+
+export function migrateLegacyInMemoryFilesystemSnapshot(
+  snapshot: LegacyInMemoryFilesystemSnapshot,
+): InMemoryFilesystemSnapshot {
+  if (!isLegacyInMemoryFilesystemSnapshot(snapshot)) {
+    throw new TypeError("Invalid legacy filesystem snapshot");
+  }
+  const blobs = new Map<string, string>();
+  const files = snapshot.files.map(([path, contents]) => {
+    const blobId = contentBlobId(contents);
+    const existing = blobs.get(blobId);
+    if (existing !== undefined && existing !== contents) {
+      throw new Error(`Filesystem blob collision for ${blobId}`);
+    }
+    blobs.set(blobId, contents);
+    return [path, blobId] as const;
+  });
+  return {
+    schema: 2,
+    blobs: [...blobs]
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([id, contents]) => [id, contents] as const),
+    directories: [...snapshot.directories],
+    files,
+    metadata: snapshot.metadata?.map(
+      ([path, metadata]) => [path, { ...metadata }] as const,
+    ),
+    symbolicLinks: snapshot.symbolicLinks?.map(
+      ([path, target]) => [path, target] as const,
+    ),
+    hardLinks: snapshot.hardLinks?.map((paths) => [...paths]),
+  };
 }
 
 const baseImages = new Map<string, FilesystemBaseImage>();
@@ -984,6 +1145,166 @@ function contentBlobId(contents: string): string {
     second = Math.imul(second ^ (value + index), 0x85ebca6b) >>> 0;
   }
   return `b${utf8Size(contents).toString(36)}-${first.toString(36)}-${second.toString(36)}`;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function hasOnlyKeys(
+  value: Readonly<Record<string, unknown>>,
+  allowedKeys: readonly string[],
+): boolean {
+  const allowed = new Set(allowedKeys);
+  return Object.keys(value).every((key) => allowed.has(key));
+}
+
+function isStringArray(value: unknown): value is readonly string[] {
+  return (
+    Array.isArray(value) && value.every((entry) => typeof entry === "string")
+  );
+}
+
+function isStringTupleArray(
+  value: unknown,
+): value is readonly (readonly [string, string])[] {
+  return (
+    Array.isArray(value) &&
+    value.every(
+      (entry) =>
+        Array.isArray(entry) &&
+        entry.length === 2 &&
+        typeof entry[0] === "string" &&
+        typeof entry[1] === "string",
+    )
+  );
+}
+
+function isMetadataTupleArray(
+  value: unknown,
+): value is readonly (readonly [string, FilesystemMetadata])[] {
+  return (
+    Array.isArray(value) &&
+    value.every(
+      (entry) =>
+        Array.isArray(entry) &&
+        entry.length === 2 &&
+        typeof entry[0] === "string" &&
+        isFilesystemMetadata(entry[1]),
+    )
+  );
+}
+
+function isFilesystemMetadata(value: unknown): value is FilesystemMetadata {
+  return (
+    isRecord(value) &&
+    hasOnlyKeys(value, ["gid", "mode", "modifiedAtMilliseconds", "uid"]) &&
+    Number.isSafeInteger(value.gid) &&
+    (value.gid as number) >= 0 &&
+    Number.isSafeInteger(value.mode) &&
+    (value.mode as number) >= 0 &&
+    (value.mode as number) <= 0o7777 &&
+    typeof value.modifiedAtMilliseconds === "number" &&
+    Number.isFinite(value.modifiedAtMilliseconds) &&
+    Number.isSafeInteger(value.uid) &&
+    (value.uid as number) >= 0
+  );
+}
+
+function isHardLinkGroups(
+  value: unknown,
+): value is readonly (readonly string[])[] {
+  return (
+    Array.isArray(value) &&
+    value.every(
+      (paths) =>
+        Array.isArray(paths) &&
+        paths.length >= 2 &&
+        paths.every((path) => typeof path === "string"),
+    )
+  );
+}
+
+function areUniqueValidPaths(
+  paths: readonly string[],
+  allowRoot: boolean,
+): boolean {
+  const unique = new Set<string>();
+  for (const path of paths) {
+    if (!isValidSnapshotPath(path, allowRoot) || unique.has(path)) return false;
+    unique.add(path);
+  }
+  return true;
+}
+
+function isValidSnapshotPath(path: string, allowRoot: boolean): boolean {
+  if (path === "/") return allowRoot;
+  return (
+    path.length > 1 &&
+    path.length <= defaultFilesystemLimits.maxPathLength &&
+    path.startsWith("/") &&
+    !path.endsWith("/") &&
+    !path.includes("\0") &&
+    !path.includes("\\") &&
+    !path.includes("//") &&
+    path
+      .slice(1)
+      .split("/")
+      .every((segment) => segment !== "." && segment !== "..")
+  );
+}
+
+function pathsAreDisjoint(...groups: readonly (readonly string[])[]): boolean {
+  const paths = new Set<string>();
+  for (const group of groups) {
+    for (const path of group) {
+      if (paths.has(path)) return false;
+      paths.add(path);
+    }
+  }
+  return true;
+}
+
+function allParentsExist(
+  paths: ReadonlySet<string>,
+  directories: readonly string[],
+): boolean {
+  const availableDirectories = new Set(directories);
+  for (const path of paths) {
+    const parent = parentPath(path);
+    if (parent !== "/" && !availableDirectories.has(parent)) return false;
+  }
+  return true;
+}
+
+function hardLinkPathsAreUnique(
+  groups: readonly (readonly string[])[],
+): boolean {
+  const paths = new Set<string>();
+  for (const group of groups) {
+    for (const path of group) {
+      if (!isValidSnapshotPath(path, false) || paths.has(path)) return false;
+      paths.add(path);
+    }
+  }
+  return true;
+}
+
+function hardLinksAreValid(
+  groups: readonly (readonly string[])[],
+  files: ReadonlyMap<string, string>,
+): boolean {
+  if (!hardLinkPathsAreUnique(groups)) return false;
+  for (const group of groups) {
+    const expectedContents = files.get(group[0]!);
+    if (
+      expectedContents === undefined ||
+      group.some((path) => files.get(path) !== expectedContents)
+    ) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function utf8Size(value: string): number {

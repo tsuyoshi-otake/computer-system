@@ -60,12 +60,16 @@ browser and positions its semantic input at the terminal cursor, preserving
 physical Enter, Ctrl+C, and history without a separate visible text field. Start
 the combined managed runtime with `npm run dev:bds:web`; see
 [the MCP debugging guide](mcp-debugging.md) for network and security settings.
-Set `WEB_COMPANION_AUTO_OPEN=1` for the companion-host one-action workflow:
-interacting with a Desktop or Advanced Desktop Computer System, or using a
-Portable Computer System, opens its activated path through loopback in the
-host's default browser. Remote players receive the detected LAN entry page and
-the Computer's permanent four-digit number. An interaction activates that number
-once for two minutes; invalid guesses and active collisions are bounded.
+The companion-host one-action workflow is automatic when the published host is a
+literal IP assigned to the server and no custom public origin is configured. Use
+`WEB_COMPANION_AUTO_OPEN=0` to disable it or `1` to enable it explicitly while
+retaining the local-listener requirement. Interacting with a Desktop or Advanced
+Desktop Computer System, or using a Portable Computer System, opens its
+activated path through loopback in the host's default browser. This checks the
+server address rather than the initiating player's IP. Remote players receive
+the detected LAN entry page and the Computer's permanent four-digit number. An
+interaction activates that number once for two minutes; invalid guesses and
+active collisions are bounded.
 
 Terminal output remains mouse-selectable. Ctrl+C copies when either output or
 command text is selected and otherwise performs the bounded terminal interrupt.
@@ -138,6 +142,57 @@ Script API has no SQLite/filesystem access. The default capacity is 1,000,000
 UTF-8 bytes, with 256,000 bytes per file and 4,096 entries. Every write enforces
 those limits before commit. `quota` exposes them, while `du` walks one bounded
 snapshot rather than performing repeated recursive directory scans.
+
+### Preserved-world storage migration
+
+The Bedrock startup path owns one bounded migration before it enables Computer,
+Portable, Monitor, or Web Terminal behavior. The paged-store reader recognizes
+both schema-1 indexed pages (`:page:<generation>:<index>`) and schema-2
+content-addressed blobs. It always validates the current head first, including
+the manifest, page bounds, checksum, JSON, and payload type, and falls back only
+to the immediately previous generation when the current generation is not
+complete. A valid previous generation may use either storage format.
+
+A legacy-format identity store is the migration trigger and remains the
+activation marker until the end. The coordinator validates its schema-2 registry
+payload and processes at most 4,096 observations. For each referenced Computer,
+it loads with the same current-first/fallback rule, converts a schema-1
+Computer/filesystem payload into the inode/content-blob schema, writes one
+content-addressed generation, and reads it back for verification. Only after all
+Computer work terminates does it save and verify the identity registry in the
+current format. It preserves IDs, families, block/item observations, OS and
+hardware profiles, display profile, terminal state, filesystem metadata,
+symbolic links, and hard-link sharing; it does not renumber `computer-N`
+identities or accept an unsupported identity payload.
+
+`ComputerHost` advances this state machine with a budget of one Dynamic Property
+read/write/delete per host tick in the persistence WorkMonitor lane. Progress,
+completion, and failure are observable through transition-only
+`CS_STORAGE_MIGRATION` JSON records and player messages. A failed migration does
+not start the normal Bedrock adapters. On restart, the legacy identity head
+causes a bounded rescan; already committed and verified current-format Computer
+heads are skipped, so the process is idempotent without maintaining a second
+world index.
+
+Before deploying a migration-capable pack into a preserved world:
+
+1. Stop BDS cleanly and wait until the process has exited and its UDP/TCP ports
+   are closed.
+2. Copy the complete stopped `worlds/<level-name>` directory to a timestamped
+   backup outside the managed runtime. Do not copy a live LevelDB and never edit
+   its keys directly.
+3. Build the packs, start the same world without resetting it, and wait for a
+   terminal `CS_STORAGE_MIGRATION` record before allowing player interaction.
+4. Verify representative old Computers, files, metadata, links, labels, OS and
+   hardware profiles, then stop and restart once more to prove the current
+   identity head loads without another conversion.
+
+`Verify:` Run
+`npx vitest run tests/phase0/transactionalPagedStore.test.ts tests/computer/snapshotMigration.test.ts tests/computer/storageMigration.test.ts`.
+
+`Expect:` Current-head and previous-generation loading, strict schema-1
+conversion, one-property-operation steps, identity-last failure safety, restart
+idempotence, and fresh-world no-op behavior all pass.
 
 ## Headless Bedrock verification
 

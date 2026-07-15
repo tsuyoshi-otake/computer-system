@@ -1,8 +1,9 @@
 import type { ComputerOsProfile } from "../../domain/computer/computer.js";
-import type {
-  FilesystemBaseImage,
-  FilesystemBaseImageFile,
-  InMemoryFilesystem,
+import {
+  registerFilesystemBaseImage,
+  type FilesystemBaseImage,
+  type FilesystemBaseImageFile,
+  type InMemoryFilesystem,
 } from "../../domain/filesystem/inMemoryFilesystem.js";
 import { commandNamesFor } from "./commandRegistry.js";
 
@@ -67,6 +68,12 @@ export const dosFilesystemImage: FilesystemBaseImage = Object.freeze({
     dataFile("/drives/c/dos/emm386.exe", "CS-DOS UMB manager", 22_528),
   ]),
 });
+
+/** Registers immutable OS images before any persisted overlay is restored. */
+export function registerOsFilesystemImages(): void {
+  registerFilesystemBaseImage(linuxFilesystemImage);
+  registerFilesystemBaseImage(dosFilesystemImage);
+}
 
 export function installOsFilesystemImage(
   filesystem: InMemoryFilesystem,

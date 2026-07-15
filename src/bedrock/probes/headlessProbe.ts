@@ -2,6 +2,7 @@ import { world } from "@minecraft/server";
 
 import { formatProbeRecord } from "../../phase0/probeProtocol.js";
 import { inspectAlwaysDayState } from "../daylightController.js";
+import { computerStorageReady } from "../computerRegistry.js";
 import { executeItemIdentityProbe } from "./itemIdentityProbe.js";
 import { executeComputerVerticalProbe } from "./computerVerticalProbe.js";
 import { executeMonitorProbe } from "./monitorProbe.js";
@@ -23,6 +24,11 @@ import {
 let activeRunId: string | undefined;
 
 export function startHeadlessProbeSuite(): void {
+  if (!computerStorageReady()) {
+    const runId = `headless-${world.getAbsoluteTime()}`;
+    emit(runId, "suite", "FAIL", { phase: "storage_migration" });
+    return;
+  }
   if (activeRunId !== undefined) {
     emit(activeRunId, "suite", "BUSY", { phase: "runtime" });
     return;

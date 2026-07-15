@@ -60,7 +60,6 @@ export function createComputerBlock(family, mask) {
           },
         },
         "minecraft:redstone_conductivity": { redstone_conductor: false },
-        "minecraft:redstone_consumer": { min_power: 0 },
         ...(connectedFaces.length === 0
           ? {}
           : {

@@ -9,6 +9,10 @@ import type {
   PersistenceSaveJob,
   PersistenceResult,
 } from "./persistence.js";
+import type {
+  ComputerStorageMigrationCoordinator,
+  ComputerStorageMigrationStatus,
+} from "./storageMigration.js";
 import type { SerialLinkBroker } from "../io/serialLinkBroker.js";
 import type { PeripheralBusBroker } from "../io/peripheralBusBroker.js";
 import {
@@ -41,6 +45,10 @@ export interface ComputerHostOptions {
   readonly blockIoScheduler?: BlockIoScheduler;
   readonly maxPersistenceChecksPerTick?: number;
   readonly onPersistenceFailure?: (computerId: string, error: Error) => void;
+  readonly storageMigration?: Pick<
+    ComputerStorageMigrationCoordinator,
+    "status" | "step"
+  >;
   readonly workMonitor?: ComputerWorkMonitor;
 }
 
@@ -79,6 +87,8 @@ export class ComputerHost {
     error: Error,
   ) => void;
   private readonly workMonitor: ComputerWorkMonitor | undefined;
+  private readonly storageMigration:
+    Pick<ComputerStorageMigrationCoordinator, "status" | "step"> | undefined;
   private hostTick = 0;
   private filesystemIoSequence = 0;
   private readonly pendingFilesystemIo = new Map<
@@ -107,6 +117,7 @@ export class ComputerHost {
     this.onPersistenceFailure =
       options.onPersistenceFailure ?? ((): void => undefined);
     this.workMonitor = options.workMonitor;
+    this.storageMigration = options.storageMigration;
   }
 
   register(record: ComputerRecord): HostRegistrationResult {
@@ -201,12 +212,14 @@ export class ComputerHost {
     const scope = this.workMonitor?.beginTick(this.hostTick);
     try {
       if (scope === undefined) {
+        this.runStorageMigration();
         this.deliverBlockIo(this.blockIo.runDue(this.guestNanoseconds));
         this.runtime.runTick();
         this.serial.runTick();
         this.runPersistenceChecks();
         return;
       }
+      this.runStorageMigration(scope);
       this.deliverBlockIo(this.blockIo.runDue(this.guestNanoseconds, scope));
       this.runtime.runTick(scope);
       if (this.serial.hasPendingWork()) {
@@ -224,8 +237,28 @@ export class ComputerHost {
     }
   }
 
+  storageMigrationStatus(): ComputerStorageMigrationStatus | undefined {
+    return this.storageMigration?.status;
+  }
+
   private get guestNanoseconds(): bigint {
     return BigInt(this.hostTick) * 50_000_000n;
+  }
+
+  private runStorageMigration(scope?: TickWorkScope): void {
+    if (
+      this.storageMigration === undefined ||
+      this.storageMigration.status.state !== "pending"
+    ) {
+      return;
+    }
+    if (scope === undefined) {
+      this.storageMigration.step(1);
+      return;
+    }
+    scope.tryRun({ lane: "persistence", deterministicUnits: 1 }, () =>
+      this.storageMigration!.step(1),
+    );
   }
 
   private requestFilesystemIo(

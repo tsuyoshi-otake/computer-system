@@ -3,6 +3,7 @@ import {
   type ComputerSnapshot,
 } from "../../domain/computer/computer.js";
 import { migrateComputerSnapshot } from "./snapshotMigration.js";
+import { registerOsFilesystemImages } from "../os/osFilesystemImages.js";
 
 export interface ComputerSnapshotRepository {
   load(computerId: string): ComputerSnapshot | undefined;
@@ -43,7 +44,9 @@ export type PersistenceResult =
 export class ComputerPersistenceService {
   private readonly savedRevisions = new Map<string, string>();
 
-  constructor(private readonly repository: ComputerSnapshotRepository) {}
+  constructor(private readonly repository: ComputerSnapshotRepository) {
+    registerOsFilesystemImages();
+  }
 
   startSaveIfDirty(record: ComputerRecord): PersistenceStartResult {
     const revision = record.persistenceRevision;

@@ -67,6 +67,49 @@ describe("Computer persistence boundary", (): void => {
     expect(Object.keys(repository.load("computer-7")!)).not.toContain("vram");
   });
 
+  it("registers Linux and DOS base images before restoring cold overlays", (): void => {
+    const cases = [
+      {
+        computerId: "computer-701",
+        imageId: "cs-linux-1.0-rootfs-v1",
+        osProfile: "linux" as const,
+        expectedPath: "/boot/vmlinuz-cs486",
+      },
+      {
+        computerId: "computer-702",
+        imageId: "cs-dos-6.2-rootfs-v1",
+        osProfile: "dos" as const,
+        expectedPath: "/drives/c/command.com",
+      },
+    ];
+
+    for (const testCase of cases) {
+      const repository = new MemoryRepository();
+      const snapshot = new ComputerRecord(testCase.computerId, "standard", {
+        osProfile: testCase.osProfile,
+      }).snapshot();
+      repository.save({
+        ...snapshot,
+        filesystem: {
+          schema: 2,
+          baseImageId: testCase.imageId,
+          blobs: [],
+          directories: [],
+          files: [],
+        },
+      });
+
+      const loaded = new ComputerPersistenceService(repository).load(
+        testCase.computerId,
+      );
+
+      expect(loaded.outcome).toBe("loaded");
+      if (loaded.outcome !== "loaded") continue;
+      expect(loaded.record.filesystem.baseImageId).toBe(testCase.imageId);
+      expect(loaded.record.filesystem.exists(testCase.expectedPath)).toBe(true);
+    }
+  });
+
   it("deduplicates clean saves and writes exactly once after a mutation", (): void => {
     const repository = new MemoryRepository();
     const save = vi.spyOn(repository, "save");

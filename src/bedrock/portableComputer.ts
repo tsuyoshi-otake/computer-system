@@ -18,10 +18,14 @@ import { PortableSessionLifecycle } from "../phase0/portableSessionLifecycle.js"
 import type { ComputerIdentityObservation } from "../domain/computer/identity.js";
 import { computerHost } from "./computerHost.js";
 import {
+  clearComputerStorageNotice,
+  computerStorageReady,
   computerIdentityProperty,
   createPortableComputer,
   ensurePortableComputer,
   identityService,
+  notifyComputerStorageUnavailable,
+  recoverStaleComputerPosition,
 } from "./computerRegistry.js";
 import { disconnectComputerTerminalPlayer } from "./computerTerminal.js";
 import {
@@ -40,6 +44,11 @@ export const portableComputerBlockTypeId =
   "computer_system:portable_computer_block";
 const lifecycle = new PortableSessionLifecycle();
 const breakingBlocks = new Set<string>();
+const pendingPlacements = new Set<string>();
+const pendingBreaks = new Map<string, Player | undefined>();
+const maximumPendingPlacements = 128;
+const maximumPendingBreaks = 4_096;
+const pendingPlacementBatchSize = 4;
 const maximumDroppedItemsToInspect = 128;
 const maximumInventorySlotsToInspect = 128;
 
@@ -49,6 +58,7 @@ export function registerPortableComputerComponent(
 ): void {
   items.registerCustomComponent(componentId, {
     onUse: ({ itemStack, source }): void => {
+      if (notifyComputerStorageUnavailable(source)) return;
       const resolved = resolvePortableComputer(source, itemStack);
       if (resolved === undefined) return;
       const { identity, observation } = resolved;
@@ -86,12 +96,15 @@ export function registerPortableComputerComponent(
 
 function handlePortableItemUseOn(event: ItemComponentUseOnEvent): void {
   if (!(event.source instanceof Player)) return;
+  if (notifyComputerStorageUnavailable(event.source)) return;
   const target = adjacent(event.block, event.blockFace);
   if (target === undefined || !target.isAir) return;
   const resolved = resolvePortableComputer(event.source, event.itemStack);
   if (resolved === undefined) return;
   const { identity, observation } = resolved;
   const physicalKey = blockKey(target);
+  if (!recoverStaleComputerPosition(event.source, physicalKey, identity))
+    return;
   const placed = identityService().place(
     physicalKey,
     observation.family,
@@ -129,6 +142,14 @@ function handlePortableItemUseOn(event: ItemComponentUseOnEvent): void {
 }
 
 function handlePortableBlockPlace({ block }: { readonly block: Block }): void {
+  if (!computerStorageReady()) {
+    queuePendingPortablePlacement(block);
+    return;
+  }
+  placePortableBlock(block);
+}
+
+function placePortableBlock(block: Block): void {
   const physicalKey = blockKey(block);
   if (breakingBlocks.has(physicalKey)) return;
   const existing = identityService().atPhysicalKey(physicalKey);
@@ -147,6 +168,7 @@ function handlePortableBlockInteraction(
 ): void {
   const player = event.player;
   if (player === undefined) return;
+  if (notifyComputerStorageUnavailable(player)) return;
   const observation = identityService().atPhysicalKey(blockKey(event.block));
   if (observation === undefined) {
     player.sendMessage(
@@ -173,11 +195,24 @@ function handlePortableBlockInteraction(
 
 function handlePortableBlockBreak(event: BlockComponentPlayerBreakEvent): void {
   const physicalKey = blockKey(event.block);
+  if (!computerStorageReady()) {
+    if (event.player !== undefined) {
+      notifyComputerStorageUnavailable(event.player);
+    }
+    queuePendingPortableBreak(physicalKey, event.player);
+    return;
+  }
+  breakPortableBlock(physicalKey, event.player);
+}
+
+function breakPortableBlock(
+  physicalKey: string,
+  player: Player | undefined,
+): void {
   const result = identityService().break(physicalKey);
   if (result.outcome !== "placed") return;
   computerHost.serial.disconnectComputer(result.computerId, "block_broken");
   computerHost.peripherals.clearComputer(result.computerId);
-  const player = event.player;
   scheduleOwnedFinalization(breakingBlocks, physicalKey, {
     prepare: [
       (): void => {
@@ -272,7 +307,12 @@ function resolvePortableComputer(
 }
 
 export function startPortableComputerLifecycle(): void {
+  system.runInterval((): void => {
+    drainPendingPortableBreaks();
+    drainPendingPortablePlacements();
+  }, 1);
   world.afterEvents.playerLeave.subscribe(({ playerId }): void => {
+    clearComputerStorageNotice(playerId);
     lifecycle.disconnect(playerId);
     disconnectComputerTerminalPlayer(playerId);
   });
@@ -293,6 +333,65 @@ export function startPortableComputerLifecycle(): void {
       observeDropped(stack);
     }
   });
+}
+
+function queuePendingPortableBreak(
+  physicalKey: string,
+  player: Player | undefined,
+): void {
+  if (
+    !pendingBreaks.has(physicalKey) &&
+    pendingBreaks.size >= maximumPendingBreaks
+  ) {
+    const message = `Portable Computer break recovery queue is full: ${physicalKey}`;
+    console.warn(message);
+    if (player?.isValid) player.sendMessage(message);
+    return;
+  }
+  pendingBreaks.set(physicalKey, player);
+}
+
+function drainPendingPortableBreaks(): void {
+  let processed = 0;
+  for (const [physicalKey, player] of pendingBreaks) {
+    if (processed >= pendingPlacementBatchSize) break;
+    pendingBreaks.delete(physicalKey);
+    processed += 1;
+    breakPortableBlock(physicalKey, player);
+  }
+}
+
+function queuePendingPortablePlacement(block: Block): void {
+  const physicalKey = blockKey(block);
+  if (
+    !pendingPlacements.has(physicalKey) &&
+    pendingPlacements.size >= maximumPendingPlacements
+  ) {
+    console.warn(
+      `Portable Computer placement rejected while storage migration is busy: ${physicalKey}`,
+    );
+    system.run((): void => {
+      const residual = blockFromKey(physicalKey);
+      if (residual?.typeId === portableComputerBlockTypeId) {
+        residual.setType("minecraft:air");
+      }
+    });
+    return;
+  }
+  pendingPlacements.add(physicalKey);
+}
+
+function drainPendingPortablePlacements(): void {
+  let processed = 0;
+  for (const physicalKey of pendingPlacements) {
+    if (processed >= pendingPlacementBatchSize) break;
+    pendingPlacements.delete(physicalKey);
+    processed += 1;
+    const block = blockFromKey(physicalKey);
+    if (block?.typeId === portableComputerBlockTypeId) {
+      placePortableBlock(block);
+    }
+  }
 }
 
 export function givePortableComputer(player: Player): string {

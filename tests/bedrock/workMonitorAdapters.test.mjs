@@ -10,6 +10,8 @@ describe("Bedrock WorkMonitor adapters", () => {
     const topology = await source("src/bedrock/faceIoTopology.ts");
     expect(component).toContain('lane: "redstone_input"');
     expect(component).toContain('lane: "redstone_output"');
+    expect(component).toContain('lane: "redstone_input"');
+    expect(component).toContain("sampleRedstoneInputs(block, record)");
     expect(topology).toContain('lane: "topology"');
     expect(topology).toContain("deterministicUnits: machineFaces.length");
   });

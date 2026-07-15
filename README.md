@@ -175,31 +175,41 @@ reported Minecraft address and port:
 
 ```powershell
 $env:BDS_HOME = "C:\path\to\bedrock-server"
-$env:WEB_COMPANION_AUTO_OPEN = "1"
 npm run dev:bds:web
 ```
 
-With `WEB_COMPANION_AUTO_OPEN=1`, interacting with a Desktop or Advanced Desktop
-Computer System activates browser access only when exactly one Monitor is
-physically adjacent. A bare desktop is selected but does not expose Web
-Terminal. The Portable Computer System has a built-in display and opens the link
-while held or placed without an external Monitor. The companion advertises a
-stable LAN entry page and Minecraft prints the Computer's permanent four-digit
-number. Touching the machine activates that number once for two minutes. Invalid
-codes are rate-limited per client, and a simultaneous four-digit collision fails
-explicitly rather than connecting the wrong Computer. Opening the entry page and
-entering the active number exchanges it for a browser-only bearer token that is
-never written to BDS logs. The authenticated session lasts at most 30 minutes.
-Placed machines remain usable only while that player stays within three blocks;
-leaving the radius pauses input as `out_of_range` without destroying the bounded
-session, and returning resumes the existing browser stream. After the first
-successful connection the browser stores only the permanent four-digit number in
-local storage and changes the bookmarkable URL to `/?computer=NNNN`. Opening
-that bookmark rotates the bearer token and reconnects through one deduplicated,
-30-minute bounded exponential-backoff loop. No bearer token or password is put
-in the query. Code lookup is O(1), and access notifications are emitted only on
-range-state transitions rather than on every scheduler check. A held Portable is
-the access point itself and does not use the placed-block distance check.
+When `WEB_COMPANION_AUTO_OPEN` is unset, the companion automatically opens each
+eligible one-use handoff only when the effective published host—detected
+automatically or overridden by `WEB_COMPANION_PUBLIC_HOST`—is a literal IP
+address assigned to the companion host and no custom public origin is
+configured. A service published as `10.255.10.90` therefore opens the same path
+through `127.0.0.1` in the server host's default browser. Set the flag to `0` to
+disable host-browser opening or to `1` to request it explicitly while retaining
+the locally reachable-listener check. This is a server-address check, not a
+Minecraft player-IP check: an eligible remote player interaction may open the
+browser on the server host, never on the remote player's device.
+
+Interacting with a Desktop or Advanced Desktop Computer System activates browser
+access only when exactly one Monitor is physically adjacent. A bare desktop is
+selected but does not expose Web Terminal. The Portable Computer System has a
+built-in display and opens the link while held or placed without an external
+Monitor. The companion advertises a stable LAN entry page and Minecraft prints
+the Computer's permanent four-digit number. Touching the machine activates that
+number once for two minutes. Invalid codes are rate-limited per client, and a
+simultaneous four-digit collision fails explicitly rather than connecting the
+wrong Computer. Opening the entry page and entering the active number exchanges
+it for a browser-only bearer token that is never written to BDS logs. The
+authenticated session lasts at most 30 minutes. Placed machines remain usable
+only while that player stays within three blocks; leaving the radius pauses
+input as `out_of_range` without destroying the bounded session, and returning
+resumes the existing browser stream. After the first successful connection the
+browser stores only the permanent four-digit number in local storage and changes
+the bookmarkable URL to `/?computer=NNNN`. Opening that bookmark rotates the
+bearer token and reconnects through one deduplicated, 30-minute bounded
+exponential-backoff loop. No bearer token or password is put in the query. Code
+lookup is O(1), and access notifications are emitted only on range-state
+transitions rather than on every scheduler check. A held Portable is the access
+point itself and does not use the placed-block distance check.
 
 For a local managed-BDS debugging session only, set
 `WEB_COMPANION_DEBUG_IGNORE_RANGE=1` before starting the companion to skip the
@@ -360,6 +370,26 @@ wall UTC, with `date --game` and `date --virtual` for Minecraft and
 deterministic VM time. Both profiles keep four-digit UTC years without a
 two-digit-year pivot, represent the 2000 leap day correctly, and support
 timestamps beyond the signed 32-bit 2038 boundary.
+
+Preserved worlds are upgraded automatically at startup. The loader validates the
+current generation first and tries the immediately previous complete generation
+only when the current one is incomplete or corrupt; this rule applies to both
+legacy schema-1 indexed pages and schema-2 content-addressed pages. When the
+identity registry is still stored in the legacy page format, startup migrates
+and verifies every referenced Computer first, including schema-1
+Computer/filesystem payloads, then commits the identity registry last as the
+activation point. The migration advances by at most one Dynamic Property
+read/write/delete per host tick, and normal Computer, Portable, Monitor, and Web
+Terminal startup remains gated until it reaches an explicit `complete` state.
+`CS_STORAGE_MIGRATION` log records expose progress or the terminal failure.
+
+Restarting an interrupted upgrade is idempotent: the legacy identity head still
+selects the old world view, while any already verified Computer generation is
+recognized and skipped during the rescan. Unsupported or corrupt data fails
+without activating a partial identity registry. Before deploying a build that
+will upgrade a preserved world, stop BDS completely and copy the entire world
+directory, including its LevelDB, to a backup location. Never copy or edit the
+LevelDB while BDS is running.
 
 Each Computer also has a persisted virtual hardware profile. Desktop Computer
 Systems default to a Computer System 486DX at 33 MHz with 2 MiB RAM. Advanced

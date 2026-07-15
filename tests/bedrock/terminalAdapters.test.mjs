@@ -97,6 +97,11 @@ describe("Bedrock terminal adapters", () => {
     expect(daylight).toContain("system.runInterval");
     expect(daylight).toContain("inspectAlwaysDayState");
     expect(main).toContain("startAlwaysDayController()");
+    expect(headless).toContain("if (!computerStorageReady())");
+    expect(headless).toContain('phase: "storage_migration"');
+    expect(headless.indexOf("if (!computerStorageReady())")).toBeLessThan(
+      headless.indexOf("executeComputerVerticalProbe()"),
+    );
     expect(headless).toContain('emit(runId, "always_day"');
   });
 

@@ -27,6 +27,8 @@ Parent: #1 Blocked by: #2 and #3
       events, and finalize terminate, cancel, disconnect, competing-form,
       server-close, and failure paths explicitly.
 - [x] Implement paged, transactional Dynamic Properties persistence.
+- [x] Upgrade schema-1 indexed pages and Computer/filesystem snapshots through a
+      bounded, restart-safe, identity-last startup migration.
 - [x] Implement `startup.py`, shutdown, reboot, terminate, and crash reporting.
 - [x] Implement six-sided redstone input and validated digital output behavior.
 
@@ -39,7 +41,9 @@ Parent: #1 Blocked by: #2 and #3
 - Identity tests cover transactional reload, block-item-block transfer,
   duplicate rejection, immutable family, and placement rollback.
 - Dynamic Properties tests cover paging, generation isolation, dirty-write
-  suppression, checksum validation, and previous-generation recovery.
+  suppression, checksum validation, current-head-first previous-generation
+  recovery, legacy-page conversion, identity-last failure safety, and idempotent
+  restart.
 - Terminal tests cover the 51x19/16-color contract, a 128-cell flush budget, one
   event per submitted line, and exactly one final event for every close path.
 - Resource Pack UI tests cover the 51x19 logical dimensions, the native
@@ -101,9 +105,9 @@ later passed the persistent GDK disconnect harness with exactly one
 New Computers now use collision-checked `c-xxxxxx` identities. The six-character
 lowercase Crockford Base32 payload decodes to the stable 30-bit
 `os.getComputerID()` value. Allocation retries at most 16 times against the
-persisted registry. Snapshot schema 2 intentionally does not migrate the earlier
-sequential identity examples recorded above; those runs remain historical
-evidence only.
+persisted registry. Storage migration preserves an existing `computer-N` value
+instead of renumbering it; unsupported pre-schema-2 identity-registry payloads
+are not inferred from the earlier historical examples.
 
 The local Web Terminal is the preferred full-width interactive surface. A
 Computer has one writer session; every newly opened browser session takes
@@ -114,12 +118,15 @@ takeover, and close operations share one per-Computer serialization lane. Only
 the final detached browser session emits `terminal_closed`; different Computers
 remain independently writable.
 
-An explicit `WEB_COMPANION_AUTO_OPEN=1` option provides the local one-action
-workflow: interacting with a Desktop/Advanced block or using a Portable Computer
-System opens the newly minted handoff once in the host default browser. It is
-eligible only when the listener and published origin are both loopback. Launch
-work is serialized and bounded, does not use a command shell, and never removes
-the 60-second in-game fallback URL when disabled, blocked, or failed.
+The local one-action workflow is automatic when the published host is a literal
+address assigned to the companion host and no custom public origin is
+configured: interacting with a Desktop/Advanced block or using a Portable
+Computer System opens the newly minted handoff once through loopback in the host
+default browser. Explicit `0` disables the workflow and `1` enables it while
+retaining the local listener requirement. The address check identifies the
+server endpoint, not the initiating player. Launch work is serialized and
+bounded, does not use a command shell, and never removes the in-game fallback
+URL when disabled, blocked, or failed.
 
 Output selection and clipboard behavior now follow terminal conventions: Ctrl+C
 copies selected output or command text and interrupts only when no text is
@@ -190,6 +197,41 @@ native GDK remains at 51x19. All completion, resize, loop, script, traversal,
 and output paths are bounded. `npm run validate` passed 60 files / 242 tests and
 the production pack build. A preserved-world BDS restart then completed headless
 run `headless-289000` with `failures: 0`.
+
+## July 2026 preserved-world storage migration update
+
+The startup paged-store reader accepts both legacy schema-1 indexed pages and
+current schema-2 content-addressed blobs. It validates the current head first
+and uses only the immediately previous complete generation as the corruption
+fallback, regardless of which of the two formats that candidate uses. Page
+counts, property lengths, assembled JSON size, checksum, JSON syntax, and
+payload shape are bounded and validated before a generation is accepted.
+
+A schema-2 identity registry stored in the legacy page format triggers the
+world-level migration. Every referenced Computer is loaded with the same
+current-first/fallback rule. Schema-1 Computer and filesystem snapshots are
+converted to the inode/content-blob representation while preserving identity,
+family, form, label, profile, terminal, file metadata, symbolic links, and hard
+links. The new Computer generation is committed and read back before the next
+Computer advances. The identity generation is saved and verified last, so it is
+the single activation point for the new world view.
+
+The coordinator performs at most one World Dynamic Property read/write/delete
+per host tick in the persistence lane and emits transition-only
+`CS_STORAGE_MIGRATION` progress, complete, or failed records. Computer,
+Portable, Monitor, and Web startup remains gated until completion. An
+interrupted run is idempotent: the legacy identity head causes a rescan and any
+verified current-format Computer is skipped. Invalid or corrupt data reaches an
+explicit failure without advancing the identity head.
+
+Deployment into a preserved world requires a stopped-world backup: stop BDS,
+wait for the process and ports to close, copy the complete world directory, and
+only then start the upgraded pack without resetting the world. A live LevelDB
+copy or direct key editing is not an accepted recovery path. Host verification
+is
+`npx vitest run tests/phase0/transactionalPagedStore.test.ts tests/computer/snapshotMigration.test.ts tests/computer/storageMigration.test.ts`;
+the real-BDS gate additionally requires observable migration completion, old
+Computer data checks, and one clean post-migration restart.
 
 ## July 2026 virtual hardware update
 

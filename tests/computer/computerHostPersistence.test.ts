@@ -6,6 +6,7 @@ import {
   type ComputerSnapshotRepository,
 } from "../../src/application/computer/persistence.js";
 import { ComputerRuntime } from "../../src/application/computer/computerRuntime.js";
+import type { ComputerStorageMigrationStatus } from "../../src/application/computer/storageMigration.js";
 import { ComputerWorkMonitor } from "../../src/application/runtime/computerWorkMonitor.js";
 import {
   ComputerRecord,
@@ -69,6 +70,49 @@ describe("ComputerHost persistence bridge", (): void => {
         rs232: { admitted: 0 },
       },
     });
+  });
+
+  it("advances storage migration once per host tick in the persistence lane", (): void => {
+    let completedSteps = 0;
+    const migration = {
+      get status(): ComputerStorageMigrationStatus {
+        return completedSteps < 2
+          ? {
+              state: "pending",
+              phase: "identity_load",
+              completedComputers: 0,
+              totalComputers: 1,
+            }
+          : {
+              state: "complete",
+              migratedComputers: 1,
+              missingComputers: 0,
+              skippedComputers: 0,
+              totalComputers: 1,
+            };
+      },
+      step: vi.fn((maximumOperations = 1): ComputerStorageMigrationStatus => {
+        void maximumOperations;
+        completedSteps += 1;
+        return migration.status;
+      }),
+    };
+    const host = hostWith(new MemoryRepository(), {
+      storageMigration: migration,
+      workMonitor: new ComputerWorkMonitor({
+        nowMicroseconds: (): number => 0,
+      }),
+    });
+
+    host.runTick();
+    host.runTick();
+    host.runTick();
+
+    expect(migration.step).toHaveBeenCalledTimes(2);
+    expect(migration.step).toHaveBeenNthCalledWith(1, 1);
+    expect(migration.step).toHaveBeenNthCalledWith(2, 1);
+    expect(host.storageMigrationStatus()?.state).toBe("complete");
+    expect(host.workMetrics()?.lanes.persistence.admitted).toBe(2);
   });
 
   it("selects fixed-disk profiles and exposes real HDD/FDD activity", (): void => {

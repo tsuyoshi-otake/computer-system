@@ -46,6 +46,29 @@ describe("PersistentComputerIdentityService", (): void => {
     );
   });
 
+  it("can release a stale block owner before placing a different carried identity", (): void => {
+    const repository = new MemoryRepository();
+    const service = serviceWithIds(repository, 1, 2);
+    const stale = service.place("overworld:stale", "advanced");
+    const incoming = service.createItem("advanced");
+    if (stale.outcome !== "placed" || incoming.outcome !== "placed") return;
+
+    expect(
+      service.place("overworld:stale", "advanced", incoming.computerId).outcome,
+    ).toBe("duplicate");
+    expect(service.break("overworld:stale")).toMatchObject({
+      outcome: "placed",
+      computerId: stale.computerId,
+    });
+    expect(
+      service.place("overworld:stale", "advanced", incoming.computerId),
+    ).toMatchObject({ outcome: "placed", computerId: incoming.computerId });
+    expect(service.observation(stale.computerId)).toMatchObject({
+      form: "item",
+      physicalKey: `detached:${stale.computerId}`,
+    });
+  });
+
   it("rolls failed new and carried placements back to their prior ownership", (): void => {
     const repository = new MemoryRepository();
     const service = serviceWithIds(repository, 1);

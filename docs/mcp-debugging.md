@@ -30,7 +30,7 @@ The server uses these optional environment variables:
 | `WEB_COMPANION_PUBLIC_HOST`        | Listener host                                       | Reachable host used in generated HTTP links                    |
 | `WEB_COMPANION_PUBLIC_ORIGIN`      | unset                                               | Complete HTTPS origin advertised behind a reverse proxy        |
 | `WEB_COMPANION_ALLOWED_ORIGINS`    | unset                                               | Extra origins, or `*` to accept every request Origin           |
-| `WEB_COMPANION_AUTO_OPEN`          | `0`                                                 | Open each loopback handoff once in the host's default browser  |
+| `WEB_COMPANION_AUTO_OPEN`          | automatic local-address match                       | `0` disables and `1` explicitly enables host-browser opening   |
 | `WEB_COMPANION_DEBUG_IGNORE_RANGE` | `0`                                                 | Debug only: skip the placed-machine range and dimension check  |
 
 No API key or `.env` file is required.
@@ -86,6 +86,41 @@ already using `19142`/`19143`, set `BDS_MCP_PORT` to a free port whose following
 port is also free; use a distinct `WEB_COMPANION_PORT` as well. Do not start two
 BDS processes against the same work directory or world concurrently.
 
+### Preserved-world upgrade workflow
+
+Use `bds_start` with `resetWorld: false` to retain a managed debug world. A
+world whose valid schema-2 identity registry is still encoded with schema-1
+indexed pages is upgraded before Computer components or the Web bridge start.
+Each paged load checks the current head before the immediately previous complete
+generation. Referenced schema-1 Computer/filesystem snapshots are converted,
+committed, and read back first; the identity registry is committed last. The
+host spends at most one Dynamic Property read/write/delete on this migration per
+tick.
+
+For a deployment or irreplaceable debug world, do not rely on a live filesystem
+copy:
+
+1. Call `bds_stop`, require the returned state to be `idle`, and verify the BDS
+   process and configured ports have closed.
+2. Copy the entire stopped
+   `%USERPROFILE%\tmp\computer-system-bds\mcp-runtime\worlds/<level-name>`
+   directory to a timestamped backup. Do not edit individual LevelDB keys.
+3. Start with `resetWorld: false`. Inspect bounded logs for transition-only
+   `CS_STORAGE_MIGRATION` records. A pending record includes the phase and
+   completed/total Computer counts; the terminal record is either `complete`
+   with migrated/skipped/missing counts or `failed` with its phase and error.
+4. Do not issue Computer, Web handoff, or shell probes until migration is
+   complete. On failure, stop BDS and preserve both the original backup and the
+   failed world for diagnosis.
+5. After success, verify representative files and profiles, stop and restart the
+   preserved world, and require a complete no-conversion startup.
+
+An interrupted run remains safe because the legacy identity head is not replaced
+until every referenced Computer generation has been verified. Restarting rescans
+the registry and skips any Computer generation already in the current format.
+Corruption of both the current and previous candidates reaches an explicit
+failure instead of activating a partial registry.
+
 For a bounded Computer System Python comparison, pass `python <file>`,
 `micropython <file>`, or `python -c <source>` through the same tool. The inline
 form accepts a multiline source string in the MCP JSON request; the relay
@@ -120,14 +155,18 @@ activation for a browser bearer token bound to the exact `c-xxxxxx` identity.
 Invalid guesses are limited to eight attempts per client per minute, and an
 active number collision returns an explicit conflict.
 
-For a one-action workflow on the companion host, set `WEB_COMPANION_AUTO_OPEN=1`
-before starting the companion. A Desktop/Advanced block interaction or Portable
-Computer System use then opens the activated `/p/NNNN` path through loopback in
-the host's default browser. The launch does not use a command shell, is
-serialized through a bounded queue, times out explicitly, and runs at most once
-per activation. The server cannot launch a browser on another player's device;
-remote players use the printed LAN entry page and four digits. Disabled,
-timed-out, and failed host launches retain that fallback.
+For a one-action workflow on the companion host, leave `WEB_COMPANION_AUTO_OPEN`
+unset. A Desktop/Advanced block interaction or Portable Computer System use
+opens the activated `/p/NNNN` path through loopback when the published host is a
+literal address assigned to a local network interface and no custom public
+origin is configured. Set the flag to `0` to disable this behavior or `1` to
+enable it explicitly while retaining the locally reachable-listener requirement.
+The launch does not use a command shell, is serialized through a bounded queue,
+times out explicitly, and runs at most once per activation. This checks the
+server endpoint rather than the initiating player's IP. The server cannot launch
+a browser on another player's device; remote players use the printed LAN entry
+page and four digits. Disabled, timed-out, and failed host launches retain that
+fallback.
 
 An MCP client can call `bds_issue_web_handoff` with the exact `c-xxxxxx`
 Computer ID to issue and receive the one-use URL in one operation. The managed
@@ -196,13 +235,23 @@ limits remain enforced. Do not publish the plain HTTP listener directly.
   transmissions, then the suite passes and BDS returns to `idle`.
 - `Verify:` Run `npm run validate`. `Expect:` Formatting, lint, type checking,
   host tests, and the pack build all pass.
+- `Verify:` Run
+  `npx vitest run tests/phase0/transactionalPagedStore.test.ts tests/computer/snapshotMigration.test.ts tests/computer/storageMigration.test.ts`.
+  `Expect:` Schema-1 page and snapshot conversion, current-head-first fallback,
+  one-operation tick slicing, identity-last activation, explicit corruption
+  failure, restart idempotence, and fresh-world no-op behavior pass.
+- `Verify:` Back up a stopped legacy-format managed world, call `bds_start` with
+  `resetWorld: false`, and wait for `CS_STORAGE_MIGRATION` logs. `Expect:` The
+  status reaches `complete` before Computer/Web behavior starts, preserved data
+  remains readable, and the next stopped-world restart performs no conversion.
 - `Verify:` Run `npm run test:web`. `Expect:` One-use handoff, authentication,
   same-origin command submission, terminal streaming, session limits, and
   explicit close behavior pass.
-- `Verify:` Set `WEB_COMPANION_AUTO_OPEN=1`, start the loopback companion, and
-  use one Portable Computer System. `Expect:` The host default browser opens the
-  minted handoff exactly once; the same fallback URL remains visible in
-  Minecraft.
+- `Verify:` Publish through a literal IP assigned to the companion host, leave
+  `WEB_COMPANION_AUTO_OPEN` unset, and use one Portable Computer System.
+  `Expect:` The host default browser opens the minted loopback handoff exactly
+  once, status reports policy `local_address`, and the same fallback URL remains
+  visible in Minecraft.
 - `Verify:` Open two activations for the same Computer and attempt input from
   both browsers. `Expect:` The second session begins in `CONTROL`, the first is
   atomically demoted to `VIEW ONLY`, and only the new writer can submit. Choose

@@ -1,6 +1,7 @@
 import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
 import { createServer } from "node:http";
+import { isIP } from "node:net";
 import { networkInterfaces } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -43,14 +44,15 @@ export class WebCompanionServer {
     this.bds = options.bds;
     this.host = options.host ?? "127.0.0.1";
     this.port = parsePort(options.port ?? 19_144);
+    this.networkInterfaces = options.networkInterfaces ?? networkInterfaces();
     this.publicHost =
       options.publicHost ??
       (this.host === "0.0.0.0"
-        ? selectLanIpv4(options.networkInterfaces ?? networkInterfaces())
+        ? selectLanIpv4(this.networkInterfaces)
         : this.host);
     this.publicOrigin = normalizePublicOrigin(options.publicOrigin);
     this.configuredOrigins = normalizeAllowedOrigins(options.allowedOrigins);
-    this.browserAutoOpenEnabled = options.autoOpenBrowser === true;
+    this.browserAutoOpenPreference = options.autoOpenBrowser;
     this.debugIgnoreRange = options.debugIgnoreRange === true;
     this.browserOpener = options.browserOpener ?? openDefaultBrowser;
     this.browserLaunchTimeoutMs = positiveInteger(
@@ -83,10 +85,19 @@ export class WebCompanionServer {
     this.nextCompletion = 1;
     this.nextPowerRequest = 1;
     this.browserLaunch = {
-      enabled: this.browserAutoOpenEnabled,
+      enabled: this.browserAutoOpenPreference === true,
       eligible: false,
-      state: this.browserAutoOpenEnabled ? "blocked" : "disabled",
-      reason: this.browserAutoOpenEnabled ? "not_started" : null,
+      policy:
+        this.browserAutoOpenPreference === undefined
+          ? "local_address"
+          : this.browserAutoOpenPreference
+            ? "enabled"
+            : "disabled",
+      state: this.browserAutoOpenPreference === false ? "disabled" : "blocked",
+      reason:
+        this.browserAutoOpenPreference === false
+          ? "explicitly_disabled"
+          : "not_started",
       attempts: 0,
       opened: 0,
       failed: 0,
@@ -355,10 +366,31 @@ export class WebCompanionServer {
   }
 
   configureBrowserAutoOpen() {
-    if (!this.browserAutoOpenEnabled) return;
+    const automaticallyEligible =
+      this.browserAutoOpenPreference === undefined &&
+      this.publicOrigin === undefined &&
+      isPublishedAddressLocal(this.publicHost, this.networkInterfaces);
+    const enabled =
+      this.browserAutoOpenPreference === true || automaticallyEligible;
+    if (!enabled) {
+      this.browserLaunch = {
+        ...this.browserLaunch,
+        enabled: false,
+        eligible: false,
+        state: "disabled",
+        reason:
+          this.browserAutoOpenPreference === false
+            ? "explicitly_disabled"
+            : this.publicOrigin !== undefined
+              ? "public_origin_configured"
+              : "published_address_not_local",
+      };
+      return;
+    }
     if (this.browserOrigin === undefined) {
       this.browserLaunch = {
         ...this.browserLaunch,
+        enabled: true,
         eligible: false,
         state: "blocked",
         reason: "listener_not_locally_reachable",
@@ -367,6 +399,7 @@ export class WebCompanionServer {
     }
     this.browserLaunch = {
       ...this.browserLaunch,
+      enabled: true,
       eligible: true,
       state: "ready",
       reason: null,
@@ -1011,6 +1044,11 @@ export function parseBooleanFlag(value, name) {
   throw new Error(`${name} must be 1, 0, true, or false.`);
 }
 
+export function parseOptionalBooleanFlag(value, name) {
+  if (value === undefined) return undefined;
+  return parseBooleanFlag(value, name);
+}
+
 function markerPayload(line, marker) {
   const index = line.indexOf(marker);
   return index === -1 ? undefined : line.slice(index + marker.length).trim();
@@ -1121,6 +1159,30 @@ export function selectLanIpv4(interfaces) {
     );
   }
   return selected;
+}
+
+export function isPublishedAddressLocal(publishedAddress, interfaces) {
+  const published = canonicalIpAddress(publishedAddress);
+  if (published === undefined || published === "0.0.0.0" || published === "::")
+    return false;
+  if (published.startsWith("127.") || published === "::1") return true;
+  for (const addresses of Object.values(interfaces)) {
+    for (const address of addresses ?? []) {
+      if (canonicalIpAddress(address.address) === published) return true;
+    }
+  }
+  return false;
+}
+
+function canonicalIpAddress(value) {
+  const unwrapped = String(value)
+    .toLowerCase()
+    .replace(/^\[|\]$/gu, "")
+    .split("%", 1)[0];
+  const family = isIP(unwrapped);
+  if (family === 0) return undefined;
+  if (family === 4) return unwrapped;
+  return new URL(`http://[${unwrapped}]/`).hostname.slice(1, -1);
 }
 
 function normalizePublicOrigin(value) {

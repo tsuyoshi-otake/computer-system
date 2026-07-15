@@ -11,6 +11,7 @@ import {
   mapMonitorTouch,
 } from "../phase0/monitorSurface.js";
 import { adjacentDesktopComputers } from "./computerComponent.js";
+import { notifyComputerStorageUnavailable } from "./computerRegistry.js";
 import { monitorTypeId } from "./probes/monitorProbe.js";
 import { requestWebComputerTerminal } from "./webTerminalBridge.js";
 
@@ -45,6 +46,7 @@ function handleMonitorInteraction(
     event.faceLocation === undefined
   )
     return;
+  if (notifyComputerStorageUnavailable(event.player)) return;
   const { block } = event;
   const tiles = [];
   for (let y = block.y - 1; y <= block.y + 1; y += 1) {

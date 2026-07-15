@@ -296,6 +296,48 @@ covers the real player's item-use interaction and presentation only.
   entity is covered by BDS, but the player interaction was not separately
   recorded in this manual run.
 
+## Preserved-world storage migration checklist
+
+Run the host checks first:
+
+```powershell
+npx vitest run tests/phase0/transactionalPagedStore.test.ts tests/computer/snapshotMigration.test.ts tests/computer/storageMigration.test.ts
+```
+
+`Expect:` The reader validates the current head before falling back to the
+immediately previous complete generation for either page format. Schema-1
+Computer/filesystem payloads preserve contents and metadata, a corrupt Computer
+does not advance the identity head, each coordinator step performs at most one
+Dynamic Property operation, an interrupted run resumes idempotently, and a fresh
+world creates no migration properties.
+
+Use a disposable copy of a real legacy-format world for the live check:
+
+1. Stop BDS cleanly. Confirm its process has exited and its configured UDP and
+   Web TCP ports are closed.
+2. Copy the complete stopped world directory, including `db`, packs, and world
+   metadata, to a timestamped backup outside the managed runtime. Never copy or
+   edit the LevelDB while BDS is running.
+3. Install the new packs and start that same world without resetting it.
+4. Inspect BDS logs for transition-only `CS_STORAGE_MIGRATION` JSON. Confirm the
+   phase and completed/total counts make bounded progress and that no Computer,
+   Portable, Monitor, or Web Terminal interaction becomes available before the
+   terminal `complete` record.
+5. Open representative existing Computers. Verify identity, family, block/item
+   form, label, OS and hardware profiles, display profile, terminal state,
+   files, ownership/mode/mtime, symbolic links, and hard-link sharing.
+6. Stop and restart the migrated world without resetting it. Confirm migration
+   reports `complete` without converting a Computer again and the same data
+   remains available.
+7. On any `failed` record, stop BDS, preserve the failed copy for diagnosis, and
+   restore only from the stopped-world backup. Do not repair LevelDB keys by
+   hand.
+
+`Expect:` Every referenced Computer generation is committed and read back before
+the identity generation becomes the activation point. A restart may rescan while
+that identity head is legacy, but it skips already-current Computer generations;
+failure never exposes a partially migrated identity registry.
+
 ## Phase 0 Monitor checklist
 
 Run this command while facing south with three blocks of clear space ahead:
@@ -330,8 +372,10 @@ real block-face coordinates and player-facing fallback interaction.
 Use a clean managed debug world for this checklist. Identity snapshot schema 2
 does not migrate the previous sequential `computer-N` registry.
 
-1. Set `WEB_COMPANION_AUTO_OPEN=1`, run `npm run dev:bds:web`, connect
-   Minecraft, and use a Portable Computer System.
+1. Publish through a literal IP assigned to the companion host, leave
+   `WEB_COMPANION_AUTO_OPEN` unset, run `npm run dev:bds:web`, connect
+   Minecraft, and use a Portable Computer System. Use `1` only to enable opening
+   explicitly or `0` to disable it.
 2. Confirm the default browser opens without typing the URL and the printed
    one-use fallback opens a Computer whose identity matches
    `c-[0-9a-hjkmnp-tv-z]{6}` and whose status shows `CONTROL`.
@@ -350,9 +394,10 @@ does not migrate the previous sequential `computer-N` registry.
 8. Repeat at a 390-pixel viewport and confirm the ownership state, takeover
    action, terminal, and status bar fit without page-level horizontal or
    vertical scrolling.
-9. Start once with automatic opening disabled and once with a non-loopback
-   published host. Confirm no browser process is launched automatically and the
-   printed 60-second fallback remains usable.
+9. Start once with `WEB_COMPANION_AUTO_OPEN=0`, once with an unassigned
+   published IP, and once with a custom public origin. Confirm no browser
+   process is launched automatically and the printed two-minute fallback remains
+   usable.
 10. Drag-select several terminal rows and press Ctrl+C. Confirm the exact range
     is copied, the selection remains visible until the next user action, and no
     interrupt is emitted. Select command-line text and repeat; then press Ctrl+C
@@ -393,8 +438,8 @@ does not migrate the previous sequential `computer-N` registry.
     XMS region total.
 19. Restart the Computer. Confirm `/home/computer/demo.py` and `/etc` survive,
     `/tmp` is empty, and BDS logs contain no persistence failure. Stop BDS
-    before taking a backup of the world LevelDB; restore the copy and confirm
-    the latest complete generation loads.
+    before backing up the complete world directory; restore the stopped-world
+    copy and confirm the latest complete generation loads.
 
 `Expect:` Every committed identity is compact and stable, viewer input never
 reaches the VM, takeover has one observable winner, a non-final detach does not

@@ -1,7 +1,10 @@
 import { Player, system, world } from "@minecraft/server";
 
 import { startAlwaysDayController } from "./daylightController.js";
-import { startComputerHost } from "./computerHost.js";
+import {
+  startComputerHost,
+  startComputerStorageBootstrap,
+} from "./computerHost.js";
 import {
   desktopComputerDisplayName,
   giveNewComputerItem,
@@ -20,6 +23,7 @@ import {
   startPortableComputerLifecycle,
 } from "./portableComputer.js";
 import { handleDebugCommand } from "./debugCommandBridge.js";
+import { startComputerStorageBreakGuard } from "./computerRegistry.js";
 import { handleDebugWebSessionRequest } from "./debugWebSessionBridge.js";
 import { startHeadlessProbeSuite } from "./probes/headlessProbe.js";
 import { registerRedstoneProbeComponent } from "./probes/redstoneProbeComponent.js";
@@ -54,11 +58,14 @@ system.beforeEvents.startup.subscribe(
 
 system.run((): void => {
   startAlwaysDayController();
+  startComputerStorageBreakGuard();
   startComputerHost();
-  startComputerComponents();
-  startPortableComputerLifecycle();
-  startWebTerminalBridge();
-  world.sendMessage(`Computer System Phase 0 loaded (${packVersion}).`);
+  startComputerStorageBootstrap((): void => {
+    startComputerComponents();
+    startPortableComputerLifecycle();
+    startWebTerminalBridge();
+    world.sendMessage(`Computer System Phase 0 loaded (${packVersion}).`);
+  });
 });
 
 system.afterEvents.scriptEventReceive.subscribe((event): void => {

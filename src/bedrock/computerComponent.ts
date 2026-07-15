@@ -20,10 +20,13 @@ import type { ComputerFamily } from "../domain/computer/identity.js";
 import { redstoneSides } from "../domain/redstone/redstoneState.js";
 import { computerHost } from "./computerHost.js";
 import {
+  computerStorageReady,
   computerIdentityProperty,
   ensureComputer,
   ensurePortableComputer,
   identityService,
+  notifyComputerStorageUnavailable,
+  recoverStaleComputerPosition,
 } from "./computerRegistry.js";
 import { selectComputerTerminal } from "./computerTerminal.js";
 import { requestWebComputerTerminal } from "./webTerminalBridge.js";
@@ -41,6 +44,11 @@ export const desktopComputerDisplayName = "Desktop Computer System";
 const blockComponentId = "computer_system:computer";
 const itemComponentId = "computer_system:computer_item";
 const breakingBlocks = new Set<string>();
+const pendingPlacements = new Map<string, ComputerFamily>();
+const pendingBreaks = new Map<string, Player | undefined>();
+const maximumPendingPlacements = 128;
+const maximumPendingBreaks = 4_096;
+const pendingPlacementBatchSize = 4;
 let outputCursor = 0;
 
 export function registerComputerComponents(
@@ -50,17 +58,11 @@ export function registerComputerComponents(
   blocks.registerCustomComponent(blockComponentId, {
     onPlace: ({ block }, parameters): void => {
       const family = familyParameter(parameters);
-      const physicalKey = blockKey(block);
-      if (breakingBlocks.has(physicalKey)) return;
-      const observation = identityService().atPhysicalKey(physicalKey);
-      const result =
-        observation === undefined
-          ? identityService().place(physicalKey, family)
-          : { outcome: "placed" as const, ...observation, generation: 0 };
-      if (result.outcome === "placed") {
-        ensureComputer(result.computerId, family);
-        system.run((): void => refreshFaceIoTopology(block));
+      if (!computerStorageReady()) {
+        queuePendingPlacement(block, family);
+        return;
       }
+      placeComputerBlock(block, family);
     },
     onPlayerBreak: handleBreak,
     onPlayerInteract: handleInteraction,
@@ -71,7 +73,58 @@ export function registerComputerComponents(
 
 export function startComputerComponents(): void {
   identityService();
-  system.runInterval(syncComputerOutputs, 1);
+  system.runInterval((): void => {
+    drainPendingBreaks();
+    drainPendingPlacements();
+    syncComputerOutputs();
+  }, 1);
+}
+
+function placeComputerBlock(block: Block, family: ComputerFamily): void {
+  const physicalKey = blockKey(block);
+  if (breakingBlocks.has(physicalKey)) return;
+  const observation = identityService().atPhysicalKey(physicalKey);
+  const result =
+    observation === undefined
+      ? identityService().place(physicalKey, family)
+      : { outcome: "placed" as const, ...observation, generation: 0 };
+  if (result.outcome === "placed") {
+    ensureComputer(result.computerId, family);
+    system.run((): void => refreshFaceIoTopology(block));
+  }
+}
+
+function queuePendingPlacement(block: Block, family: ComputerFamily): void {
+  const physicalKey = blockKey(block);
+  if (
+    !pendingPlacements.has(physicalKey) &&
+    pendingPlacements.size >= maximumPendingPlacements
+  ) {
+    console.warn(
+      `Computer placement rejected while storage migration is busy: ${physicalKey}`,
+    );
+    system.run((): void => {
+      const residual = blockFromKey(physicalKey);
+      if (residual !== undefined && isComputerBlock(residual.typeId)) {
+        residual.setType("minecraft:air");
+      }
+    });
+    return;
+  }
+  pendingPlacements.set(physicalKey, family);
+}
+
+function drainPendingPlacements(): void {
+  let processed = 0;
+  for (const [physicalKey, family] of pendingPlacements) {
+    if (processed >= pendingPlacementBatchSize) break;
+    pendingPlacements.delete(physicalKey);
+    processed += 1;
+    const block = blockFromKey(physicalKey);
+    if (block !== undefined && isComputerBlock(block.typeId)) {
+      placeComputerBlock(block, family);
+    }
+  }
 }
 
 export function giveNewComputerItem(
@@ -86,6 +139,7 @@ function handleItemUseOn(
   parameters: CustomComponentParameters,
 ): void {
   if (!(event.source instanceof Player)) return;
+  if (notifyComputerStorageUnavailable(event.source)) return;
   const target = adjacent(event.block, event.blockFace);
   if (target === undefined || !target.isAir) return;
   const family = familyParameter(parameters);
@@ -94,7 +148,9 @@ function handleItemUseOn(
     event.source.sendMessage("Computer item identity is invalid.");
     return;
   }
-  const result = identityService().place(blockKey(target), family, carried);
+  const physicalKey = blockKey(target);
+  if (!recoverStaleComputerPosition(event.source, physicalKey, carried)) return;
+  const result = identityService().place(physicalKey, family, carried);
   if (result.outcome === "duplicate") {
     event.source.sendMessage("Duplicate computer identity rejected.");
     return;
@@ -120,11 +176,24 @@ function handleItemUseOn(
 
 function handleBreak(event: BlockComponentPlayerBreakEvent): void {
   const physicalKey = blockKey(event.block);
+  if (!computerStorageReady()) {
+    if (event.player !== undefined) {
+      notifyComputerStorageUnavailable(event.player);
+    }
+    queuePendingBreak(physicalKey, event.player);
+    return;
+  }
+  breakComputerBlock(physicalKey, event.player);
+}
+
+function breakComputerBlock(
+  physicalKey: string,
+  player: Player | undefined,
+): void {
   const result = identityService().break(physicalKey);
   if (result.outcome !== "placed") return;
   computerHost.serial.disconnectComputer(result.computerId, "block_broken");
   computerHost.peripherals.clearComputer(result.computerId);
-  const player = event.player;
   scheduleOwnedFinalization(breakingBlocks, physicalKey, {
     prepare: [
       (): void => {
@@ -157,8 +226,35 @@ function handleBreak(event: BlockComponentPlayerBreakEvent): void {
   });
 }
 
+function queuePendingBreak(
+  physicalKey: string,
+  player: Player | undefined,
+): void {
+  if (
+    !pendingBreaks.has(physicalKey) &&
+    pendingBreaks.size >= maximumPendingBreaks
+  ) {
+    const message = `Computer break recovery queue is full: ${physicalKey}`;
+    console.warn(message);
+    if (player?.isValid) player.sendMessage(message);
+    return;
+  }
+  pendingBreaks.set(physicalKey, player);
+}
+
+function drainPendingBreaks(): void {
+  let processed = 0;
+  for (const [physicalKey, player] of pendingBreaks) {
+    if (processed >= pendingPlacementBatchSize) break;
+    pendingBreaks.delete(physicalKey);
+    processed += 1;
+    breakComputerBlock(physicalKey, player);
+  }
+}
+
 function handleInteraction(event: BlockComponentPlayerInteractEvent): void {
   if (event.player === undefined) return;
+  if (notifyComputerStorageUnavailable(event.player)) return;
   const observation = identityService().atPhysicalKey(blockKey(event.block));
   if (observation === undefined) {
     event.player.sendMessage("Computer identity is unavailable.");
@@ -205,6 +301,7 @@ export function adjacentDesktopComputers(
 }
 
 function handleRedstoneUpdate(event: BlockComponentRedstoneUpdateEvent): void {
+  if (!computerStorageReady()) return;
   computerHost.observeExternalWork(
     { lane: "redstone_input", deterministicUnits: redstoneSides.length },
     () => handleRedstoneUpdateBounded(event),
@@ -217,7 +314,14 @@ function handleRedstoneUpdateBounded(
   const observation = identityService().atPhysicalKey(blockKey(event.block));
   if (observation === undefined) return;
   const record = ensureComputer(observation.computerId, observation.family);
-  adjacentBlocks(event.block).forEach((block, index) => {
+  sampleRedstoneInputs(event.block, record);
+}
+
+function sampleRedstoneInputs(
+  computerBlock: Block,
+  record: ReturnType<typeof ensureComputer>,
+): void {
+  adjacentBlocks(computerBlock).forEach((block, index) => {
     const side = redstoneSides[index]!;
     const power = block?.getRedstonePower() ?? 0;
     const change = record.redstone.setInput(side, power);
@@ -257,6 +361,14 @@ function syncComputerOutputs(): void {
     }
     refreshFaceIoTopology(block);
     if (!isComputerBlock(block.typeId)) continue;
+    computerHost.observeExternalWork(
+      {
+        lane: "redstone_input",
+        deterministicUnits: redstoneSides.length,
+        computerId: observation.computerId,
+      },
+      () => sampleRedstoneInputs(block, record),
+    );
     computerHost.observeExternalWork(
       {
         lane: "redstone_output",

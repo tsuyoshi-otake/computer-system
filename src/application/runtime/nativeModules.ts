@@ -176,19 +176,6 @@ function createShellModule(
   const applyResult = (
     result: ShellResult,
   ): RuntimeValue | VmWaitRequest | VmWorkRequest => {
-    runHostWork(context, "terminal", 1, () => {
-      if (result.terminalScreen !== undefined) {
-        renderTerminalScreen(context.terminal, result.terminalScreen);
-      } else {
-        if (result.action === "clear" || result.resetTerminal) {
-          context.terminal.setTextColor(0);
-          context.terminal.setBackgroundColor(15);
-          context.terminal.clear();
-          context.terminal.setCursorPosition(1, 1);
-        }
-        writeTerminalLines(context.terminal, result.lines);
-      }
-    });
     if (result.action === "shutdown") {
       requireCapability(context.shutdown, "shutdown")();
     } else if (result.action === "reboot") {
@@ -220,6 +207,30 @@ function createShellModule(
       return { kind: "sleep", ticks: result.sleepTicks };
     }
     return { kind: "work", cycles: result.cpuCycles ?? 1, value: null };
+  };
+  const executeShellOperation = (
+    operation: () => ShellResult,
+    echoedLine?: string,
+  ): RuntimeValue | VmWaitRequest | VmWorkRequest => {
+    const result = runHostWork(context, "terminal", 1, () => {
+      if (echoedLine !== undefined) {
+        writeTerminalLines(context.terminal, [echoedLine]);
+      }
+      const completed = operation();
+      if (completed.terminalScreen !== undefined) {
+        renderTerminalScreen(context.terminal, completed.terminalScreen);
+      } else {
+        if (completed.action === "clear" || completed.resetTerminal) {
+          context.terminal.setTextColor(0);
+          context.terminal.setBackgroundColor(15);
+          context.terminal.clear();
+          context.terminal.setCursorPosition(1, 1);
+        }
+        writeTerminalLines(context.terminal, completed.lines);
+      }
+      return completed;
+    });
+    return applyResult(result);
   };
   const banner = fn("banner", (positional, keywords) => {
     requireArity(positional, keywords, 0, 0);
@@ -254,8 +265,10 @@ function createShellModule(
     requireArity(positional, keywords, 1, 1);
     const line = stringArgument(positional[0]);
     const secretInput = shell.isSecretInput();
-    writeTerminalLines(context.terminal, [secretInput ? "" : line]);
-    return applyResult(shell.submit(line));
+    return executeShellOperation(
+      () => shell.submit(line),
+      secretInput ? "" : line,
+    );
   });
   const keys = fn("keys", (positional, keywords) => {
     requireArity(positional, keywords, 1, 1);
@@ -273,7 +286,7 @@ function createShellModule(
     ) {
       throw new VmRuntimeError("ValueError", "Invalid terminal key batch");
     }
-    return applyResult(shell.keys(decoded));
+    return executeShellOperation(() => shell.keys(decoded));
   });
   return namespace("shell", { banner, prompt, submit, keys });
 }

@@ -4,11 +4,24 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
+  isPublishedAddressLocal,
+  parseOptionalBooleanFlag,
   selectLanIpv4,
   WebCompanionServer,
 } from "../../tools/web-companion-server.mjs";
 
 const servers = [];
+
+function newTestWebCompanionServer(options = {}) {
+  return new WebCompanionServer({ autoOpenBrowser: false, ...options });
+}
+
+function localNetworkInterfaces() {
+  return {
+    "Wi-Fi": [{ address: "10.255.10.90", family: "IPv4", internal: false }],
+    Loopback: [{ address: "127.0.0.1", family: "IPv4", internal: true }],
+  };
+}
 
 afterEach(async () => {
   await Promise.all(servers.splice(0).map((server) => server.stop()));
@@ -16,7 +29,7 @@ afterEach(async () => {
 
 describe("Web companion HTTP server", () => {
   it("serves manual PNG illustrations with an image content type", async () => {
-    const server = new WebCompanionServer({
+    const server = newTestWebCompanionServer({
       bds: new FakeBds(),
       port: 0,
       assetRoot: path.resolve(import.meta.dirname, "../../web"),
@@ -35,11 +48,14 @@ describe("Web companion HTTP server", () => {
     }
   });
 
-  it("keeps browser opening disabled by default", async () => {
+  it("keeps browser opening disabled when explicitly disabled", async () => {
     const bds = new FakeBds();
     const launches = [];
-    const server = new WebCompanionServer({
+    const server = newTestWebCompanionServer({
       bds,
+      host: "0.0.0.0",
+      publicHost: "10.255.10.90",
+      networkInterfaces: localNetworkInterfaces(),
       port: 0,
       browserOpener: async (url) => launches.push(url),
     });
@@ -57,14 +73,127 @@ describe("Web companion HTTP server", () => {
     expect(server.status().browserAutoOpen).toMatchObject({
       enabled: false,
       eligible: false,
+      policy: "disabled",
+      reason: "explicitly_disabled",
       state: "disabled",
       attempts: 0,
     });
   });
 
+  it("automatically opens a locally published LAN handoff through loopback", async () => {
+    const bds = new FakeBds();
+    const launches = [];
+    const server = new WebCompanionServer({
+      bds,
+      host: "0.0.0.0",
+      publicHost: "10.255.10.90",
+      networkInterfaces: localNetworkInterfaces(),
+      port: 0,
+      browserOpener: async (url) => launches.push(url),
+    });
+    servers.push(server);
+    await server.start();
+
+    bds.log(
+      'CS_WEB_SESSION_REQUEST {"requestId":"r1-1","playerId":"player-1","computerId":"c-000001"}',
+    );
+    await until(() => launches.length === 1);
+
+    expect(new URL(launches[0]).hostname).toBe("127.0.0.1");
+    expect(bds.commands[0]).toContain("http://10.255.10.90:");
+    expect(server.status().browserAutoOpen).toMatchObject({
+      enabled: true,
+      eligible: true,
+      policy: "local_address",
+      reason: null,
+      state: "opened",
+      attempts: 1,
+      opened: 1,
+    });
+  });
+
+  it("does not automatically open a non-local published address", async () => {
+    const bds = new FakeBds();
+    const launches = [];
+    const server = new WebCompanionServer({
+      bds,
+      host: "0.0.0.0",
+      publicHost: "192.0.2.44",
+      networkInterfaces: localNetworkInterfaces(),
+      port: 0,
+      browserOpener: async (url) => launches.push(url),
+    });
+    servers.push(server);
+    await server.start();
+
+    bds.log(
+      'CS_WEB_SESSION_REQUEST {"requestId":"r1-1","playerId":"player-1","computerId":"c-000001"}',
+    );
+    await until(() => bds.commands.length === 1);
+
+    expect(launches).toEqual([]);
+    expect(server.status().browserAutoOpen).toMatchObject({
+      enabled: false,
+      eligible: false,
+      policy: "local_address",
+      reason: "published_address_not_local",
+      state: "disabled",
+      attempts: 0,
+    });
+  });
+
+  it("does not infer automatic opening from a custom public origin", async () => {
+    const bds = new FakeBds();
+    const launches = [];
+    const server = new WebCompanionServer({
+      bds,
+      host: "0.0.0.0",
+      publicHost: "10.255.10.90",
+      publicOrigin: "https://10.255.10.90",
+      networkInterfaces: localNetworkInterfaces(),
+      port: 0,
+      browserOpener: async (url) => launches.push(url),
+    });
+    servers.push(server);
+    await server.start();
+
+    bds.log(
+      'CS_WEB_SESSION_REQUEST {"requestId":"r1-1","playerId":"player-1","computerId":"c-000001"}',
+    );
+    await until(() => bds.commands.length === 1);
+
+    expect(launches).toEqual([]);
+    expect(bds.commands[0]).toContain("https://10.255.10.90/p/");
+    expect(server.status().browserAutoOpen).toMatchObject({
+      enabled: false,
+      reason: "public_origin_configured",
+      state: "disabled",
+    });
+  });
+
+  it("parses the browser auto-open override as a tri-state flag", () => {
+    expect(parseOptionalBooleanFlag(undefined, "FLAG")).toBeUndefined();
+    expect(parseOptionalBooleanFlag("1", "FLAG")).toBe(true);
+    expect(parseOptionalBooleanFlag("true", "FLAG")).toBe(true);
+    expect(parseOptionalBooleanFlag("0", "FLAG")).toBe(false);
+    expect(parseOptionalBooleanFlag("false", "FLAG")).toBe(false);
+    expect(parseOptionalBooleanFlag("", "FLAG")).toBe(false);
+  });
+
+  it("matches only literal addresses assigned to the companion host", () => {
+    const interfaces = localNetworkInterfaces();
+    expect(isPublishedAddressLocal("10.255.10.90", interfaces)).toBe(true);
+    expect(isPublishedAddressLocal("127.0.0.1", interfaces)).toBe(true);
+    expect(isPublishedAddressLocal("192.0.2.44", interfaces)).toBe(false);
+    expect(isPublishedAddressLocal("localhost", interfaces)).toBe(false);
+    expect(isPublishedAddressLocal("terminal.example.test", interfaces)).toBe(
+      false,
+    );
+  });
+
   it("disables only the Bedrock range check when explicitly enabled for debug", async () => {
     const bds = new FakeBds();
-    const server = new WebCompanionServer({
+    const server = newTestWebCompanionServer({
       bds,
       port: 0,
       debugIgnoreRange: true,
@@ -86,7 +215,7 @@ describe("Web companion HTTP server", () => {
   it("opens each loopback handoff once when explicitly enabled", async () => {
     const bds = new FakeBds();
     const launches = [];
-    const server = new WebCompanionServer({
+    const server = newTestWebCompanionServer({
       bds,
       port: 0,
       autoOpenBrowser: true,
@@ -117,8 +246,10 @@ describe("Web companion HTTP server", () => {
     const launches = [];
     const server = new WebCompanionServer({
       bds,
+      host: "0.0.0.0",
+      publicHost: "10.255.10.90",
+      networkInterfaces: localNetworkInterfaces(),
       port: 0,
-      autoOpenBrowser: true,
       browserOpener: async (url) => launches.push(url),
     });
     servers.push(server);
@@ -143,7 +274,7 @@ describe("Web companion HTTP server", () => {
   });
 
   it("bounds and finalizes computer-scoped handoff waits", async () => {
-    const server = new WebCompanionServer({ bds: new FakeBds(), port: 0 });
+    const server = newTestWebCompanionServer({ bds: new FakeBds(), port: 0 });
     servers.push(server);
     await server.start();
 
@@ -156,7 +287,7 @@ describe("Web companion HTTP server", () => {
   });
 
   it("explicitly finalizes a handoff wait when its Bedrock request fails", async () => {
-    const server = new WebCompanionServer({ bds: new FakeBds(), port: 0 });
+    const server = newTestWebCompanionServer({ bds: new FakeBds(), port: 0 });
     servers.push(server);
     await server.start();
 
@@ -174,7 +305,7 @@ describe("Web companion HTTP server", () => {
   it("opens a LAN handoff through loopback on the companion host", async () => {
     const bds = new FakeBds();
     const launches = [];
-    const server = new WebCompanionServer({
+    const server = newTestWebCompanionServer({
       bds,
       host: "127.0.0.1",
       port: 0,
@@ -213,7 +344,7 @@ describe("Web companion HTTP server", () => {
 
   it("accepts an explicit custom HTTPS origin without allowing arbitrary origins", async () => {
     const bds = new FakeBds();
-    const server = new WebCompanionServer({
+    const server = newTestWebCompanionServer({
       bds,
       host: "127.0.0.1",
       port: 0,
@@ -250,7 +381,7 @@ describe("Web companion HTTP server", () => {
 
   it("accepts any request Origin only when wildcard mode is explicit", async () => {
     const bds = new FakeBds();
-    const server = new WebCompanionServer({
+    const server = newTestWebCompanionServer({
       allowedOrigins: "*",
       bds,
       host: "127.0.0.1",
@@ -291,7 +422,7 @@ describe("Web companion HTTP server", () => {
   });
 
   it("rate-limits four-digit connection-code guessing per client", async () => {
-    const server = new WebCompanionServer({ bds: new FakeBds(), port: 0 });
+    const server = newTestWebCompanionServer({ bds: new FakeBds(), port: 0 });
     servers.push(server);
     const status = await server.start();
 
@@ -303,7 +434,7 @@ describe("Web companion HTTP server", () => {
 
   it("exchanges a four-digit code without leaving the stable entry page", async () => {
     const bds = new FakeBds();
-    const server = new WebCompanionServer({ bds, port: 0 });
+    const server = newTestWebCompanionServer({ bds, port: 0 });
     servers.push(server);
     const status = await server.start();
     bds.log(
@@ -326,7 +457,7 @@ describe("Web companion HTTP server", () => {
   it("keeps the chat handoff usable when browser opening fails", async () => {
     const bds = new FakeBds();
     const diagnostics = [];
-    const server = new WebCompanionServer({
+    const server = newTestWebCompanionServer({
       bds,
       port: 0,
       autoOpenBrowser: true,
@@ -359,7 +490,7 @@ describe("Web companion HTTP server", () => {
 
   it("issues a one-use handoff and relays authenticated terminal input", async () => {
     const bds = new FakeBds();
-    const server = new WebCompanionServer({
+    const server = newTestWebCompanionServer({
       bds,
       port: 0,
       assetRoot: path.resolve(import.meta.dirname, "../../web"),
@@ -489,7 +620,7 @@ describe("Web companion HTTP server", () => {
 
   it("accepts snapshots only for issued sessions and blocks cross-origin writes", async () => {
     const bds = new FakeBds();
-    const server = new WebCompanionServer({ bds, port: 0 });
+    const server = newTestWebCompanionServer({ bds, port: 0 });
     servers.push(server);
     const status = await server.start();
     bds.log(
@@ -535,7 +666,7 @@ describe("Web companion HTTP server", () => {
 
   it("relays bounded writer-only power requests and waits for Bedrock finalization", async () => {
     const bds = new FakeBds();
-    const server = new WebCompanionServer({ bds, port: 0 });
+    const server = newTestWebCompanionServer({ bds, port: 0 });
     servers.push(server);
     const status = await server.start();
     bds.log(
@@ -587,7 +718,7 @@ describe("Web companion HTTP server", () => {
 
   it("gives the newest browser control and rejects the demoted writer", async () => {
     const bds = new FakeBds();
-    const server = new WebCompanionServer({ bds, port: 0 });
+    const server = newTestWebCompanionServer({ bds, port: 0 });
     servers.push(server);
     const status = await server.start();
 
@@ -622,7 +753,7 @@ describe("Web companion HTTP server", () => {
 
   it("reconnects a remembered code only after proximity resumes", async () => {
     const bds = new FakeBds();
-    const server = new WebCompanionServer({ bds, port: 0 });
+    const server = newTestWebCompanionServer({ bds, port: 0 });
     servers.push(server);
     const status = await server.start();
     bds.log(
@@ -677,7 +808,7 @@ describe("Web companion HTTP server", () => {
 
   it("allows an existing out-of-range session to reconnect in explicit debug mode", async () => {
     const bds = new FakeBds();
-    const server = new WebCompanionServer({
+    const server = newTestWebCompanionServer({
       bds,
       port: 0,
       debugIgnoreRange: true,
@@ -713,7 +844,7 @@ describe("Web companion HTTP server", () => {
   });
 
   it("serializes and bounds terminal operations per computer", async () => {
-    const server = new WebCompanionServer();
+    const server = newTestWebCompanionServer();
     let release;
     const gate = new Promise((resolve) => {
       release = resolve;

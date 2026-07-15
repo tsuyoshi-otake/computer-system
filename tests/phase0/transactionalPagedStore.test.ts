@@ -17,10 +17,15 @@ interface TestManifest {
 class MemoryPropertyStore implements StringPropertyStore {
   readonly values = new Map<string, string>();
   failOnWrite: number | undefined;
+  reads = 0;
   writes = 0;
+  readonly deleteKeys: string[] = [];
+  readonly readKeys: string[] = [];
   readonly writeKeys: string[] = [];
 
   public get(key: string): string | undefined {
+    this.reads += 1;
+    this.readKeys.push(key);
     return this.values.get(key);
   }
 
@@ -29,6 +34,7 @@ class MemoryPropertyStore implements StringPropertyStore {
   }
 
   public delete(key: string): void {
+    this.deleteKeys.push(key);
     this.values.delete(key);
   }
 
@@ -39,6 +45,46 @@ class MemoryPropertyStore implements StringPropertyStore {
       throw new Error("Injected write failure.");
     }
     this.values.set(key, value);
+  }
+}
+
+function legacyChecksum(value: string): string {
+  let hash = 0x81_1c_9d_c5;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 0x01_00_01_93);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+function writeLegacyGeneration(
+  properties: MemoryPropertyStore,
+  prefix: string,
+  generation: number,
+  value: unknown,
+  pageCharacterLimit: number,
+): void {
+  const json = JSON.stringify(value);
+  if (json === undefined) throw new Error("Invalid legacy test value.");
+  const pages: string[] = [];
+  for (let offset = 0; offset < json.length; offset += pageCharacterLimit) {
+    pages.push(json.slice(offset, offset + pageCharacterLimit));
+  }
+  properties.values.set(
+    `${prefix}:manifest:${String(generation)}`,
+    JSON.stringify({
+      characterLength: json.length,
+      checksum: legacyChecksum(json),
+      generation,
+      pageCount: pages.length,
+      schema: 1,
+    }),
+  );
+  for (const [index, page] of pages.entries()) {
+    properties.values.set(
+      `${prefix}:page:${String(generation)}:${String(index)}`,
+      page,
+    );
   }
 }
 
@@ -79,6 +125,7 @@ describe("TransactionalPagedStore", () => {
     expect(store.load(isSavedDocument)).toEqual({
       generation: 1,
       recovered: false,
+      sourceFormat: "content_addressed_blobs",
       value: document,
     });
     expect(
@@ -117,6 +164,7 @@ describe("TransactionalPagedStore", () => {
     expect(store.load(isSavedDocument)).toEqual({
       generation: 1,
       recovered: false,
+      sourceFormat: "content_addressed_blobs",
       value: original,
     });
   });
@@ -136,6 +184,7 @@ describe("TransactionalPagedStore", () => {
     expect(store.load(isSavedDocument)).toEqual({
       generation: 1,
       recovered: true,
+      sourceFormat: "content_addressed_blobs",
       value: original,
     });
   });
@@ -190,5 +239,243 @@ describe("TransactionalPagedStore", () => {
     }
     expect(steps).toBeGreaterThan(4);
     expect(store.load(isSavedDocument)?.value.version).toBe(2);
+  });
+
+  it("replaces a corrupt head after fallback without deleting the last good generation", () => {
+    const properties = new MemoryPropertyStore();
+    const prefix = "computer:recovered-save";
+    const store = new TransactionalPagedStore(properties, prefix, 1_024);
+    const original = { body: "last known good", version: 1 };
+    store.save(original);
+    store.save({ body: "corrupt current generation", version: 2 });
+    const corruptManifest = manifestAt(properties, `${prefix}:manifest:2`);
+    properties.values.set(
+      `${prefix}:blob:${String(corruptManifest.pageIds[0])}`,
+      "corrupt",
+    );
+
+    const recovered = store.load(isSavedDocument)!;
+    expect(recovered).toMatchObject({ generation: 1, recovered: true });
+    const transaction = store.beginSave(
+      { body: "replacement current generation", version: 3 },
+      recovered.generation,
+    );
+    while (transaction.step(1).outcome !== "complete") {
+      // Exercise the same bounded path used by startup migration.
+    }
+
+    expect(properties.values.get(`${prefix}:head`)).toBe("2");
+    expect(store.load(isSavedDocument)).toMatchObject({
+      generation: 2,
+      recovered: false,
+      value: { version: 3 },
+    });
+    const replacementManifest = manifestAt(properties, `${prefix}:manifest:2`);
+    properties.values.set(
+      `${prefix}:blob:${String(replacementManifest.pageIds[0])}`,
+      "corrupt again",
+    );
+    expect(store.load(isSavedDocument)).toEqual({
+      generation: 1,
+      recovered: true,
+      sourceFormat: "content_addressed_blobs",
+      value: original,
+    });
+  });
+
+  it("loads a strictly validated legacy indexed-page generation", () => {
+    const properties = new MemoryPropertyStore();
+    const prefix = "computer:legacy";
+    const document = {
+      body: "a schema-one document split across old indexed pages",
+      version: 1,
+    };
+    writeLegacyGeneration(properties, prefix, 7, document, 9);
+    properties.values.set(`${prefix}:head`, "7");
+
+    const store = new TransactionalPagedStore(properties, prefix, 9);
+    expect(store.load(isSavedDocument)).toEqual({
+      generation: 7,
+      recovered: false,
+      sourceFormat: "legacy_indexed_pages",
+      value: document,
+    });
+  });
+
+  it("rejects a legacy manifest with unrecognized fields", () => {
+    const properties = new MemoryPropertyStore();
+    const prefix = "computer:legacy-invalid";
+    writeLegacyGeneration(
+      properties,
+      prefix,
+      1,
+      { body: "legacy", version: 1 },
+      12,
+    );
+    const manifestKey = `${prefix}:manifest:1`;
+    const manifest: unknown = JSON.parse(
+      properties.values.get(manifestKey) ?? "{}",
+    );
+    if (typeof manifest !== "object" || manifest === null) {
+      throw new Error("Invalid legacy manifest fixture.");
+    }
+    properties.values.set(
+      manifestKey,
+      JSON.stringify({ ...manifest, arbitraryPayload: true }),
+    );
+    properties.values.set(`${prefix}:head`, "1");
+
+    const store = new TransactionalPagedStore(properties, prefix, 12);
+    expect(() => store.load(isSavedDocument)).toThrow(
+      "No complete storage generation could be loaded.",
+    );
+  });
+
+  it("reads at most one legacy property per incremental load step", () => {
+    const properties = new MemoryPropertyStore();
+    const prefix = "computer:legacy-incremental";
+    const document = {
+      body: "legacy pages must be admitted one property at a time",
+      version: 1,
+    };
+    writeLegacyGeneration(properties, prefix, 3, document, 7);
+    properties.values.set(`${prefix}:head`, "3");
+    const transaction = new TransactionalPagedStore(
+      properties,
+      prefix,
+      7,
+    ).beginLoad(isSavedDocument);
+    expect(properties.reads).toBe(0);
+
+    for (let step = 0; step < 100; step += 1) {
+      const readsBefore = properties.reads;
+      const result = transaction.step(1);
+      expect(properties.reads - readsBefore).toBeLessThanOrEqual(1);
+      if (result.outcome === "complete") {
+        expect(result).toEqual({
+          generation: 3,
+          outcome: "complete",
+          recovered: false,
+          sourceFormat: "legacy_indexed_pages",
+          value: document,
+        });
+        expect(transaction.stage).toBe("complete");
+        return;
+      }
+    }
+    throw new Error("Incremental legacy load did not terminate.");
+  });
+
+  it("incrementally falls back from a corrupt current blob to legacy pages", () => {
+    const properties = new MemoryPropertyStore();
+    const prefix = "computer:mixed-fallback";
+    const original = { body: "legacy fallback", version: 1 };
+    writeLegacyGeneration(properties, prefix, 1, original, 11);
+    properties.values.set(`${prefix}:head`, "1");
+    const store = new TransactionalPagedStore(properties, prefix, 11);
+    store.save({ body: "current content-addressed value", version: 2 });
+    const manifest = manifestAt(properties, `${prefix}:manifest:2`);
+    properties.values.set(
+      `${prefix}:blob:${String(manifest.pageIds[0])}`,
+      "corrupt",
+    );
+    properties.reads = 0;
+    properties.readKeys.length = 0;
+    const transaction = store.beginLoad(isSavedDocument);
+
+    for (let step = 0; step < 100; step += 1) {
+      const readsBefore = properties.reads;
+      const result = transaction.step(1);
+      expect(properties.reads - readsBefore).toBeLessThanOrEqual(1);
+      if (result.outcome === "complete") {
+        expect(result).toEqual({
+          generation: 1,
+          outcome: "complete",
+          recovered: true,
+          sourceFormat: "legacy_indexed_pages",
+          value: original,
+        });
+        expect(properties.readKeys).toContain(`${prefix}:manifest:1`);
+        return;
+      }
+    }
+    throw new Error("Incremental mixed-format fallback did not terminate.");
+  });
+
+  it("keeps the legacy head readable when its schema-two rewrite is interrupted", () => {
+    const properties = new MemoryPropertyStore();
+    const prefix = "computer:legacy-rewrite-failure";
+    const original = { body: "legacy remains committed", version: 1 };
+    writeLegacyGeneration(properties, prefix, 1, original, 8);
+    properties.values.set(`${prefix}:head`, "1");
+    const store = new TransactionalPagedStore(properties, prefix, 8);
+    properties.failOnWrite = properties.writes + 2;
+
+    expect(() =>
+      store.save({
+        body: "replacement that needs several new-format blobs",
+        version: 2,
+      }),
+    ).toThrow("Injected write failure.");
+    expect(properties.values.get(`${prefix}:head`)).toBe("1");
+    expect(store.load(isSavedDocument)).toEqual({
+      generation: 1,
+      recovered: false,
+      sourceFormat: "legacy_indexed_pages",
+      value: original,
+    });
+  });
+
+  it("deletes obsolete legacy pages in bounded save steps", () => {
+    const properties = new MemoryPropertyStore();
+    const prefix = "computer:legacy-cleanup";
+    writeLegacyGeneration(
+      properties,
+      prefix,
+      1,
+      { body: "obsolete legacy pages", version: 1 },
+      6,
+    );
+    writeLegacyGeneration(
+      properties,
+      prefix,
+      2,
+      { body: "retained legacy pages", version: 2 },
+      6,
+    );
+    properties.values.set(`${prefix}:head`, "2");
+    const store = new TransactionalPagedStore(properties, prefix, 6);
+    const transaction = store.beginSave({ body: "new format", version: 3 });
+
+    for (let step = 0; step < 100; step += 1) {
+      const writesBefore = properties.writes;
+      const deletesBefore = properties.deleteKeys.length;
+      const result = transaction.step(1);
+      expect(
+        properties.writes -
+          writesBefore +
+          (properties.deleteKeys.length - deletesBefore),
+      ).toBeLessThanOrEqual(1);
+      if (result.outcome === "complete") break;
+      if (step === 99) throw new Error("Legacy cleanup did not terminate.");
+    }
+
+    expect(properties.values.has(`${prefix}:manifest:1`)).toBe(false);
+    expect(
+      [...properties.values.keys()].some((key) =>
+        key.startsWith(`${prefix}:page:1:`),
+      ),
+    ).toBe(false);
+    expect(properties.values.has(`${prefix}:manifest:2`)).toBe(true);
+    expect(
+      [...properties.values.keys()].some((key) =>
+        key.startsWith(`${prefix}:page:2:`),
+      ),
+    ).toBe(true);
+    expect(store.load(isSavedDocument)).toMatchObject({
+      generation: 3,
+      sourceFormat: "content_addressed_blobs",
+      value: { version: 3 },
+    });
   });
 });

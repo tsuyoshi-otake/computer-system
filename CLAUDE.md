@@ -42,6 +42,10 @@ Bedrock adapters -> application services -> domain/runtime abstractions
   must each have one finalization owner.
 - Preserve computer identity and storage transactionally across block, item,
   portable, monitor, reload, and rollback paths.
+- Preserve the startup storage-migration activation boundary: validate the
+  current generation before its previous-generation fallback, migrate and verify
+  referenced Computers before committing the identity registry, and advance at
+  no more than one Dynamic Property operation per host tick.
 - Mount immutable OS-image bytes from one shared, prevalidated base. Persist
   only per-Computer content-addressed overlays, metadata, hard links, and
   deletion tombstones; never duplicate the base image for every Computer or
@@ -227,7 +231,15 @@ The July 2026 live GDK verification established the following:
   complete cell height so full-screen backgrounds do not develop row gaps.
 - New identities use a collision-checked `c-xxxxxx` format. The lowercase
   Crockford Base32 payload decodes to the stable 30-bit numeric computer ID;
-  legacy identity snapshots are not migrated automatically.
+  migration does not renumber an existing `computer-N` identity or accept an
+  unsupported identity-payload schema. It only re-encodes a valid schema-2
+  identity registry from the legacy paged-store format.
+- Startup recognizes legacy schema-1 indexed page manifests and schema-1
+  Computer/filesystem snapshots. It migrates and verifies referenced Computers
+  before writing the identity generation last, logs state transitions as
+  `CS_STORAGE_MIGRATION`, and gates Computer/Web startup until an explicit
+  terminal result. A restart rescans safely and skips already-current Computer
+  generations.
 - A Computer has one Web Terminal writer lease. Each newly opened session takes
   control immediately and demotes the previous writer to view-only. A demoted
   session may use **Take control** to reclaim the lease. Viewer input is
@@ -276,10 +288,22 @@ The July 2026 live GDK verification established the following:
   adapters expose explicit resumable/deferred outcomes; do not claim their
   reserved lanes as separate production measurements yet. See
   `docs/work-monitor.md`.
-- `WEB_COMPANION_AUTO_OPEN=1` opens the activated path through loopback in the
-  companion host's default browser even while the published entry page uses a
-  LAN address. It cannot open a remote player's browser; Minecraft prints the
-  stable LAN entry page and four-digit number for that player instead.
+- Admit bounded native shell and terminal work before executing it. A
+  post-execution admission check can turn an otherwise successful command into
+  an uncaught host-budget failure after its side effects have already occurred.
+- BDS 1.26 rejects a custom block that declares both
+  `minecraft:redstone_consumer` and `minecraft:redstone_producer`. Computer
+  blocks keep the producer component and sample all six adjacent inputs through
+  the existing fixed-batch redstone poll; do not restore the incompatible
+  consumer component.
+- With `WEB_COMPANION_AUTO_OPEN` unset, a literal published IP that belongs to
+  the companion host automatically opens the activated path through loopback in
+  that host's default browser. `0` disables this behavior and `1` enables it
+  explicitly while retaining listener-reachability checks. A custom public
+  origin never enables automatic mode. The check identifies the server endpoint,
+  not the initiating player's IP, and cannot open a remote player's browser;
+  Minecraft prints the stable LAN entry page and four-digit number for that
+  player instead.
 - Production CS-Linux requires first-boot password setup and later login. The
   salted bounded SHA-256 record lives in `/etc/shadow`; plaintext is never
   persisted or echoed. Secret Web input is masked and excluded from browser
@@ -448,9 +472,15 @@ World Dynamic Properties remain the Bedrock source of truth (physically the
 world LevelDB). Clean persistence checks use component revision tokens, not
 whole-snapshot JSON fingerprints. Retain only the current and previous complete
 paged generations, address pages by content, reuse unchanged page properties,
-and preserve the checksum-backed fallback before expanding storage features.
-SQLite belongs only behind the repository boundary for a future non-Bedrock
-host.
+and preserve the checksum-backed, current-head-first fallback before expanding
+storage features. The startup migrator may read schema-1 indexed pages and
+schema-1 Computer/filesystem payloads, but it must commit and verify each
+current-format Computer before the identity registry is activated last. Every
+branch must terminate as complete or failed, one tick may perform at most one
+Dynamic Property read/write/delete, and restart must be idempotent. Never
+inspect or copy a live world LevelDB for deployment; stop BDS and back up the
+complete world first. SQLite belongs only behind the repository boundary for a
+future non-Bedrock host.
 
 ## Development conventions
 
