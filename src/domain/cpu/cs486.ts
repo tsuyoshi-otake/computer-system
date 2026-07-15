@@ -218,9 +218,16 @@ export class Cs486Process implements CpuProcess {
     return this.cycleDebt > 0;
   }
 
-  runCpuSlice(cpuCycleBudget: number): CpuProcessSliceResult {
+  runCpuSlice(
+    cpuCycleBudget: number,
+    instructionBudget = Number.MAX_SAFE_INTEGER,
+  ): CpuProcessSliceResult {
     if (!Number.isSafeInteger(cpuCycleBudget) || cpuCycleBudget <= 0)
       throw new RangeError("CPU cycle budget must be a positive safe integer");
+    if (!Number.isSafeInteger(instructionBudget) || instructionBudget <= 0)
+      throw new RangeError(
+        "instruction budget must be a positive safe integer",
+      );
     if (this.stateValue.kind !== "ready" && this.cycleDebt === 0)
       return { cpuCycles: 0, executedInstructions: 0, state: this.stateValue };
 
@@ -236,6 +243,7 @@ export class Cs486Process implements CpuProcess {
         cpuCycles += paid;
         continue;
       }
+      if (executedInstructions >= instructionBudget) break;
       if (this.stateValue.kind !== "ready") break;
       try {
         const cycles = this.executeNext();

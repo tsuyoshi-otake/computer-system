@@ -5,6 +5,8 @@ Parent: #1 Blocked by: #4
 ## Scope
 
 - [ ] Implement the Peripheral Bus and attach/detach events.
+- [x] Add the bounded six-face RS-232C, SPI, and I2C controller foundations,
+      fixed Linux/DOS device numbering, and machine-relative topology mapping.
 - [ ] Implement the Redstone Interface and independent analog output fallback.
 - [ ] Implement Disk Drive, Floppy Disk, and `/disk`, `/disk2` mount behavior.
 - [ ] Implement Monitor and Advanced Monitor using the validated rendering

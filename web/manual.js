@@ -1,9 +1,6 @@
-const chapters = [
+const rawChapters = [
   {
     id: "orientation",
-    number: "01",
-    title: "System orientation",
-    summary: "Boot, edit, execute, observe",
     html: `
       <header class="manual-page-header">
         <p class="manual-kicker">Chapter 01 · Operator orientation</p>
@@ -11,11 +8,13 @@ const chapters = [
         <p class="manual-lead">A Computer is a persistent, sandboxed machine. The desktop runs Computer System Linux 1.0 (CS-Linux 1.0); the portable runs Computer System DOS 6.2 (CS-DOS 6.2). Its terminal, files, redstone state, CPU budget, and RAM belong to its identity and survive normal world reloads.</p>
       </header>
       <div class="manual-spec-line"><span>Desktop</span><b>CS486DX · 33 MHz · 2 MiB</b><span>Advanced</span><b>CS486DX2 · 66 MHz · 8 MiB</b><span>Portable</span><b>CS386SX · 16 MHz · 2 MiB</b></div>
+      <section class="manual-section"><h3>1.1 Choose a machine</h3><table><thead><tr><th>Machine</th><th>Default profile</th><th>Display</th><th>Languages</th></tr></thead><tbody><tr><td>Desktop</td><td>CS486DX · CS-Linux 1.0</td><td>Exactly one adjacent Monitor</td><td>Computer System Python, ASM, BASIC, C, C++</td></tr><tr><td>Advanced Desktop</td><td>CS486DX2 · CS-Linux 1.0</td><td>Exactly one adjacent Monitor</td><td>Computer System Python, ASM, BASIC, C, C++</td></tr><tr><td>Portable</td><td>CS386SX · CS-DOS 6.2</td><td>Built-in; held or placed</td><td>ASM, BASIC, C, C++; no user Python</td></tr></tbody></table><p>Choose the machine from the operating profile and display you need. Hardware identity, OS profile, storage, and the permanent browser connection number persist with the Computer identity.</p></section>
+      <section class="manual-section"><h3>1.2 Power on, connect, and sign in</h3><ol class="manual-procedure"><li><b>Power on.</b> CSBIOS reports the persisted hardware, then hands control to the selected OS.</li><li><b>Connect.</b> Activate the eligible machine and enter its four-digit number on the Web Terminal entry page.</li><li><b>Initialize credentials.</b> A new CS-Linux installation asks for and confirms a password before exposing the shell.</li><li><b>Authenticate later boots.</b> Existing CS-Linux installations stop at <code>Password:</code>; CS-DOS presents <code>C:\\&gt;</code> after its bounded startup files finish.</li></ol><p>Each OS boot resets the display but does not format the guest disk. Password plaintext is never stored or written to terminal history.</p></section>
       <section class="manual-section">
-        <h3>1.1 Operating cycle</h3>
+        <h3>1.3 Operating cycle</h3>
         <ol class="manual-procedure">
           <li><b>Inspect.</b> Run <code>cpuinfo</code>, <code>free -h</code>, and <code>quota</code>.</li>
-          <li><b>Edit.</b> Use <code>vi</code> for source files. Desktop MicroPython starts at <code>/startup.py</code>; the portable DOS profile uses <code>AUTOEXEC.BAT</code>.</li>
+          <li><b>Edit.</b> Use <code>vi</code> for source files. Desktop Computer System Python starts at <code>/startup.py</code>; the portable DOS profile uses <code>AUTOEXEC.BAT</code>.</li>
           <li><b>Build.</b> Use <code>as</code>, <code>basicc</code>, <code>cc</code>, or <code>c++</code>; add <code>-c</code> for an object and combine objects with <code>ld</code>.</li>
           <li><b>Measure.</b> Run compiled programs with <code>run --stats</code>.</li>
           <li><b>Optimize.</b> Compare instructions, cycles, output, and memory use—not host wall time.</li>
@@ -26,19 +25,17 @@ const chapters = [
         <div><h3>Volatile or bounded</h3><p><code>/tmp</code>, active VM frames, event queues, compiler work, terminal output, retries, and each direct machine run.</p></div>
       </section>
       <aside class="manual-callout"><b>Safety boundary</b><p>No guest language launches PowerShell, cmd.exe, a host compiler, BDS administration, or native binaries. Unsupported behavior fails inside the guest.</p></aside>
-      <section class="manual-section"><h3>1.2 First inspection</h3><pre><code>whoami
+      <section class="manual-section"><h3>1.4 First inspection</h3><pre><code>whoami
 pwd
 cpuinfo
 free -h
 df
 quota
-ls -la /</code></pre></section>`,
+ls -la /</code></pre></section>
+      <section class="manual-section"><h3>1.5 Choose a reading route</h3><table><thead><tr><th>Goal</th><th>Route</th></tr></thead><tbody><tr><td>First program</td><td>01 → 02 → 03 → 05</td></tr><tr><td>Python + Redstone</td><td>01 → 02 → 03 → 05 → 06 → 07</td></tr><tr><td>CS-Linux operator</td><td>01 → 02 → 03 → 04 → 15</td></tr><tr><td>Native development</td><td>01 → 03 → 09 → 10 / 11 / 12 → 13</td></tr><tr><td>Portable / CS-DOS</td><td>01 → 02 → 14 → 09 → 10 / 11 / 12</td></tr><tr><td>Diagnose a problem</td><td>15 → 16</td></tr></tbody></table><p>Reference chapters are destinations, not prerequisites. Follow one route, then use manual search to jump directly to a command, API, instruction, fault, or concept.</p></section>`,
   },
   {
     id: "architecture",
-    number: "02",
-    title: "Machine architecture",
-    summary: "Registers, memory, cycles, faults",
     html: `
       <header class="manual-page-header"><p class="manual-kicker">Chapter 02 · Hardware model</p><h2>Three machine profiles, one safe instruction format</h2><p class="manual-lead">Desktop Computer Systems select a CS486DX at 33 MHz with 2 MiB RAM; Advanced Desktop Computer Systems select a CS486DX2 at 66 MHz with 8 MiB RAM; the Portable Computer System selects a CS386SX at 16 MHz with 2 MiB RAM. The persisted CPU model selects timing in O(1), while the bounded scheduler arbitrates actual BDS work fairly.</p></header>
       <figure class="manual-figure manual-figure--desktop"><img src="/assets/manual/desktop-computer-system.png" alt="Desktop Computer System with a 486DX 33 MHz system unit, monochrome CRT, keyboard, mouse, and floppy drives" loading="lazy" decoding="async"><figcaption><b>Desktop Computer System.</b> The workstation illustration establishes the nominal CS486DX hardware identity. The Minecraft implementation models the machine rather than emulating the pictured host hardware literally.</figcaption></figure>
@@ -67,9 +64,6 @@ ls -la /</code></pre></section>`,
   },
   {
     id: "assembly",
-    number: "10",
-    title: "Assembly language",
-    summary: "Complete CS486 instruction reference",
     html: `
       <header class="manual-page-header"><p class="manual-kicker">Chapter 10 · Low-level programming</p><h2>CS486 assembly language</h2><p class="manual-lead">One instruction per line. Labels end in a colon; semicolons begin comments. Registers are case-insensitive. Memory operands use square brackets.</p></header>
       <section class="manual-section"><h3>10.1 Build and inspect</h3><pre><code>as total.asm -o total
@@ -101,29 +95,33 @@ halt</code></pre></section>
   },
   {
     id: "micropython",
-    number: "06",
-    title: "MicroPython on CS processors",
-    summary: "Boot, imports, and native modules",
     html: `
-      <header class="manual-page-header"><p class="manual-kicker">Chapter 06 · Desktop language runtime</p><h2>Computer System MicroPython</h2><p class="manual-lead">On the desktop CS486DX and CS486DX2 profiles, the MicroPython-compatible language compiles to the same resumable guest process as C, C++, ASM, and BASIC; there is no separate Python VM. Source in <code>/startup.py</code> starts when the Computer powers on. The portable CS386SX DOS profile does not expose user MicroPython.</p></header>
+      <header class="manual-page-header"><p class="manual-kicker">Chapter 06 · Desktop language runtime</p><h2>Computer System Python on CS486</h2><p class="manual-lead">On the desktop CS486DX and CS486DX2 profiles, the MicroPython-compatible language compiles to the same resumable guest process as C, C++, ASM, and BASIC; there is no separate Python VM. Source in <code>/startup.py</code> starts when the Computer powers on. The portable CS386SX DOS profile does not expose user MicroPython.</p></header>
       <section class="manual-section manual-grid-2"><div><h3>6.1 Edit and boot</h3><pre><code>vi /startup.py
-        reboot</code></pre><p>Normal completion powers the program down. Infinite work remains preemptible by the common scheduler.</p></div><div><h3>6.2 Core language</h3><p>Variables, numbers, strings, booleans, lists, tuples, dictionaries, functions, imports, conditionals, loops, exceptions, formatting, and bounded built-ins compile to shared call/jump control flow and allowlisted managed-runtime syscalls.</p></div></section>
+        reboot</code></pre><p>Normal completion powers the program down. Infinite work remains preemptible by the common scheduler.</p><p>CS-Linux can also compile and run a source file as a foreground process from the normal Web Terminal:</p><pre><code>python /tmp/program.py
+python --stats /tmp/program.py
+micropython /tmp/program.py</code></pre><p><code>python</code> and <code>micropython</code> are aliases for the same Computer System Python frontend. The shell waits while the process runs, routes guest events to it, and restores the prompt after completion, failure, or <kbd>Ctrl</kbd>+<kbd>C</kbd>. Add <code>--stats</code> to print machine instructions, modeled CPU cycles, and virtual time. Foreground Python is intentionally rejected inside pipelines, redirects, scripts, and command chains. <code>/startup.py</code> remains the boot program; the MCP form remains a bounded non-TUI debug probe.</p></div><div><h3>6.2 Core language</h3><p>Variables, numbers, strings, booleans, lists, tuples, dictionaries, functions, imports, conditionals, loops, exceptions, formatting, and bounded built-ins compile to shared call/jump control flow and allowlisted managed-runtime syscalls.</p></div></section>
       <section class="manual-section"><h3>6.3 Native modules</h3><table><thead><tr><th>Module</th><th>Purpose</th><th>Representative calls</th></tr></thead><tbody>
         <tr><td>os</td><td>Identity, time, events, timers, lifecycle</td><td>get_computer_id, clock, sleep, pull_event, queue_event, shutdown, reboot</td></tr>
         <tr><td>term</td><td>Fixed-cell terminal</td><td>write, clear, set_cursor_pos, set_text_color</td></tr>
         <tr><td>fs</td><td>Sandbox filesystem</td><td>read_file, write_file, exists, make_dir, get_size, get_free_space</td></tr>
         <tr><td>redstone</td><td>Six-sided digital / analog I/O</td><td>get_input, get_analog_input, set_output</td></tr>
+        <tr><td>serial</td><td>Six full-duplex RS-232C ports</td><td>read, write, status</td></tr>
+        <tr><td>spi</td><td>Bounded controller transfers</td><td>transfer</td></tr>
+        <tr><td>i2c</td><td>Bounded addressed controller transfers</td><td>scan, transfer</td></tr>
         <tr><td>shell</td><td>Terminal shell adapter</td><td>banner, prompt, submit, keys</td></tr>
       </tbody></table></section>
       <section class="manual-section"><h3>6.4 Python modules</h3><pre><code># /home/computer/main.py
 import helper
 print(helper.answer())</code></pre><p>Module lookup checks the importing file's directory, then <code>/lib/python</code> and <code>/usr/lib/computer-system/python</code>. A <code>.py</code> module initializes once. Missing, circular, oversized, and failed imports stop with <code>ImportError</code>.</p></section>
-      <section class="manual-section"><h3>6.5 Import a C or C++ object</h3><pre><code>cc -c fastmath.c -o fastmath.o
-python main.py
+      <section class="manual-section"><h3>6.5 Import a C or C++ object</h3><pre><code>cc -c /fastmath.c -o /fastmath.o
+vi /startup.py
 
-# main.py
+# /startup.py
 import fastmath
-print(fastmath.answer())</code></pre><p>A sibling <code>CS486OBJ</code> file or one in a Python library directory becomes a module. Its global functions use the current zero-argument integer ABI and return through EAX. The function executes inside the calling Python CS486 process, so its instructions, cycles, faults, and RAM accesses use the same limits. This is sandboxed static extension loading, not a host DLL or shared object.</p></section>
+print(fastmath.answer())
+
+reboot</code></pre><p>A sibling <code>CS486OBJ</code> file or one in a Python library directory becomes a module. Its global functions use the current zero-argument integer ABI and return through EAX. The function executes inside the calling Python CS486 process, so its instructions, cycles, faults, and RAM accesses use the same limits. This is sandboxed static extension loading, not a host DLL or shared object.</p></section>
       <section class="manual-section"><h3>6.6 Event-driven output</h3><pre><code>import os
 import redstone
 
@@ -137,9 +135,6 @@ while True:
   },
   {
     id: "shell",
-    number: "04",
-    title: "Bash and utilities",
-    summary: "Pipelines, scripts, startup files",
     html: `
       <header class="manual-page-header"><p class="manual-kicker">Chapter 04 · Command environment</p><h2>Computer System Bash</h2><p class="manual-lead">A bounded compatibility shell implemented inside the application layer. It is not host Bash and cannot escape to a native process.</p></header>
       <section class="manual-section"><h3>4.1 Grammar</h3><table><thead><tr><th>Feature</th><th>Syntax</th></tr></thead><tbody><tr><td>Pipeline</td><td><code>a | b</code></td></tr><tr><td>Redirection</td><td><code>&lt;</code>, <code>&gt;</code>, <code>&gt;&gt;</code></td></tr><tr><td>Control</td><td><code>&amp;&amp;</code>, <code>||</code>, <code>;</code></td></tr><tr><td>Expansion</td><td><code>$VAR</code>, <code>$?</code>, positional parameters</td></tr><tr><td>Scripts</td><td>if/else, for, while, functions, break, continue, return, source</td></tr></tbody></table></section>
@@ -154,9 +149,6 @@ done | sort | uniq</code></pre></div></section>
   },
   {
     id: "basic",
-    number: "11",
-    title: "BASIC",
-    summary: "Line-oriented compiled programs",
     html: `
       <header class="manual-page-header"><p class="manual-kicker">Chapter 11 · BASIC compiler</p><h2>Structured and numbered BASIC</h2><p class="manual-lead">BASIC source compiles to the same validated CS486 executable as assembly, C, and C++. Line numbers are optional except as GOTO targets.</p></header>
       <section class="manual-section"><h3>11.1 Build modes</h3><pre><code>basic program.bas              # compile and run
@@ -173,9 +165,6 @@ run --stats program</code></pre></section>
   },
   {
     id: "c-family",
-    number: "12",
-    title: "C and C++",
-    summary: "Safe compiled subsets",
     html: `
       <header class="manual-page-header"><p class="manual-kicker">Chapter 12 · C-family compilers</p><h2>Typed source for the CS486 target</h2><p class="manual-lead">The compilers accept deliberately small, auditable subsets. They do not invoke GCC or Clang and do not claim ISO language or x86 binary compatibility.</p></header>
       <section class="manual-section manual-grid-2"><div><h3>12.1 C</h3><pre><code>cc program.c -o program</code></pre><p><code>int</code>/<code>long</code> locals, integer expressions, assignment, canonical for loops, <code>printf("%d\\n", value)</code>, and return.</p></div><div><h3>12.2 C++</h3><pre><code>c++ program.cpp -o program</code></pre><p>The C subset plus <code>std::cout &lt;&lt; value &lt;&lt; std::endl</code>. Classes, templates, exceptions, RTTI, and the standard library are not implemented.</p></div></section>
@@ -193,6 +182,7 @@ as -c fast.asm -o fast.o
 nm main.o
 ld main.o fast.o -o program
 run --stats program</code></pre><p>The versioned <code>CS486OBJ</code> format carries symbols, relocations, and object-relative data size. <code>extern int fast();</code> imports a zero-argument function; a C/C++ definition or <code>global fast</code> ASM label exports it. The callee returns its integer in EAX. Duplicate and unresolved symbols stop the link. Placing a valid object beside a Python script or in a Python library directory also permits <code>import fast</code>; every imported machine instruction is charged to the caller.</p></section>
+      <section class="manual-section"><h3>12.6 Cross-profile executable compatibility</h3><p><code>as</code>, <code>basicc</code>, <code>cc</code>, and <code>c++</code> write the same validated <b>Computer System CS486 executable</b> format under CS-Linux and CS-DOS. It is not Linux ELF, a native DOS <code>.COM</code>/<code>.EXE</code>, or host x86 machine code. A CS486 executable built under CS-Linux can run under CS-DOS after it is transferred intact to a valid DOS 8.3 path. The destination Computer supplies the CPU timing, cache or bus behavior, RAM ceiling, and filesystem rules.</p><p>There is currently no guest command for copying a file between two different Computer identities and no shared guest disk. Therefore format compatibility does not imply that <code>cp</code> can cross machines. In the live reference run, compiling the same sources separately produced the same artifact sizes on both profiles: 557 bytes for ASM, 2,132 for BASIC, and 2,308 for both C and C++. This confirms the common toolchain path, but it is not a demonstration of an operator-visible cross-machine transfer.</p></section>
       <section class="manual-section"><h3>12.6 Restricted inline assembly</h3><pre><code>int answer = 0;
 asm("mov eax, 6");
 asm("mul eax, 7");
@@ -201,9 +191,6 @@ asm("store [answer], eax");</code></pre><p>Inline assembly executes at a stateme
   },
   {
     id: "io-files",
-    number: "05",
-    title: "Filesystem and storage",
-    summary: "Paths, devices, quota, persistence",
     html: `
       <header class="manual-page-header"><p class="manual-kicker">Chapter 05 · Filesystem interface</p><h2>Filesystem and storage</h2><p class="manual-lead">Minecraft behavior is exposed through bounded adapters. The domain/runtime core does not import Minecraft APIs.</p></header>
       <section class="manual-section"><h3>5.1 Linux layout</h3><table><thead><tr><th>Path</th><th>Role</th></tr></thead><tbody><tr><td>/etc</td><td>Root-owned system configuration and Bash startup</td></tr><tr><td>/dev</td><td>Virtual devices</td></tr><tr><td>/proc</td><td>Dynamic CPU, memory, version, uptime, load, and mount information</td></tr><tr><td>/tmp</td><td>Volatile mode-1777 working files</td></tr><tr><td>/usr</td><td>Userland hierarchy</td></tr><tr><td>/home/computer</td><td>UID/GID 1000 default user home</td></tr></tbody></table><p>CS-Linux persists mode, UID, GID, modification time, symbolic links, and hard-link groups. Older snapshots without metadata remain readable and receive safe defaults on boot.</p></section>
@@ -223,11 +210,9 @@ cat /proc/mounts</code></pre><p>These entries are read-only views generated from
   },
   {
     id: "terminal-editor",
-    number: "03",
-    title: "Terminal and editors",
-    summary: "Keyboard, viewport, editing workflow",
     html: `
       <header class="manual-page-header"><p class="manual-kicker">Chapter 03 · Operator console</p><h2>Terminal control and source editing</h2><p class="manual-lead">The terminal is a fixed-cell machine display. The Web Terminal keeps the guest grid at 80x25 and scales its glyphs with the browser viewport while preserving the same cells, cursor, colors, and input semantics.</p></header>
+      <section class="manual-section"><h3>3.1 Web access and session states</h3><table><thead><tr><th>State</th><th>What the operator can do</th><th>Terminal outcome</th></tr></thead><tbody><tr><td>Writer</td><td>Type, paste, submit, interrupt, and edit. A newly opened session takes control immediately.</td><td>Input is accepted at both transport boundaries.</td></tr><tr><td>Viewer</td><td>Select and copy. Use <b>Take control</b> to reclaim the single writer lease.</td><td>Viewer input is rejected explicitly.</td></tr><tr><td><code>out_of_range</code></td><td>Return within three blocks of a placed machine.</td><td>The live stream pauses without destroying the session.</td></tr><tr><td>Disconnected</td><td>Reconnect with the remembered four-digit number.</td><td>The bearer token rotates; persisted machine state remains.</td></tr><tr><td>Closed</td><td>No further input is accepted.</td><td>Only the final detached session emits <code>terminal_closed</code>.</td></tr></tbody></table></section>
       <section class="manual-section"><h3>3.1 Keyboard map</h3><table><thead><tr><th>Key</th><th>Shell action</th><th>vi action</th></tr></thead><tbody><tr><td>Enter</td><td>Submit command</td><td>Insert newline</td></tr><tr><td>Tab</td><td>Complete command or path</td><td>Insert indentation</td></tr><tr><td>↑ / ↓</td><td>Command history</td><td>Move cursor</td></tr><tr><td>Ctrl+C</td><td>Bounded interrupt</td><td>Interrupt current input</td></tr><tr><td>Ctrl+V</td><td>Paste clipboard text</td><td>Paste in insert mode</td></tr></tbody></table></section>
       <section class="manual-section manual-grid-2"><div><h3>3.2 Normal mode</h3><div class="manual-command-bank"><p><b>Move</b> h j k l, arrows, gg/G, PageUp/PageDown</p><p><b>Edit</b> i/I, a/A, o/O, x, dd</p><p><b>History</b> u</p><p><b>Save + quit</b> Shift+ZZ</p><p><b>Discard + quit</b> Shift+ZQ</p><p><b>Leave insert</b> Esc or Ctrl+[</p></div></div><div><h3>3.3 Command mode</h3><div class="manual-command-bank"><p><b>Save</b> :w</p><p><b>Name and save</b> :w path</p><p><b>Quit</b> :q</p><p><b>Save + quit</b> :wq, :wq!, or :x</p><p><b>Discard</b> :q!</p><p><b>Cancel empty :</b> Backspace</p></div><p>Bare <code>vi</code> opens <code>[No Name]</code>. It must be named with <code>:w path</code> before an unnamed save can succeed.</p></div></section>
       <section class="manual-section"><h3>3.4 DOS-style EDIT</h3><p>On the DOS profile, <code>EDIT [path]</code> opens a blue full-screen editor. Bare <code>EDIT</code> starts an <code>UNTITLED</code> buffer and F2 saves it as <code>C:\\NONAME.TXT</code>. Linux does not expose EDIT and uses <code>vi</code>. The top bar exposes File, Edit, Search, Options, and Help; the lower rows show the DOS path, modified state, line, column, and INS/OVR mode.</p><table><thead><tr><th>Key</th><th>Action</th></tr></thead><tbody><tr><td>F2 / Ctrl+S</td><td>Save and report success or failure</td></tr><tr><td>F10 / Alt+F</td><td>Open keyboard menus; arrows and Enter select</td></tr><tr><td>Ctrl+F / F3</td><td>Find text / find next with bounded forward search</td></tr><tr><td>Ctrl+Home / Ctrl+End</td><td>Move to the start or end of the document</td></tr><tr><td>Ctrl+Left / Ctrl+Right</td><td>Move by word</td></tr><tr><td>Ctrl+Y / Ctrl+Z</td><td>Delete the current line / undo</td></tr><tr><td>Insert</td><td>Toggle insert and overwrite modes</td></tr><tr><td>Alt+F, X</td><td>Exit; a dirty buffer requires Save, Discard, or Cancel</td></tr></tbody></table></section>
@@ -236,29 +221,28 @@ cat /proc/mounts</code></pre><p>These entries are read-only views generated from
   },
   {
     id: "redstone-peripherals",
-    number: "08",
-    title: "Redstone and peripherals",
-    summary: "Sides, signals, events, adapters",
     html: `
       <header class="manual-page-header"><p class="manual-kicker">Chapter 08 · World interface</p><h2>Connecting programs to Minecraft</h2><p class="manual-lead">World I/O crosses a narrow adapter boundary. A program observes snapshots and bounded events; it never calls Bedrock APIs directly.</p></header>
       <div class="manual-spec-line"><span>Sides</span><b>6</b><span>Digital</span><b>false / true</b><span>Analog input</span><b>0…15</b></div>
       <section class="manual-section"><h3>8.1 Display connections</h3><table><thead><tr><th>Machine</th><th>Web Terminal rule</th></tr></thead><tbody><tr><td>Desktop / Advanced Desktop</td><td>Requires exactly one adjacent Monitor. Selecting a bare Computer does not open a terminal.</td></tr><tr><td>Monitor</td><td>Resolves the physically adjacent Desktop Computer System. No connection and ambiguous multiple connections fail explicitly.</td></tr><tr><td>Portable Computer System</td><td>Its display is built in. Use it while held, or place and touch the open-laptop block; no external Monitor is required.</td></tr></tbody></table><p>Each Computer has a permanent four-digit connection number. Touching an eligible machine activates it once for two minutes; enter it at the stable LAN Web Terminal page. After connection, the browser stores the number locally and changes the bookmarkable URL to <code>/?computer=NNNN</code>; bearer tokens are never placed in that query. Invalid guesses are rate-limited and simultaneous number collisions fail explicitly. Placed-machine control requires the player to remain within three blocks. Leaving the radius or dimension pauses input as <code>out_of_range</code> without destroying the bounded session; returning resumes the existing tab, while a reloaded bookmark rotates the bearer token and reconnects automatically. Portable placement transfers the same persistent Computer identity from item to block. Breaking it returns an identity-carrying Portable Computer System item.</p></section>
       <section class="manual-section"><h3>8.2 Side names</h3><table><thead><tr><th>Name</th><th>Meaning</th><th>Use</th></tr></thead><tbody><tr><td>top / bottom</td><td>Vertical faces</td><td>Stacks and floor wiring</td></tr><tr><td>front / back</td><td>Relative to block orientation</td><td>Operator-facing machines</td></tr><tr><td>left / right</td><td>Relative lateral faces</td><td>Relay and control pairs</td></tr></tbody></table></section>
-      <section class="manual-section"><h3>8.3 Polling and events</h3><pre><code>import os
+      <section class="manual-section"><h3>8.3 Six-face serial, SPI, and I2C</h3><table><thead><tr><th>Linux bus / DOS bus</th><th>Face</th><th>Linux devices</th><th>DOS devices</th></tr></thead><tbody><tr><td>0 / 1</td><td>bottom</td><td><code>ttyS0</code>, <code>spidev0.0</code>, <code>i2c-0</code></td><td><code>COM1</code>, <code>SPI1</code>, <code>I2C1</code></td></tr><tr><td>1 / 2</td><td>right</td><td><code>ttyS1</code>, <code>spidev1.0</code>, <code>i2c-1</code></td><td><code>COM2</code>, <code>SPI2</code>, <code>I2C2</code></td></tr><tr><td>2 / 3</td><td>front</td><td><code>ttyS2</code>, <code>spidev2.0</code>, <code>i2c-2</code></td><td><code>COM3</code>, <code>SPI3</code>, <code>I2C3</code></td></tr><tr><td>3 / 4</td><td>back</td><td><code>ttyS3</code>, <code>spidev3.0</code>, <code>i2c-3</code></td><td><code>COM4</code>, <code>SPI4</code>, <code>I2C4</code></td></tr><tr><td>4 / 5</td><td>top</td><td><code>ttyS4</code>, <code>spidev4.0</code>, <code>i2c-4</code></td><td><code>COM5</code>, <code>SPI5</code>, <code>I2C5</code></td></tr><tr><td>5 / 6</td><td>left</td><td><code>ttyS5</code>, <code>spidev5.0</code>, <code>i2c-5</code></td><td><code>COM6</code>, <code>SPI6</code>, <code>I2C6</code></td></tr></tbody></table><p>RS-232C is 9600 baud, 8N1, full duplex, and direct Computer-to-Computer. At 20 ticks per second each direction advances at most 48 bytes per tick. A full receive queue applies backpressure; disconnect and power changes clear stale bytes. SPI is mode 0 at 1 MHz with 8-bit MSB-first words and a 256-byte atomic limit. I2C is 100 kHz, 7-bit, and limits each combined write/read transaction to 256 bytes. SPI/I2C controller contracts are ready for future IoT blocks; an unattached target fails explicitly.</p><pre><code>printf hello &gt; /dev/ttyS0
+cat /dev/ttyS0
+spi 0 0 9f0000
+i2c 0 scan
+i2c 0 0x48 00 2</code></pre></section>
+      <section class="manual-section"><h3>8.4 Polling and events</h3><pre><code>import os
 import redstone
 
 while True:
     os.pull_event("redstone")
     level = redstone.get_analog_input("left")
     redstone.set_output("right", level &gt;= 8)</code></pre><p>Use <code>pull_event</code> instead of a tight polling loop. It yields the VM until relevant work exists and avoids consuming the machine's cycle budget while idle.</p></section>
-      <section class="manual-section"><h3>8.4 Output checklist</h3><ol class="manual-procedure"><li>Confirm orientation before assigning side names.</li><li>Read the existing input and decide a safe default output.</li><li>Handle startup before waiting for the first change event.</li><li>On failure, leave an explicit terminal state; do not spin-retry.</li></ol></section>
+      <section class="manual-section"><h3>8.5 Output checklist</h3><ol class="manual-procedure"><li>Confirm orientation before assigning side names.</li><li>Read the existing input and decide a safe default output.</li><li>Handle startup before waiting for the first change event.</li><li>On failure, leave an explicit terminal state; do not spin-retry.</li></ol></section>
       <aside class="manual-warning"><b>Capability-dependent interfaces</b><p>Computer, Portable Computer System, Monitor, Speaker, and other block behavior is exposed only when the relevant adapter exists. Missing capability calls fail explicitly rather than impersonating unavailable hardware.</p></aside>`,
   },
   {
     id: "dos-profile",
-    number: "14",
-    title: "CS-DOS profile",
-    summary: "CS-DOS 6.2 boot, memory, batch, and toolchains",
     html: `
       <header class="manual-page-header"><p class="manual-kicker">Chapter 14 · Computer System DOS 6.2</p><h2>Operating CS-DOS 6.2 on the CS386SX portable</h2><p class="manual-lead">Computer System DOS 6.2 (CS-DOS 6.2) is the portable profile for a CS386SX 16 MHz machine with 2 MiB RAM. It supports ASM, C, C++, BASIC, and bounded batch files. User MicroPython is unavailable. Storage, identity, execution limits, and the host security boundary remain shared with the CS-Linux desktop.</p></header>
       <figure class="manual-figure manual-figure--portable"><img src="/assets/manual/portable-computer-system.png" alt="Portable 386SX 16 MHz Computer System with 2 MB RAM showing a DOS prompt, VGA LCD, keyboard, trackball, floppy drive, rear ports, and battery pack" loading="lazy" decoding="async"><figcaption><b>Portable Computer System.</b> The CS386SX profile runs at 16 MHz with 2 MiB RAM, a 24-bit address bus, a 16-bit data bus, 256 KiB VRAM, and 800,000 cycles/tick. Its 800x480 physical VGA LCD centers guest modes up to 640x480; its narrower bus and 80386-derived timing are active execution constraints rather than display-only labels.</figcaption></figure>
@@ -285,13 +269,18 @@ ECHO SOURCE=%1
 CC %1 -O %2
 ECHO STATUS=%ERRORLEVEL%</code></pre><p>A command without a path is resolved in the current directory and then <code>PATH</code>; the <code>.BAT</code> suffix may be omitted. CRLF and LF are accepted. Batch substitution supports <code>%VAR%</code>, <code>%0</code> through <code>%9</code>, and <code>%ERRORLEVEL%</code>. The shared safe shell also accepts pipes, redirects, <code>&amp;&amp;</code>, and <code>||</code> as documented extensions—not as full COMMAND.COM emulation.</p><table><thead><tr><th>Bound</th><th>Limit</th><th>Failure</th></tr></thead><tbody><tr><td>Batch lines</td><td>256</td><td>Explicit line-limit status</td></tr><tr><td>Nested batch/script depth</td><td>8</td><td>Explicit depth status</td></tr><tr><td>Positional arguments</td><td>9</td><td>Additional arguments are not exposed as <code>%n</code></td></tr><tr><td>Pipeline/output buffer</td><td>256,000 characters</td><td>Explicit bounded-output status</td></tr></tbody></table><p>Labels, <code>GOTO</code>, <code>CALL</code>, <code>CHOICE</code>, and native COMMAND.COM binary behavior are not currently implemented.</p></section>
       <section class="manual-section"><h3>14.6 Command correspondence</h3><table><thead><tr><th>Task</th><th>Linux</th><th>DOS</th></tr></thead><tbody><tr><td>List / read</td><td>ls / cat</td><td>DIR / TYPE</td></tr><tr><td>Directory tree / volume</td><td>find / df</td><td>TREE / VOL</td></tr><tr><td>Edit full screen</td><td>vi</td><td>EDIT / VI</td></tr><tr><td>Create / remove directory</td><td>mkdir / rm</td><td>MD / RD (CHDIR and RMDIR aliases)</td></tr><tr><td>Copy / move / rename</td><td>cp / mv</td><td>COPY / MOVE / REN or RENAME</td></tr><tr><td>Remove file</td><td>rm</td><td>DEL or ERASE</td></tr><tr><td>Clock / measurement</td><td>date / time</td><td>TIME / TIMER</td></tr><tr><td>History</td><td>history</td><td>DOSKEY /HISTORY</td></tr><tr><td>Clear / version</td><td>clear / uname</td><td>CLS / VER</td></tr><tr><td>Hardware</td><td>cpuinfo / free</td><td>CPU / MEM, MEM /F</td></tr><tr><td>System summary</td><td>uname -a</td><td>SYSTEMINFO</td></tr></tbody></table><p>DOS-facing commands and errors use CRLF and DOS-specific wording. Commands and paths are case-insensitive, but every directory and file name follows strict 8.3 form: a 1–8 character base plus an optional 1–3 character extension. Invalid long names fail explicitly and are never silently truncated. Backslash is preserved as the displayed separator. <code>DIR /B</code> produces a bare listing; <code>TREE [/F] [/A]</code> is an O(N) traversal capped at 512 entries and 32 levels. <code>C:\\TEMP</code> is volatile across boot. <code>NUL</code> and <code>CON</code> are bounded compatibility sink devices; CON is not a raw host console.</p></section>
-      <section class="manual-section"><h3>14.7 Portable toolchains</h3><pre><code>AS ANSWER.ASM -O ANSWER
+      <section class="manual-section"><h3>14.7 Local bus commands</h3><pre><code>ECHO HELLO&gt;COM1
+TYPE COM1
+SPI 1 0 9F0000
+I2C 1 SCAN
+I2C 1 72 00 2</code></pre><p><code>COM1</code> through <code>COM6</code> are the six machine-relative RS-232C ports and work with redirection and <code>TYPE</code>. <code>SPI</code> accepts a one-based bus, chip select, and hexadecimal byte pairs. <code>I2C</code> accepts a one-based bus plus <code>SCAN</code>, or an address, write bytes (use <code>-</code> for none), and read length. These commands are valid in bounded batch files. A missing neighbor, unattached peripheral, NACK, address conflict, full queue, or powered-off endpoint returns a nonzero explicit status.</p></section>
+      <section class="manual-section"><h3>14.8 Portable toolchains</h3><pre><code>AS ANSWER.ASM -O ANSWER
 CC TOTAL.C -O TOTAL
 C++ ANSWER.CPP -O ANSCPP
 BASIC DEMO.BAS
 BASICC DEMO.BAS -O DEMO
 RUN --STATS ANSCPP</code></pre><p>ASM, the supported C subset, the supported C++ subset (including restricted inline assembly), and BASIC all produce or execute the common checked instruction format. Each run uses CS386SX timings and the 2 MiB limit. MicroPython commands and <code>/startup.py</code> are unavailable on Portable; MCP returns status 127 instead of silently using a different VM.</p></section>
-      <section class="manual-section"><h3>14.8 C++ exercise</h3><pre><code>REM ANSWER.CPP
+      <section class="manual-section"><h3>14.9 C++ exercise</h3><pre><code>REM ANSWER.CPP
 int main() {
   int answer = 6 * 7;
   std::cout &lt;&lt; answer &lt;&lt; std::endl;
@@ -300,15 +289,11 @@ int main() {
 
 C++ ANSWER.CPP -O ANSWER
 RUN --STATS ANSWER</code></pre><p>Record output, instructions, and cycles. On the 16-bit external bus, memory traffic and output can dominate. Reduce the algorithmic term first, then repeated loads, taken branches, division, and PRINT traffic.</p></section>
-      <section class="manual-section"><h3>14.9 Linux memory comparison</h3><table><thead><tr><th>Portable DOS</th><th>Desktop Linux</th></tr></thead><tbody><tr><td>640 KiB conventional + UMB/reserved + XMS</td><td>32-bit protected flat sandbox</td></tr><tr><td>Inspect with CPU, MEM, MEM /C, MEM /D</td><td>Inspect with cpuinfo, free, /proc/cpuinfo, /proc/meminfo</td></tr><tr><td>DOS system/drivers and guest runtime are separate</td><td>Kernel, services, buffers, and guest runtime are separate</td></tr><tr><td>HIMEM/EMM386 and DOS HIGH are modeled</td><td>Resident OS overhead plus dynamic used/free/available are reported</td></tr><tr><td>No paging or native interrupt execution</td><td>No paging, swap, process table, or MMU page emulation</td></tr></tbody></table></section>
-      <section class="manual-section"><h3>14.10 Recovery checklist</h3><ol class="manual-procedure"><li>Run <code>VER</code>, <code>CPU</code>, and <code>MEM /D</code>.</li><li>Inspect <code>TYPE C:\\CONFIG.SYS</code> and <code>TYPE C:\\AUTOEXEC.BAT</code>.</li><li>Use <code>SET</code>, <code>PATH</code>, and <code>PROMPT</code> to confirm boot state.</li><li>Use an explicit path if a BAT or compiled program is not found.</li><li>Correct every boot warning; unsupported directives are never silently accepted.</li></ol></section>
+      <section class="manual-section"><h3>14.10 Linux memory comparison</h3><table><thead><tr><th>Portable DOS</th><th>Desktop Linux</th></tr></thead><tbody><tr><td>640 KiB conventional + UMB/reserved + XMS</td><td>32-bit protected flat sandbox</td></tr><tr><td>Inspect with CPU, MEM, MEM /C, MEM /D</td><td>Inspect with cpuinfo, free, /proc/cpuinfo, /proc/meminfo</td></tr><tr><td>DOS system/drivers and guest runtime are separate</td><td>Kernel, services, buffers, and guest runtime are separate</td></tr><tr><td>HIMEM/EMM386 and DOS HIGH are modeled</td><td>Resident OS overhead plus dynamic used/free/available are reported</td></tr><tr><td>No paging or native interrupt execution</td><td>No paging, swap, process table, or MMU page emulation</td></tr></tbody></table></section>
       <aside class="manual-callout"><b>Portable profile</b><p>A newly created Portable Computer System selects CS-DOS plus CS386SX automatically. Customized OS, CPU, clock, or RAM settings remain attached to its Computer identity.</p></aside>`,
   },
   {
     id: "worked-project",
-    number: "09",
-    title: "Worked project",
-    summary: "Build, inspect, benchmark, deploy",
     html: `
       <header class="manual-page-header"><p class="manual-kicker">Chapter 09 · Laboratory exercise</p><h2>Build a signal threshold controller</h2><p class="manual-lead">This exercise joins filesystem work, source editing, redstone events, diagnostic output, and bounded execution into one repeatable operator workflow.</p></header>
       <section class="manual-section"><h3>9.1 Define the contract</h3><table><thead><tr><th>Input</th><th>Rule</th><th>Output</th></tr></thead><tbody><tr><td>Analog left, 0…15</td><td>level ≥ 8</td><td>Digital right, on</td></tr><tr><td>Analog left, 0…7</td><td>level &lt; 8</td><td>Digital right, off</td></tr></tbody></table></section>
@@ -325,32 +310,37 @@ while True:
     os.pull_event("redstone")
     update()</code></pre></section>
       <section class="manual-section"><h3>9.3 Commissioning procedure</h3><ol class="manual-procedure"><li>Save with <code>:wq</code>, then run <code>reboot</code>.</li><li>Apply levels 0, 7, 8, and 15 to the left face.</li><li>Verify the right output changes only at the threshold.</li><li>Disconnect and reconnect the terminal; verify the program and machine identity persist.</li><li>Inspect <code>free -h</code> and <code>quota</code> after the test.</li></ol></section>
+      <section class="manual-section"><h3>9.4 Verify boundary and failure cases</h3><table><thead><tr><th>Case</th><th>Verify</th><th>Expect</th></tr></thead><tbody><tr><td>Below threshold</td><td><b>Verify:</b> Apply analog levels 0 and 7 to the left face.</td><td><b>Expect:</b> The right output stays off and the terminal reports each level.</td></tr><tr><td>At and above threshold</td><td><b>Verify:</b> Apply analog levels 8 and 15.</td><td><b>Expect:</b> The right output turns on exactly at level 8.</td></tr><tr><td>Startup</td><td><b>Verify:</b> Reboot once with a stable input.</td><td><b>Expect:</b> The output reflects the input before the first event wait.</td></tr><tr><td>Connection loss</td><td><b>Verify:</b> Disconnect, reconnect, and inspect the same Computer identity.</td><td><b>Expect:</b> Source and output state persist; reconnect work remains bounded.</td></tr></tbody></table></section>
+      <section class="manual-section"><h3>9.5 Measure and inspect</h3><pre><code>cpuinfo
+free -h
+quota</code></pre><p><b>Verify:</b> Record processor identity and clock, command status, live memory, and disk use before and after one controlled input sequence.</p><p><b>Expect:</b> Output remains correct, idle event waiting does not create a polling storm, and resource use remains within the independent ceilings.</p></section>
+      <section class="manual-section"><h3>9.6 Deploy and roll back</h3><ol class="manual-procedure"><li>Copy the last known-good source before replacing <code>/startup.py</code>.</li><li>Reboot once and repeat the four boundary inputs.</li><li>If startup faults, restore the known-good file from the shell and reboot once; do not loop retries.</li></ol><p><b>Verify:</b> Power-cycle, reconnect, and repeat levels 7 and 8.</p><p><b>Expect:</b> The persisted program starts once, waits for events, and switches only at the documented boundary.</p></section>
       <aside class="manual-warning"><b>Acceptance rule</b><p>A controller is not complete because it compiled. It is complete when boundary values, startup state, event waiting, persisted source, and reconnect behavior have observable results.</p></aside>`,
   },
   {
     id: "api-reference",
-    number: "07",
-    title: "MicroPython API reference",
-    summary: "Native functions and return values",
     html: `
       <header class="manual-page-header"><p class="manual-kicker">Chapter 07 · Native API</p><h2>Runtime function reference</h2><p class="manual-lead">Snake-case names are canonical below. Selected camelCase aliases exist for ComputerCraft familiarity; portable programs should prefer one naming convention consistently.</p></header>
       <section class="manual-section"><h3>7.1 os</h3><table><thead><tr><th>Function</th><th>Result / effect</th></tr></thead><tbody><tr><td>get_computer_id()</td><td>Stable numeric Computer identity</td></tr><tr><td>clock()</td><td>Elapsed tick time in seconds</td></tr><tr><td>sleep(seconds)</td><td>Yield for a bounded tick duration</td></tr><tr><td>pull_event([filter])</td><td>Yield until the next matching event</td></tr><tr><td>queue_event(name, ...args)</td><td>Append a bounded local event</td></tr><tr><td>start_timer(seconds)</td><td>Return timer id</td></tr><tr><td>cancel_timer(id)</td><td>Return whether cancellation succeeded</td></tr><tr><td>shutdown() / reboot()</td><td>Request explicit lifecycle transition</td></tr></tbody></table></section>
       <section class="manual-section"><h3>7.2 term</h3><div class="manual-command-bank"><p><b>Writing</b> write(text), clear(), clear_line(), scroll(lines)</p><p><b>Cursor</b> set_cursor_pos(x, y), get_cursor_pos(), set_cursor_blink(bool)</p><p><b>Geometry</b> get_size()</p><p><b>Color</b> set_text_color(mask), get_text_color(), set_background_color(mask), get_background_color(), is_color()</p></div></section>
       <section class="manual-section"><h3>7.3 fs and redstone</h3><table><thead><tr><th>Module</th><th>Functions</th></tr></thead><tbody><tr><td>fs</td><td>exists, is_dir, list, make_dir, read_file, write_file, append_file, delete, copy, move, get_size, get_free_space</td></tr><tr><td>redstone</td><td>get_input(side), get_analog_input(side), get_output(side), set_output(side, bool)</td></tr></tbody></table></section>
+      <section class="manual-section"><h3>7.4 serial, spi, and i2c</h3><table><thead><tr><th>Module</th><th>Functions</th><th>Bus numbering</th></tr></thead><tbody><tr><td>serial</td><td>read(port [, maximum]), write(port, text), status(port)</td><td>0..5</td></tr><tr><td>spi</td><td>transfer(bus, chip_select, byte_list)</td><td>0..5</td></tr><tr><td>i2c</td><td>scan(bus), transfer(bus, address, write_bytes, read_length)</td><td>0..5</td></tr></tbody></table><p>These modules are available to desktop Computer System Python. The portable CS386SX DOS profile uses the batch-capable <code>SPI</code>/<code>I2C</code> commands and COM devices because user Python is unavailable.</p></section>
       <aside class="manual-callout"><b>Coordinate and color rules</b><p>Terminal coordinates are one-based. Color arguments use a single power-of-two mask; getters return that mask. Invalid arity, side, coordinate, color, path, or unavailable capability raises a guest-visible error.</p></aside>`,
   },
   {
     id: "optimization",
-    number: "13",
-    title: "Optimization workshop",
-    summary: "Measure, identify, change, compare",
     html: `
       <header class="manual-page-header"><p class="manual-kicker">Chapter 13 · Performance engineering</p><h2>Optimization is part of the machine</h2><p class="manual-lead">Use deterministic guest metrics. Host timing is affected by Minecraft ticks, other Computers, and the global scheduler cap.</p></header>
       <section class="manual-section"><h3>13.1 The loop</h3><ol class="manual-procedure"><li><b>Establish correctness.</b> Save expected output.</li><li><b>Measure.</b> Record instructions and cycles with <code>run --stats</code>.</li><li><b>Find the dominant term.</b> Count loop iterations and expensive opcodes.</li><li><b>Change one idea.</b> Algorithm, invariant motion, strength reduction, or memory layout.</li><li><b>Compare.</b> Require equal output and lower cost.</li></ol></section>
-      <section class="manual-section"><h3>13.2 Cost priorities</h3><table><thead><tr><th>Priority</th><th>Question</th><th>Typical action</th></tr></thead><tbody><tr><td>O(N)</td><td>Does work scale with input or nested iteration?</td><td>Change the algorithm first</td></tr><tr><td>Serial fraction</td><td>What remains under global scheduling?</td><td>Remove repeated setup and output</td></tr><tr><td>Opcode cost</td><td>Are DIV/MOD, taken branches, dword bus transfers, or PRINT dominant?</td><td>Strength-reduce, improve locality, or batch</td></tr><tr><td>Memory pressure</td><td>Are live objects forcing O(N) scans?</td><td>Release references and reuse buffers</td></tr></tbody></table><p>Compare optimizations on the same processor profile: CS386SX and CS486DX intentionally assign different costs to the same instruction stream.</p></section>
-      <section class="manual-section"><h3>13.3 Alignment and cache locality</h3><p>Align C/C++ data and ASM buffers to four-byte boundaries. On CS386SX, any even dword address uses two 16-bit bus transfers, while an odd address uses three. Four-byte ABI alignment remains the portable convention. On CS486, keep hot code and data in nearby 16-byte cache lines. Reusing a line produces L1 hits; scattered or conflicting addresses cause bounded line fills. The Advanced external L2 can satisfy a line evicted from L1. Stores are write-through, so reducing unnecessary writes still matters.</p><pre><code>RUN --STATS LOCAL
+      <section class="manual-section"><h3>13.2 Live strength-reduction benchmark</h3><p>These are live BDS measurements captured through the Computer System MCP on 2026-07-15. All sources compute <code>sum(i*i + 3*i + 7)</code> for <code>i = 1..1500</code>. The baseline performs two multiplications per iteration; the optimized source advances the term with first differences. Every supported run started cold and printed the same checksum, <code>1129513000</code>. Compile time, Web transport, browser rendering, Minecraft wall time, and MCP overhead are excluded. Each cell is <b>instructions · modeled CPU cycles · virtual microseconds</b>; the final column is cycle reduction.</p>
+      <h4>Advanced Desktop · 9367 · CS486DX2 66 MHz · <code>c-hvq8k7</code></h4><table><thead><tr><th>Frontend</th><th>Baseline</th><th>Strength-reduced</th><th>Reduction</th></tr></thead><tbody><tr><td>ASM</td><td>15,004 · 42,106 · 637.970 µs</td><td>9,006 · 12,084 · 183.091 µs</td><td>71.3%</td></tr><tr><td>BASIC</td><td>66,019 · 279,527 · 4,235.258 µs</td><td>54,027 · 218,089 · 3,304.379 µs</td><td>22.0%</td></tr><tr><td>C</td><td>73,526 · 299,066 · 4,531.303 µs</td><td>61,534 · 237,604 · 3,600.061 µs</td><td>20.6%</td></tr><tr><td>C++</td><td>73,526 · 299,066 · 4,531.303 µs</td><td>61,534 · 237,604 · 3,600.061 µs</td><td>20.6%</td></tr><tr><td>Computer System Python</td><td>52,532 · 638,275 · 9,670.833 µs</td><td>46,540 · 551,399 · 8,354.530 µs</td><td>13.6%</td></tr></tbody></table>
+      <h4>Desktop · 1272 · CS486DX 33 MHz · <code>c-s33g1r</code></h4><table><thead><tr><th>Frontend</th><th>Baseline</th><th>Strength-reduced</th><th>Reduction</th></tr></thead><tbody><tr><td>ASM</td><td>15,004 · 42,058 · 1,274.485 µs</td><td>9,006 · 12,048 · 365.091 µs</td><td>71.4%</td></tr><tr><td>BASIC</td><td>66,019 · 211,787 · 6,417.788 µs</td><td>54,027 · 159,325 · 4,828.030 µs</td><td>24.8%</td></tr><tr><td>C</td><td>73,526 · 226,814 · 6,873.152 µs</td><td>61,534 · 174,340 · 5,283.030 µs</td><td>23.1%</td></tr><tr><td>C++</td><td>73,526 · 226,814 · 6,873.152 µs</td><td>61,534 · 174,340 · 5,283.030 µs</td><td>23.1%</td></tr><tr><td>Computer System Python</td><td>52,532 · 638,083 · 19,335.848 µs</td><td>46,540 · 551,195 · 16,702.879 µs</td><td>13.6%</td></tr></tbody></table>
+      <h4>Portable · 2985 · CS386SX 16 MHz · <code>c-cqvhcs</code></h4><table><thead><tr><th>Frontend</th><th>Baseline</th><th>Strength-reduced</th><th>Reduction</th></tr></thead><tbody><tr><td>ASM</td><td>15,004 · 68,478 · 4,279.875 µs</td><td>9,006 · 25,522 · 1,595.125 µs</td><td>62.7%</td></tr><tr><td>BASIC</td><td>66,019 · 339,520 · 21,220.000 µs</td><td>54,027 · 250,632 · 15,664.500 µs</td><td>26.2%</td></tr><tr><td>C</td><td>73,526 · 365,061 · 22,816.313 µs</td><td>61,534 · 276,173 · 17,260.813 µs</td><td>24.3%</td></tr><tr><td>C++</td><td>73,526 · 365,061 · 22,816.313 µs</td><td>61,534 · 276,173 · 17,260.813 µs</td><td>24.3%</td></tr><tr><td>Computer System Python</td><td colspan="2">Unavailable: both MCP commands returned status 127 and <code>Bad command or file name</code>.</td><td>—</td></tr></tbody></table>
+      <p>The ordering is a property of this workload and these current frontends, not a general language ranking. The small C and C++ frontends emit the same instruction stream here. CS486DX2 does not simply halve every cycle count: its external L2 participates in cold misses, while its 66 MHz clock still lowers virtual time. CS386SX has no cache and charges its 16-bit external bus, so the same executable has a different cycle total.</p><aside class="manual-warning"><b>Measurement boundary</b><p>Use <code>run --stats</code> for compiled executables and the bounded MCP Python debug form for Python. Compare modeled CPU cycles or derived virtual time, never host JavaScript time or browser latency. The raw result set and exact sources are retained under <code>docs/benchmarks/strength-reduction/</code>.</p></aside></section>
+      <section class="manual-section"><h3>13.3 Cost priorities</h3><table><thead><tr><th>Priority</th><th>Question</th><th>Typical action</th></tr></thead><tbody><tr><td>O(N)</td><td>Does work scale with input or nested iteration?</td><td>Change the algorithm first</td></tr><tr><td>Serial fraction</td><td>What remains under global scheduling?</td><td>Remove repeated setup and output</td></tr><tr><td>Opcode cost</td><td>Are DIV/MOD, taken branches, dword bus transfers, or PRINT dominant?</td><td>Strength-reduce, improve locality, or batch</td></tr><tr><td>Memory pressure</td><td>Are live objects forcing O(N) scans?</td><td>Release references and reuse buffers</td></tr></tbody></table><p>Compare optimizations on the same processor profile: CS386SX and CS486DX intentionally assign different costs to the same instruction stream.</p></section>
+      <section class="manual-section"><h3>13.4 Alignment and cache locality</h3><p>Align C/C++ data and ASM buffers to four-byte boundaries. On CS386SX, any even dword address uses two 16-bit bus transfers, while an odd address uses three. Four-byte ABI alignment remains the portable convention. On CS486, keep hot code and data in nearby 16-byte cache lines. Reusing a line produces L1 hits; scattered or conflicting addresses cause bounded line fills. The Advanced external L2 can satisfy a line evicted from L1. Stores are write-through, so reducing unnecessary writes still matters.</p><pre><code>RUN --STATS LOCAL
 RUN --STATS SCATTER</code></pre><p>The second statistics line reports L1 and L2 hits/misses, bus transfers, unaligned dwords, and pipeline flushes. Every run starts cold, so comparisons are reproducible and do not inherit another program's cache.</p></section>
-      <section class="manual-section"><h3>13.4 Branches and pipelines</h3><p>Neither CS386SX nor CS486 implements dynamic branch prediction. CS386SX models prefetch overlap and charges taken branches more than fall-through. CS486 models a five-stage refill: a not-taken conditional branch costs one base cycle, while a taken conditional branch costs three and records a pipeline flush. JMP, CALL, RET, and runtime control transfers also flush. Prefer branch removal only after the algorithm and memory-access pattern are correct.</p></section>
+      <section class="manual-section"><h3>13.5 Branches and pipelines</h3><p>Neither CS386SX nor CS486 implements dynamic branch prediction. CS386SX models prefetch overlap and charges taken branches more than fall-through. CS486 models a five-stage refill: a not-taken conditional branch costs one base cycle, while a taken conditional branch costs three and records a pipeline flush. JMP, CALL, RET, and runtime control transfers also flush. Prefer branch removal only after the algorithm and memory-access pattern are correct.</p></section>
       <section class="manual-section manual-grid-2"><div><h3>Before</h3><pre><code>mov eax, 0
 mov ecx, 100
 loop:
@@ -363,11 +353,9 @@ mov eax, 5050</code></pre></div></section>
   },
   {
     id: "faults",
-    number: "15",
-    title: "Faults and diagnostics",
-    summary: "Terminal states and recovery",
     html: `
       <header class="manual-page-header"><p class="manual-kicker">Chapter 15 · Service information</p><h2>Faults are explicit terminal outcomes</h2><p class="manual-lead">Every stateful path assigns a final owner. Crashes, cancellation, disconnect, retry exhaustion, shutdown, reboot, and bounded yields remain observable.</p></header>
+      <section class="manual-section"><h3>15.1 Start from the observed symptom</h3><table><thead><tr><th>Symptom</th><th>Check</th><th>Recovery owner</th></tr></thead><tbody><tr><td>Web Terminal cannot accept input</td><td>Check writer/viewer, <code>out_of_range</code>, connection number activation, and the exactly-one-Monitor rule.</td><td>Take control, return to range, or reconnect once after correcting the physical connection.</td></tr><tr><td>CS-Linux stops before the prompt</td><td>Check first-boot password setup, later login, and startup output.</td><td>Complete authentication or correct the reported startup file; never immediate-loop retries.</td></tr><tr><td>Program is not found or does not start</td><td>Check OS profile, path, filename rules, executable/object format, and status 127.</td><td>Use an explicit guest path or the toolchain for the active profile.</td></tr><tr><td>Program is slow</td><td>Check hidden polling, repeated output, <code>run --stats</code>, cache/bus counters, and the dominant O(N) term.</td><td>Bound or deduplicate repeated work before changing machine limits.</td></tr></tbody></table></section>
       <section class="manual-section"><h3>15.1 CS486 faults</h3><table><thead><tr><th>Fault</th><th>Cause</th><th>Correction</th></tr></thead><tbody><tr><td>ExecutableFormatError</td><td>Bad header, opcode, operand, register, or target</td><td>Reassemble; inspect the source artifact</td></tr><tr><td>MemoryAccessError</td><td>32-bit access outside configured RAM</td><td>Correct address and allocation math</td></tr><tr><td>DivisionByZeroError</td><td>DIV or MOD divisor is zero</td><td>Guard the divisor</td></tr><tr><td>StackOverflowError</td><td>Stack grows below address zero</td><td>Reduce nesting or stack data</td></tr><tr><td>StackUnderflowError</td><td>POP/RET without a stored word</td><td>Balance PUSH/POP and CALL/RET</td></tr><tr><td>OutputLimitError</td><td>Program exceeds bounded output</td><td>Summarize or batch output</td></tr></tbody></table></section>
       <section class="manual-section"><h3>15.2 Shell statuses</h3><table><thead><tr><th>Status</th><th>Meaning</th></tr></thead><tbody><tr><td>0</td><td>Successful completion</td></tr><tr><td>1</td><td>Ordinary command failure / false result</td></tr><tr><td>2</td><td>Usage or explicitly unsupported option</td></tr><tr><td>124</td><td>CS486 instruction bound reached; yielded</td></tr><tr><td>127</td><td>Command not found for the active OS profile</td></tr></tbody></table></section>
       <section class="manual-section"><h3>15.3 Diagnostic sequence</h3><pre><code>cpuinfo
@@ -376,15 +364,14 @@ quota
 objdump program
 run --stats program
 echo $?</code></pre></section>
+      <section class="manual-section"><h3>15.4 CS-DOS recovery checklist</h3><ol class="manual-procedure"><li>Run <code>VER</code>, <code>CPU</code>, and <code>MEM /D</code>.</li><li>Inspect <code>TYPE C:\\CONFIG.SYS</code> and <code>TYPE C:\\AUTOEXEC.BAT</code>.</li><li>Use <code>SET</code>, <code>PATH</code>, and <code>PROMPT</code> to confirm boot state.</li><li>Use an explicit path if a BAT or compiled program is not found.</li><li>Correct every boot warning; unsupported directives are never silently accepted.</li></ol><p><b>Verify:</b> Reboot once after the correction and inspect every boot line.</p><p><b>Expect:</b> Startup reaches <code>C:\\&gt;</code> or stops at one explicit, actionable failure.</p></section>
       <aside class="manual-warning"><b>Server remains authoritative</b><p>A guest fault must never mutate host files or broaden permissions. If BDS or the terminal disconnects, reconnect and inspect the persisted Computer rather than retrying in an unbounded loop.</p></aside>`,
   },
   {
     id: "limits-glossary",
-    number: "16",
-    title: "Limits and glossary",
-    summary: "Ceilings, terms, quick lookup",
     html: `
       <header class="manual-page-header"><p class="manual-kicker">Chapter 16 · Technical appendix</p><h2>Limits, units, and terminology</h2><p class="manual-lead">A limit is part of the programming model, not an exceptional host failure. Design programs so every ceiling has a useful observable outcome.</p></header>
+      <section class="manual-section"><h3>16.1 Canonical compatibility matrix</h3><table><thead><tr><th>Capability</th><th>CS486DX desktop</th><th>CS486DX2 advanced</th><th>CS386SX portable</th></tr></thead><tbody><tr><td>Default OS</td><td>CS-Linux 1.0</td><td>CS-Linux 1.0</td><td>CS-DOS 6.2</td></tr><tr><td>Computer System Python</td><td>Supported</td><td>Supported</td><td>Not available</td></tr><tr><td>ASM / BASIC / C / C++</td><td>Supported</td><td>Supported</td><td>Supported</td></tr><tr><td>Web Terminal display</td><td>Exactly one adjacent Monitor</td><td>Exactly one adjacent Monitor</td><td>Built in; held or placed</td></tr><tr><td>Maximum guest display</td><td>640x480x8</td><td>640x480x8</td><td>640x480x4</td></tr></tbody></table><p>This matrix is the canonical quick compatibility lookup. Profile chapters explain behavior; they do not broaden a capability marked unavailable here.</p></section>
       <section class="manual-section"><h3>16.1 Independent resource ceilings</h3><table><thead><tr><th>Resource</th><th>Measured as</th><th>Inspect with</th></tr></thead><tbody><tr><td>CPU</td><td>Instructions and modeled cycles</td><td>run --stats, time, cpuinfo</td></tr><tr><td>RAM</td><td>Live VM values and CS486 memory</td><td>free -h, /proc/meminfo</td></tr><tr><td>Disk</td><td>Persisted file bytes and entries</td><td>df, du, quota</td></tr><tr><td>Terminal</td><td>Rows × columns and bounded output</td><td>term.get_size()</td></tr><tr><td>Events</td><td>Queued records and wait ownership</td><td>Program diagnostics</td></tr><tr><td>Scheduler</td><td>Per-machine and global tick work</td><td>cpuinfo, run --stats</td></tr></tbody></table></section>
       <section class="manual-section"><h3>16.2 Terms</h3><table><thead><tr><th>Term</th><th>Definition</th></tr></thead><tbody><tr><td>Computer identity</td><td>Stable id binding block, item, storage, terminal, and runtime state</td></tr><tr><td>Guest</td><td>Code executing inside the sandboxed machine</td></tr><tr><td>Host</td><td>BDS, Minecraft, and the companion processes outside the guest boundary</td></tr><tr><td>Cycle debt</td><td>Modeled work awaiting fair scheduler service</td></tr><tr><td>Writer lease</td><td>Exclusive authority for one Web Terminal session to submit input</td></tr><tr><td>Terminal state</td><td>Explicit completion such as success, fault, cancel, close, shutdown, or yield</td></tr></tbody></table></section>
       <section class="manual-section"><h3>16.3 Quick diagnostic card</h3><pre><code>whoami             # identity and user
@@ -395,10 +382,476 @@ df                  # filesystem capacity
 quota               # guest disk limits
 history             # recent commands
 echo $?             # previous status</code></pre></section>
-      <aside class="manual-callout"><b>Reading path</b><p>New operators: 01 → 03 → 04 → 06 → 09. Low-level programmers: 02 → 10 → 12 → 13. Integrators: 05 → 07 → 08 → 15. Keep this appendix open while commissioning a machine.</p></aside>`,
+      <section class="manual-section"><h3>16.4 Canonical numeric ceilings</h3><table><thead><tr><th>Resource</th><th>Ceiling</th><th>Observable outcome</th></tr></thead><tbody><tr><td>Direct CS486 run</td><td>10,000 instructions per bounded direct run</td><td>Status 124 / yielded</td></tr><tr><td>CS-DOS batch</td><td>256 lines; nesting depth 8</td><td>Explicit line-limit or depth status</td></tr><tr><td>CONFIG.SYS</td><td>64 lines</td><td>Explicit unsupported or invalid directive</td></tr><tr><td>Pipeline / output buffer</td><td>256,000 characters</td><td>Explicit bounded-output status</td></tr><tr><td>DOS TREE</td><td>512 entries; 32 levels</td><td>Explicit traversal limit</td></tr><tr><td>Manual search</td><td>24 section results</td><td>Highest-ranked bounded results</td></tr></tbody></table></section>
+      <section class="manual-section"><h3>16.5 Command, API, instruction, and error indexes</h3><table><thead><tr><th>Lookup</th><th>Primary chapter</th><th>Examples</th></tr></thead><tbody><tr><td>Commands</td><td>04 CS-Linux shell; 14 CS-DOS</td><td><code>ls</code>, <code>grep</code>, <code>DIR</code>, <code>MEM /F</code></td></tr><tr><td>Python API</td><td>08 API reference</td><td><code>os.pull_event</code>, <code>term.write</code>, <code>redstone.set_output</code></td></tr><tr><td>Instructions</td><td>10 Assembly language</td><td><code>LOAD</code>, <code>STORE</code>, <code>CALL</code>, <code>RET</code></td></tr><tr><td>Errors and statuses</td><td>15 Diagnostics</td><td><code>MemoryAccessError</code>, 124, 127, <code>out_of_range</code></td></tr></tbody></table><p>Manual search returns the matching section with a type, applicability, and bounded snippet; use these chapters when the exact contract matters.</p></section>
+      <section class="manual-section"><h3>16.6 Reading paths</h3><table><thead><tr><th>Goal</th><th>Chapters</th></tr></thead><tbody><tr><td>First program</td><td>01 → 02 → 03 → 05</td></tr><tr><td>Python + Redstone</td><td>01 → 02 → 03 → 05 → 06 → 07</td></tr><tr><td>CS-Linux operator</td><td>01 → 02 → 03 → 04 → 15</td></tr><tr><td>Native development</td><td>01 → 03 → 09 → 10 / 11 / 12 → 13</td></tr><tr><td>Portable / CS-DOS</td><td>01 → 02 → 14 → 09 → 10 / 11 / 12</td></tr><tr><td>Diagnose a problem</td><td>15 → 16</td></tr></tbody></table></section>
+      <aside class="manual-callout"><b>Reading path</b><p>Choose one goal in Chapter 01, follow its stable chapter route, and keep this appendix open while commissioning a machine.</p></aside>`,
   },
 ];
 
-export const manualChapters = [...chapters].sort((left, right) =>
-  left.number.localeCompare(right.number),
+const publicationOrder = [
+  "orientation",
+  "terminal-editor",
+  "io-files",
+  "shell",
+  "micropython",
+  "redstone-peripherals",
+  "worked-project",
+  "api-reference",
+  "architecture",
+  "assembly",
+  "basic",
+  "c-family",
+  "optimization",
+  "dos-profile",
+  "faults",
+  "limits-glossary",
+];
+
+const allProfiles = ["cs-linux", "cs-dos", "cs486dx", "cs486dx2", "cs386sx"];
+
+const chapterMetadata = {
+  orientation: {
+    title: "System orientation & machine choice",
+    summary: "Choose hardware, boot, connect, and begin",
+    partId: "start-operate",
+    kind: "tutorial",
+    appliesTo: allProfiles,
+  },
+  "terminal-editor": {
+    title: "Terminal, Web access, and editors",
+    summary: "Connect, control, type, edit, and close",
+    partId: "start-operate",
+    kind: "how-to",
+    appliesTo: allProfiles,
+  },
+  "io-files": {
+    title: "Filesystem, storage, and persistence",
+    summary: "Paths, permissions, quota, and durable state",
+    partId: "start-operate",
+    kind: "concept",
+    appliesTo: allProfiles,
+  },
+  shell: {
+    title: "CS-Linux shell and utilities",
+    summary: "Commands, pipelines, scripts, and startup files",
+    partId: "start-operate",
+    kind: "how-to",
+    appliesTo: ["cs-linux", "cs486dx", "cs486dx2"],
+  },
+  micropython: {
+    title: "Computer System Python on CS486",
+    summary: "Edit, run, import, and deploy",
+    partId: "build-connect",
+    kind: "tutorial",
+    appliesTo: ["cs-linux", "cs486dx", "cs486dx2"],
+  },
+  "redstone-peripherals": {
+    title: "Redstone, peripherals, and events",
+    summary: "Connect displays, sides, signals, and events",
+    partId: "build-connect",
+    kind: "how-to",
+    appliesTo: allProfiles,
+  },
+  "worked-project": {
+    title: "Worked project: build, test, measure, deploy",
+    summary: "Complete and verify a threshold controller",
+    partId: "build-connect",
+    kind: "tutorial",
+    appliesTo: ["cs-linux", "cs486dx", "cs486dx2"],
+  },
+  "api-reference": {
+    title: "Computer System Python API reference",
+    summary: "Native functions, return values, errors, and limits",
+    partId: "build-connect",
+    kind: "reference",
+    appliesTo: ["cs-linux", "cs486dx", "cs486dx2"],
+  },
+  architecture: {
+    title: "Machine architecture and execution model",
+    summary: "Registers, memory, cycles, display, and faults",
+    partId: "understand-compile",
+    kind: "concept",
+    appliesTo: allProfiles,
+  },
+  assembly: {
+    title: "Assembly language",
+    summary: "Build, inspect, execute, and reference instructions",
+    partId: "understand-compile",
+    kind: "tutorial",
+    appliesTo: allProfiles,
+  },
+  basic: {
+    title: "BASIC",
+    summary: "Structured and numbered compiled programs",
+    partId: "understand-compile",
+    kind: "tutorial",
+    appliesTo: allProfiles,
+  },
+  "c-family": {
+    title: "C and C++",
+    summary: "Safe compiled subsets, objects, and linking",
+    partId: "understand-compile",
+    kind: "tutorial",
+    appliesTo: allProfiles,
+  },
+  optimization: {
+    title: "Optimization workshop",
+    summary: "Measure, identify, change, and compare",
+    partId: "understand-compile",
+    kind: "how-to",
+    appliesTo: allProfiles,
+  },
+  "dos-profile": {
+    title: "CS-DOS 6.2 on CS386SX",
+    summary: "Portable boot, memory, batch, commands, and toolchains",
+    partId: "profiles-support",
+    kind: "concept",
+    appliesTo: ["cs-dos", "cs386sx"],
+  },
+  faults: {
+    title: "Faults, diagnostics, and recovery",
+    summary: "Symptoms, terminal states, checks, and recovery",
+    partId: "profiles-support",
+    kind: "how-to",
+    appliesTo: allProfiles,
+  },
+  "limits-glossary": {
+    title: "Limits, compatibility, glossary, and indexes",
+    summary: "Canonical ceilings, matrices, terms, and quick lookup",
+    partId: "profiles-support",
+    kind: "reference",
+    appliesTo: allProfiles,
+  },
+};
+
+export const manualParts = [
+  {
+    id: "start-operate",
+    number: "I",
+    title: "Start and operate",
+    summary: "Choose a machine and learn the everyday operator workflow.",
+    chapterIds: publicationOrder.slice(0, 4),
+  },
+  {
+    id: "build-connect",
+    number: "II",
+    title: "Build and connect",
+    summary: "Create programs and connect them to the Minecraft world.",
+    chapterIds: publicationOrder.slice(4, 8),
+  },
+  {
+    id: "understand-compile",
+    number: "III",
+    title: "Understand and compile",
+    summary: "Study the shared process, toolchains, and measured optimization.",
+    chapterIds: publicationOrder.slice(8, 13),
+  },
+  {
+    id: "profiles-support",
+    number: "IV",
+    title: "Profiles and support",
+    summary: "Operate CS-DOS, recover faults, and look up canonical limits.",
+    chapterIds: publicationOrder.slice(13, 16),
+  },
+];
+
+export const manualPaths = [
+  {
+    id: "first-program",
+    title: "First program",
+    summary: "Choose, connect, save, and run a CS486 program.",
+    chapterIds: ["orientation", "terminal-editor", "io-files", "micropython"],
+  },
+  {
+    id: "python-redstone",
+    title: "Python + Redstone",
+    summary: "Build and verify an event-driven world controller.",
+    chapterIds: [
+      "orientation",
+      "terminal-editor",
+      "io-files",
+      "micropython",
+      "redstone-peripherals",
+      "worked-project",
+    ],
+  },
+  {
+    id: "linux-operator",
+    title: "CS-Linux operator",
+    summary: "Operate the terminal, filesystem, shell, and recovery tools.",
+    chapterIds: [
+      "orientation",
+      "terminal-editor",
+      "io-files",
+      "shell",
+      "faults",
+    ],
+  },
+  {
+    id: "native-development",
+    title: "Native development",
+    summary: "Understand, compile, inspect, and optimize native programs.",
+    chapterIds: [
+      "orientation",
+      "io-files",
+      "architecture",
+      "assembly",
+      "basic",
+      "c-family",
+      "optimization",
+    ],
+  },
+  {
+    id: "portable-dos",
+    title: "Portable / CS-DOS",
+    summary: "Operate and program the Portable Computer System.",
+    chapterIds: [
+      "orientation",
+      "terminal-editor",
+      "dos-profile",
+      "architecture",
+      "assembly",
+      "basic",
+      "c-family",
+    ],
+  },
+  {
+    id: "diagnostics",
+    title: "Diagnose a problem",
+    summary: "Start from an observed symptom and finish at a bounded outcome.",
+    chapterIds: ["faults", "limits-glossary"],
+  },
+];
+
+const htmlEntities = {
+  amp: "&",
+  apos: "'",
+  gt: ">",
+  lt: "<",
+  nbsp: " ",
+  quot: '"',
+};
+
+function decodeEntities(value) {
+  return value.replace(
+    /&(#(?:x[\da-f]+|\d+)|amp|apos|gt|lt|nbsp|quot);/gi,
+    (_match, entity) => {
+      if (entity[0] !== "#") {
+        return htmlEntities[entity.toLowerCase()] ?? _match;
+      }
+      const hexadecimal = entity[1].toLowerCase() === "x";
+      const parsed = Number.parseInt(
+        entity.slice(hexadecimal ? 2 : 1),
+        hexadecimal ? 16 : 10,
+      );
+      return Number.isFinite(parsed) ? String.fromCodePoint(parsed) : _match;
+    },
+  );
+}
+
+function plainText(html) {
+  return decodeEntities(
+    html
+      .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, " ")
+      .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, " ")
+      .replace(/<[^>]+>/g, " "),
+  )
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function normalizeSearchText(value) {
+  return String(value)
+    .normalize("NFKC")
+    .toLocaleLowerCase("en-US")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function stableSlug(value, fallback) {
+  const slug = normalizeSearchText(plainText(value))
+    .replace(/^\d{1,2}\.\d+\s+/, "")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return slug || fallback;
+}
+
+function enrichHeadings(html, chapterId, number) {
+  const usedIds = new Map();
+  let numberedHeadingIndex = 0;
+  const visibleChapter = String(Number(number));
+  const renumbered = html.replace(/\bChapter\s+\d{2}\b/g, `Chapter ${number}`);
+
+  return renumbered.replace(
+    /<h3([^>]*)>([\s\S]*?)<\/h3>/gi,
+    (_match, attributes, heading) => {
+      const numberedHeading = heading.replace(/^\s*\d{1,2}\.\d+\s+/, () => {
+        numberedHeadingIndex += 1;
+        return `${visibleChapter}.${numberedHeadingIndex} `;
+      });
+      const baseId = `${chapterId}-${stableSlug(numberedHeading, "section")}`;
+      const occurrence = (usedIds.get(baseId) ?? 0) + 1;
+      usedIds.set(baseId, occurrence);
+      const id = occurrence === 1 ? baseId : `${baseId}-${occurrence}`;
+      const cleanAttributes = attributes.replace(
+        /\s+id\s*=\s*(?:"[^"]*"|'[^']*')/i,
+        "",
+      );
+      return `<h3${cleanAttributes} id="${id}">${numberedHeading}</h3>`;
+    },
+  );
+}
+
+function sectionType(chapterId) {
+  if (chapterId === "api-reference") return "api";
+  if (chapterId === "assembly") return "instruction";
+  if (chapterId === "faults") return "error";
+  if (chapterId === "shell" || chapterId === "dos-profile") return "command";
+  return "concept";
+}
+
+function deriveSections(html, chapterId) {
+  const headings = [
+    ...html.matchAll(/<h3\b[^>]*\bid="([^"]+)"[^>]*>([\s\S]*?)<\/h3>/gi),
+  ];
+  return headings.map((heading, index) => {
+    const title = plainText(heading[2]);
+    const contentStart = (heading.index ?? 0) + heading[0].length;
+    const contentEnd = headings[index + 1]?.index ?? html.length;
+    const text = plainText(html.slice(contentStart, contentEnd));
+    return {
+      id: heading[1],
+      title,
+      number: title.match(/^(\d{1,2}\.\d+)/)?.[1] ?? null,
+      text,
+      type: sectionType(chapterId),
+      href: `#${heading[1]}`,
+    };
+  });
+}
+
+const rawChapterById = new Map(
+  rawChapters.map((chapter) => [chapter.id, chapter]),
 );
+
+const searchTypeTerms = {
+  api: ["api", "function"],
+  command: ["command", "utility"],
+  concept: ["concept", "architecture"],
+  error: ["diagnostic", "error", "fault", "status"],
+  instruction: ["assembly", "instruction", "opcode"],
+};
+
+export const manualChapters = publicationOrder.map((id, index) => {
+  const rawChapter = rawChapterById.get(id);
+  const metadata = chapterMetadata[id];
+  if (!rawChapter || !metadata) {
+    throw new Error(`Missing field manual chapter definition: ${id}`);
+  }
+
+  const number = String(index + 1).padStart(2, "0");
+  const html = enrichHeadings(rawChapter.html, id, number);
+  return {
+    id,
+    number,
+    ...metadata,
+    appliesTo: [...metadata.appliesTo],
+    html,
+    sections: deriveSections(html, id),
+  };
+});
+
+const manualSearchIndex = manualChapters.flatMap((chapter) =>
+  chapter.sections.map((section, sectionIndex) => ({
+    chapter,
+    chapterTitle: normalizeSearchText(`${chapter.title} ${chapter.summary}`),
+    section,
+    sectionIndex,
+    sectionText: normalizeSearchText(section.text),
+    sectionTitle: normalizeSearchText(section.title),
+  })),
+);
+
+function resultScore(query, terms, entry) {
+  const { chapterTitle, section, sectionIndex, sectionText, sectionTitle } =
+    entry;
+  const sectionMatches = terms.every(
+    (term) => sectionTitle.includes(term) || sectionText.includes(term),
+  );
+  const chapterMatches = terms.every((term) => chapterTitle.includes(term));
+  if (!sectionMatches && !(sectionIndex === 0 && chapterMatches)) return null;
+
+  let score = 0;
+  if (searchTypeTerms[section.type].some((term) => terms.includes(term)))
+    score += 500;
+  if (sectionTitle === query) score += 1_000;
+  else if (sectionTitle.startsWith(query)) score += 800;
+  else if (sectionTitle.includes(query)) score += 600;
+  if (sectionText.includes(query)) score += 400;
+  if (sectionIndex === 0 && chapterTitle.includes(query)) score += 500;
+  for (const term of terms) {
+    if (sectionTitle.includes(term)) score += 80;
+    if (sectionText.includes(term)) score += 20;
+  }
+  return score;
+}
+
+function makeSnippet(text, normalizedText, terms, maximumLength = 160) {
+  if (text.length <= maximumLength) return text;
+  const firstMatch = Math.min(
+    ...terms
+      .map((term) => normalizedText.indexOf(term))
+      .filter((position) => position >= 0),
+  );
+  const center = Number.isFinite(firstMatch) ? firstMatch : 0;
+  const start = Math.max(0, Math.min(center - 48, text.length - maximumLength));
+  const end = Math.min(text.length, start + maximumLength);
+  return `${start > 0 ? "…" : ""}${text.slice(start, end).trim()}${
+    end < text.length ? "…" : ""
+  }`;
+}
+
+export function searchManual(query, options = {}) {
+  const normalizedQuery = normalizeSearchText(String(query).slice(0, 160));
+  if (!normalizedQuery) return [];
+  const terms = normalizedQuery.split(" ").filter(Boolean).slice(0, 8);
+  const limitOption = typeof options === "number" ? options : options?.limit;
+  const requestedLimit = Number.isFinite(limitOption)
+    ? Math.trunc(limitOption)
+    : 24;
+  const limit = Math.max(0, Math.min(24, requestedLimit));
+  if (limit === 0) return [];
+  const results = [];
+
+  for (const entry of manualSearchIndex) {
+    const { chapter, section } = entry;
+    const score = resultScore(normalizedQuery, terms, entry);
+    if (score === null) continue;
+    results.push({
+      type: section.type,
+      chapterId: chapter.id,
+      chapterNumber: chapter.number,
+      chapterTitle: chapter.title,
+      sectionId: section.id,
+      sectionTitle: section.title,
+      href: section.href,
+      appliesTo: [...chapter.appliesTo],
+      snippet: makeSnippet(
+        section.text || section.title,
+        entry.sectionText || entry.sectionTitle,
+        terms,
+      ),
+      score,
+    });
+  }
+
+  return results
+    .sort(
+      (left, right) =>
+        right.score - left.score ||
+        left.chapterNumber.localeCompare(right.chapterNumber) ||
+        left.sectionTitle.localeCompare(right.sectionTitle),
+    )
+    .slice(0, limit);
+}

@@ -52,12 +52,35 @@ describe("Web companion HTTP server", () => {
     await until(() => bds.commands.length === 1);
 
     expect(launches).toEqual([]);
+    expect(bds.commands[0]).not.toContain(" debug ");
+    expect(server.status().rangeEnforcement).toBe("three_blocks");
     expect(server.status().browserAutoOpen).toMatchObject({
       enabled: false,
       eligible: false,
       state: "disabled",
       attempts: 0,
     });
+  });
+
+  it("disables only the Bedrock range check when explicitly enabled for debug", async () => {
+    const bds = new FakeBds();
+    const server = new WebCompanionServer({
+      bds,
+      port: 0,
+      debugIgnoreRange: true,
+    });
+    servers.push(server);
+    await server.start();
+
+    bds.log(
+      'CS_WEB_SESSION_REQUEST {"requestId":"r1-1","playerId":"player-1","computerId":"c-000001"}',
+    );
+    await until(() => bds.commands.length === 1);
+
+    expect(bds.commands[0]).toMatch(
+      /^scriptevent computer_system:web-response r1-1 [A-Za-z0-9_-]+ writer debug http:\/\//u,
+    );
+    expect(server.status().rangeEnforcement).toBe("disabled_for_debug");
   });
 
   it("opens each loopback handoff once when explicitly enabled", async () => {
@@ -130,6 +153,22 @@ describe("Web companion HTTP server", () => {
     expect(() =>
       server.waitForHandoff({ computerId: "invalid", timeoutMs: 10 }),
     ).toThrow("c-xxxxxx");
+  });
+
+  it("explicitly finalizes a handoff wait when its Bedrock request fails", async () => {
+    const server = new WebCompanionServer({ bds: new FakeBds(), port: 0 });
+    servers.push(server);
+    await server.start();
+
+    const waiting = server.waitForHandoff({
+      computerId: "c-000001",
+      timeoutMs: 1_000,
+    });
+    expect(server.rejectPendingHandoff("c-000001", "request failed")).toBe(
+      true,
+    );
+    await expect(waiting).rejects.toThrow("request failed");
+    expect(server.rejectPendingHandoff("c-000001", "late failure")).toBe(false);
   });
 
   it("opens a LAN handoff through loopback on the companion host", async () => {
@@ -582,6 +621,43 @@ describe("Web companion HTTP server", () => {
       ).status,
     ).toBe(202);
     expect(bds.commands.at(-1)).toMatch(/ line resumed$/u);
+  });
+
+  it("allows an existing out-of-range session to reconnect in explicit debug mode", async () => {
+    const bds = new FakeBds();
+    const server = new WebCompanionServer({
+      bds,
+      port: 0,
+      debugIgnoreRange: true,
+    });
+    servers.push(server);
+    const status = await server.start();
+    bds.log(
+      'CS_WEB_SESSION_REQUEST {"requestId":"r1-1","playerId":"player-1","computerId":"c-000001"}',
+    );
+    await until(() => bds.commands.length === 1);
+    const connected = await consumeResponse(bds.commands[0]);
+    const session = server.store.activeSessions()[0];
+    server.store.updateAccess(session.sessionId, "out_of_range");
+
+    expect(
+      (
+        await post(status.origin, "/api/input", connected.token, {
+          kind: "line",
+          value: "debug-input",
+        })
+      ).status,
+    ).toBe(202);
+    const resumed = await fetch(`${status.origin}/api/reconnect`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Origin: status.origin,
+      },
+      body: JSON.stringify({ code: "0001" }),
+    });
+    expect(resumed.status).toBe(200);
+    expect((await resumed.json()).session.access).toBe("in_range");
   });
 
   it("serializes and bounds terminal operations per computer", async () => {

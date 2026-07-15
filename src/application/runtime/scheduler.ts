@@ -15,6 +15,8 @@ export interface SchedulerLimits {
   readonly timerCapacity: number;
   readonly cpuCyclesPerComputer: number;
   readonly cpuCyclesPerTick: number;
+  readonly instructionsPerComputer?: number;
+  readonly instructionsPerTick?: number;
 }
 
 export const defaultSchedulerLimits: SchedulerLimits = {
@@ -22,6 +24,8 @@ export const defaultSchedulerLimits: SchedulerLimits = {
   timerCapacity: 128,
   cpuCyclesPerComputer: Math.floor(computerNominalClockHz / 20),
   cpuCyclesPerTick: Math.floor(computerNominalClockHz / 20),
+  instructionsPerComputer: 200,
+  instructionsPerTick: 1_000,
 };
 
 export interface ScheduledComputerView {
@@ -43,6 +47,8 @@ export class RoundRobinScheduler {
   private order: number[] = [];
   private cursor = 0;
   private tickValue = 0;
+  private readonly instructionsPerComputer: number;
+  private readonly instructionsPerTick: number;
 
   constructor(
     private readonly limits: SchedulerLimits = defaultSchedulerLimits,
@@ -51,6 +57,15 @@ export class RoundRobinScheduler {
     requirePositiveInteger(limits.timerCapacity, "timerCapacity");
     requirePositiveInteger(limits.cpuCyclesPerComputer, "cpuCyclesPerComputer");
     requirePositiveInteger(limits.cpuCyclesPerTick, "cpuCyclesPerTick");
+    this.instructionsPerComputer =
+      limits.instructionsPerComputer ?? Number.MAX_SAFE_INTEGER;
+    this.instructionsPerTick =
+      limits.instructionsPerTick ?? Number.MAX_SAFE_INTEGER;
+    requirePositiveInteger(
+      this.instructionsPerComputer,
+      "instructionsPerComputer",
+    );
+    requirePositiveInteger(this.instructionsPerTick, "instructionsPerTick");
   }
 
   get tickNumber(): number {
@@ -115,6 +130,7 @@ export class RoundRobinScheduler {
   runTick(): SchedulerTickResult {
     this.tickValue += 1;
     let remaining = this.limits.cpuCyclesPerTick;
+    let remainingInstructions = this.instructionsPerTick;
     let executedInstructions = 0;
     const count = this.order.length;
 
@@ -123,7 +139,11 @@ export class RoundRobinScheduler {
       if (computer !== undefined) this.prepare(computer);
     }
 
-    for (let offset = 0; offset < count && remaining > 0; offset += 1) {
+    for (
+      let offset = 0;
+      offset < count && remaining > 0 && remainingInstructions > 0;
+      offset += 1
+    ) {
       const index = (this.cursor + offset) % count;
       const computer = this.computers.get(this.order[index]!);
       if (computer === undefined) continue;
@@ -133,11 +153,16 @@ export class RoundRobinScheduler {
       )
         continue;
       const budget = Math.min(computer.cpuCyclesPerTick, remaining);
-      const result = computer.process.runCpuSlice(budget);
+      const instructionBudget = Math.min(
+        this.instructionsPerComputer,
+        remainingInstructions,
+      );
+      const result = computer.process.runCpuSlice(budget, instructionBudget);
       computer.cpuCycles += result.cpuCycles;
       computer.executedInstructions += result.executedInstructions;
       executedInstructions += result.executedInstructions;
       remaining -= result.cpuCycles;
+      remainingInstructions -= result.executedInstructions;
     }
     if (count > 0) this.cursor = (this.cursor + 1) % count;
 

@@ -26,6 +26,27 @@ export interface ShellProgram {
 
 export type ShellVariableResolver = (name: string) => string | undefined;
 
+export interface ShellSyntaxFeatures {
+  readonly chainOperators: ReadonlySet<ChainOperator>;
+  readonly comments: boolean;
+  readonly singleQuotes: boolean;
+  readonly variables: boolean;
+}
+
+export const busyBoxShellSyntaxFeatures: ShellSyntaxFeatures = {
+  chainOperators: new Set(["&&", "||", ";"]),
+  comments: true,
+  singleQuotes: true,
+  variables: true,
+};
+
+export const dosShellSyntaxFeatures: ShellSyntaxFeatures = {
+  chainOperators: new Set(["&&", "||"]),
+  comments: false,
+  singleQuotes: false,
+  variables: false,
+};
+
 const maximumSourceLength = 4_096;
 const maximumTokens = 256;
 const maximumPipelines = 32;
@@ -45,8 +66,9 @@ export class ShellSyntaxError extends Error {
 export function parseShellProgram(
   source: string,
   resolveVariable: ShellVariableResolver = () => undefined,
+  features: ShellSyntaxFeatures = busyBoxShellSyntaxFeatures,
 ): ShellProgram {
-  const tokens = tokenize(source, resolveVariable);
+  const tokens = tokenize(source, resolveVariable, features);
   if (tokens.length === 0) return { chains: [] };
   const chains: ShellChainNode[] = [];
   let cursor = 0;
@@ -81,7 +103,11 @@ export function parseShellProgram(
     });
     const separator = tokens[cursor];
     if (separator === undefined) break;
-    if (separator.kind !== "operator" || !isChainOperator(separator.value)) {
+    if (
+      separator.kind !== "operator" ||
+      !isChainOperator(separator.value) ||
+      !features.chainOperators.has(separator.value)
+    ) {
       throw new ShellSyntaxError(`unexpected token '${separator.value}'`);
     }
     nextOperator = separator.value;
@@ -139,6 +165,7 @@ function parseCommand(
 function tokenize(
   source: string,
   resolveVariable: ShellVariableResolver,
+  features: ShellSyntaxFeatures,
 ): Token[] {
   if (source.length > maximumSourceLength) {
     throw new ShellSyntaxError("command line is too long");
@@ -187,12 +214,16 @@ function tokenize(
       continue;
     }
     if (quote === undefined && character === "'") {
+      if (!features.singleQuotes)
+        throw new ShellSyntaxError("single quotes are not supported");
       quote = "single";
       wordStarted = true;
       index += 1;
       continue;
     }
     if (character === "$") {
+      if (!features.variables)
+        throw new ShellSyntaxError("dollar variables are not supported");
       const expansion = expandVariable(source, index, resolveVariable);
       word += expansion.value;
       wordStarted = true;
@@ -204,20 +235,35 @@ function tokenize(
       index += 1;
       continue;
     }
-    if (quote === undefined && character === "#" && !wordStarted) break;
+    if (
+      features.comments &&
+      quote === undefined &&
+      character === "#" &&
+      !wordStarted
+    )
+      break;
     if (quote === undefined) {
       const pair = source.slice(index, index + 2);
-      if (pair === "&&" || pair === "||" || pair === ">>") {
+      if (pair === "&&" || pair === "||") {
+        if (!features.chainOperators.has(pair))
+          throw new ShellSyntaxError(`operator '${pair}' is not supported`);
         pushOperator(pair);
         index += 2;
         continue;
       }
-      if (
-        character === "|" ||
-        character === ";" ||
-        character === ">" ||
-        character === "<"
-      ) {
+      if (pair === ">>") {
+        pushOperator(pair);
+        index += 2;
+        continue;
+      }
+      if (character === ";") {
+        if (!features.chainOperators.has(";"))
+          throw new ShellSyntaxError("operator ';' is not supported");
+        pushOperator(character);
+        index += 1;
+        continue;
+      }
+      if (character === "|" || character === ">" || character === "<") {
         pushOperator(character);
         index += 1;
         continue;

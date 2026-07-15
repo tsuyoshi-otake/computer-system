@@ -19,18 +19,19 @@ start a new Codex session) after pulling or changing the configuration.
 
 The server uses these optional environment variables:
 
-| Variable                        | Default                                             | Purpose                                                        |
-| ------------------------------- | --------------------------------------------------- | -------------------------------------------------------------- |
-| `BDS_HOME`                      | `%USERPROFILE%\tmp\computer-system-bds\runtime`     | Extracted official BDS distribution used only as a copy source |
-| `BDS_MCP_WORKDIR`               | `%USERPROFILE%\tmp\computer-system-bds\mcp-runtime` | Isolated MCP debug runtime                                     |
-| `BDS_MCP_PORT`                  | `19142`                                             | IPv4 server port; IPv6 uses the following port                 |
-| `BDS_MCP_WORLD`                 | `ComputerSystemMcpDebug`                            | Debug world name                                               |
-| `WEB_COMPANION_HOST`            | `0.0.0.0`                                           | Web listener interface for trusted LAN access                  |
-| `WEB_COMPANION_PORT`            | `19144`                                             | Web listener TCP port                                          |
-| `WEB_COMPANION_PUBLIC_HOST`     | Listener host                                       | Reachable host used in generated HTTP links                    |
-| `WEB_COMPANION_PUBLIC_ORIGIN`   | unset                                               | Complete HTTPS origin advertised behind a reverse proxy        |
-| `WEB_COMPANION_ALLOWED_ORIGINS` | unset                                               | Extra origins, or `*` to accept every request Origin           |
-| `WEB_COMPANION_AUTO_OPEN`       | `0`                                                 | Open each loopback handoff once in the host's default browser  |
+| Variable                           | Default                                             | Purpose                                                        |
+| ---------------------------------- | --------------------------------------------------- | -------------------------------------------------------------- |
+| `BDS_HOME`                         | `%USERPROFILE%\tmp\computer-system-bds\runtime`     | Extracted official BDS distribution used only as a copy source |
+| `BDS_MCP_WORKDIR`                  | `%USERPROFILE%\tmp\computer-system-bds\mcp-runtime` | Isolated MCP debug runtime                                     |
+| `BDS_MCP_PORT`                     | `19142`                                             | IPv4 server port; IPv6 uses the following port                 |
+| `BDS_MCP_WORLD`                    | `ComputerSystemMcpDebug`                            | Debug world name                                               |
+| `WEB_COMPANION_HOST`               | `0.0.0.0`                                           | Web listener interface for trusted LAN access                  |
+| `WEB_COMPANION_PORT`               | `19144`                                             | Web listener TCP port                                          |
+| `WEB_COMPANION_PUBLIC_HOST`        | Listener host                                       | Reachable host used in generated HTTP links                    |
+| `WEB_COMPANION_PUBLIC_ORIGIN`      | unset                                               | Complete HTTPS origin advertised behind a reverse proxy        |
+| `WEB_COMPANION_ALLOWED_ORIGINS`    | unset                                               | Extra origins, or `*` to accept every request Origin           |
+| `WEB_COMPANION_AUTO_OPEN`          | `0`                                                 | Open each loopback handoff once in the host's default browser  |
+| `WEB_COMPANION_DEBUG_IGNORE_RANGE` | `0`                                                 | Debug only: skip the placed-machine range and dimension check  |
 
 No API key or `.env` file is required.
 
@@ -68,26 +69,40 @@ Input, output, concurrency, and timeout are bounded; vi/editor, sleep,
 shutdown/reboot, and other TUI or asynchronous control flows return an explicit
 unsupported result.
 
+Python and CS486 executable work is registered as a scheduler job and advances
+on later BDS host ticks. The Script API console callback only validates and
+enqueues the request; the single `CS_DEBUG_COMMAND` response is emitted after
+the job reaches a completed, failed, limited, or detached terminal state.
+
 Use `run --stats <program>` through this tool when comparing guest code. The
 returned `stderr` preserves the CPU model line and the L1/L2 hit/miss, bus
 transfer, unaligned-access, and pipeline-flush counters. This makes alignment
 and locality benchmarks reproducible through MCP without scraping the Web
-Terminal. CS-Linux authentication remains enforced: log in normally before using
-the debug command. CS-DOS has no login gate.
+Terminal. CS-Linux authentication remains enforced for ordinary shell commands:
+log in normally before using them. CS-DOS has no login gate.
 
 Only one managed BDS may own a UDP port pair. When a development server is
 already using `19142`/`19143`, set `BDS_MCP_PORT` to a free port whose following
 port is also free; use a distinct `WEB_COMPANION_PORT` as well. Do not start two
 BDS processes against the same work directory or world concurrently.
 
-For a bounded Computer System Python comparison, pass `python <file>` or
-`micropython <file>` through the same tool. This MCP-only form compiles and runs
-the file with the target Computer's filesystem, hardware profile, and RAM limit.
-It rejects waits and long-running work after a fixed cycle ceiling. Returned
-machine-instruction counts are diagnostic only. The `cpuCycles` field is a
-deterministic 486DX-equivalent cost shared with ASM, C, C++, and BASIC;
+For a bounded Computer System Python comparison, pass `python <file>`,
+`micropython <file>`, or `python -c <source>` through the same tool. The inline
+form accepts a multiline source string in the MCP JSON request; the relay
+percent-encodes it into one BDS console line and rejects line breaks for every
+other command. The source is compiled in memory at `/tmp/__mcp_inline__.py` and
+does not create that file. These non-TUI forms use the target Computer's
+filesystem, hardware profile, and RAM limit and reject waits or long-running
+work after a fixed cycle ceiling. The normal CS-Linux Web Terminal separately
+supports foreground `python <file>`, `python --stats <file>`, and the
+`micropython` alias; that operator path may wait for guest events and supports
+Ctrl+C. Returned machine-instruction counts are diagnostic only. The `cpuCycles`
+field is the deterministic modeled CPU cost shared with ASM, C, C++, and BASIC;
 `run --stats` and Python/CS486 diagnostics also convert it to virtual
-microseconds at 33 MHz. Do not use host wall-clock time for language rankings.
+microseconds at the selected hardware clock. Do not use host wall-clock time for
+language rankings. Ordinary MCP shell commands still require a completed
+CS-Linux login. The isolated Python compile/run probe is a separate
+managed-debug operation and does not authenticate the interactive shell.
 
 BDS prints `Server started` before Script API world initialization is fully
 settled. The MCP session therefore applies the same bounded one-second startup
@@ -114,12 +129,19 @@ per activation. The server cannot launch a browser on another player's device;
 remote players use the printed LAN entry page and four digits. Disabled,
 timed-out, and failed host launches retain that fallback.
 
-An MCP client that needs the URL itself can call `bds_wait_for_web_handoff` with
-the exact `c-xxxxxx` Computer ID before the Portable Computer System is used.
-The wait is bounded to at most 120 seconds and only one wait may own a Computer
-ID. A matching handoff is returned to MCP instead of being sent to browser
-auto-open, avoiding a race to consume the one-use URL. The URL remains absent
-from BDS logs and unrelated Computer IDs cannot satisfy the wait.
+An MCP client can call `bds_issue_web_handoff` with the exact `c-xxxxxx`
+Computer ID to issue and receive the one-use URL in one operation. The managed
+debug server must have exactly one connected player; zero or multiple players, a
+missing Computer identity, relay failure, and timeout all terminate with an
+explicit error. The tool installs the Computer-scoped waiter before asking
+Bedrock to create the session, so the request cannot outrun the waiter.
+
+Use `bds_wait_for_web_handoff` instead when an operator will trigger the machine
+interaction separately. Both tools bound the wait to at most 120 seconds, and
+only one pending operation may own a Computer ID. A matching handoff is returned
+to MCP instead of browser auto-open, avoiding a race to consume the one-use URL.
+The URL remains absent from BDS logs and unrelated Computer IDs cannot satisfy
+the wait.
 
 Placed-machine sessions recheck the requesting player against the access block
 during attachment, input, completion, resize, and snapshot work. Moving beyond
@@ -167,6 +189,11 @@ limits remain enforced. Do not publish the plain HTTP listener directly.
 - `Verify:` Run `npm run test:mcp`. `Expect:` MCP initialization, tool
   discovery, status output, command allowlisting, explicit idle-state tests, and
   lossless `run --stats` microarchitecture output pass.
+- `Verify:` On free dedicated BDS/Web ports and a new dedicated
+  `BDS_MCP_WORKDIR`, run `npm run test:mcp:serial:bds`. `Expect:` MCP starts an
+  isolated real BDS, the `serial_matrix` probe reports three machines, six
+  faces, 36 ordered links, and 72 successful bidirectional Linux ttyS/DOS COM
+  transmissions, then the suite passes and BDS returns to `idle`.
 - `Verify:` Run `npm run validate`. `Expect:` Formatting, lint, type checking,
   host tests, and the pack build all pass.
 - `Verify:` Run `npm run test:web`. `Expect:` One-use handoff, authentication,

@@ -46,6 +46,10 @@ describe("Computer identity registry", (): void => {
       form: "block",
       physicalKey: "nether:9,8,7",
     });
+    expect(registry.getAtPhysicalKey("nether:9,8,7")?.computerId).toBe(
+      "computer-1",
+    );
+    expect(registry.getAtPhysicalKey("overworld:1,2,3")).toBeUndefined();
   });
 
   it("rejects duplicates without replacing the established physical owner", (): void => {
@@ -72,6 +76,17 @@ describe("Computer identity registry", (): void => {
         physicalKey: "overworld:0,0,0",
       }),
     ).toMatchObject({ outcome: "duplicate" });
+    expect(
+      registry.claim({
+        computerId: "computer-3",
+        family: "standard",
+        form: "block",
+        physicalKey: "container:a:0",
+      }),
+    ).toMatchObject({
+      outcome: "duplicate",
+      existing: { computerId: "computer-2" },
+    });
   });
 
   it("restores deterministic snapshots and supports administrative removal", (): void => {

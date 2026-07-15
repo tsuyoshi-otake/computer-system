@@ -13,6 +13,7 @@ import {
 import { executeStorageProbe } from "./storageProbe.js";
 import { executeSpeakerProbe } from "./speakerProbe.js";
 import { executeTurtleProbe } from "./turtleProbe.js";
+import { executeSerialMatrixProbe } from "./serialMatrixProbe.js";
 import {
   getProbeDimension,
   prepareProbeArena,
@@ -70,6 +71,14 @@ async function executeSuite(runId: string): Promise<void> {
     } catch (error: unknown) {
       failures += 1;
       emitFailure(runId, "computer_vertical", error);
+    }
+
+    try {
+      const serial = executeSerialMatrixProbe();
+      emit(runId, "serial_matrix", "PASS", { ...serial });
+    } catch (error: unknown) {
+      failures += 1;
+      emitFailure(runId, "serial_matrix", error);
     }
 
     const dimension = getProbeDimension();

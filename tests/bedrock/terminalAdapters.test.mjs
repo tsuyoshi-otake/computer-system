@@ -110,6 +110,7 @@ describe("Bedrock terminal adapters", () => {
 
     expect(main).toContain("startWebTerminalBridge");
     expect(main).toContain("handleWebTerminalScriptEvent");
+    expect(main).toContain("handleDebugWebSessionRequest");
     expect(computer).toContain(
       "requestWebComputerTerminal(player, record, event.block)",
     );
@@ -133,9 +134,16 @@ describe("Bedrock terminal adapters", () => {
     expect(bridge).toContain("detached.wasLast");
     expect(bridge).toContain("rejectSession");
     expect(bridge).toContain("x * x + y * y + z * z <= 9");
+    expect(bridge).toContain("rangeCheckDisabledForDebug");
+    expect(bridge).toContain('debugMarker === "debug"');
     expect(bridge).toContain('setSessionAccess(session, "out_of_range")');
     expect(bridge).toContain('setSessionAccess(session, "in_range")');
     expect(bridge).toContain("Connection code:");
+    const debugBridge = await source("src/bedrock/debugWebSessionBridge.ts");
+    expect(debugBridge).toContain("world.getAllPlayers()");
+    expect(debugBridge).toContain("players.length !== 1");
+    expect(debugBridge).toContain("requestWebComputerTerminal(player, record)");
+    expect(debugBridge).toContain("CS_DEBUG_WEB_REQUEST");
   });
 
   it("keeps the Bedrock Core prototype isolated from the production DDUI coordinator", async () => {

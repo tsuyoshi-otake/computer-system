@@ -8,12 +8,28 @@ import {
 } from "../../tools/computer-block.mjs";
 import {
   createCardinalDirectionPermutations,
+  createMachineBlockGeometry,
   machineBlockGeometryIds,
   machinePlacementTraits,
   machineBlockTextureKeys,
 } from "../../tools/machine-block-assets.mjs";
 
 describe("computer block generator", () => {
+  it("keeps Bedrock placement headings stable and flips only the Resource Pack geometry", () => {
+    expect(createCardinalDirectionPermutations()).toEqual([
+      permutation("north", 0),
+      permutation("south", 180),
+      permutation("west", 90),
+      permutation("east", -90),
+    ]);
+    const geometries = createMachineBlockGeometry()["minecraft:geometry"];
+    expect(geometries).toHaveLength(4);
+    for (const geometry of geometries) {
+      expect(geometry.bones).toHaveLength(1);
+      expect(geometry.bones[0].rotation).toEqual([0, 180, 0]);
+    }
+  });
+
   it("generates two families with every independent digital output mask", () => {
     for (const family of computerFamilies) {
       for (let mask = 0; mask < 64; mask += 1) {
@@ -54,3 +70,12 @@ describe("computer block generator", () => {
     expect(() => createComputerBlock("unknown", 0)).toThrow(/family/u);
   });
 });
+
+function permutation(direction, rotation) {
+  return {
+    condition: `query.block_state('minecraft:cardinal_direction') == '${direction}'`,
+    components: {
+      "minecraft:transformation": { rotation: [0, rotation, 0] },
+    },
+  };
+}

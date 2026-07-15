@@ -24,6 +24,10 @@ const webCompanion = new WebCompanionServer({
     process.env.WEB_COMPANION_AUTO_OPEN,
     "WEB_COMPANION_AUTO_OPEN",
   ),
+  debugIgnoreRange: parseBooleanFlag(
+    process.env.WEB_COMPANION_DEBUG_IGNORE_RANGE,
+    "WEB_COMPANION_DEBUG_IGNORE_RANGE",
+  ),
 });
 await webCompanion.start();
 let initialized = false;
@@ -145,7 +149,7 @@ const tools = [
     name: "bds_execute_computer_command",
     title: "Execute Computer shell command",
     description:
-      "Execute one bounded non-TUI command inside a specific sandboxed Computer and return its stdout, stderr, exit code, and selected hardware model CPU cycles. This never invokes the host shell or arbitrary BDS administration commands.",
+      "Execute one bounded non-TUI command inside a specific sandboxed Computer and return its stdout, stderr, exit code, and selected hardware model CPU cycles. Multiline input is accepted only for bounded python -c source. This never invokes the host shell or arbitrary BDS administration commands.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -208,6 +212,34 @@ const tools = [
     },
     annotations: {
       readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: false,
+    },
+  },
+  {
+    name: "bds_issue_web_handoff",
+    title: "Issue Web Terminal handoff",
+    description:
+      "Issue and return a one-use Web Terminal URL for one exact Computer ID through the connected Bedrock player. The managed debug server must have exactly one connected player.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        computerId: {
+          type: "string",
+          pattern: "^c-[0-9a-hjkmnp-tv-z]{6}$",
+        },
+        timeoutMs: {
+          type: "integer",
+          minimum: 1,
+          maximum: 120_000,
+        },
+      },
+      required: ["computerId"],
+    },
+    annotations: {
+      readOnlyHint: false,
       destructiveHint: false,
       idempotentHint: false,
       openWorldHint: false,
@@ -299,7 +331,7 @@ async function handleLine(line) {
           capabilities: { tools: { listChanged: false } },
           serverInfo,
           instructions:
-            "Call bds_start before commands. Use bds_run_probe for Computer System probes, then bds_wait_for_log or bds_get_logs. Use bds_stop when debugging is complete.",
+            "Call bds_start before commands. Use bds_run_probe for Computer System probes, bds_issue_web_handoff for an exact Computer Web URL, then bds_wait_for_log or bds_get_logs. Use bds_stop when debugging is complete.",
         });
         return;
       }
@@ -364,6 +396,22 @@ async function callTool(name, args) {
       requireKeys(args, ["contains", "afterCursor", "timeoutMs"]);
       requireString(args.contains, "contains");
       return toolSuccess(await session.waitForLog(args));
+    case "bds_issue_web_handoff": {
+      requireKeys(args, ["computerId", "timeoutMs"]);
+      requireString(args.computerId, "computerId");
+      const waiting = webCompanion.waitForHandoff(args);
+      try {
+        await session.requestWebHandoff(args);
+        return toolSuccess(await waiting);
+      } catch (error) {
+        webCompanion.rejectPendingHandoff(
+          args.computerId,
+          `Web handoff request failed: ${errorMessage(error)}`,
+        );
+        await waiting.catch(() => undefined);
+        throw error;
+      }
+    }
     case "bds_wait_for_web_handoff":
       requireKeys(args, ["computerId", "timeoutMs"]);
       requireString(args.computerId, "computerId");

@@ -76,6 +76,13 @@
   batch execution cannot disagree. — Evidence: DOS profile tests verify the
   conventional/UMB/XMS map, boot variables, explicit warnings, and line/depth
   termination.
+- Keep OS command exposure closed by default. Linux and DOS must select separate
+  Map-backed registries for execution, help, discovery, and completion; adding a
+  command to one registry must not expose it through the other frontend. Keep
+  DOS names and formatting in DOS adapters and share structured filesystem and
+  toolchain services instead of aliasing `DIR`/`COPY` to Linux applets. —
+  Evidence: OS command-boundary and architecture tests reject cross-profile
+  names and preserve the documented DOS extensions and CS486 toolchains.
 - Gate profile-specific interactive commands twice: filter discovery and
   completion in the command runtime, and guard the `ShellSession` TUI intercept
   itself. A runtime-only gate can be bypassed when the session starts an editor
@@ -107,3 +114,12 @@
   an explicit built-in-display capability. — Evidence: Bedrock adapter tests
   cover the Desktop gate, adjacent Monitor resolution, Portable held/placed
   paths, and stationary-redstone exclusion for Portable blocks.
+- Treat live cross-language benchmarks as correctness experiments first: use
+  identical workload/checksum sources, cold guest processes, exact persisted
+  hardware identities, and runtime statistics rather than MCP command overhead.
+  A yielded process is an incomplete measurement, not a slow result; keep the
+  runner bounded but large enough for the declared workload, and record an
+  unsupported frontend as an explicit status cell instead of a host estimate. —
+  Evidence: the 1,500-iteration strength-reduction matrix completed all 28
+  supported live-BDS/MCP runs on CS486DX2, CS486DX, and CS386SX, while both
+  Portable Python cells terminated with DOS status 127.

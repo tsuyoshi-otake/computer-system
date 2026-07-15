@@ -84,6 +84,12 @@ export function isAllowedBdsCommand(command) {
     )
   )
     return true;
+  if (
+    /^scriptevent computer_system:debug-web-request w[a-z0-9]+-[a-z0-9]+ c-[0-9a-hjkmnp-tv-z]{6}$/u.test(
+      command,
+    )
+  )
+    return true;
 
   const serverProbe = /^scriptevent computer_system:probe ([a-z-]+)$/u.exec(
     command,
@@ -109,7 +115,7 @@ export function isAllowedWebRelayCommand(command) {
     return false;
   }
   if (
-    /^scriptevent computer_system:web-response r[a-z0-9]+-[a-z0-9]+ [A-Za-z0-9_-]{12,32} (?:writer|viewer) https?:\/\/[A-Za-z0-9.:[\]-]+(?::\d{1,5})?\/p\/[0-9]{4}$/u.test(
+    /^scriptevent computer_system:web-response r[a-z0-9]+-[a-z0-9]+ [A-Za-z0-9_-]{12,32} (?:writer|viewer)(?: debug)? https?:\/\/[A-Za-z0-9.:[\]-]+(?::\d{1,5})?\/p\/[0-9]{4}$/u.test(
       command,
     )
   ) {
@@ -147,6 +153,8 @@ export class BdsDebugSession {
     this.commandTail = Promise.resolve();
     this.nextDebugRequest = 1;
     this.pendingDebugCommands = 0;
+    this.nextWebRequest = 1;
+    this.pendingWebRequests = 0;
     this.serverPort = parseBdsPort(this.environment.BDS_MCP_PORT);
     this.worldName = this.environment.BDS_MCP_WORLD ?? defaultWorldName;
     this.sourceRoot = path.resolve(
@@ -258,9 +266,13 @@ export class BdsDebugSession {
       typeof command !== "string" ||
       command.length === 0 ||
       command.length > 128 ||
-      /[\r\n\0]/u.test(command)
+      /\0/u.test(command) ||
+      (/[\r\n]/u.test(command) &&
+        !/^(?:micropython|python)\s+-c\s+[\s\S]+$/u.test(command))
     ) {
-      throw new Error("command must contain 1 to 128 characters on one line.");
+      throw new Error(
+        "command must contain 1 to 128 characters; only python -c may contain line breaks.",
+      );
     }
     if (this.pendingDebugCommands >= 8) {
       throw new Error("Computer command debug capacity has been reached.");
@@ -303,6 +315,61 @@ export class BdsDebugSession {
       return response;
     } finally {
       this.pendingDebugCommands -= 1;
+    }
+  }
+
+  async requestWebHandoff(options = {}) {
+    const computerId = options.computerId;
+    if (
+      typeof computerId !== "string" ||
+      !/^c-[0-9a-hjkmnp-tv-z]{6}$/u.test(computerId)
+    ) {
+      throw new Error("computerId must use the c-xxxxxx identity format.");
+    }
+    if (this.pendingWebRequests >= 4) {
+      throw new Error("Web handoff debug capacity has been reached.");
+    }
+    const timeoutMs = Math.min(
+      asPositiveInteger(options.timeoutMs ?? 30_000),
+      120_000,
+    );
+    const requestId = `w${Date.now().toString(36)}-${this.nextWebRequest.toString(36)}`;
+    this.nextWebRequest =
+      this.nextWebRequest === Number.MAX_SAFE_INTEGER
+        ? 1
+        : this.nextWebRequest + 1;
+    this.pendingWebRequests += 1;
+    try {
+      const sent = await this.runCommand(
+        `scriptevent computer_system:debug-web-request ${requestId} ${computerId}`,
+      );
+      const entry = await this.waitForLog({
+        contains: `"requestId":"${requestId}"`,
+        afterCursor: sent.afterCursor,
+        timeoutMs,
+      });
+      const marker = "CS_DEBUG_WEB_REQUEST ";
+      const markerIndex = entry.line.indexOf(marker);
+      if (markerIndex < 0) throw new Error("Malformed Web handoff response.");
+      const response = JSON.parse(
+        entry.line.slice(markerIndex + marker.length),
+      );
+      if (
+        response.requestId !== requestId ||
+        response.computerId !== computerId
+      ) {
+        throw new Error("Mismatched Web handoff response.");
+      }
+      if (response.status !== "requested") {
+        throw new Error(
+          typeof response.error === "string"
+            ? response.error
+            : "Bedrock rejected the Web handoff request.",
+        );
+      }
+      return response;
+    } finally {
+      this.pendingWebRequests -= 1;
     }
   }
 

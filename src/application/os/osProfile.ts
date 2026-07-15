@@ -20,7 +20,6 @@ export interface VirtualDevice {
 }
 
 export interface OsProfile {
-  readonly aliases: ReadonlyMap<string, string>;
   readonly environment: ReadonlyMap<string, string>;
   readonly home: string;
   readonly initialDirectory: string;
@@ -65,6 +64,9 @@ const dosPathDialect: PathDialect = {
     if (expanded.startsWith("/drives/")) return canonicalizeDosPath(expanded);
     if (/^nul$/iu.test(expanded)) return "/drives/c/nul";
     if (/^con$/iu.test(expanded)) return "/drives/c/con";
+    if (/^(?:com|spi|i2c)[1-6]$/iu.test(expanded)) {
+      return `/drives/c/${expanded.toLowerCase()}`;
+    }
     const drive = /^([A-Za-z]):(?:\/(.*))?$/u.exec(expanded);
     const rooted =
       drive === null
@@ -104,7 +106,6 @@ const linuxProfile: OsProfile = {
   home: "/home/computer",
   initialDirectory: "/home/computer",
   pathDialect: linuxPathDialect,
-  aliases: new Map(),
   environment: new Map([
     ["HOME", "/home/computer"],
     ["PATH", "/usr/bin:/bin"],
@@ -203,22 +204,6 @@ const dosProfile: OsProfile = {
   home: "/drives/c",
   initialDirectory: "/drives/c",
   pathDialect: dosPathDialect,
-  aliases: new Map([
-    ["chdir", "cd"],
-    ["cls", "clear"],
-    ["copy", "cp"],
-    ["del", "rm"],
-    ["dir", "ls"],
-    ["erase", "rm"],
-    ["md", "mkdir"],
-    ["move", "mv"],
-    ["rd", "rm"],
-    ["ren", "mv"],
-    ["rename", "mv"],
-    ["rmdir", "rm"],
-    ["type", "cat"],
-    ["ver", "uname"],
-  ]),
   environment: new Map([
     ["PATH", "C:\\DOS;C:\\COMMAND"],
     ["PROMPT", "$P$G"],

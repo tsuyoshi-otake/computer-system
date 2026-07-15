@@ -29,13 +29,15 @@ import {
   requestWebComputerTerminal,
 } from "./webTerminalBridge.js";
 import { placeMachineFacingPlayer } from "./machinePlacement.js";
+import { refreshFaceIoTopology } from "./faceIoTopology.js";
 
 export const portableComputerTypeId = "computer_system:portable_computer";
 export const portableIdentityProperty = computerIdentityProperty;
 export const portableComputerDisplayName = "Portable Computer System";
 const componentId = "computer_system:portable_computer";
 const blockComponentId = "computer_system:portable_computer_block";
-const portableComputerBlockTypeId = "computer_system:portable_computer_block";
+export const portableComputerBlockTypeId =
+  "computer_system:portable_computer_block";
 const lifecycle = new PortableSessionLifecycle();
 const breakingBlocks = new Set<string>();
 const maximumDroppedItemsToInspect = 128;
@@ -134,8 +136,10 @@ function handlePortableBlockPlace({ block }: { readonly block: Block }): void {
     existing === undefined
       ? identityService().place(physicalKey, "advanced")
       : { outcome: "placed" as const, ...existing, generation: 0 };
-  if (placed.outcome === "placed")
+  if (placed.outcome === "placed") {
     ensurePortableComputer(placed.computerId, placed.family);
+    system.run((): void => refreshFaceIoTopology(block));
+  }
 }
 
 function handlePortableBlockInteraction(
@@ -171,6 +175,8 @@ function handlePortableBlockBreak(event: BlockComponentPlayerBreakEvent): void {
   const physicalKey = blockKey(event.block);
   const result = identityService().break(physicalKey);
   if (result.outcome !== "placed") return;
+  computerHost.serial.disconnectComputer(result.computerId, "block_broken");
+  computerHost.peripherals.clearComputer(result.computerId);
   const player = event.player;
   scheduleOwnedFinalization(breakingBlocks, physicalKey, {
     prepare: [

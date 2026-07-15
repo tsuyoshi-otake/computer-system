@@ -4,11 +4,22 @@ import { DynamicPropertyComputerRepository } from "../adapters/storage/dynamicPr
 import { ComputerHost } from "../application/computer/computerHost.js";
 import { ComputerPersistenceService } from "../application/computer/persistence.js";
 import { ComputerRuntime } from "../application/computer/computerRuntime.js";
+import { ComputerWorkMonitor } from "../application/runtime/computerWorkMonitor.js";
 import type { GameClockSnapshot } from "../application/os/clock.js";
 import type { ComputerRecord } from "../domain/computer/computer.js";
 
 const repository = new DynamicPropertyComputerRepository(world);
 const persistence = new ComputerPersistenceService(repository);
+let lastWorkClockMicroseconds = 0;
+const workMonitor = new ComputerWorkMonitor({
+  nowMicroseconds: (): number => {
+    lastWorkClockMicroseconds = Math.max(
+      lastWorkClockMicroseconds,
+      Date.now() * 1_000,
+    );
+    return lastWorkClockMicroseconds;
+  },
+});
 export const computerHost = new ComputerHost(
   new ComputerRuntime({
     requireLinuxLogin: true,
@@ -28,6 +39,7 @@ export const computerHost = new ComputerHost(
         `Computer ${computerId} persistence failed: ${error.message}`,
       );
     },
+    workMonitor,
   },
 );
 

@@ -32,7 +32,10 @@ export interface CpuProcess {
   advanceTick(tick: number): CpuProcessState;
   deliverEvent(name: string, ...arguments_: readonly RuntimeValue[]): boolean;
   fail(error: VmRuntimeError): CpuProcessState;
-  runCpuSlice(cpuCycleBudget: number): CpuProcessSliceResult;
+  runCpuSlice(
+    cpuCycleBudget: number,
+    instructionBudget?: number,
+  ): CpuProcessSliceResult;
   terminate(reason?: string): CpuProcessState;
 }
 

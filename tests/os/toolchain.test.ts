@@ -71,6 +71,37 @@ describe("CS486DX shell toolchain", (): void => {
     expect(shell.submit("/answer").stdout).toBe("42\n");
   });
 
+  it("completes a bounded compiled workload larger than 10,000 instructions", (): void => {
+    const filesystem = new InMemoryFilesystem();
+    const shell = new ShellSession(filesystem);
+    filesystem.writeFile(
+      "/strength.asm",
+      [
+        "mov eax, 0",
+        "mov ecx, 1",
+        "loop:",
+        "mov edx, ecx",
+        "mul edx, ecx",
+        "mov ebx, ecx",
+        "mul ebx, 3",
+        "add edx, ebx",
+        "add edx, 7",
+        "add eax, edx",
+        "add ecx, 1",
+        "cmp ecx, 1500",
+        "jle loop",
+        "print eax",
+        "halt",
+      ].join("\n"),
+    );
+
+    expect(shell.submit("as /strength.asm -o /strength").exitCode).toBe(0);
+    const measured = shell.submit("run --stats /strength");
+    expect(measured.exitCode).toBe(0);
+    expect(measured.stdout).toBe("1129513000");
+    expect(measured.stderr).toMatch(/1[0-9]{4} instructions.*halted/u);
+  });
+
   it("shows the nominal 486DX 33 MHz identity in Linux and DOS", (): void => {
     const linux = new ShellSession(new InMemoryFilesystem());
     const dos = new ShellSession(new InMemoryFilesystem(), {

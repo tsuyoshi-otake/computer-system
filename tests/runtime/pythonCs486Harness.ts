@@ -75,8 +75,11 @@ export class PythonCs486Harness implements CpuProcess {
     return this.program.process.runInstructionSlice(instructionBudget);
   }
 
-  runCpuSlice(cpuCycleBudget: number): CpuProcessSliceResult {
-    return this.program.process.runCpuSlice(cpuCycleBudget);
+  runCpuSlice(
+    cpuCycleBudget: number,
+    instructionBudget?: number,
+  ): CpuProcessSliceResult {
+    return this.program.process.runCpuSlice(cpuCycleBudget, instructionBudget);
   }
 
   advanceTick(tick: number): CpuProcessState {

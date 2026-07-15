@@ -18,6 +18,7 @@
     "test:bds:disconnect": "npm run build && node tools/bds-probe-runner.mjs --disconnect",
     "test:mcp": "vitest run tests/tools/bdsDebugSession.test.mjs tests/tools/bdsMcpServer.test.mjs",
     "test:mcp:bds": "node tools/bds-mcp-smoke.mjs",
+    "test:mcp:serial:bds": "node tools/bds-serial-mcp-smoke.mjs",
     "test:web": "vitest run tests/tools/webSessionStore.test.mjs tests/tools/webCompanionServer.test.mjs",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",

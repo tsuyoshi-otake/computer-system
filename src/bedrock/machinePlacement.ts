@@ -1,8 +1,7 @@
 import { BlockPermutation, type Block, type Player } from "@minecraft/server";
+import type { MachineCardinalDirection } from "../domain/computer/machineFace.js";
 
 const cardinalDirectionState = "minecraft:cardinal_direction";
-
-export type MachineCardinalDirection = "east" | "north" | "south" | "west";
 
 export function playerCardinalDirection(
   player: Pick<Player, "getViewDirection">,

@@ -48,6 +48,7 @@ export class WebCompanionServer {
     this.publicOrigin = normalizePublicOrigin(options.publicOrigin);
     this.configuredOrigins = normalizeAllowedOrigins(options.allowedOrigins);
     this.browserAutoOpenEnabled = options.autoOpenBrowser === true;
+    this.debugIgnoreRange = options.debugIgnoreRange === true;
     this.browserOpener = options.browserOpener ?? openDefaultBrowser;
     this.browserLaunchTimeoutMs = positiveInteger(
       options.browserLaunchTimeoutMs ?? defaultBrowserLaunchTimeoutMs,
@@ -173,6 +174,9 @@ export class WebCompanionServer {
       port: this.server?.address()?.port ?? this.port,
       origin: this.origin ?? null,
       activeSessions: this.store.activeCount(),
+      rangeEnforcement: this.debugIgnoreRange
+        ? "disabled_for_debug"
+        : "three_blocks",
       browserAutoOpen: { ...this.browserLaunch },
     };
   }
@@ -200,9 +204,10 @@ export class WebCompanionServer {
       const identity = JSON.parse(request);
       const issued = this.store.issue(identity);
       const handoffUrl = `${this.origin}/p/${issued.handoffCode}`;
+      const debugMarker = this.debugIgnoreRange ? " debug" : "";
       try {
         await this.bds.runWebRelay(
-          `scriptevent computer_system:web-response ${identity.requestId} ${issued.sessionId} ${issued.mode} ${handoffUrl}`,
+          `scriptevent computer_system:web-response ${identity.requestId} ${issued.sessionId} ${issued.mode}${debugMarker} ${handoffUrl}`,
         );
       } catch (error) {
         this.store.close(issued.sessionId, "relay_failed");
@@ -302,6 +307,15 @@ export class WebCompanionServer {
     this.pendingHandoffs.delete(computerId);
     clearTimeout(pending.timer);
     pending.resolve(handoff);
+    return true;
+  }
+
+  rejectPendingHandoff(computerId, reason) {
+    const pending = this.pendingHandoffs.get(computerId);
+    if (pending === undefined) return false;
+    this.pendingHandoffs.delete(computerId);
+    clearTimeout(pending.timer);
+    pending.reject(new Error(reason));
     return true;
   }
 
@@ -785,7 +799,9 @@ export class WebCompanionServer {
     const client = request.socket.remoteAddress ?? "unknown";
     this.requireHandoffAttemptAllowed(client);
     try {
-      const reconnected = this.store.reconnect(code);
+      const reconnected = this.store.reconnect(code, {
+        ignoreRange: this.debugIgnoreRange,
+      });
       this.handoffFailures.delete(client);
       return reconnected;
     } catch (error) {
@@ -795,6 +811,7 @@ export class WebCompanionServer {
   }
 
   requireInRange(session) {
+    if (this.debugIgnoreRange) return;
     if (!this.store.isInRange(session.sessionId)) {
       throw new WebSessionError(
         "out_of_range",

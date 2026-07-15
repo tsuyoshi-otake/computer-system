@@ -95,6 +95,36 @@ describe("default Computer System Linux boot", (): void => {
     expect(screen).not.toContain("login required");
   });
 
+  it("does not duplicate the shell prompt when unrelated events arrive after login", (): void => {
+    const record = new ComputerRecord("computer-88", "standard");
+    const setup = new ShellSession(record.filesystem, {
+      osProfile: "linux",
+      requireLogin: true,
+    });
+    setup.submit("correct-horse");
+    setup.submit("correct-horse");
+    const runtime = new ComputerRuntime({ requireLinuxLogin: true });
+    runtime.register(record);
+    runtime.powerOn(record.computerId);
+    runtime.runTick();
+
+    runtime.queueEvent(record.computerId, "terminal_line", "correct-horse");
+    runtime.runTick();
+    expect(record.terminal.line(4).trimEnd()).toBe("Login successful.");
+    expect(record.terminal.line(5).trimEnd()).toBe("~$");
+
+    runtime.queueEvent(record.computerId, "redstone", "left");
+    runtime.runTick();
+
+    const screen = record.terminal.snapshot().rows.join("\n");
+    expect(screen.match(/~\$ /gu)).toHaveLength(1);
+    expect(record.terminal.line(5).trimEnd()).toBe("~$");
+    expect(record.lifecycle.state).toEqual({
+      kind: "waiting_event",
+      filter: undefined,
+    });
+  });
+
   it("boots the Linux shell, edits startup.py with vi, and remains cooperatively waiting", (): void => {
     const record = new ComputerRecord("computer-30", "standard");
     const runtime = new ComputerRuntime();

@@ -124,7 +124,7 @@
     >
       <header class="manual-header">
         <div>
-          <div class="manual-series">CS TECHNICAL PUBLICATION · REV 0.4</div>
+          <div class="manual-series">CS TECHNICAL PUBLICATION · REV 0.5</div>
           <h2 id="manual-title">Computer System Field Manual</h2>
         </div>
         <div class="manual-header-actions">
@@ -135,15 +135,26 @@
         </div>
       </header>
       <div class="manual-workspace">
-        <aside class="manual-sidebar" aria-label="Manual chapters">
-          <label for="manual-search">Index search</label>
-          <input
-            id="manual-search"
-            type="search"
-            placeholder="instruction, fault, BASIC…"
-            autocomplete="off"
-          />
-          <nav id="manual-toc"></nav>
+        <aside class="manual-sidebar" aria-label="Manual navigation">
+          <div class="manual-control">
+            <label for="manual-search">Search manual</label>
+            <input
+              id="manual-search"
+              type="search"
+              placeholder="instruction, fault, BASIC…"
+              autocomplete="off"
+              maxlength="80"
+              aria-describedby="manual-search-status"
+            />
+            <p
+              id="manual-search-status"
+              class="manual-search-status"
+              role="status"
+              aria-live="polite"
+              aria-atomic="true"
+            ></p>
+          </div>
+          <nav id="manual-toc" aria-label="Publication chapters"></nav>
         </aside>
         <article id="manual-page" class="manual-page" tabindex="-1"></article>
       </div>

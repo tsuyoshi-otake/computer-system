@@ -1,5 +1,5 @@
 import { hasCopySelection, insertPastedCommand } from "/terminal-input.js";
-import { manualChapters } from "/manual.js";
+import { manualChapters, manualParts, searchManual } from "/manual.js";
 import { calculateFixedGridFontSize } from "/terminal-layout.js";
 
 const palette = [
@@ -20,6 +20,26 @@ const palette = [
   "#cc4c4c",
   "#111111",
 ];
+const manualApplicabilityLabels = {
+  "cs-linux": "CS-Linux",
+  "cs-dos": "CS-DOS",
+  cs486dx: "CS486DX",
+  cs486dx2: "CS486DX2",
+  cs386sx: "CS386SX",
+};
+const manualKindLabels = {
+  tutorial: "Tutorial",
+  "how-to": "How-to",
+  concept: "Concept",
+  reference: "Reference",
+};
+const manualSearchTypeLabels = {
+  command: "Command",
+  api: "API",
+  instruction: "Instruction",
+  error: "Error",
+  concept: "Concept",
+};
 
 const elements = {
   computerName: document.querySelector("#computer-name"),
@@ -50,6 +70,7 @@ const elements = {
   manualToc: document.querySelector("#manual-toc"),
   manualPage: document.querySelector("#manual-page"),
   manualSearch: document.querySelector("#manual-search"),
+  manualSearchStatus: document.querySelector("#manual-search-status"),
   manualPosition: document.querySelector("#manual-position"),
   manualPrevious: document.querySelector("#manual-previous"),
   manualNext: document.querySelector("#manual-next"),
@@ -83,6 +104,7 @@ let resizeFrame = 0;
 let hardwareTextModePending = false;
 let hardwareTextModeConfirmed = false;
 let manualChapterIndex = 0;
+let manualSectionId = "";
 const commandHistory = [];
 const editorKeyQueue = [];
 
@@ -229,7 +251,7 @@ elements.manualPrevious.addEventListener("click", () => {
 elements.manualNext.addEventListener("click", () => {
   renderManualChapter(manualChapterIndex + 1, true);
 });
-elements.manualSearch.addEventListener("input", renderManualToc);
+elements.manualSearch.addEventListener("input", renderManualNavigation);
 elements.manualDialog.addEventListener("keydown", (event) => {
   if (event.target === elements.manualSearch) return;
   if (event.key === "ArrowLeft") {
@@ -240,7 +262,7 @@ elements.manualDialog.addEventListener("keydown", (event) => {
     renderManualChapter(manualChapterIndex + 1, true);
   }
 });
-renderManualToc();
+renderManualNavigation();
 window.addEventListener("resize", scheduleTerminalFit);
 if (typeof ResizeObserver === "function") {
   new ResizeObserver(scheduleTerminalFit).observe(elements.terminalStage);
@@ -258,51 +280,182 @@ if (!/^[A-Za-z0-9_-]{20,}$/u.test(token) && /^[0-9]{4}$/u.test(queryCode)) {
   void bootstrap();
 }
 
-function renderManualToc() {
-  const query = elements.manualSearch.value.trim().toLowerCase();
+function renderManualNavigation() {
+  const query = elements.manualSearch.value.trim();
+  if (query.length > 0) renderManualSearchResults(query);
+  else renderManualParts();
+}
+
+function renderManualParts() {
   const fragment = document.createDocumentFragment();
-  for (const [index, chapter] of manualChapters.entries()) {
-    const searchable =
-      `${chapter.number} ${chapter.title} ${chapter.summary} ${chapter.html.replace(/<[^>]+>/gu, " ")}`.toLowerCase();
-    if (query.length > 0 && !searchable.includes(query)) continue;
+  for (const part of manualParts) {
+    const section = document.createElement("section");
+    section.className = "manual-part";
+    const heading = document.createElement("h3");
+    heading.className = "manual-part-title";
+    heading.textContent = `Part ${part.number} · ${part.title}`;
+    const entries = document.createElement("div");
+    entries.className = "manual-part-chapters";
+    for (const chapterId of part.chapterIds) {
+      const chapterIndex = manualChapters.findIndex(
+        ({ id }) => id === chapterId,
+      );
+      if (chapterIndex < 0) continue;
+      entries.append(createManualChapterButton(chapterIndex));
+    }
+    section.append(heading, entries);
+    fragment.append(section);
+  }
+  elements.manualToc.replaceChildren(fragment);
+  elements.manualToc.setAttribute("aria-label", "Publication chapters by part");
+  elements.manualSearchStatus.textContent = `${String(manualChapters.length)} chapters in ${String(manualParts.length)} parts.`;
+}
+
+function createManualChapterButton(chapterIndex) {
+  const chapter = manualChapters[chapterIndex];
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "manual-toc-entry";
+  button.dataset.chapter = chapter.id;
+  if (chapterIndex === manualChapterIndex) {
+    button.setAttribute("aria-current", "page");
+  }
+  const number = document.createElement("span");
+  number.textContent = chapter.number;
+  const label = document.createElement("span");
+  const title = document.createElement("b");
+  title.textContent = chapter.title;
+  const summary = document.createElement("small");
+  summary.textContent = chapter.summary;
+  label.append(title, summary);
+  if (chapterIndex === manualChapterIndex) appendCurrentMarker(label);
+  button.append(number, label);
+  button.addEventListener("click", () =>
+    renderManualChapter(chapterIndex, true),
+  );
+  return button;
+}
+
+function renderManualSearchResults(query) {
+  const results = searchManual(query, { limit: 24 });
+  const fragment = document.createDocumentFragment();
+  for (const result of results) {
+    const chapterIndex = manualChapters.findIndex(
+      ({ id }) => id === result.chapterId,
+    );
+    if (chapterIndex < 0) continue;
+    const chapter = manualChapters[chapterIndex];
     const button = document.createElement("button");
     button.type = "button";
-    button.className = "manual-toc-entry";
+    button.className = "manual-search-result";
     button.dataset.chapter = chapter.id;
-    if (index === manualChapterIndex)
-      button.setAttribute("aria-current", "page");
-    const number = document.createElement("span");
-    number.textContent = chapter.number;
-    const label = document.createElement("span");
-    const title = document.createElement("b");
-    title.textContent = chapter.title;
-    const summary = document.createElement("small");
-    summary.textContent = chapter.summary;
-    label.append(title, summary);
-    button.append(number, label);
-    button.addEventListener("click", () => renderManualChapter(index, true));
+    button.dataset.section = result.sectionId;
+    const isCurrent =
+      chapterIndex === manualChapterIndex &&
+      result.sectionId === manualSectionId;
+    if (isCurrent) button.setAttribute("aria-current", "location");
+
+    const meta = document.createElement("span");
+    meta.className = "manual-search-meta";
+    const type = document.createElement("span");
+    type.className = "manual-search-type";
+    type.textContent = manualSearchTypeLabels[result.type] ?? result.type;
+    const applicability = document.createElement("span");
+    applicability.className = "manual-search-applicability";
+    applicability.textContent = formatManualApplicability(result.appliesTo);
+    meta.append(type, applicability);
+    if (isCurrent) appendCurrentMarker(meta);
+
+    const breadcrumb = document.createElement("span");
+    breadcrumb.className = "manual-search-breadcrumb";
+    breadcrumb.textContent = `${result.chapterNumber} · ${result.chapterTitle} / ${result.sectionTitle}`;
+    const snippet = document.createElement("small");
+    snippet.className = "manual-search-snippet";
+    snippet.textContent = result.snippet;
+    button.append(meta, breadcrumb, snippet);
+    button.addEventListener("click", () =>
+      renderManualChapter(chapterIndex, true, result.sectionId),
+    );
     fragment.append(button);
   }
   elements.manualToc.replaceChildren(fragment);
-  if (elements.manualToc.childElementCount === 0) {
+  elements.manualToc.setAttribute("aria-label", `Search results for ${query}`);
+  elements.manualSearchStatus.textContent = `${String(results.length)} ${results.length === 1 ? "result" : "results"} for “${query}”.`;
+  if (results.length === 0) {
     const empty = document.createElement("p");
     empty.className = "manual-empty";
-    empty.textContent = "No chapter matches this index search.";
+    empty.textContent = `No manual section matches “${query}”.`;
     elements.manualToc.append(empty);
   }
 }
 
-function renderManualChapter(index, focusPage = false) {
+function appendCurrentMarker(parent) {
+  const marker = document.createElement("span");
+  marker.className = "manual-current-marker";
+  marker.textContent = "Current";
+  parent.append(marker);
+}
+
+function formatManualApplicability(appliesTo) {
+  return appliesTo
+    .map((profile) => manualApplicabilityLabels[profile] ?? profile)
+    .join(" · ");
+}
+
+function renderManualChapterMeta(chapter) {
+  const header = elements.manualPage.querySelector(".manual-page-header");
+  if (header === null) return;
+  const metadata = document.createElement("div");
+  metadata.className = "manual-chapter-meta";
+  metadata.setAttribute(
+    "aria-label",
+    "Chapter classification and applicability",
+  );
+
+  const kind = document.createElement("span");
+  kind.className = "manual-chapter-kind";
+  kind.textContent = `Type · ${manualKindLabels[chapter.kind] ?? chapter.kind}`;
+  const applicability = document.createElement("span");
+  applicability.className = "manual-chapter-applies";
+  applicability.textContent = `Applies · ${formatManualApplicability(chapter.appliesTo)}`;
+  metadata.append(kind, applicability);
+
+  const kicker = header.querySelector(".manual-kicker");
+  if (kicker === null) header.prepend(metadata);
+  else kicker.after(metadata);
+}
+
+function renderManualChapter(index, focusPage = false, sectionId = "") {
   manualChapterIndex = Math.max(0, Math.min(manualChapters.length - 1, index));
+  manualSectionId = sectionId;
   const chapter = manualChapters[manualChapterIndex];
   elements.manualPage.innerHTML = chapter.html;
+  renderManualChapterMeta(chapter);
   elements.manualPage.scrollTop = 0;
   elements.manualPosition.textContent = `${chapter.number} / ${String(manualChapters.length).padStart(2, "0")}`;
   elements.manualPrevious.disabled = manualChapterIndex === 0;
   elements.manualNext.disabled =
     manualChapterIndex === manualChapters.length - 1;
-  renderManualToc();
-  if (focusPage) elements.manualPage.focus({ preventScroll: true });
+  elements.manualPrevious.title = elements.manualPrevious.disabled
+    ? "Already at the first chapter"
+    : `Open chapter ${manualChapters[manualChapterIndex - 1].number}`;
+  elements.manualNext.title = elements.manualNext.disabled
+    ? "Already at the final chapter"
+    : `Open chapter ${manualChapters[manualChapterIndex + 1].number}`;
+  renderManualNavigation();
+  if (!focusPage) return;
+  if (sectionId.length > 0) {
+    const heading = [...elements.manualPage.querySelectorAll("h3[id]")].find(
+      ({ id }) => id === sectionId,
+    );
+    if (heading !== undefined) {
+      heading.tabIndex = -1;
+      heading.focus({ preventScroll: true });
+      heading.scrollIntoView({ block: "start" });
+      return;
+    }
+  }
+  elements.manualPage.focus({ preventScroll: true });
 }
 
 async function bootstrap() {

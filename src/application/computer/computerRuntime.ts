@@ -1,6 +1,8 @@
 import {
   createNativeEnvironment,
   renderTerminalScreen,
+  writeTerminalLines,
+  type ForegroundProcessStartResult,
 } from "../runtime/nativeModules.js";
 import { createPythonCs486Program } from "../runtime/pythonCs486.js";
 import {
@@ -9,6 +11,7 @@ import {
 } from "../runtime/scheduler.js";
 import type { CpuProcessState } from "../../domain/runtime/cpuProcess.js";
 import type { CpuProcess } from "../../domain/runtime/cpuProcess.js";
+import { Cs486Process, runCs486 } from "../../domain/cpu/cs486.js";
 import type { ComputerRecord } from "../../domain/computer/computer.js";
 import { numericComputerId } from "../../domain/computer/identity.js";
 import type { RuntimeValue } from "../../domain/runtime/value.js";
@@ -17,6 +20,7 @@ import { defaultSystemBootSource } from "../os/systemPrograms.js";
 import type { ShellClockSource } from "../os/clock.js";
 import type { ShellCompletionResult } from "../os/shellCommands.js";
 import type { ShellSession } from "../os/shellSession.js";
+import type { ShellForegroundRequest } from "../os/shellTypes.js";
 import {
   hardwareCpuCyclesPerTick,
   type ComputerHardwareProfile,
@@ -24,6 +28,8 @@ import {
 import { cpuModelSpecification } from "../../domain/cpu/models.js";
 import { cpuCyclesToMicroseconds } from "../../domain/cpu/timing.js";
 import { clearCsBiosForOs, renderCsBiosPost } from "./csBios.js";
+import { SerialLinkBroker } from "../io/serialLinkBroker.js";
+import { PeripheralBusBroker } from "../io/peripheralBusBroker.js";
 
 export interface ComputerRuntimeOptions {
   readonly clock?: ShellClockSource;
@@ -31,6 +37,8 @@ export interface ComputerRuntimeOptions {
   readonly defaultBootSource?: string;
   readonly ticksPerSecond?: number;
   readonly requireLinuxLogin?: boolean;
+  readonly serial?: SerialLinkBroker;
+  readonly peripherals?: PeripheralBusBroker;
 }
 
 export type RuntimeCommandResult =
@@ -54,7 +62,14 @@ export type DebugShellCommandResult =
   | { readonly outcome: "ignored"; readonly reason: "not_running" }
   | { readonly outcome: "failed"; readonly error: Error };
 
+export type DebugShellCommandCompletion = Extract<
+  DebugShellCommandResult,
+  { readonly outcome: "completed" | "failed" | "ignored" | "missing" }
+>;
+
 export class ComputerRuntime {
+  readonly serial: SerialLinkBroker;
+  readonly peripherals: PeripheralBusBroker;
   private readonly scheduler: RoundRobinScheduler;
   private readonly entries = new Map<string, RuntimeEntry>();
   private readonly defaultBootSource: string;
@@ -64,6 +79,8 @@ export class ComputerRuntime {
   private nextRuntimeId = 1;
 
   constructor(options: ComputerRuntimeOptions = {}) {
+    this.serial = options.serial ?? new SerialLinkBroker();
+    this.peripherals = options.peripherals ?? new PeripheralBusBroker();
     this.scheduler = new RoundRobinScheduler(options.schedulerLimits);
     this.defaultBootSource =
       options.defaultBootSource ?? defaultSystemBootSource;
@@ -109,6 +126,16 @@ export class ComputerRuntime {
     return this.requestStop(computerId, "shutdown", "terminated");
   }
 
+  interrupt(computerId: string): RuntimeCommandResult {
+    const entry = this.entries.get(computerId);
+    if (entry === undefined) return { outcome: "missing", computerId };
+    if (entry.foreground !== undefined) {
+      entry.foreground.process.terminate("interrupted");
+      return { outcome: "accepted", state: "foreground_interrupted" };
+    }
+    return this.requestStop(computerId, "shutdown", "terminated");
+  }
+
   queueEvent(
     computerId: string,
     name: string,
@@ -119,7 +146,11 @@ export class ComputerRuntime {
     if (entry.vm === undefined)
       return { outcome: "ignored", reason: "not_running" };
     try {
-      this.scheduler.queueEvent(entry.runtimeId, name, ...arguments_);
+      this.scheduler.queueEvent(
+        entry.foreground?.runtimeId ?? entry.runtimeId,
+        name,
+        ...arguments_,
+      );
       return { outcome: "accepted", state: entry.record.lifecycle.state.kind };
     } catch (error: unknown) {
       return failure(error);
@@ -128,9 +159,44 @@ export class ComputerRuntime {
 
   runTick(): void {
     this.completePendingBootHandoffs();
-    this.scheduler.runTick();
+    const tick = this.scheduler.runTick();
+    const scheduled = new Map(
+      tick.computers.map((computer) => [computer.id, computer] as const),
+    );
     const reboot: RuntimeEntry[] = [];
     for (const entry of this.entries.values()) {
+      const foreground = entry.foreground;
+      if (foreground !== undefined) {
+        const measured = scheduled.get(foreground.runtimeId);
+        if (measured !== undefined) {
+          foreground.cpuCycles = Math.min(
+            1_000_000,
+            foreground.compileCycles + measured.cpuCycles,
+          );
+          foreground.executedInstructions = measured.executedInstructions;
+        }
+        if (
+          foreground.instructionLimit !== undefined &&
+          foreground.executedInstructions >= foreground.instructionLimit &&
+          foreground.process.state.kind === "ready"
+        ) {
+          foreground.limitReached = true;
+          foreground.process.terminate("execution limit reached");
+        }
+        const foregroundState = foreground.process.state;
+        if (
+          !foreground.process.hasPendingCpuCycles &&
+          (foregroundState.kind === "completed" ||
+            foregroundState.kind === "crashed" ||
+            foregroundState.kind === "terminated")
+        ) {
+          this.completeForegroundProcess(entry, foreground, foregroundState);
+        }
+      }
+      this.updateDebugJob(
+        entry,
+        scheduled.get(entry.debugJob?.runtimeId ?? -1),
+      );
       if (entry.vm === undefined) continue;
       const state = entry.vm.state;
       if (
@@ -180,7 +246,8 @@ export class ComputerRuntime {
   }
 
   vmState(computerId: string): CpuProcessState | undefined {
-    return this.entries.get(computerId)?.vm?.state;
+    const entry = this.entries.get(computerId);
+    return entry?.foreground?.process.state ?? entry?.vm?.state;
   }
 
   completeShellInput(
@@ -203,11 +270,54 @@ export class ComputerRuntime {
     if (entry === undefined) return { outcome: "missing", computerId };
     if (entry.shell === undefined)
       return { outcome: "ignored", reason: "not_running" };
+    if (entry.foreground !== undefined) {
+      return {
+        outcome: "completed",
+        exitCode: 2,
+        stdout: "",
+        stderr: "debug: a foreground process is already running\n",
+        cpuCycles: 1,
+      };
+    }
     try {
-      const python = /^(?:micropython|python)\s+(\S+)$/u.exec(line.trim());
+      const trimmed = line.trim();
+      const inlinePython = /^(?:micropython|python)\s+-c\s+([\s\S]+)$/u.exec(
+        trimmed,
+      );
+      if (inlinePython !== null) {
+        return this.executeDebugPython(
+          entry,
+          "/tmp/__mcp_inline__.py",
+          inlinePython[1] ?? "",
+        );
+      }
+      const python = /^(?:micropython|python)\s+(\S+)$/u.exec(trimmed);
       if (python !== null)
         return this.executeDebugPython(entry, python[1] ?? "");
       const result = entry.shell.submitDebugCommand(line);
+      if (result.foreground?.kind === "cs486") {
+        const request = result.foreground;
+        const executed = runCs486(request.executable, {
+          cpuModel: entry.record.hardware.cpuModel,
+          instructionLimit: 100_000,
+          memoryBytes: entry.record.hardware.memoryBytes,
+        });
+        const cpuCycles = Math.min(
+          1_000_000,
+          request.compileCycles + executed.cycles,
+        );
+        return {
+          outcome: "completed",
+          exitCode: executed.state === "halted" ? 0 : 124,
+          stdout: executed.output,
+          stderr: request.stats
+            ? `${cs486RunResultStats(executed, entry.record.hardware).join("\n")}\n`
+            : executed.state === "yielded"
+              ? `${cpuModelSpecification(entry.record.hardware.cpuModel).runtimeName}: execution limit reached\n`
+              : "",
+          cpuCycles,
+        };
+      }
       return {
         outcome: "completed",
         exitCode: result.exitCode,
@@ -223,9 +333,297 @@ export class ComputerRuntime {
     }
   }
 
+  /**
+   * Starts MCP-facing guest execution without running a guest loop on the
+   * Script API callback stack. The completion callback is owned by this
+   * runtime and is invoked exactly once after the scheduler reaches a terminal
+   * state. Non-guest commands complete immediately through the same callback.
+   */
+  enqueueDebugShellCommand(
+    computerId: string,
+    line: string,
+    onComplete: (result: DebugShellCommandCompletion) => void,
+  ): void {
+    const entry = this.entries.get(computerId);
+    if (entry === undefined) {
+      onComplete({ outcome: "missing", computerId });
+      return;
+    }
+    if (entry.shell === undefined) {
+      onComplete({ outcome: "ignored", reason: "not_running" });
+      return;
+    }
+    if (entry.foreground !== undefined || entry.debugJob !== undefined) {
+      onComplete({
+        outcome: "completed",
+        exitCode: 2,
+        stdout: "",
+        stderr: "debug: a foreground process is already running\n",
+        cpuCycles: 1,
+      });
+      return;
+    }
+    try {
+      const trimmed = line.trim();
+      const inlinePython = /^(?:micropython|python)\s+-c\s+([\s\S]+)$/u.exec(
+        trimmed,
+      );
+      if (inlinePython !== null) {
+        this.enqueueDebugPython(
+          entry,
+          "/tmp/__mcp_inline__.py",
+          inlinePython[1] ?? "",
+          onComplete,
+        );
+        return;
+      }
+      const python = /^(?:micropython|python)\s+(\S+)$/u.exec(trimmed);
+      if (python !== null) {
+        this.enqueueDebugPython(entry, python[1] ?? "", undefined, onComplete);
+        return;
+      }
+      const result = entry.shell.submitDebugCommand(line);
+      if (result.foreground?.kind === "cs486") {
+        this.enqueueDebugCs486(entry, result.foreground, onComplete);
+        return;
+      }
+      onComplete({
+        outcome: "completed",
+        exitCode: result.exitCode,
+        stderr: result.stderr,
+        stdout: result.stdout,
+        cpuCycles: result.cpuCycles ?? 1,
+      });
+    } catch (error: unknown) {
+      onComplete({
+        outcome: "failed",
+        error: error instanceof Error ? error : new Error(String(error)),
+      });
+    }
+  }
+
+  private enqueueDebugPython(
+    entry: RuntimeEntry,
+    path: string,
+    inlineSource: string | undefined,
+    onComplete: (result: DebugShellCommandCompletion) => void,
+  ): void {
+    const cpu = cpuModelSpecification(entry.record.hardware.cpuModel);
+    if (!cpu.supportsMicroPython) {
+      onComplete({
+        outcome: "completed",
+        exitCode: 127,
+        stdout: "",
+        stderr: `MicroPython is not available on ${cpu.runtimeName}\n`,
+        cpuCycles: 1,
+      });
+      return;
+    }
+    const source = inlineSource ?? entry.record.filesystem.readFile(path);
+    const terminal = new TerminalBuffer(80, 25);
+    const runtimeId = this.nextRuntimeId++;
+    const environment = createNativeEnvironment({
+      clock: this.clock,
+      computerId: numericComputerId(entry.record.computerId),
+      computerName: entry.record.computerId,
+      osProfile: entry.record.osProfile,
+      filesystem: entry.record.filesystem,
+      terminal,
+      hardware: entry.record.hardware,
+      memoryUsageBytes: () => entry.debugJob?.process.memoryUsageBytes ?? 0,
+      currentTick: () => this.scheduler.tickNumber,
+      ticksPerSecond: this.ticksPerSecond,
+      serial: this.serial,
+      peripherals: this.peripherals,
+    });
+    const process = createPythonCs486Program({
+      cpuModel: entry.record.hardware.cpuModel,
+      environment,
+      filesystem: entry.record.filesystem,
+      memoryBytes: entry.record.hardware.memoryBytes,
+      path,
+      source,
+    }).process;
+    this.startDebugJob(entry, {
+      compileCycles: 0,
+      kind: "python",
+      onComplete,
+      process,
+      runtimeId,
+      stats: true,
+      terminal,
+    });
+  }
+
+  private enqueueDebugCs486(
+    entry: RuntimeEntry,
+    request: Extract<ShellForegroundRequest, { readonly kind: "cs486" }>,
+    onComplete: (result: DebugShellCommandCompletion) => void,
+  ): void {
+    this.startDebugJob(entry, {
+      compileCycles: request.compileCycles,
+      instructionLimit: 100_000,
+      kind: "cs486",
+      onComplete,
+      process: new Cs486Process(request.executable, {
+        cpuModel: entry.record.hardware.cpuModel,
+        memoryBytes: entry.record.hardware.memoryBytes,
+      }),
+      runtimeId: this.nextRuntimeId++,
+      stats: request.stats,
+    });
+  }
+
+  private startDebugJob(
+    entry: RuntimeEntry,
+    job: Omit<DebugGuestJob, "cpuCycles" | "executedInstructions">,
+  ): void {
+    const active: DebugGuestJob = {
+      ...job,
+      cpuCycles: 0,
+      executedInstructions: 0,
+    };
+    entry.debugJob = active;
+    this.scheduler.add(
+      active.runtimeId,
+      active.process,
+      hardwareCpuCyclesPerTick(
+        entry.record.hardware.clockHz,
+        this.ticksPerSecond,
+      ),
+    );
+  }
+
+  private updateDebugJob(
+    entry: RuntimeEntry,
+    measured:
+      | {
+          readonly cpuCycles: number;
+          readonly executedInstructions: number;
+        }
+      | undefined,
+  ): void {
+    const job = entry.debugJob;
+    if (job === undefined) return;
+    if (measured !== undefined) {
+      job.cpuCycles = Math.min(
+        100_000_000,
+        job.compileCycles + measured.cpuCycles,
+      );
+      job.executedInstructions = measured.executedInstructions;
+    }
+    const state = job.process.state;
+    if (state.kind === "sleeping" || state.kind === "waiting_event") {
+      job.termination = "unsupported_wait";
+      job.process.terminate(
+        "MCP debug execution does not support waits or long-running work",
+      );
+    } else if (
+      job.instructionLimit !== undefined &&
+      job.executedInstructions >= job.instructionLimit &&
+      state.kind === "ready"
+    ) {
+      job.termination = "instruction_limit";
+      job.process.terminate("execution limit reached");
+    } else if (job.cpuCycles >= 100_000_000 && state.kind === "ready") {
+      job.termination = "cpu_limit";
+      job.process.terminate("MCP debug CPU cycle limit reached");
+    }
+    const terminalState = job.process.state;
+    if (
+      !job.process.hasPendingCpuCycles &&
+      (terminalState.kind === "completed" ||
+        terminalState.kind === "crashed" ||
+        terminalState.kind === "terminated")
+    ) {
+      this.completeDebugJob(entry, job, terminalState);
+    }
+  }
+
+  private completeDebugJob(
+    entry: RuntimeEntry,
+    job: DebugGuestJob,
+    state: Extract<
+      CpuProcessState,
+      { readonly kind: "completed" | "crashed" | "terminated" }
+    >,
+  ): void {
+    this.scheduler.remove(job.runtimeId);
+    entry.debugJob = undefined;
+    const stdout =
+      job.kind === "python"
+        ? terminalStdout(job.terminal!)
+        : job.process.output;
+    let result: DebugShellCommandCompletion;
+    if (job.termination === "instruction_limit") {
+      result = {
+        outcome: "completed",
+        exitCode: 124,
+        stdout,
+        stderr: `${cpuModelSpecification(entry.record.hardware.cpuModel).runtimeName}: execution limit reached\n`,
+        cpuCycles: job.cpuCycles,
+      };
+    } else if (
+      job.termination === "unsupported_wait" ||
+      job.termination === "cpu_limit"
+    ) {
+      result = {
+        outcome: "completed",
+        exitCode: 2,
+        stdout,
+        stderr:
+          "MCP debug execution does not support waits or long-running work\n",
+        cpuCycles: job.cpuCycles,
+      };
+    } else if (state.kind === "crashed") {
+      result = {
+        outcome: "completed",
+        exitCode: 1,
+        stdout,
+        stderr: `${state.error.name}: ${state.error.message}\n`,
+        cpuCycles: job.cpuCycles,
+      };
+    } else if (state.kind === "terminated") {
+      result = {
+        outcome: "completed",
+        exitCode: 130,
+        stdout,
+        stderr: "debug: execution terminated\n",
+        cpuCycles: job.cpuCycles,
+      };
+    } else {
+      result = {
+        outcome: "completed",
+        exitCode: 0,
+        stdout,
+        stderr:
+          job.kind === "python"
+            ? pythonStats(
+                job.executedInstructions,
+                job.cpuCycles,
+                "completed",
+                entry.record.hardware,
+              )
+            : job.stats
+              ? `${cs486Stats(
+                  job.executedInstructions,
+                  job.cpuCycles,
+                  "halted",
+                  entry.record.hardware,
+                  job.process,
+                ).join("\n")}\n`
+              : "",
+        cpuCycles: job.cpuCycles,
+      };
+    }
+    entry.shell?.completeForegroundProcess(result.exitCode);
+    job.onComplete(result);
+  }
+
   private executeDebugPython(
     entry: RuntimeEntry,
     path: string,
+    inlineSource?: string,
   ): DebugShellCommandResult {
     const cpu = cpuModelSpecification(entry.record.hardware.cpuModel);
     if (!cpu.supportsMicroPython) {
@@ -237,7 +635,7 @@ export class ComputerRuntime {
         cpuCycles: 1,
       };
     }
-    const source = entry.record.filesystem.readFile(path);
+    const source = inlineSource ?? entry.record.filesystem.readFile(path);
     const terminal = new TerminalBuffer(80, 25);
     const environment = createNativeEnvironment({
       clock: this.clock,
@@ -251,6 +649,8 @@ export class ComputerRuntime {
       currentTick: () => this.scheduler.tickNumber,
       shell: entry.shell,
       ticksPerSecond: this.ticksPerSecond,
+      serial: this.serial,
+      peripherals: this.peripherals,
     });
     const vm = createPythonCs486Program({
       cpuModel: entry.record.hardware.cpuModel,
@@ -333,6 +733,7 @@ export class ComputerRuntime {
 
   private boot(entry: RuntimeEntry): RuntimeCommandResult {
     try {
+      entry.record.faceIo.powerOn();
       if (entry.record.display.state.kind === "faulted") {
         entry.record.display.transition({ kind: "reset" });
       } else if (entry.record.display.state.kind !== "off") {
@@ -358,7 +759,10 @@ export class ComputerRuntime {
         filesystem: entry.record.filesystem,
         terminal: entry.record.terminal,
         hardware: entry.record.hardware,
-        memoryUsageBytes: () => entry.vm?.memoryUsageBytes ?? 0,
+        memoryUsageBytes: () =>
+          entry.foreground?.process.memoryUsageBytes ??
+          entry.vm?.memoryUsageBytes ??
+          0,
         redstone: entry.record.redstone,
         currentTick: () => this.scheduler.tickNumber,
         queueEvent: (name, ...arguments_) =>
@@ -369,8 +773,12 @@ export class ComputerRuntime {
           this.scheduler.cancelTimer(entry.runtimeId, timerId),
         shutdown: () => this.requestEntryStop(entry, "shutdown", "shutdown"),
         reboot: () => this.requestEntryStop(entry, "reboot", "reboot"),
+        startForegroundProcess: (request) =>
+          this.startForegroundProcess(entry, request),
         ticksPerSecond: this.ticksPerSecond,
         requireLinuxLogin: this.requireLinuxLogin,
+        serial: this.serial,
+        peripherals: this.peripherals,
       });
       const vm = createPythonCs486Program({
         cpuModel: entry.record.hardware.cpuModel,
@@ -402,12 +810,190 @@ export class ComputerRuntime {
         message: normalized.message,
       });
       entry.pendingBootHandoff = false;
+      entry.record.faceIo.powerOff("boot_failed");
       entry.record.display.transition({
         kind: "fault",
         message: normalized.message.slice(0, 256) || "CSBIOS boot failure",
       });
       return { outcome: "failed", error: normalized };
     }
+  }
+
+  private startForegroundProcess(
+    entry: RuntimeEntry,
+    request: ShellForegroundRequest,
+  ): ForegroundProcessStartResult {
+    if (entry.foreground !== undefined) {
+      return {
+        outcome: "failed",
+        exitCode: 2,
+        stderr: `${request.command}: a foreground process is already running\n`,
+      };
+    }
+    if (entry.vm === undefined || entry.shell === undefined) {
+      return {
+        outcome: "failed",
+        exitCode: 2,
+        stderr: `${request.command}: shell runtime is not running\n`,
+      };
+    }
+    const cpu = cpuModelSpecification(entry.record.hardware.cpuModel);
+    if (request.kind === "python" && !cpu.supportsMicroPython) {
+      return {
+        outcome: "failed",
+        exitCode: 127,
+        stderr: `${request.command}: MicroPython is not available on ${cpu.runtimeName}\n`,
+      };
+    }
+    try {
+      const runtimeId = this.nextRuntimeId++;
+      const completionEvent = `${foregroundCompletionEvent}:${String(runtimeId)}`;
+      const process =
+        request.kind === "python"
+          ? this.createForegroundPythonProcess(entry, request, runtimeId)
+          : new Cs486Process(request.executable, {
+              cpuModel: entry.record.hardware.cpuModel,
+              memoryBytes: entry.record.hardware.memoryBytes,
+            });
+      const foreground: ForegroundGuestProcess = {
+        command: request.command,
+        compileCycles: request.kind === "cs486" ? request.compileCycles : 0,
+        completionEvent,
+        cpuCycles: 0,
+        executedInstructions: 0,
+        instructionLimit: request.kind === "cs486" ? 100_000 : undefined,
+        kind: request.kind,
+        process,
+        runtimeId,
+        stats: request.stats,
+      };
+      this.scheduler.add(
+        runtimeId,
+        process,
+        hardwareCpuCyclesPerTick(
+          entry.record.hardware.clockHz,
+          this.ticksPerSecond,
+        ),
+      );
+      entry.foreground = foreground;
+      return { completionEvent, outcome: "started" };
+    } catch (error: unknown) {
+      const normalized =
+        error instanceof Error ? error : new Error(String(error));
+      return {
+        outcome: "failed",
+        exitCode: 1,
+        stderr: `${request.command}: ${normalized.name}: ${normalized.message}\n`,
+      };
+    }
+  }
+
+  private createForegroundPythonProcess(
+    entry: RuntimeEntry,
+    request: Extract<ShellForegroundRequest, { readonly kind: "python" }>,
+    runtimeId: number,
+  ): Cs486Process {
+    const source = entry.record.filesystem.readFile(request.path);
+    const environment = createNativeEnvironment({
+      clock: this.clock,
+      computerId: numericComputerId(entry.record.computerId),
+      computerName: entry.record.computerId,
+      osProfile: entry.record.osProfile,
+      filesystem: entry.record.filesystem,
+      terminal: entry.record.terminal,
+      hardware: entry.record.hardware,
+      memoryUsageBytes: () => entry.foreground?.process.memoryUsageBytes ?? 0,
+      redstone: entry.record.redstone,
+      currentTick: () => this.scheduler.tickNumber,
+      queueEvent: (name, ...arguments_) =>
+        this.scheduler.queueEvent(runtimeId, name, ...arguments_),
+      startTimer: (delay) => this.scheduler.startTimer(runtimeId, delay),
+      cancelTimer: (timerId) => this.scheduler.cancelTimer(runtimeId, timerId),
+      shutdown: () => this.requestEntryStop(entry, "shutdown", "shutdown"),
+      reboot: () => this.requestEntryStop(entry, "reboot", "reboot"),
+      ticksPerSecond: this.ticksPerSecond,
+      shell: entry.shell,
+      serial: this.serial,
+      peripherals: this.peripherals,
+    });
+    return createPythonCs486Program({
+      cpuModel: entry.record.hardware.cpuModel,
+      environment,
+      filesystem: entry.record.filesystem,
+      memoryBytes: entry.record.hardware.memoryBytes,
+      path: request.path,
+      source,
+    }).process;
+  }
+
+  private completeForegroundProcess(
+    entry: RuntimeEntry,
+    foreground: ForegroundGuestProcess,
+    state: CpuProcessState,
+  ): void {
+    this.scheduler.remove(foreground.runtimeId);
+    entry.foreground = undefined;
+    if (entry.stopIntent !== undefined || entry.vm === undefined) return;
+
+    let exitCode: number;
+    let stateName: string;
+    if (foreground.limitReached === true) {
+      exitCode = 124;
+      stateName = "yielded";
+      writeTerminalLines(entry.record.terminal, [
+        `${cpuModelSpecification(entry.record.hardware.cpuModel).runtimeName}: execution limit reached`,
+      ]);
+    } else if (state.kind === "completed") {
+      exitCode = 0;
+      stateName = foreground.kind === "cs486" ? "halted" : "completed";
+    } else if (state.kind === "crashed") {
+      exitCode = 1;
+      stateName = "crashed";
+      writeTerminalLines(entry.record.terminal, [
+        `${state.error.name}: ${state.error.message}`,
+      ]);
+    } else if (state.kind === "terminated") {
+      exitCode = 130;
+      stateName = "terminated";
+      writeTerminalLines(entry.record.terminal, ["^C"]);
+    } else {
+      throw new Error(`Cannot complete foreground process from ${state.kind}`);
+    }
+    if (foreground.kind === "cs486" && foreground.process.output.length > 0) {
+      writeTerminalLines(
+        entry.record.terminal,
+        foreground.process.output
+          .replaceAll("\r\n", "\n")
+          .replace(/\n$/u, "")
+          .split("\n"),
+      );
+    }
+    if (foreground.stats) {
+      writeTerminalLines(entry.record.terminal, [
+        ...(foreground.kind === "python"
+          ? pythonStats(
+              foreground.executedInstructions,
+              foreground.cpuCycles,
+              stateName,
+              entry.record.hardware,
+            )
+              .trimEnd()
+              .split("\n")
+          : cs486Stats(
+              foreground.executedInstructions,
+              foreground.cpuCycles,
+              stateName,
+              entry.record.hardware,
+              foreground.process,
+            )),
+      ]);
+    }
+    entry.shell?.completeForegroundProcess(exitCode);
+    this.scheduler.queueEvent(
+      entry.runtimeId,
+      foreground.completionEvent,
+      exitCode,
+    );
   }
 
   private requestStop(
@@ -434,7 +1020,10 @@ export class ComputerRuntime {
         : { kind: "shutdown" as const, reason };
     const transition = entry.record.lifecycle.transition(event);
     if (transition.outcome !== "changed") return;
+    entry.record.faceIo.powerOff(reason);
     entry.stopIntent = intent;
+    entry.foreground?.process.terminate(reason);
+    entry.debugJob?.process.terminate(reason);
     entry.vm?.terminate(reason);
   }
 
@@ -459,6 +1048,22 @@ export class ComputerRuntime {
   }
 
   private detach(entry: RuntimeEntry): void {
+    entry.record.faceIo.powerOff("runtime_detached");
+    if (entry.foreground !== undefined) {
+      this.scheduler.remove(entry.foreground.runtimeId);
+      entry.foreground = undefined;
+    }
+    if (entry.debugJob !== undefined) {
+      const debugJob = entry.debugJob;
+      this.scheduler.remove(debugJob.runtimeId);
+      entry.debugJob = undefined;
+      debugJob.onComplete({
+        outcome: "failed",
+        error: new Error(
+          "debug guest execution ended because the runtime detached",
+        ),
+      });
+    }
     this.scheduler.remove(entry.runtimeId);
     entry.vm = undefined;
     entry.shell = undefined;
@@ -497,7 +1102,39 @@ interface RuntimeEntry {
   shell?: ShellSession;
   stopIntent?: StopIntent;
   pendingBootHandoff?: boolean;
+  foreground?: ForegroundGuestProcess;
+  debugJob?: DebugGuestJob;
 }
+
+interface DebugGuestJob {
+  readonly compileCycles: number;
+  cpuCycles: number;
+  executedInstructions: number;
+  readonly instructionLimit?: number;
+  readonly kind: "cs486" | "python";
+  readonly onComplete: (result: DebugShellCommandCompletion) => void;
+  readonly process: Cs486Process;
+  readonly runtimeId: number;
+  readonly stats: boolean;
+  readonly terminal?: TerminalBuffer;
+  termination?: "cpu_limit" | "instruction_limit" | "unsupported_wait";
+}
+
+interface ForegroundGuestProcess {
+  readonly command: "basic" | "micropython" | "python" | "run";
+  readonly compileCycles: number;
+  readonly completionEvent: string;
+  cpuCycles: number;
+  executedInstructions: number;
+  readonly instructionLimit?: number;
+  readonly kind: "cs486" | "python";
+  limitReached?: boolean;
+  readonly process: Cs486Process;
+  readonly runtimeId: number;
+  readonly stats: boolean;
+}
+
+const foregroundCompletionEvent = "__cs_foreground_complete";
 
 type StopIntent = "reboot" | "shutdown";
 
@@ -510,6 +1147,40 @@ function pythonStats(
   const microseconds = cpuCyclesToMicroseconds(cpuCycles, hardware.clockHz);
   const runtimeName = cpuModelSpecification(hardware.cpuModel).runtimeName;
   return `Python/${runtimeName}: ${String(instructions)} machine instructions, ${String(cpuCycles)} CPU cycles, ${microseconds.toFixed(3)} us at ${formatClock(hardware.clockHz)}, ${state}\n`;
+}
+
+function cs486Stats(
+  instructions: number,
+  cpuCycles: number,
+  state: string,
+  hardware: ComputerHardwareProfile,
+  process: Cs486Process,
+): readonly string[] {
+  const microseconds = cpuCyclesToMicroseconds(cpuCycles, hardware.clockHz);
+  const runtimeName = cpuModelSpecification(hardware.cpuModel).runtimeName;
+  const stats = process.microarchitectureStats;
+  return [
+    `${runtimeName}: ${String(instructions)} instructions, ${String(cpuCycles)} CPU cycles, ${microseconds.toFixed(3)} us at ${formatClock(hardware.clockHz)}, ${state}`,
+    `memory: L1 ${String(stats.l1Hits)} hit/${String(stats.l1Misses)} miss, L2 ${String(stats.l2Hits)} hit/${String(stats.l2Misses)} miss, ${String(stats.busTransfers)} bus transfers, ${String(stats.unalignedAccesses)} unaligned, ${String(stats.pipelineFlushes)} pipeline flushes`,
+  ];
+}
+
+function cs486RunResultStats(
+  result: ReturnType<typeof runCs486>,
+  hardware: ComputerHardwareProfile,
+): readonly string[] {
+  const microseconds = cpuCyclesToMicroseconds(result.cycles, hardware.clockHz);
+  const runtimeName = cpuModelSpecification(hardware.cpuModel).runtimeName;
+  const stats = result.microarchitecture;
+  return [
+    `${runtimeName}: ${String(result.executedInstructions)} instructions, ${String(result.cycles)} CPU cycles, ${microseconds.toFixed(3)} us at ${formatClock(hardware.clockHz)}, ${result.state}`,
+    `memory: L1 ${String(stats.l1Hits)} hit/${String(stats.l1Misses)} miss, L2 ${String(stats.l2Hits)} hit/${String(stats.l2Misses)} miss, ${String(stats.busTransfers)} bus transfers, ${String(stats.unalignedAccesses)} unaligned, ${String(stats.pipelineFlushes)} pipeline flushes`,
+  ];
+}
+
+function terminalStdout(terminal: TerminalBuffer): string {
+  const output = terminal.snapshot().rows.join("\n").trimEnd();
+  return output.length === 0 ? "" : `${output}\n`;
 }
 
 function formatClock(clockHz: number): string {

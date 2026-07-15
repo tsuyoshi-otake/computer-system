@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { ShellSession } from "../../src/application/os/shellSession.js";
 import { InMemoryFilesystem } from "../../src/domain/filesystem/inMemoryFilesystem.js";
+import { portableComputerHardware } from "../../src/domain/computer/hardware.js";
 
 describe("Computer System Linux shell and editor", (): void => {
   it("lists and reads files and reports unknown commands", (): void => {
@@ -40,6 +41,56 @@ describe("Computer System Linux shell and editor", (): void => {
     expect(shell.submit("shutdown").action).toBe("shutdown");
     expect(shell.submit("reboot").action).toBe("reboot");
     expect(shell.submit("clear").action).toBe("clear");
+  });
+
+  it("prepares Python as one direct CS-Linux foreground process", (): void => {
+    const filesystem = new InMemoryFilesystem();
+    const shell = new ShellSession(filesystem);
+    filesystem.writeFile("/tmp/demo.py", "print(42)\n");
+
+    expect(shell.submit("python --stats /tmp/demo.py")).toMatchObject({
+      exitCode: 0,
+      foreground: {
+        command: "python",
+        kind: "python",
+        path: "/tmp/demo.py",
+        stats: true,
+      },
+    });
+    expect(shell.submit("micropython /tmp/demo.py")).toMatchObject({
+      exitCode: 0,
+      foreground: {
+        command: "micropython",
+        stats: false,
+      },
+    });
+    expect(shell.submit("python /tmp/demo.py | cat")).toMatchObject({
+      exitCode: 0,
+      stderr:
+        "python: cannot run in a pipeline, redirect, script, or command chain\n",
+    });
+    expect(shell.submit("python /tmp/demo.py > /tmp/output.txt")).toMatchObject(
+      {
+        exitCode: 2,
+        stderr:
+          "python: cannot run in a pipeline, redirect, script, or command chain\n",
+      },
+    );
+
+    const unsupported = new ShellSession(filesystem, {
+      hardware: portableComputerHardware,
+    });
+    expect(unsupported.submit("python /tmp/demo.py")).toMatchObject({
+      exitCode: 127,
+      stderr: "python: MicroPython is not available on CS386SX\n",
+    });
+    const dos = new ShellSession(filesystem, {
+      hardware: portableComputerHardware,
+      osProfile: "dos",
+    });
+    expect(dos.submit("PYTHON C:\\TEMP\\DEMO.PY")).toMatchObject({
+      exitCode: 127,
+    });
   });
 
   it("executes bounded MCP debug commands without entering TUI state", (): void => {

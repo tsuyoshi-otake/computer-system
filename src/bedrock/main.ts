@@ -20,6 +20,7 @@ import {
   startPortableComputerLifecycle,
 } from "./portableComputer.js";
 import { handleDebugCommand } from "./debugCommandBridge.js";
+import { handleDebugWebSessionRequest } from "./debugWebSessionBridge.js";
 import { startHeadlessProbeSuite } from "./probes/headlessProbe.js";
 import { registerRedstoneProbeComponent } from "./probes/redstoneProbeComponent.js";
 import { startRuntimeProbe } from "./probes/runtimeProbe.js";
@@ -64,6 +65,10 @@ system.afterEvents.scriptEventReceive.subscribe((event): void => {
   if (handleWebTerminalScriptEvent(event.id, event.message)) return;
   if (event.id === "computer_system:debug-command") {
     handleDebugCommand(event.message);
+    return;
+  }
+  if (event.id === "computer_system:debug-web-request") {
+    handleDebugWebSessionRequest(event.message);
     return;
   }
   if (event.id !== "computer_system:probe") {

@@ -35,6 +35,7 @@ export class ComputerIdentityRegistry {
     string,
     ComputerIdentityObservation
   >();
+  private readonly computerIdsByPhysicalKey = new Map<string, string>();
 
   get size(): number {
     return this.observations.size;
@@ -44,11 +45,35 @@ export class ComputerIdentityRegistry {
     return this.observations.get(computerId);
   }
 
+  getAtPhysicalKey(
+    physicalKey: string,
+  ): ComputerIdentityObservation | undefined {
+    const computerId = this.computerIdsByPhysicalKey.get(physicalKey);
+    return computerId === undefined
+      ? undefined
+      : this.observations.get(computerId);
+  }
+
   claim(observation: ComputerIdentityObservation): IdentityResult {
     validateObservation(observation);
     const existing = this.observations.get(observation.computerId);
+    const physicalOwner = this.getAtPhysicalKey(observation.physicalKey);
+    if (
+      physicalOwner !== undefined &&
+      physicalOwner.computerId !== observation.computerId
+    ) {
+      return {
+        outcome: "duplicate",
+        existing: physicalOwner,
+        rejected: observation,
+      };
+    }
     if (existing === undefined) {
       this.observations.set(observation.computerId, observation);
+      this.computerIdsByPhysicalKey.set(
+        observation.physicalKey,
+        observation.computerId,
+      );
       return { outcome: "claimed", observation };
     }
     if (
@@ -58,6 +83,10 @@ export class ComputerIdentityRegistry {
       return { outcome: "duplicate", existing, rejected: observation };
     }
     this.observations.set(observation.computerId, observation);
+    this.computerIdsByPhysicalKey.set(
+      observation.physicalKey,
+      observation.computerId,
+    );
     return { outcome: "updated", observation };
   }
 
@@ -68,19 +97,23 @@ export class ComputerIdentityRegistry {
   ): IdentityResult {
     const existing = this.observations.get(computerId);
     if (existing === undefined) return { outcome: "missing", computerId };
+    const observation = { computerId, ...target };
+    validateObservation(observation);
+    const physicalOwner = this.getAtPhysicalKey(target.physicalKey);
     if (
       existing.physicalKey !== sourcePhysicalKey ||
-      existing.family !== target.family
+      existing.family !== target.family ||
+      (physicalOwner !== undefined && physicalOwner.computerId !== computerId)
     ) {
       return {
         outcome: "duplicate",
-        existing,
-        rejected: { computerId, ...target },
+        existing: physicalOwner ?? existing,
+        rejected: observation,
       };
     }
-    const observation = { computerId, ...target };
-    validateObservation(observation);
+    this.computerIdsByPhysicalKey.delete(existing.physicalKey);
     this.observations.set(computerId, observation);
+    this.computerIdsByPhysicalKey.set(observation.physicalKey, computerId);
     return { outcome: "transferred", observation };
   }
 
@@ -88,12 +121,13 @@ export class ComputerIdentityRegistry {
     const observation = this.observations.get(computerId);
     if (observation === undefined) return { outcome: "missing", computerId };
     this.observations.delete(computerId);
+    this.computerIdsByPhysicalKey.delete(observation.physicalKey);
     return { outcome: "removed", observation };
   }
 
   restore(observations: readonly ComputerIdentityObservation[]): void {
     const next = new Map<string, ComputerIdentityObservation>();
-    const physical = new Set<string>();
+    const physical = new Map<string, string>();
     for (const observation of observations) {
       validateObservation(observation);
       if (
@@ -105,11 +139,15 @@ export class ComputerIdentityRegistry {
         );
       }
       next.set(observation.computerId, observation);
-      physical.add(observation.physicalKey);
+      physical.set(observation.physicalKey, observation.computerId);
     }
     this.observations.clear();
+    this.computerIdsByPhysicalKey.clear();
     for (const [id, observation] of next)
       this.observations.set(id, observation);
+    for (const [physicalKey, computerId] of physical) {
+      this.computerIdsByPhysicalKey.set(physicalKey, computerId);
+    }
   }
 
   snapshot(): readonly ComputerIdentityObservation[] {

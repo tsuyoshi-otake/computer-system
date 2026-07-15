@@ -1,8 +1,14 @@
 import { describe, expect, it } from "vitest";
 
-import { ComputerRuntime } from "../../src/application/computer/computerRuntime.js";
+import {
+  ComputerRuntime,
+  type DebugShellCommandCompletion,
+} from "../../src/application/computer/computerRuntime.js";
 import { ComputerRecord } from "../../src/domain/computer/computer.js";
-import { portableComputerHardware } from "../../src/domain/computer/hardware.js";
+import {
+  advancedComputerHardware,
+  portableComputerHardware,
+} from "../../src/domain/computer/hardware.js";
 
 describe("ComputerRuntime", (): void => {
   it("boots startup.py and stops explicitly when the program completes", (): void => {
@@ -41,6 +47,215 @@ describe("ComputerRuntime", (): void => {
     if (result.outcome === "completed") {
       expect(result.cpuCycles).toBeGreaterThan(20);
     }
+  });
+
+  it("schedules MCP Python work and completes it from later ticks", (): void => {
+    const record = computer("c-000020", "import os\nos.pull_event()\n");
+    const runtime = runtimeWith(record);
+    runtime.powerOn(record.computerId);
+    record.filesystem.writeFile("/tmp/deferred.py", "print(21 * 2)\n");
+    let completion: DebugShellCommandCompletion | undefined;
+
+    runtime.enqueueDebugShellCommand(
+      record.computerId,
+      "python /tmp/deferred.py",
+      (result) => {
+        completion = result;
+      },
+    );
+
+    expect(completion).toBeUndefined();
+    runTicks(runtime, 4);
+    expect(completion).toMatchObject({
+      outcome: "completed",
+      exitCode: 0,
+      stdout: "42\n",
+    });
+  });
+
+  it("runs bounded inline Python through the MCP debug path", (): void => {
+    const record = computer("c-000018", "import os\nos.pull_event()\n");
+    const runtime = runtimeWith(record);
+    runtime.powerOn(record.computerId);
+
+    const result = runtime.executeDebugShellCommand(
+      record.computerId,
+      "python -c total = 0\nfor i in range(1, 101):\n    total = total + i\nprint(total)",
+    );
+
+    expect(result).toMatchObject({
+      outcome: "completed",
+      exitCode: 0,
+      stdout: "5050\n",
+    });
+    if (result.outcome !== "completed") return;
+    expect(result.stderr).toMatch(
+      /^Python\/CS486DX: 1532 machine instructions, \d+ CPU cycles,/u,
+    );
+    expect(result.cpuCycles).toBeGreaterThan(0);
+    expect(record.filesystem.exists("/tmp/__mcp_inline__.py")).toBe(false);
+  });
+
+  it("runs and measures Python from the normal CS-Linux terminal", (): void => {
+    const record = new ComputerRecord("c-000010", "advanced");
+    record.configureHardware(advancedComputerHardware);
+    const runtime = runtimeWith(record);
+    runtime.powerOn(record.computerId);
+    record.filesystem.writeFile(
+      "/tmp/sum.py",
+      [
+        "total = 0",
+        "for i in range(1, 101):",
+        "    total = total + i",
+        "print(total)",
+      ].join("\n"),
+    );
+    runTicks(runtime, 2);
+
+    runtime.queueEvent(
+      record.computerId,
+      "terminal_line",
+      "python --stats /tmp/sum.py",
+    );
+    runTicks(runtime, 12);
+
+    const output = record.terminal.snapshot().rows.join("\n");
+    expect(output).toContain("5050");
+    expect(output).toMatch(
+      /Python\/CS486DX2: \d+ machine instructions, \d+ CPU cycles, \d+\.\d{3} us at 66 M\s*Hz, completed/u,
+    );
+    expect(output).toContain("~$ ");
+    expect(runtime.vmState(record.computerId)).toMatchObject({
+      kind: "waiting_event",
+    });
+    expect(record.lifecycle.state.kind).not.toBe("off");
+  });
+
+  it("interrupts foreground Python without powering off the shell", (): void => {
+    const record = new ComputerRecord("c-000011", "standard");
+    const runtime = runtimeWith(record);
+    runtime.powerOn(record.computerId);
+    record.filesystem.writeFile("/tmp/loop.py", "while True:\n    pass\n");
+    runTicks(runtime, 2);
+    runtime.queueEvent(
+      record.computerId,
+      "terminal_line",
+      "python --stats /tmp/loop.py",
+    );
+    runTicks(runtime, 2);
+
+    expect(runtime.interrupt(record.computerId)).toMatchObject({
+      outcome: "accepted",
+      state: "foreground_interrupted",
+    });
+    runTicks(runtime, 3);
+
+    const output = record.terminal.snapshot().rows.join("\n");
+    expect(output).toContain("^C");
+    expect(output).toMatch(
+      /Python\/CS486DX: \d+ machine instructions, \d+ CPU cycles,[\s\S]*terminated/u,
+    );
+    expect(output).toContain("~$ ");
+    expect(record.lifecycle.state.kind).not.toBe("off");
+  });
+
+  it("schedules normal run commands in bounded instruction slices", (): void => {
+    const record = new ComputerRecord("c-000019", "standard");
+    const runtime = new ComputerRuntime({
+      schedulerLimits: {
+        cpuCyclesPerComputer: 100_000,
+        cpuCyclesPerTick: 100_000,
+        eventCapacity: 8,
+        instructionsPerComputer: 200,
+        instructionsPerTick: 200,
+        timerCapacity: 8,
+      },
+    });
+    runtime.register(record);
+    runtime.powerOn(record.computerId);
+    record.filesystem.writeFile(
+      "/tmp/loop.asm",
+      "start:\nadd eax,1\njmp start\n",
+    );
+    expect(
+      runtime.executeDebugShellCommand(
+        record.computerId,
+        "as /tmp/loop.asm -o /tmp/loop",
+      ),
+    ).toMatchObject({ outcome: "completed", exitCode: 0 });
+    runTicks(runtime, 2);
+
+    runtime.queueEvent(record.computerId, "terminal_line", "run /tmp/loop");
+    runTicks(runtime, 4);
+
+    expect(runtime.vmState(record.computerId)).toEqual({ kind: "ready" });
+    expect(runtime.interrupt(record.computerId)).toMatchObject({
+      outcome: "accepted",
+      state: "foreground_interrupted",
+    });
+    runTicks(runtime, 3);
+    expect(record.terminal.snapshot().rows.join("\n")).toContain("^C");
+    expect(runtime.vmState(record.computerId)).toMatchObject({
+      kind: "waiting_event",
+    });
+  });
+
+  it("routes events to waiting foreground Python and then restores the shell", (): void => {
+    const record = new ComputerRecord("c-000012", "standard");
+    const runtime = runtimeWith(record);
+    runtime.powerOn(record.computerId);
+    record.filesystem.writeFile(
+      "/tmp/event.py",
+      'import os\nos.pull_event("custom")\nprint(42)\n',
+    );
+    runTicks(runtime, 2);
+
+    runtime.queueEvent(
+      record.computerId,
+      "terminal_line",
+      "python /tmp/event.py",
+    );
+    runTicks(runtime, 2);
+    expect(runtime.vmState(record.computerId)).toEqual({
+      kind: "waiting_event",
+      filter: "custom",
+    });
+
+    runtime.queueEvent(record.computerId, "mouse", 1);
+    runTicks(runtime, 1);
+    expect(runtime.vmState(record.computerId)).toEqual({
+      kind: "waiting_event",
+      filter: "custom",
+    });
+    runtime.queueEvent(record.computerId, "custom", 9);
+    runTicks(runtime, 3);
+
+    const output = record.terminal.snapshot().rows.join("\n");
+    expect(output).toContain("42");
+    expect(output).toContain("~$ ");
+    expect(runtime.vmState(record.computerId)).toMatchObject({
+      kind: "waiting_event",
+    });
+  });
+
+  it("reports foreground Python compile failures and keeps the shell usable", (): void => {
+    const record = new ComputerRecord("c-000013", "standard");
+    const runtime = runtimeWith(record);
+    runtime.powerOn(record.computerId);
+    record.filesystem.writeFile("/tmp/broken.py", "if True print(42)\n");
+    runTicks(runtime, 2);
+
+    runtime.queueEvent(
+      record.computerId,
+      "terminal_line",
+      "python /tmp/broken.py",
+    );
+    runTicks(runtime, 3);
+
+    const output = record.terminal.snapshot().rows.join("\n");
+    expect(output).toContain("python:");
+    expect(output).toContain("~$ ");
+    expect(record.lifecycle.state.kind).not.toBe("off");
   });
 
   it("reports comparable CPU cycles across ASM, C++, and Python/CS486DX", (): void => {

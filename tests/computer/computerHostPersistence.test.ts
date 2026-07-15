@@ -6,6 +6,7 @@ import {
   type ComputerSnapshotRepository,
 } from "../../src/application/computer/persistence.js";
 import { ComputerRuntime } from "../../src/application/computer/computerRuntime.js";
+import { ComputerWorkMonitor } from "../../src/application/runtime/computerWorkMonitor.js";
 import {
   ComputerRecord,
   type ComputerSnapshot,
@@ -41,6 +42,31 @@ describe("ComputerHost persistence bridge", (): void => {
     expect(() => host.runTick()).not.toThrow();
     expect(onFailure).toHaveBeenCalledWith("computer-22", expect.any(Error));
     expect(host.runtime.tickNumber).toBe(1);
+  });
+
+  it("accounts runtime, RS-232C, and persistence in one finished host scope", (): void => {
+    const repository = new MemoryRepository();
+    let microseconds = 10;
+    const monitor = new ComputerWorkMonitor({
+      nowMicroseconds: (): number => microseconds++,
+    });
+    const host = hostWith(repository, {
+      maxPersistenceChecksPerTick: 1,
+      workMonitor: monitor,
+    });
+    host.register(new ComputerRecord("computer-23", "standard"));
+
+    host.runTick();
+
+    expect(host.lastWorkSummary).toMatchObject({ tick: 1 });
+    expect(host.workMetrics()).toMatchObject({
+      completedTicks: 1,
+      lanes: {
+        guest_cpu: { admitted: 1 },
+        persistence: { admitted: 1 },
+        rs232: { admitted: 1 },
+      },
+    });
   });
 });
 

@@ -1,5 +1,6 @@
 import { computerHost } from "./computerHost.js";
 import { ensureComputer, identityService } from "./computerRegistry.js";
+import type { DebugShellCommandCompletion } from "../application/computer/computerRuntime.js";
 
 const responseMarker = "CS_DEBUG_COMMAND ";
 const requestPattern =
@@ -14,7 +15,9 @@ export function handleDebugCommand(message: string): void {
     );
     return;
   }
-  const [, requestId, computerId, encoded] = match;
+  const requestId = match[1]!;
+  const computerId = match[2]!;
+  const encoded = match[3]!;
   try {
     const command = decodeURIComponent(encoded ?? "");
     const observation = identityService().observation(computerId ?? "");
@@ -32,33 +35,11 @@ export function handleDebugCommand(message: string): void {
       const powered = computerHost.runtime.powerOn(record.computerId);
       if (powered.outcome === "failed") throw powered.error;
     }
-    const result = computerHost.runtime.executeDebugShellCommand(
+    computerHost.runtime.enqueueDebugShellCommand(
       record.computerId,
       command,
+      (result) => emitResult(requestId, record.computerId, result),
     );
-    if (result.outcome === "completed") {
-      emit({
-        requestId,
-        computerId: record.computerId,
-        status: "completed",
-        exitCode: result.exitCode,
-        stdout: truncate(result.stdout),
-        stderr: truncate(result.stderr),
-        cpuCycles: result.cpuCycles,
-      });
-      return;
-    }
-    emit({
-      requestId,
-      computerId: record.computerId,
-      status: result.outcome,
-      error:
-        result.outcome === "failed"
-          ? result.error.message
-          : result.outcome === "ignored"
-            ? result.reason
-            : "Computer is unavailable.",
-    });
   } catch (error: unknown) {
     emit({
       requestId,
@@ -67,6 +48,36 @@ export function handleDebugCommand(message: string): void {
       error: error instanceof Error ? error.message : String(error),
     });
   }
+}
+
+function emitResult(
+  requestId: string,
+  computerId: string,
+  result: DebugShellCommandCompletion,
+): void {
+  if (result.outcome === "completed") {
+    emit({
+      requestId,
+      computerId,
+      status: "completed",
+      exitCode: result.exitCode,
+      stdout: truncate(result.stdout),
+      stderr: truncate(result.stderr),
+      cpuCycles: result.cpuCycles,
+    });
+    return;
+  }
+  emit({
+    requestId,
+    computerId,
+    status: result.outcome,
+    error:
+      result.outcome === "failed"
+        ? result.error.message
+        : result.outcome === "ignored"
+          ? result.reason
+          : "Computer is unavailable.",
+  });
 }
 
 function emit(payload: Readonly<Record<string, unknown>>): void {

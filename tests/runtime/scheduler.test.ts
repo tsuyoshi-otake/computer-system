@@ -66,6 +66,34 @@ describe("round-robin scheduler", (): void => {
     expect(result.cpuCycles).toBe(1_400);
   });
 
+  it("bounds host instruction work independently from modeled CPU cycles", (): void => {
+    const scheduler = new RoundRobinScheduler({
+      ...limits,
+      cpuCyclesPerComputer: 1_000_000,
+      cpuCyclesPerTick: 1_000_000,
+      instructionsPerComputer: 200,
+      instructionsPerTick: 1_000,
+    });
+    for (let id = 0; id < 10; id += 1)
+      scheduler.add(id, vm("while True:\n    pass\n"));
+
+    const first = scheduler.runTick();
+    const second = scheduler.runTick();
+
+    expect(first.executedInstructions).toBeLessThanOrEqual(1_000);
+    expect(second.executedInstructions).toBeLessThanOrEqual(1_000);
+    expect(
+      first.computers.every(
+        ({ executedInstructions }) => executedInstructions <= 200,
+      ),
+    ).toBe(true);
+    expect(
+      second.computers.some(
+        ({ executedInstructions }) => executedInstructions > 200,
+      ),
+    ).toBe(true);
+  });
+
   it("resumes sleep and filtered event waits exactly once", (): void => {
     const scheduler = new RoundRobinScheduler(limits);
     const machine = vm("slept = sleep()\nevent = wait_key()\n", {

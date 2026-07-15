@@ -15,10 +15,12 @@ GitHub Issue #4 tracks the Phase 2 Bedrock Computer vertical slice. GitHub Issue
 #12 tracks the CS-Linux 1.0 / CS-DOS 6.2 shell profiles, CS486 toolchain, Web
 Terminal, and operator manual expansion. GitHub Issue #13 tracks Python-to-CS486
 compilation, filesystem imports, and CS486 C/C++ extension modules. GitHub Issue
-#14 tracks the portable CS386SX 16 MHz / 2 MiB hardware profile. Most Phase 2
-behavior is implemented and verified. Production interaction uses the local Web
-Terminal companion started with `npm run dev:bds:web`; companion failures must
-remain explicit and must not open the native GDK terminal as a fallback.
+#14 tracks the portable CS386SX 16 MHz / 2 MiB hardware profile. GitHub Issue
+#16 tracks tick-sliced guest/MCP execution, runnable-only scheduler bookkeeping,
+and real-BDS multi-user load evidence. Most Phase 2 behavior is implemented and
+verified. Production interaction uses the local Web Terminal companion started
+with `npm run dev:bds:web`; companion failures must remain explicit and must not
+open the native GDK terminal as a fallback.
 
 ## Architecture rules
 
@@ -80,6 +82,72 @@ computer-scoped Web handoff waits. Preserve the managed debug world for
 interactive development and reset it only for clean-world acceptance. MCP shell
 execution must remain inside `ShellSession`; never broaden it into host shell or
 arbitrary BDS command execution.
+
+`npm run test:mcp:serial:bds` is the isolated real-BDS serial acceptance. Give
+it free BDS/Web ports and a new dedicated `BDS_MCP_WORKDIR`; it drives only MCP
+tools and requires `serial_matrix/PASS` for three machines, six faces, 36
+ordered links, and 72 bidirectional Linux ttyS/DOS COM transmissions before
+stopping the isolated server. Do not point it at the interactive managed world.
+
+### MCP Computer benchmark and load-test procedure
+
+Use the MCP companion for guest-machine measurements; do not substitute a host
+Python, compiler, shell, or timer. The repeatable sequence is:
+
+1. Call `bds_status`, then call `bds_start` with `resetWorld: false` for
+   ordinary work. Use `resetWorld: true` only for an explicitly requested
+   clean-world acceptance run. Confirm Script API readiness and the expected
+   player count with `bds_run_command {"command":"list"}` and bounded log
+   inspection.
+2. Resolve the current managed world's exact `c-xxxxxx` identities and persisted
+   hardware profiles. Do not assume that an old four-digit browser code,
+   Computer ID, LAN address, or player name is still valid. A browser code is a
+   Web entry credential, not the identity accepted by MCP execution.
+3. Create benchmark sources inside each Computer's sandbox. Keep every
+   `bds_execute_computer_command` request to one non-TUI shell line and at most
+   128 characters; use several bounded `echo`/redirection calls when necessary.
+   If DOS quoting cannot represent a source line safely, enter it through the
+   Web Terminal editor instead of widening MCP into host or BDS command access.
+4. Compile inside the guest with `as`, `basicc`, `cc`, or `c++`, then execute
+   the resulting validated CS486 binary with `run --stats <program>`. For Python
+   on CS486 machines, use bounded `python <file>`, `micropython <file>`, or
+   `python -c <source>` through the same MCP tool. A CS386SX status 127 for user
+   Python is the expected hardware restriction, not a failed benchmark setup.
+5. Use the same algorithm, input size, expected checksum, cold process start,
+   and compiler mode on every language and hardware profile. Record `stdout`,
+   `stderr`, `exitCode`, and `cpuCycles`. Treat the instruction/cache/bus/cycle
+   diagnostics from `run --stats` or Python as the authoritative modeled guest
+   cost; wall-clock MCP latency includes relay, shell, compile, and tick delay
+   and is useful only as a separately labeled responsiveness measurement.
+6. Run correctness and single-Computer measurements sequentially first. For a
+   load test, increase bounded concurrency deliberately, never exceed the MCP
+   debug pending-command limit, and record server tick p50/p95/p99/max plus MCP
+   response latency. A successful response and quiet logs do not prove the 50 ms
+   BDS tick budget was met. A timeout, status 124, or yielded/incomplete process
+   is not a language-speed result.
+7. After each load stage, call `bds_get_logs` from the saved cursor and inspect
+   watchdog, crash, fatal, Script API, queue-capacity, and slow-tick evidence.
+   Verify Minecraft interaction and Web typing remain responsive. Exercise one
+   request above each documented capacity and require an explicit bounded
+   rejection while existing work continues.
+
+For a minimal compiled measurement, call:
+
+```json
+{
+  "computerId": "c-xxxxxx",
+  "command": "run --stats /tmp/bench",
+  "timeoutMs": 30000
+}
+```
+
+On CS-DOS use its valid 8.3 path syntax. The tool returns at most bounded output
+and rejects TUI editors, sleep, lifecycle commands, unknown identities, commands
+over 128 characters, and timeouts over 30 seconds. Keep authentication secrets,
+one-use Web URLs, and bearer tokens out of repository files and logs. Issue #16
+owns conversion of synchronous guest and MCP execution to fixed per-tick slices;
+until it is complete, do not claim multi-user capacity from sequential MCP
+results alone.
 
 `BDS_HOME` is a read-only distribution source. Never modify or recursively
 delete it. The default managed work directory is
@@ -163,19 +231,37 @@ The July 2026 live GDK verification established the following:
   and rotates the bearer token. Access logs are transition-only, connection-code
   lookup is O(1), and browser retry work is deduplicated, exponentially backed
   off, and bounded by the 30-minute session lifetime.
-- `bds_wait_for_web_handoff` owns at most one bounded wait per Computer ID and
-  suppresses auto-open for its matching handoff, preventing one-use URL races.
+- `bds_issue_web_handoff` atomically installs a Computer-scoped waiter and asks
+  the single connected debug player to issue that exact Computer's one-use URL.
+  `bds_wait_for_web_handoff` retains the passive interaction-first workflow.
+  Both own at most one bounded wait per Computer ID and suppress auto-open for
+  the matching handoff, preventing one-use URL races. Zero or multiple players
+  and every request/relay/timeout failure finalize explicitly.
   `bds_execute_computer_command` returns bounded stdout, stderr, exit code, and
   modeled CPU cycles for one exact Computer's selected hardware model. TUI,
   sleep, and lifecycle-control commands fail explicitly on this debug path.
-- The MCP-only `python <file>`/`micropython <file>` debug forms execute a
-  bounded source file only when the target CPU specification enables
-  MicroPython. CS386SX returns status 127. CS486DX and CS486DX2 reject waits and
-  long-running execution; their returned `cpuCycles` use the same timing unit as
-  ASM, C, C++, and BASIC.
+- The normal CS-Linux shell runs `python <file>`, `python --stats <file>`, and
+  the `micropython` alias as one foreground CS486 process. It may wait for guest
+  events and returns to the prompt after completion, failure, or Ctrl+C. The
+  non-TUI MCP debug forms accept `python <file>` and bounded multiline
+  `python -c <source>`, reject waits and long-running execution, and do not
+  authenticate the interactive shell. Only this Python form may contain encoded
+  line breaks; other debug commands remain single-line. Both paths require a CPU
+  specification with MicroPython enabled, use the same timing unit as ASM, C,
+  C++, and BASIC, and return status 127 on CS386SX.
 - Periodic snapshot work is fixed-batch O(K), without an O(N) allocation per
   pass. Writer input uses an amortized-O(1), deduplicated, attempt-bounded eager
   queue so interactive latency does not inherit the viewer round-robin delay.
+- `ComputerWorkMonitor` owns one host-time scope per BDS tick and fixed lanes
+  for CPU, compilation, MCP, RS-232C, I2C, SPI, redstone, topology, terminal,
+  and persistence work. Host time is admission/observability only and must never
+  be converted into guest cycles or wire timing. Normal `run` and MCP
+  Python/CS486 execution are resumable scheduler jobs with machine-instruction
+  ceilings. RS-232C uses an O(1) ready deque with exact removal on disconnect.
+  I2C/SPI remain bounded 256-byte synchronous atoms accounted inside the guest
+  CPU lane until their adapters expose explicit resumable/deferred outcomes; do
+  not claim their reserved lanes as separate production measurements yet. See
+  `docs/work-monitor.md`.
 - `WEB_COMPANION_AUTO_OPEN=1` opens the activated path through loopback in the
   companion host's default browser even while the published entry page uses a
   LAN address. It cannot open a remote player's browser; Minecraft prints the
@@ -190,12 +276,17 @@ Terminal changes, run the focused Web tests and verify the connected state,
 inline typing, physical Enter, and disconnect behavior in a real browser.
 
 The Web Terminal includes a searchable 16-chapter field manual. Its canonical
-learning sequence is: orientation, architecture, terminal/editors, Bash,
-filesystem/storage, MicroPython, MicroPython API, Redstone, worked project,
-assembly, BASIC, C/C++, optimization, DOS, diagnostics, and limits/glossary.
-Keep chapter numbers, section numbers, search order, previous/next navigation,
-and the appendix reading paths synchronized. `tests/tools/webManual.test.mjs`
-locks the publication order and chapter/header agreement.
+publication order is: orientation and machine choice; terminal, Web access, and
+editors; filesystem, storage, and persistence; the CS-Linux shell; Computer
+System Python; Redstone, peripherals, and events; a worked project; the Python
+API reference; architecture and execution; assembly; BASIC; C/C++; optimization;
+CS-DOS; diagnostics and recovery; then limits, compatibility, glossary, and
+indexes. Goal paths use stable chapter IDs and may skip through that order for
+first-program, Python-and-Redstone, CS-Linux, native-development,
+Portable-CS-DOS, and diagnostic work. Keep chapter and section IDs, generated
+numbers, search results, Previous/Next navigation, and every goal path
+synchronized. `tests/tools/webManual.test.mjs` locks the publication order and
+chapter/header agreement.
 
 ## Web companion networking
 
@@ -204,6 +295,11 @@ non-virtual LAN IPv4 address. `WEB_COMPANION_HOST` controls the listener, while
 `WEB_COMPANION_PUBLIC_HOST` overrides the detected address. For Internet access,
 keep the process on loopback, set `WEB_COMPANION_PUBLIC_ORIGIN` to an HTTPS
 origin, and use a TLS reverse proxy. Never publish plain HTTP to the Internet.
+
+`WEB_COMPANION_DEBUG_IGNORE_RANGE=1` is a managed-debug-only escape hatch for
+the placed-machine three-block and dimension check. It is disabled by default
+and must not bypass the initial interaction, player connection, writer lease,
+bearer token, session lifetime, or disconnect finalization.
 
 ## Shell compatibility
 

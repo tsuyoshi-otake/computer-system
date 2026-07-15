@@ -1,0 +1,273 @@
+{
+  "date": "2026-07-15",
+  "measurement": "live-bds-mcp",
+  "workload": "sum(i*i + 3*i + 7), i=1..1500",
+  "checksum": "1129513000",
+  "processState": "cold",
+  "metrics": "runtime instructions, modeled CPU cycles, virtual microseconds",
+  "machines": [
+    {
+      "connectionNumber": "9367",
+      "computerId": "c-hvq8k7",
+      "cpu": "CS486DX2",
+      "clockMHz": 66,
+      "os": "CS-Linux 1.0",
+      "results": [
+        {
+          "language": "ASM",
+          "variant": "baseline",
+          "instructions": 15004,
+          "cycles": 42106,
+          "microseconds": 637.97,
+          "exitCode": 0
+        },
+        {
+          "language": "ASM",
+          "variant": "optimized",
+          "instructions": 9006,
+          "cycles": 12084,
+          "microseconds": 183.091,
+          "exitCode": 0
+        },
+        {
+          "language": "BASIC",
+          "variant": "baseline",
+          "instructions": 66019,
+          "cycles": 279527,
+          "microseconds": 4235.258,
+          "exitCode": 0
+        },
+        {
+          "language": "BASIC",
+          "variant": "optimized",
+          "instructions": 54027,
+          "cycles": 218089,
+          "microseconds": 3304.379,
+          "exitCode": 0
+        },
+        {
+          "language": "C",
+          "variant": "baseline",
+          "instructions": 73526,
+          "cycles": 299066,
+          "microseconds": 4531.303,
+          "exitCode": 0
+        },
+        {
+          "language": "C",
+          "variant": "optimized",
+          "instructions": 61534,
+          "cycles": 237604,
+          "microseconds": 3600.061,
+          "exitCode": 0
+        },
+        {
+          "language": "C++",
+          "variant": "baseline",
+          "instructions": 73526,
+          "cycles": 299066,
+          "microseconds": 4531.303,
+          "exitCode": 0
+        },
+        {
+          "language": "C++",
+          "variant": "optimized",
+          "instructions": 61534,
+          "cycles": 237604,
+          "microseconds": 3600.061,
+          "exitCode": 0
+        },
+        {
+          "language": "Python",
+          "variant": "baseline",
+          "instructions": 52532,
+          "cycles": 638275,
+          "microseconds": 9670.833,
+          "exitCode": 0
+        },
+        {
+          "language": "Python",
+          "variant": "optimized",
+          "instructions": 46540,
+          "cycles": 551399,
+          "microseconds": 8354.53,
+          "exitCode": 0
+        }
+      ]
+    },
+    {
+      "connectionNumber": "1272",
+      "computerId": "c-s33g1r",
+      "cpu": "CS486DX",
+      "clockMHz": 33,
+      "os": "CS-Linux 1.0",
+      "results": [
+        {
+          "language": "ASM",
+          "variant": "baseline",
+          "instructions": 15004,
+          "cycles": 42058,
+          "microseconds": 1274.485,
+          "exitCode": 0
+        },
+        {
+          "language": "ASM",
+          "variant": "optimized",
+          "instructions": 9006,
+          "cycles": 12048,
+          "microseconds": 365.091,
+          "exitCode": 0
+        },
+        {
+          "language": "BASIC",
+          "variant": "baseline",
+          "instructions": 66019,
+          "cycles": 211787,
+          "microseconds": 6417.788,
+          "exitCode": 0
+        },
+        {
+          "language": "BASIC",
+          "variant": "optimized",
+          "instructions": 54027,
+          "cycles": 159325,
+          "microseconds": 4828.03,
+          "exitCode": 0
+        },
+        {
+          "language": "C",
+          "variant": "baseline",
+          "instructions": 73526,
+          "cycles": 226814,
+          "microseconds": 6873.152,
+          "exitCode": 0
+        },
+        {
+          "language": "C",
+          "variant": "optimized",
+          "instructions": 61534,
+          "cycles": 174340,
+          "microseconds": 5283.03,
+          "exitCode": 0
+        },
+        {
+          "language": "C++",
+          "variant": "baseline",
+          "instructions": 73526,
+          "cycles": 226814,
+          "microseconds": 6873.152,
+          "exitCode": 0
+        },
+        {
+          "language": "C++",
+          "variant": "optimized",
+          "instructions": 61534,
+          "cycles": 174340,
+          "microseconds": 5283.03,
+          "exitCode": 0
+        },
+        {
+          "language": "Python",
+          "variant": "baseline",
+          "instructions": 52532,
+          "cycles": 638083,
+          "microseconds": 19335.848,
+          "exitCode": 0
+        },
+        {
+          "language": "Python",
+          "variant": "optimized",
+          "instructions": 46540,
+          "cycles": 551195,
+          "microseconds": 16702.879,
+          "exitCode": 0
+        }
+      ]
+    },
+    {
+      "connectionNumber": "2985",
+      "computerId": "c-cqvhcs",
+      "cpu": "CS386SX",
+      "clockMHz": 16,
+      "os": "CS-DOS 6.2",
+      "results": [
+        {
+          "language": "ASM",
+          "variant": "baseline",
+          "instructions": 15004,
+          "cycles": 68478,
+          "microseconds": 4279.875,
+          "exitCode": 0
+        },
+        {
+          "language": "ASM",
+          "variant": "optimized",
+          "instructions": 9006,
+          "cycles": 25522,
+          "microseconds": 1595.125,
+          "exitCode": 0
+        },
+        {
+          "language": "BASIC",
+          "variant": "baseline",
+          "instructions": 66019,
+          "cycles": 339520,
+          "microseconds": 21220.0,
+          "exitCode": 0
+        },
+        {
+          "language": "BASIC",
+          "variant": "optimized",
+          "instructions": 54027,
+          "cycles": 250632,
+          "microseconds": 15664.5,
+          "exitCode": 0
+        },
+        {
+          "language": "C",
+          "variant": "baseline",
+          "instructions": 73526,
+          "cycles": 365061,
+          "microseconds": 22816.313,
+          "exitCode": 0
+        },
+        {
+          "language": "C",
+          "variant": "optimized",
+          "instructions": 61534,
+          "cycles": 276173,
+          "microseconds": 17260.813,
+          "exitCode": 0
+        },
+        {
+          "language": "C++",
+          "variant": "baseline",
+          "instructions": 73526,
+          "cycles": 365061,
+          "microseconds": 22816.313,
+          "exitCode": 0
+        },
+        {
+          "language": "C++",
+          "variant": "optimized",
+          "instructions": 61534,
+          "cycles": 276173,
+          "microseconds": 17260.813,
+          "exitCode": 0
+        },
+        {
+          "language": "Python",
+          "variant": "baseline",
+          "exitCode": 127,
+          "error": "Bad command or file name"
+        },
+        {
+          "language": "Python",
+          "variant": "optimized",
+          "exitCode": 127,
+          "error": "Bad command or file name"
+        }
+      ]
+    }
+  ]
+}

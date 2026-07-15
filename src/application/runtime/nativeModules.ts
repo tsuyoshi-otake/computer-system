@@ -19,11 +19,24 @@ import {
 } from "../../domain/redstone/redstoneState.js";
 import { ShellSession } from "../os/shellSession.js";
 import type { ShellResult } from "../os/shellSession.js";
+import type { ShellForegroundRequest } from "../os/shellTypes.js";
 import type { EditorScreen } from "../editor/editorScreen.js";
 import type { ComputerOsProfile } from "../../domain/computer/computer.js";
 import type { ShellClockSource } from "../os/clock.js";
 import type { ComputerHardwareProfile } from "../../domain/computer/hardware.js";
 import { formatOsIdentity, getOsIdentity } from "../os/osIdentity.js";
+import type {
+  SerialEndpoint,
+  SerialLinkBroker,
+} from "../io/serialLinkBroker.js";
+import {
+  createSerialVirtualDevices,
+  serialFaceForPortIndex,
+} from "../os/serialVirtualDevices.js";
+import type { PeripheralBusBroker } from "../io/peripheralBusBroker.js";
+import { createPeripheralVirtualDevices } from "../os/peripheralVirtualDevices.js";
+import type { VirtualDevice } from "../os/osProfile.js";
+import { decodeUtf8Chunk, encodeUtf8 } from "../../domain/text/utf8.js";
 
 export interface NativeModuleContext {
   readonly clock?: ShellClockSource;
@@ -47,7 +60,21 @@ export interface NativeModuleContext {
   readonly memoryUsageBytes?: () => number;
   readonly requireLinuxLogin?: boolean;
   readonly shell?: ShellSession;
+  readonly startForegroundProcess?: (
+    request: ShellForegroundRequest,
+  ) => ForegroundProcessStartResult;
+  readonly serial?: SerialLinkBroker;
+  readonly peripherals?: PeripheralBusBroker;
 }
+
+export type ForegroundProcessStartResult =
+  | { readonly completionEvent: string; readonly outcome: "started" }
+  | {
+      readonly cpuCycles?: number;
+      readonly exitCode: number;
+      readonly outcome: "failed";
+      readonly stderr: string;
+    };
 
 export interface NativeEnvironment {
   readonly modules: ReadonlyMap<string, RuntimeNamespace>;
@@ -58,6 +85,7 @@ export interface NativeEnvironment {
 export function createNativeEnvironment(
   context: NativeModuleContext,
 ): NativeEnvironment {
+  const virtualDevices = createVirtualDevices(context);
   const shell =
     context.shell ??
     new ShellSession(context.filesystem, {
@@ -72,6 +100,9 @@ export function createNativeEnvironment(
       requireLogin: context.requireLinuxLogin,
       terminalHeight: context.terminal.height,
       terminalWidth: context.terminal.width,
+      virtualDevices,
+      peripherals: context.peripherals,
+      deferGuestExecution: context.startForegroundProcess !== undefined,
     });
   const modules = new Map<string, RuntimeNamespace>([
     ["os", createOsModule(context)],
@@ -82,11 +113,49 @@ export function createNativeEnvironment(
       : ([["redstone", createRedstoneModule(context.redstone)]] as const)),
     ["shell", createShellModule(shell, context)],
   ]);
+  if ((context.osProfile ?? "linux") === "linux") {
+    if (context.serial !== undefined && context.computerName !== undefined) {
+      modules.set("serial", createSerialModule(context));
+    }
+    if (
+      context.peripherals !== undefined &&
+      context.computerName !== undefined
+    ) {
+      modules.set("spi", createSpiModule(context));
+      modules.set("i2c", createI2cModule(context));
+    }
+  }
   return {
     modules,
     globals: new Map([["print", createPrint(context.terminal)]]),
     shell,
   };
+}
+
+function createVirtualDevices(
+  context: NativeModuleContext,
+): ReadonlyMap<string, VirtualDevice> | undefined {
+  if (context.computerName === undefined) return undefined;
+  const devices = new Map<string, VirtualDevice>();
+  if (context.serial !== undefined) {
+    for (const [path, device] of createSerialVirtualDevices(
+      context.osProfile ?? "linux",
+      context.computerName,
+      context.serial,
+    )) {
+      devices.set(path, device);
+    }
+  }
+  if (context.peripherals !== undefined) {
+    for (const [path, device] of createPeripheralVirtualDevices(
+      context.osProfile ?? "linux",
+      context.computerName,
+      context.peripherals,
+    )) {
+      devices.set(path, device);
+    }
+  }
+  return devices.size === 0 ? undefined : devices;
 }
 
 function createShellModule(
@@ -111,6 +180,25 @@ function createShellModule(
       requireCapability(context.shutdown, "shutdown")();
     } else if (result.action === "reboot") {
       requireCapability(context.reboot, "reboot")();
+    }
+    if (result.foreground !== undefined) {
+      const started = requireCapability(
+        context.startForegroundProcess,
+        "foreground process",
+      )(result.foreground);
+      if (started.outcome === "failed") {
+        shell.completeForegroundProcess(started.exitCode);
+        writeTerminalLines(
+          context.terminal,
+          started.stderr.replaceAll("\r\n", "\n").trimEnd().split("\n"),
+        );
+        return {
+          kind: "work",
+          cycles: started.cpuCycles ?? 1,
+          value: null,
+        };
+      }
+      return { kind: "wait_event", filter: started.completionEvent };
     }
     if (result.sleepTicks !== undefined) {
       return { kind: "sleep", ticks: result.sleepTicks };
@@ -196,7 +284,7 @@ export function renderTerminalScreen(
   terminal.setCursorBlink(true);
 }
 
-function writeTerminalLines(
+export function writeTerminalLines(
   terminal: TerminalBuffer,
   lines: readonly string[],
 ): void {
@@ -252,6 +340,133 @@ function createRedstoneModule(redstone: RedstoneState): RuntimeNamespace {
     set_output: setOutput,
     setOutput,
   });
+}
+
+function createSerialModule(context: NativeModuleContext): RuntimeNamespace {
+  const serial = requireCapability(context.serial, "serial");
+  const computerId = requireCapability(context.computerName, "computer name");
+  const pending = new Map<number, Uint8Array>();
+  const observedResetEpochs = new Map<number, number>();
+  const endpoint = (port: RuntimeValue | undefined): SerialEndpoint => ({
+    computerId,
+    face: serialFaceForPortIndex(integerArgument(port)),
+  });
+  const write = fn("write", (positional, keywords) => {
+    requireArity(positional, keywords, 2, 2);
+    const result = serial.write(
+      endpoint(positional[0]),
+      encodeUtf8(stringArgument(positional[1])),
+    );
+    if (result.outcome !== "accepted") {
+      throw deviceError("serial", result.outcome);
+    }
+    return result.bytes;
+  });
+  const read = fn("read", (positional, keywords) => {
+    requireArity(positional, keywords, 1, 2);
+    const port = integerArgument(positional[0]);
+    const portStatus = serial.status(endpoint(port));
+    if (portStatus === undefined) {
+      throw deviceError("serial", "device_unavailable");
+    }
+    const observedResetEpoch = observedResetEpochs.get(port);
+    if (
+      observedResetEpoch !== undefined &&
+      observedResetEpoch !== portStatus.port.resetEpoch
+    ) {
+      pending.delete(port);
+    }
+    observedResetEpochs.set(port, portStatus.port.resetEpoch);
+    const maximum =
+      positional.length === 2 ? integerArgument(positional[1]) : undefined;
+    const result = serial.read(endpoint(port), maximum);
+    if (result.outcome !== "read") {
+      throw deviceError("serial", result.outcome);
+    }
+    const prior = pending.get(port) ?? new Uint8Array();
+    const combined = concatenateBytes(prior, result.bytes);
+    const decoded = decodeUtf8Chunk(combined);
+    pending.set(port, decoded.remainder);
+    return decoded.value;
+  });
+  const status = fn("status", (positional, keywords) => {
+    requireArity(positional, keywords, 1, 1);
+    const result = serial.status(endpoint(positional[0]));
+    if (result === undefined) throw deviceError("serial", "device_unavailable");
+    return tuple(
+      result.link,
+      result.peer?.computerId ?? "",
+      result.peer?.face ?? "",
+      result.port.receiveBytes,
+      result.port.transmitBytes,
+    );
+  });
+  return namespace("serial", { read, status, write });
+}
+
+function createSpiModule(context: NativeModuleContext): RuntimeNamespace {
+  const peripherals = requireCapability(context.peripherals, "spi");
+  const computerId = requireCapability(context.computerName, "computer name");
+  const transfer = fn("transfer", (positional, keywords) => {
+    requireArity(positional, keywords, 3, 3);
+    const result = peripherals.transferSpi(
+      {
+        computerId,
+        face: serialFaceForPortIndex(integerArgument(positional[0])),
+      },
+      integerArgument(positional[1]),
+      byteArrayArgument(positional[2]),
+    );
+    if (result.outcome !== "completed") {
+      throw deviceError(
+        "spi",
+        result.outcome,
+        "message" in result ? result.message : undefined,
+      );
+    }
+    return byteList(result.receive);
+  });
+  return namespace("spi", { transfer });
+}
+
+function createI2cModule(context: NativeModuleContext): RuntimeNamespace {
+  const peripherals = requireCapability(context.peripherals, "i2c");
+  const computerId = requireCapability(context.computerName, "computer name");
+  const scan = fn("scan", (positional, keywords) => {
+    requireArity(positional, keywords, 1, 1);
+    const result = peripherals.scanI2c({
+      computerId,
+      face: serialFaceForPortIndex(integerArgument(positional[0])),
+    });
+    if (result.outcome !== "completed") {
+      throw deviceError("i2c", result.outcome);
+    }
+    if (result.conflicts.length > 0) {
+      throw deviceError("i2c", "address_conflict");
+    }
+    return byteList(Uint8Array.from(result.addresses));
+  });
+  const transfer = fn("transfer", (positional, keywords) => {
+    requireArity(positional, keywords, 4, 4);
+    const result = peripherals.transactI2c(
+      {
+        computerId,
+        face: serialFaceForPortIndex(integerArgument(positional[0])),
+      },
+      integerArgument(positional[1]),
+      byteArrayArgument(positional[2]),
+      integerArgument(positional[3]),
+    );
+    if (result.outcome !== "completed") {
+      throw deviceError(
+        "i2c",
+        result.outcome,
+        "message" in result ? result.message : undefined,
+      );
+    }
+    return byteList(result.read);
+  });
+  return namespace("i2c", { scan, transfer });
 }
 
 function createOsModule(context: NativeModuleContext): RuntimeNamespace {
@@ -651,6 +866,46 @@ function booleanArgument(value: RuntimeValue | undefined): boolean {
   if (typeof value !== "boolean")
     throw new VmRuntimeError("TypeError", "Expected boolean argument");
   return value;
+}
+
+function byteArrayArgument(value: RuntimeValue | undefined): Uint8Array {
+  if (
+    value === null ||
+    typeof value !== "object" ||
+    (value.kind !== "list" && value.kind !== "tuple")
+  ) {
+    throw new VmRuntimeError("TypeError", "Expected a list or tuple of bytes");
+  }
+  const bytes = value.values.map((entry) => integerArgument(entry));
+  if (bytes.some((byte) => byte < 0 || byte > 255)) {
+    throw new VmRuntimeError(
+      "ValueError",
+      "Byte values must be between 0 and 255",
+    );
+  }
+  return Uint8Array.from(bytes);
+}
+
+function byteList(bytes: Uint8Array): RuntimeValue {
+  return { kind: "list", values: [...bytes] };
+}
+
+function concatenateBytes(left: Uint8Array, right: Uint8Array): Uint8Array {
+  const result = new Uint8Array(left.length + right.length);
+  result.set(left);
+  result.set(right, left.length);
+  return result;
+}
+
+function deviceError(
+  protocol: string,
+  outcome: string,
+  detail?: string,
+): VmRuntimeError {
+  return new VmRuntimeError(
+    "DeviceError",
+    `${protocol}: ${detail ?? outcome.replaceAll("_", " ")}`,
+  );
 }
 
 function colorIndex(value: RuntimeValue | undefined): number {

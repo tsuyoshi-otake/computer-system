@@ -44,6 +44,11 @@ describe("BDS debug session", () => {
         "scriptevent computer_system:debug-command dabc-1 c-9dwhx6 vwhoami",
       ),
     ).toBe(true);
+    expect(
+      isAllowedBdsCommand(
+        "scriptevent computer_system:debug-web-request wabc-1 c-9dwhx6",
+      ),
+    ).toBe(true);
 
     expect(isAllowedBdsCommand("stop")).toBe(false);
     expect(isAllowedBdsCommand("op @a")).toBe(false);
@@ -67,6 +72,11 @@ describe("BDS debug session", () => {
         "scriptevent computer_system:debug-command dabc-1 c-9dwhx6 vwhoami stop",
       ),
     ).toBe(false);
+    expect(
+      isAllowedBdsCommand(
+        "scriptevent computer_system:debug-web-request wabc-1 c-9dwhx6 stop",
+      ),
+    ).toBe(false);
   });
 
   it("validates ports without silently accepting trailing text", () => {
@@ -83,6 +93,16 @@ describe("BDS debug session", () => {
         "scriptevent computer_system:web-response r1-1 abcdefghijkl writer http://127.0.0.1:19144/p/0042",
       ),
     ).toBe(true);
+    expect(
+      isAllowedWebRelayCommand(
+        "scriptevent computer_system:web-response r1-1 abcdefghijkl writer debug http://127.0.0.1:19144/p/0042",
+      ),
+    ).toBe(true);
+    expect(
+      isAllowedWebRelayCommand(
+        "scriptevent computer_system:web-response r1-1 abcdefghijkl writer unrestricted http://127.0.0.1:19144/p/0042",
+      ),
+    ).toBe(false);
     expect(
       isAllowedWebRelayCommand(
         "scriptevent computer_system:web-response r1-1 abcdefghijkl writer http://127.0.0.1:19144/p/042",
@@ -205,5 +225,88 @@ describe("BDS debug session", () => {
       cpuCycles: 40,
     });
     expect(response.stderr).toContain("14 bus transfers, 2 unaligned");
+  });
+
+  it("encodes bounded multiline python -c source without opening BDS command injection", async () => {
+    class InlinePythonSession extends BdsDebugSession {
+      async runCommand(command) {
+        this.command = command;
+        return { command, afterCursor: 44 };
+      }
+
+      async waitForLog(options) {
+        const requestId = options.contains.match(/"requestId":"([^"]+)"/u)?.[1];
+        return {
+          line: `CS_DEBUG_COMMAND ${JSON.stringify({
+            requestId,
+            computerId: "c-00696j",
+            status: "completed",
+            exitCode: 0,
+            stdout: "5050\n",
+            stderr:
+              "Python/CS486DX: 1532 machine instructions, 16423 CPU cycles, 497.667 us at 33 MHz, completed\n",
+            cpuCycles: 16_423,
+          })}`,
+        };
+      }
+    }
+
+    const session = new InlinePythonSession({
+      environment: { BDS_HOME: "C:/not-accessed-by-inline-python" },
+    });
+    const source =
+      "total = 0\nfor i in range(1, 101):\n    total = total + i\nprint(total)";
+    const response = await session.executeComputerCommand({
+      computerId: "c-00696j",
+      command: `python -c ${source}`,
+    });
+
+    expect(session.command).not.toMatch(/[\r\n]/u);
+    expect(session.command).toContain("%0A");
+    expect(response).toMatchObject({
+      status: "completed",
+      exitCode: 0,
+      stdout: "5050\n",
+      cpuCycles: 16_423,
+    });
+    await expect(
+      session.executeComputerCommand({
+        computerId: "c-00696j",
+        command: "echo first\necho second",
+      }),
+    ).rejects.toThrow("only python -c");
+  });
+
+  it("requests a bounded Web handoff for one exact Computer identity", async () => {
+    class WebRequestSession extends BdsDebugSession {
+      async runCommand(command) {
+        this.command = command;
+        return { command, afterCursor: 52 };
+      }
+
+      async waitForLog(options) {
+        const requestId = options.contains.match(/"requestId":"([^"]+)"/u)?.[1];
+        return {
+          line: `CS_DEBUG_WEB_REQUEST ${JSON.stringify({
+            requestId,
+            computerId: "c-00696j",
+            status: "requested",
+          })}`,
+        };
+      }
+    }
+
+    const session = new WebRequestSession({
+      environment: { BDS_HOME: "C:/not-accessed-by-web-request" },
+    });
+    await expect(
+      session.requestWebHandoff({
+        computerId: "c-00696j",
+        timeoutMs: 1_000,
+      }),
+    ).resolves.toMatchObject({ status: "requested" });
+    expect(session.command).toMatch(
+      /^scriptevent computer_system:debug-web-request w[^ ]+ c-00696j$/u,
+    );
   });
 });

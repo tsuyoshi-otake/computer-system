@@ -34,6 +34,8 @@ export type IdentityPlacementResult =
 export class PersistentComputerIdentityService {
   private readonly registry = new ComputerIdentityRegistry();
   private readonly allocator: ComputerIdAllocator;
+  private readonly blockComputerIds: string[] = [];
+  private readonly blockIndexes = new Map<string, number>();
 
   constructor(
     private readonly repository: ComputerIdentityRepository,
@@ -47,6 +49,11 @@ export class PersistentComputerIdentityService {
     if (snapshot !== undefined) {
       if (snapshot.schema !== 2) throw new Error("Unsupported identity schema");
       this.registry.restore(snapshot.observations);
+      for (const observation of snapshot.observations) {
+        if (observation.form === "block") {
+          this.trackBlock(observation.computerId, true);
+        }
+      }
     }
   }
 
@@ -79,6 +86,7 @@ export class PersistentComputerIdentityService {
       });
       if (claim.outcome === "duplicate") return claim;
     }
+    this.trackBlock(computerId, true);
     const generation = this.repository.save(this.snapshot());
     return { outcome: "placed", computerId, family, generation };
   }
@@ -97,13 +105,8 @@ export class PersistentComputerIdentityService {
   }
 
   break(physicalKey: string): IdentityPlacementResult | IdentityResult {
-    const observation = this.registry
-      .snapshot()
-      .find(
-        (candidate) =>
-          candidate.form === "block" && candidate.physicalKey === physicalKey,
-      );
-    if (observation === undefined) {
+    const observation = this.registry.getAtPhysicalKey(physicalKey);
+    if (observation?.form !== "block") {
       return { outcome: "missing", computerId: physicalKey };
     }
     const result = this.registry.transfer(observation.computerId, physicalKey, {
@@ -112,6 +115,7 @@ export class PersistentComputerIdentityService {
       physicalKey: detachedKey(observation.computerId),
     });
     if (result.outcome !== "transferred") return result;
+    this.trackBlock(observation.computerId, false);
     const generation = this.repository.save(this.snapshot());
     return {
       outcome: "placed",
@@ -142,6 +146,7 @@ export class PersistentComputerIdentityService {
     } else {
       this.registry.remove(computerId);
     }
+    this.trackBlock(computerId, false);
     this.repository.save(this.snapshot());
   }
 
@@ -150,15 +155,45 @@ export class PersistentComputerIdentityService {
   }
 
   atPhysicalKey(physicalKey: string): ComputerIdentityObservation | undefined {
-    return this.registry
-      .snapshot()
-      .find((observation) => observation.physicalKey === physicalKey);
+    return this.registry.getAtPhysicalKey(physicalKey);
   }
 
   blockObservations(): readonly ComputerIdentityObservation[] {
     return this.registry
       .snapshot()
       .filter((observation) => observation.form === "block");
+  }
+
+  blockObservationBatch(
+    cursor: number,
+    maximum: number,
+  ): {
+    readonly nextCursor: number;
+    readonly observations: readonly ComputerIdentityObservation[];
+  } {
+    if (!Number.isSafeInteger(maximum) || maximum <= 0) {
+      throw new RangeError("Block observation batch size must be positive");
+    }
+    if (this.blockComputerIds.length === 0) {
+      return { nextCursor: 0, observations: [] };
+    }
+    const start =
+      Number.isSafeInteger(cursor) && cursor >= 0
+        ? cursor % this.blockComputerIds.length
+        : 0;
+    const count = Math.min(maximum, this.blockComputerIds.length);
+    const observations: ComputerIdentityObservation[] = [];
+    for (let offset = 0; offset < count; offset += 1) {
+      const computerId =
+        this.blockComputerIds[(start + offset) % this.blockComputerIds.length];
+      const observation =
+        computerId === undefined ? undefined : this.registry.get(computerId);
+      if (observation?.form === "block") observations.push(observation);
+    }
+    return {
+      nextCursor: (start + count) % this.blockComputerIds.length,
+      observations,
+    };
   }
 
   private snapshot(): ComputerIdentitySnapshot {
@@ -172,6 +207,25 @@ export class PersistentComputerIdentityService {
     return this.allocator.next(
       (computerId) => this.registry.get(computerId) !== undefined,
     );
+  }
+
+  private trackBlock(computerId: string, present: boolean): void {
+    const existingIndex = this.blockIndexes.get(computerId);
+    if (present) {
+      if (existingIndex !== undefined) return;
+      this.blockIndexes.set(computerId, this.blockComputerIds.length);
+      this.blockComputerIds.push(computerId);
+      return;
+    }
+    if (existingIndex === undefined) return;
+    const lastIndex = this.blockComputerIds.length - 1;
+    const lastComputerId = this.blockComputerIds[lastIndex]!;
+    if (existingIndex !== lastIndex) {
+      this.blockComputerIds[existingIndex] = lastComputerId;
+      this.blockIndexes.set(lastComputerId, existingIndex);
+    }
+    this.blockComputerIds.pop();
+    this.blockIndexes.delete(computerId);
   }
 }
 

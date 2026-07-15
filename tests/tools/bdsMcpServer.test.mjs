@@ -39,6 +39,7 @@ describe("BDS MCP stdio server", () => {
       "bds_execute_computer_command",
       "bds_get_logs",
       "bds_wait_for_log",
+      "bds_issue_web_handoff",
       "bds_wait_for_web_handoff",
     ]);
     expect(

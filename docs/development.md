@@ -103,11 +103,15 @@ setup twice and later boots require login; the salted record is stored in
 `/etc/shadow`, while secret Web input is masked and excluded from history and
 completion. The Linux profile owns `/etc`, `/dev`, volatile `/tmp`, `/usr`,
 `/var`, `/home/computer`, identity/time applets, and `/dev/null`. The shared OS
-profile boundary owns path dialects, aliases, boot images, and virtual devices;
-the DOS contract fixture proves drive paths, case-insensitive strict 8.3 names,
-the root `C:\>` startup directory, CRLF, `DIR`/`TYPE`, and `NUL` without
-changing Linux semantics. Commands operate only on `InMemoryFilesystem`; they
-must never spawn a host shell. Focused verification is:
+profile boundary owns path dialects, boot images, environment, and virtual
+devices. Closed-by-default Linux and DOS registries own command names, help, and
+completion; separate frontends own syntax, expansion, and error formatting. DOS
+adapters call shared filesystem and toolchain services without mapping names
+such as `DIR` or `COPY` to Linux applets. The DOS contract fixture proves drive
+paths, case-insensitive strict 8.3 names, the root `C:\>` startup directory,
+CRLF, `DIR`/`TYPE`, and `NUL` without changing Linux semantics. Commands operate
+only on `InMemoryFilesystem`; they must never spawn a host shell. Focused
+verification is:
 
 ```powershell
 npx vitest run tests/os tests/editor
@@ -288,8 +292,15 @@ persisted and visible clocks are 33 MHz and 66 MHz. `run --stats` is the
 deterministic optimization measurement: compare CPU-cycle totals and virtual
 microseconds, not host wall time or language-specific instruction counts.
 Executables are JSON preceded by `CS486\n`, validated again at load, and never
-passed to a host process. Direct execution is capped at 10,000 instructions per
-submission and returns exit 124 on a bounded yield.
+passed to a host process. Normal terminal execution is a resumable foreground
+scheduler job capped at 100,000 instructions and returns exit 124 on a bounded
+yield. The scheduler also enforces per-Computer and global instruction ceilings
+on every tick.
+
+Host-load admission and remaining scale risks are specified in
+`docs/work-monitor.md`. Keep deterministic guest timing separate from measured
+host time; WorkMonitor guards may defer a bounded atom but must never alter its
+modeled CPU cycles or device-wire timing.
 
 Relocatable objects are versioned JSON preceded by `CS486OBJ\n`. They contain
 normalized assembly, object-relative data size, local/global/undefined text

@@ -36,6 +36,7 @@ interface ActiveSession {
   readonly expiresAtTick: number;
   readonly playerId: string;
   readonly player: Player;
+  readonly rangeCheckDisabledForDebug: boolean;
   readonly sessionId: string;
   access: "in_range" | "out_of_range";
   lastSnapshot?: string;
@@ -183,11 +184,19 @@ export function disconnectWebTerminalPlayer(
 
 function handleResponse(message: string): void {
   const match =
-    /^(r[a-z0-9]+-[a-z0-9]+) ([A-Za-z0-9_-]{12,32}) (writer|viewer) (https?:\/\/[^\s]{1,180})$/u.exec(
+    /^(r[a-z0-9]+-[a-z0-9]+) ([A-Za-z0-9_-]{12,32}) (writer|viewer)(?: (debug))? (https?:\/\/[^\s]{1,180})$/u.exec(
       message,
     );
   if (match === null) return;
-  const [, requestId = "", sessionId = "", mode = "", url = ""] = match;
+  const [
+    ,
+    requestId = "",
+    sessionId = "",
+    mode = "",
+    debugMarker = "",
+    url = "",
+  ] = match;
+  const rangeCheckDisabledForDebug = debugMarker === "debug";
   const request = pendingRequests.get(requestId);
   if (request === undefined) {
     rejectSession(sessionId, "request_missing");
@@ -198,7 +207,13 @@ function handleResponse(message: string): void {
     rejectSession(sessionId, "request_expired");
     return;
   }
-  if (!isWithinAccessRange(request.player, request.accessPoint)) {
+  if (
+    !isWithinAccessRange(
+      request.player,
+      request.accessPoint,
+      rangeCheckDisabledForDebug,
+    )
+  ) {
     request.player.sendMessage(
       "Web Terminal access expired: stay within 3 blocks of the Computer.",
     );
@@ -221,6 +236,7 @@ function handleResponse(message: string): void {
     expiresAtTick: system.currentTick + sessionLifetimeTicks,
     playerId: request.player.id,
     player: request.player,
+    rangeCheckDisabledForDebug,
     sessionId,
     access: "in_range",
   };
@@ -353,7 +369,7 @@ function handleInterrupt(message: string): void {
   if (match === null) return;
   const session = requireActiveSession(match[1] ?? "");
   if (session !== undefined && terminalAccess.canWrite(session.sessionId)) {
-    computerHost.runtime.terminate(session.computerId);
+    computerHost.runtime.interrupt(session.computerId);
     snapshotScheduler.requestEager(session.sessionId);
   }
 }
@@ -379,7 +395,13 @@ function requireActiveSession(sessionId: string): ActiveSession | undefined {
     finalizeSession(session, "expired");
     return undefined;
   }
-  if (!isWithinAccessRange(session.player, session.accessPoint)) {
+  if (
+    !isWithinAccessRange(
+      session.player,
+      session.accessPoint,
+      session.rangeCheckDisabledForDebug,
+    )
+  ) {
     setSessionAccess(session, "out_of_range");
     return undefined;
   }
@@ -411,7 +433,9 @@ function setSessionAccess(
 function isWithinAccessRange(
   player: Player,
   accessPoint: WebTerminalAccessPoint | undefined,
+  rangeCheckDisabledForDebug = false,
 ): boolean {
+  if (rangeCheckDisabledForDebug) return true;
   if (accessPoint === undefined) return true;
   if (!player.isValid || player.dimension.id !== accessPoint.dimensionId)
     return false;
@@ -440,7 +464,13 @@ function emitEagerSnapshots(): void {
 }
 
 function emitSnapshot(session: ActiveSession, force: boolean): boolean {
-  if (!isWithinAccessRange(session.player, session.accessPoint)) {
+  if (
+    !isWithinAccessRange(
+      session.player,
+      session.accessPoint,
+      session.rangeCheckDisabledForDebug,
+    )
+  ) {
     setSessionAccess(session, "out_of_range");
     return false;
   }

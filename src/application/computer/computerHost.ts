@@ -7,10 +7,19 @@ import type {
   ComputerPersistenceService,
   PersistenceResult,
 } from "./persistence.js";
+import type { SerialLinkBroker } from "../io/serialLinkBroker.js";
+import type { PeripheralBusBroker } from "../io/peripheralBusBroker.js";
+import {
+  type ComputerWorkMonitor,
+  type ComputerWorkMonitorSnapshot,
+  type TickWorkScope,
+  type TickWorkSummary,
+} from "../runtime/computerWorkMonitor.js";
 
 export interface ComputerHostOptions {
   readonly maxPersistenceChecksPerTick?: number;
   readonly onPersistenceFailure?: (computerId: string, error: Error) => void;
+  readonly workMonitor?: ComputerWorkMonitor;
 }
 
 export type HostRegistrationResult =
@@ -20,6 +29,8 @@ export type HostRegistrationResult =
   | { readonly outcome: "duplicate"; readonly computerId: string };
 
 export class ComputerHost {
+  readonly serial: SerialLinkBroker;
+  readonly peripherals: PeripheralBusBroker;
   private readonly records = new Map<string, ComputerRecord>();
   private readonly order: string[] = [];
   private readonly maxPersistenceChecksPerTick: number;
@@ -27,6 +38,9 @@ export class ComputerHost {
     computerId: string,
     error: Error,
   ) => void;
+  private readonly workMonitor: ComputerWorkMonitor | undefined;
+  private hostTick = 0;
+  private lastWorkSummaryValue: TickWorkSummary | undefined;
   private persistenceCursor = 0;
 
   constructor(
@@ -34,6 +48,8 @@ export class ComputerHost {
     private readonly persistence: ComputerPersistenceService,
     options: ComputerHostOptions = {},
   ) {
+    this.serial = runtime.serial;
+    this.peripherals = runtime.peripherals;
     const budget = options.maxPersistenceChecksPerTick ?? 4;
     if (!Number.isSafeInteger(budget) || budget <= 0) {
       throw new RangeError("Persistence checks per tick must be positive.");
@@ -41,6 +57,7 @@ export class ComputerHost {
     this.maxPersistenceChecksPerTick = budget;
     this.onPersistenceFailure =
       options.onPersistenceFailure ?? ((): void => undefined);
+    this.workMonitor = options.workMonitor;
   }
 
   register(record: ComputerRecord): HostRegistrationResult {
@@ -53,6 +70,8 @@ export class ComputerHost {
     }
     this.records.set(record.computerId, record);
     this.order.push(record.computerId);
+    this.serial.register(record);
+    this.peripherals.register(record);
     return { outcome: "registered", record };
   }
 
@@ -68,16 +87,64 @@ export class ComputerHost {
     return this.records.get(computerId);
   }
 
+  get lastWorkSummary(): TickWorkSummary | undefined {
+    return this.lastWorkSummaryValue;
+  }
+
+  workMetrics(): ComputerWorkMonitorSnapshot | undefined {
+    return this.workMonitor?.snapshot();
+  }
+
   runTick(): void {
-    this.runtime.runTick();
+    this.hostTick += 1;
+    const scope = this.workMonitor?.beginTick(this.hostTick);
+    try {
+      if (scope === undefined) {
+        this.runtime.runTick();
+        this.serial.runTick();
+        this.runPersistenceChecks();
+        return;
+      }
+      scope.tryRun(
+        {
+          lane: "guest_cpu",
+          deterministicUnits: this.workMonitor!.laneLimit("guest_cpu"),
+        },
+        () => this.runtime.runTick(),
+      );
+      scope.tryRun(
+        {
+          lane: "rs232",
+          deterministicUnits: this.workMonitor!.laneLimit("rs232"),
+        },
+        () => this.serial.runTick(),
+      );
+      this.runPersistenceChecks(scope);
+    } finally {
+      if (scope !== undefined) this.lastWorkSummaryValue = scope.finish();
+    }
+  }
+
+  private runPersistenceChecks(scope?: TickWorkScope): void {
     const checks = Math.min(
       this.maxPersistenceChecksPerTick,
       this.order.length,
     );
     for (let index = 0; index < checks; index += 1) {
       const computerId = this.order[this.persistenceCursor];
+      if (computerId === undefined) continue;
+      if (scope === undefined) {
+        this.persist(computerId);
+        this.persistenceCursor =
+          (this.persistenceCursor + 1) % this.order.length;
+        continue;
+      }
+      const attempt = scope.tryRun(
+        { lane: "persistence", deterministicUnits: 1, computerId },
+        () => this.persist(computerId),
+      );
+      if (attempt.outcome === "deferred") break;
       this.persistenceCursor = (this.persistenceCursor + 1) % this.order.length;
-      if (computerId !== undefined) this.persist(computerId);
     }
   }
 

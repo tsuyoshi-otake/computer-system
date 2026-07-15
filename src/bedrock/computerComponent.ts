@@ -22,6 +22,7 @@ import { computerHost } from "./computerHost.js";
 import {
   computerIdentityProperty,
   ensureComputer,
+  ensurePortableComputer,
   identityService,
 } from "./computerRegistry.js";
 import { selectComputerTerminal } from "./computerTerminal.js";
@@ -30,6 +31,10 @@ import {
   placeMachineFacingPlayer,
   replaceMachinePreservingDirection,
 } from "./machinePlacement.js";
+import {
+  isComputerSystemBlock,
+  refreshFaceIoTopology,
+} from "./faceIoTopology.js";
 
 export { computerIdentityProperty } from "./computerRegistry.js";
 export const desktopComputerDisplayName = "Desktop Computer System";
@@ -52,8 +57,10 @@ export function registerComputerComponents(
         observation === undefined
           ? identityService().place(physicalKey, family)
           : { outcome: "placed" as const, ...observation, generation: 0 };
-      if (result.outcome === "placed")
+      if (result.outcome === "placed") {
         ensureComputer(result.computerId, family);
+        system.run((): void => refreshFaceIoTopology(block));
+      }
     },
     onPlayerBreak: handleBreak,
     onPlayerInteract: handleInteraction,
@@ -115,6 +122,8 @@ function handleBreak(event: BlockComponentPlayerBreakEvent): void {
   const physicalKey = blockKey(event.block);
   const result = identityService().break(physicalKey);
   if (result.outcome !== "placed") return;
+  computerHost.serial.disconnectComputer(result.computerId, "block_broken");
+  computerHost.peripherals.clearComputer(result.computerId);
   const player = event.player;
   scheduleOwnedFinalization(breakingBlocks, physicalKey, {
     prepare: [
@@ -215,20 +224,30 @@ function handleRedstoneUpdate(event: BlockComponentRedstoneUpdateEvent): void {
 }
 
 function syncComputerOutputs(): void {
-  const blocks = identityService().blockObservations();
-  const checks = Math.min(4, blocks.length);
-  for (let index = 0; index < checks; index += 1) {
-    const observation = blocks[outputCursor];
-    outputCursor = (outputCursor + 1) % blocks.length;
-    if (observation === undefined) continue;
+  const batch = identityService().blockObservationBatch(outputCursor, 4);
+  outputCursor = batch.nextCursor;
+  for (const observation of batch.observations) {
     const block = blockFromKey(observation.physicalKey);
-    const record = computerHost.get(observation.computerId);
+    let record = computerHost.get(observation.computerId);
+    if (block !== undefined && record === undefined) {
+      record =
+        block.typeId === "computer_system:portable_computer_block"
+          ? ensurePortableComputer(observation.computerId, observation.family)
+          : ensureComputer(observation.computerId, observation.family);
+    }
     if (
       block === undefined ||
       record === undefined ||
-      !isComputerBlock(block.typeId)
-    )
+      !isComputerSystemBlock(block.typeId)
+    ) {
+      computerHost.serial.disconnectComputer(
+        observation.computerId,
+        "topology_unavailable",
+      );
       continue;
+    }
+    refreshFaceIoTopology(block);
+    if (!isComputerBlock(block.typeId)) continue;
     const expected = blockType(observation.family, record.redstone.outputMask);
     if (block.typeId !== expected)
       replaceMachinePreservingDirection(block, expected);

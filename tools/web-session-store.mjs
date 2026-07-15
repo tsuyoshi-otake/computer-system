@@ -142,12 +142,13 @@ export class WebSessionStore {
     return session;
   }
 
-  reconnect(code) {
+  reconnect(code, { ignoreRange = false } = {}) {
     if (typeof code !== "string" || !handoffPattern.test(code)) {
       throw unauthorized();
     }
     const session = this.sessionsByCode.get(code);
     if (session === undefined || !isActive(session)) throw unauthorized();
+    if (ignoreRange) this.updateAccess(session.sessionId, "in_range");
     if (session.access !== "in_range") {
       throw new WebSessionError(
         "out_of_range",

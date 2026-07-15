@@ -176,6 +176,18 @@ describe("Web terminal session store", () => {
     expect(() => store.authenticate(connected.token)).toThrow(/valid/u);
     expect(store.authenticate(reconnected.token).computerId).toBe("c-000001");
   });
+
+  it("normalizes an existing out-of-range session only for an explicit debug reconnect", () => {
+    const store = createStore();
+    const connected = consume(store, identity());
+    store.updateAccess(connected.session.sessionId, "out_of_range");
+
+    const reconnected = store.reconnect("0001", { ignoreRange: true });
+
+    expect(reconnected.token).not.toBe(connected.token);
+    expect(reconnected.session.access).toBe("in_range");
+    expect(store.isInRange(connected.session.sessionId)).toBe(true);
+  });
 });
 
 function createStore(options = {}) {

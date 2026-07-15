@@ -61,12 +61,14 @@ expose `EDIT`. Both editors use the same writer-owned bounded key transport and
 render inside the fixed 80x25 Web Terminal hardware text grid.
 
 The Web Terminal header also opens a searchable, keyboard-navigable 16-chapter
-field manual. It is organized as a learning path rather than a command cheat
-sheet: machine orientation and architecture; terminal, Bash, and storage;
-MicroPython, its native API, Redstone, and a complete controller exercise;
-assembly, BASIC, C/C++, and optimization; then DOS compatibility, diagnostics,
-and the limits/glossary appendix. Previous/next controls and arrow keys follow
-that publication order.
+field manual. Goal paths lead new operators through a first program, a
+Python-and-Redstone project, CS-Linux operation, native development, Portable
+CS-DOS operation, or diagnosis without changing the canonical publication order.
+Four visible parts group startup and operation; building and peripherals;
+architecture, compiled languages, and optimization; then profiles, recovery, and
+reference. Section-level results identify tutorials, how-to material, concepts,
+and reference entries while Previous/Next controls and arrow keys continue to
+follow publication order.
 
 See [the implementation roadmap](docs/roadmap.md) for the planned compatibility
 scope and executable acceptance criteria.
@@ -148,16 +150,23 @@ safety constraints.
 Computer without using its TUI. It returns stdout, stderr, exit code, and
 modeled CPU cycles for the target Computer's persisted hardware model from the
 sandboxed shell; it never invokes host PowerShell/Bash or arbitrary BDS
-administration commands. `bds_wait_for_web_handoff` returns the next one-use URL
-for one exact Computer ID while preventing browser auto-open from consuming it
-first. Both paths bound input, concurrency, output, and waits. The MCP-only
-`python <file>` and `micropython <file>` forms run a bounded source file with
-the target Computer's MicroPython-compatible language, filesystem, hardware
-profile, and RAM limit. Python is compiled to CS486 control flow and an
-allowlisted managed-runtime syscall ABI; there is no separate Python VM. MCP
-execution rejects waits and long-running work and reports machine instructions,
-CPU cycles, and virtual time at the target Computer's clock, using the same
-units as `run --stats`.
+administration commands. `bds_issue_web_handoff` asks the single connected debug
+player to open one exact Computer ID and returns its one-use URL without a
+physical machine interaction. `bds_wait_for_web_handoff` remains available when
+an operator will trigger the interaction separately. Both paths prevent browser
+auto-open from consuming the claimed URL first and bound input, concurrency,
+output, and waits. The MCP direct `python <file>`, `micropython <file>`, and
+bounded multiline `python -c <source>` forms run through the target Computer's
+MicroPython-compatible compiler, filesystem, hardware profile, and RAM limit.
+Only the inline Python debug form may contain encoded line breaks; ordinary
+debug commands remain one line. The normal CS-Linux shell also accepts
+`python <file>`, `python --stats <file>`, and the `micropython` alias as a
+foreground process; it can wait for guest events and returns to the prompt on
+completion, failure, or Ctrl+C. Python is compiled to CS486 control flow and an
+allowlisted managed-runtime syscall ABI; there is no separate Python VM. The
+non-TUI MCP execution path rejects waits and long-running work and reports
+machine instructions, CPU cycles, and virtual time at the target Computer's
+clock, using the same units as `run --stats`.
 
 ## Browser terminal
 
@@ -191,6 +200,12 @@ that bookmark rotates the bearer token and reconnects through one deduplicated,
 in the query. Code lookup is O(1), and access notifications are emitted only on
 range-state transitions rather than on every scheduler check. A held Portable is
 the access point itself and does not use the placed-block distance check.
+
+For a local managed-BDS debugging session only, set
+`WEB_COMPANION_DEBUG_IGNORE_RANGE=1` before starting the companion to skip the
+placed-machine three-block and dimension check. The default remains enforced.
+This flag does not bypass the initial machine interaction, player connection,
+writer lease, bearer token, session lifetime, or disconnect finalization.
 
 Each two-minute activation is already bound to one Computer; the companion root
 page accepts only an active four-digit number, not an arbitrary Computer ID.
@@ -250,21 +265,22 @@ buffer before printing the minimal OS identity and prompt; persisted files and
 `/etc/shadow` remain intact. The interactive account is UID/GID 1000; root owns
 system paths, while mode, UID, GID, modification time, symbolic links, and
 hard-link groups persist with backward-compatible filesystem snapshots. A
-profile boundary separates path syntax, boot layout, command aliases,
-environment, and virtual devices. The implemented DOS profile shares the same
-terminal, filesystem, persistence, hardware limits, and checked CS
-executable/toolchain abstractions without Linux conditionals in the domain core.
-It starts at `C:\>` without creating a Linux-like `C:\USERS` hierarchy and
-provides drive-letter paths, case-insensitive strict 8.3 names, CRLF boot files,
-`NUL`/`CON`, and DOS command aliases. Invalid long names fail explicitly instead
-of being silently truncated. DOS-facing commands use CRLF and DOS-specific
-status/error text rather than leaking Linux applet output. The implemented
-compatibility surface includes `DIR`, `TYPE`, `COPY`, `DEL`/ `ERASE`, `MD`,
-`RD`, `MOVE`, `REN`/`RENAME`, `TREE`, `VOL`, `VER`, `TIME`, `TIMER`,
-`DOSKEY /HISTORY`, and `MEM /F`. Computer System DOS 6.2 (`CS-DOS 6.2`) reads a
-bounded `CONFIG.SYS` and runs `AUTOEXEC.BAT`; `SET`, `PATH`, `PROMPT`, `REM`,
-`@ECHO OFF`, `%0`…`%9`, `%VAR%`, and `%ERRORLEVEL%` are supported. Unsupported
-boot directives fail visibly.
+profile boundary separates path syntax, boot layout, environment, and virtual
+devices. Closed-by-default Linux and DOS command registries own public names,
+completion, and help, while separate syntax frontends own expansion and errors.
+The implemented DOS profile shares the same terminal, filesystem, persistence,
+hardware limits, and checked CS executable/toolchain abstractions without Linux
+conditionals in the domain core. It starts at `C:\>` without creating a
+Linux-like `C:\USERS` hierarchy and provides drive-letter paths,
+case-insensitive strict 8.3 names, CRLF boot files, `NUL`/`CON`, and DOS command
+aliases. Invalid long names fail explicitly instead of being silently truncated.
+DOS-facing commands use CRLF and DOS-specific status/error text rather than
+leaking Linux applet output. The implemented compatibility surface includes
+`DIR`, `TYPE`, `COPY`, `DEL`/ `ERASE`, `MD`, `RD`, `MOVE`, `REN`/`RENAME`,
+`TREE`, `VOL`, `VER`, `TIME`, `TIMER`, `DOSKEY /HISTORY`, and `MEM /F`. Computer
+System DOS 6.2 (`CS-DOS 6.2`) reads a bounded `CONFIG.SYS` and runs
+`AUTOEXEC.BAT`; `SET`, `PATH`, `PROMPT`, `REM`, `@ECHO OFF`, `%0`…`%9`, `%VAR%`,
+and `%ERRORLEVEL%` are supported. Unsupported boot directives fail visibly.
 
 ```text
 files:  pwd cd ls cat mkdir rmdir touch rm cp mv ln readlink realpath find stat
@@ -438,8 +454,8 @@ dynamic/shared libraries remain a follow-up on the versioned object and ABI
 foundation. MCP's `cpuCycles` field uses one unit across ASM, C, C++, BASIC, and
 desktop Python; machine-instruction counts remain diagnostic values, not timing
 units. The portable CS386SX retains ASM, C, C++, BASIC, and batch support, but
-rejects user `python`/`micropython` debug commands with status 127 and does not
-execute `/startup.py`.
+rejects `python`/`micropython` commands with status 127 and does not execute
+`/startup.py`.
 
 The Bedrock pack includes placeable `Computer`, `Advanced Computer`, and
 `Monitor` items (`computer_system:computer_item`,
@@ -457,6 +473,25 @@ fail explicitly. The current display block is named Monitor rather than Display.
 CS386SX 16 MHz / 2 MiB profile when its persistent identity is created or a
 legacy-default portable identity is safely migrated.
 
+Every placed Computer exposes six machine-relative local-I/O faces in the stable
+order `bottom`, `right`, `front`, `back`, `top`, `left`. The chassis cardinal
+direction rotates front/right/back/left while top and bottom stay vertical.
+Directly adjacent Computers receive one full-duplex RS-232C link per touching
+face at 9600 baud, 8N1. Linux names the ports `/dev/ttyS0` through `/dev/ttyS5`;
+DOS names the same faces `COM1` through `COM6`. Each direction is limited to 48
+bytes per 20 Hz tick with 4 KiB RX/TX queues, atomic writes up to 1 KiB,
+backpressure instead of silent loss, and explicit disconnect/power errors. Links
+and buffered bytes are transient and are cleared on topology or power-epoch
+changes rather than being serialized into World Dynamic Properties.
+
+The same face numbering reserves Linux `/dev/spidev0.0` through `/dev/spidev5.0`
+and `/dev/i2c-0` through `/dev/i2c-5`; DOS exposes `SPI1` through `SPI6` and
+`I2C1` through `I2C6`. `spi` uses mode 0, 1 MHz, 8-bit, MSB-first atomic
+transfers up to 256 bytes. `i2c` uses a 100 kHz 7-bit segment with bounded scan
+and combined write/read transactions up to 256 bytes. The controller, conflict,
+NACK, and capability contracts are implemented now for future IoT block
+adapters; no production sensor block is implied by this foundation.
+
 Examples:
 
 ```sh
@@ -465,6 +500,8 @@ printf 'alpha\nbeta\nalpha\n' | grep alpha | wc -l
 echo 'hello world' > message.txt
 cat message.txt | tr a-z A-Z
 false || echo recovered
+i2c 0 scan
+spi 0 0 9f0000
 bash -c "find / -name '*.py' | sort"
 ```
 

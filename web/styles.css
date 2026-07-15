@@ -39,6 +39,7 @@ body {
 
 button,
 input,
+select,
 textarea {
   font: inherit;
 }
@@ -429,7 +430,7 @@ dialog p {
   --manual-ink: #1d211e;
   --manual-muted: #565b54;
   --manual-rule: #9b9788;
-  --manual-accent: #a84224;
+  --manual-accent: #8f321c;
   width: min(1180px, calc(100vw - 32px));
   height: min(860px, calc(100dvh - 32px));
   max-height: calc(100dvh - 32px);
@@ -501,6 +502,10 @@ dialog p {
   overflow: auto;
 }
 
+.manual-control {
+  min-width: 0;
+}
+
 .manual-sidebar label {
   display: block;
   margin-bottom: 8px;
@@ -510,25 +515,83 @@ dialog p {
   text-transform: uppercase;
 }
 
-.manual-sidebar input {
+.manual-sidebar input,
+.manual-sidebar select {
   width: 100%;
   min-height: 40px;
-  margin: 0 0 16px;
+  margin: 0;
   padding: 8px 10px;
   border: 1px solid var(--line-strong);
   border-radius: 0;
   outline: 0 solid transparent;
   background: #151917;
   color: var(--text);
+  transition:
+    border-color var(--motion-fast),
+    background-color var(--motion-fast);
 }
 
-.manual-sidebar input:focus-visible {
+.manual-sidebar input:hover,
+.manual-sidebar select:hover {
+  border-color: var(--muted);
+  background: #191e1b;
+}
+
+.manual-sidebar input:focus-visible,
+.manual-sidebar select:focus-visible {
   border-color: var(--amber);
   outline: 2px solid var(--amber);
   outline-offset: 2px;
 }
 
+.manual-search-status {
+  min-height: 16px;
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 9px;
+  line-height: 1.4;
+}
+
+.manual-toc-entry:hover:not(:disabled),
+.manual-search-result:hover:not(:disabled) {
+  border-color: var(--amber);
+  background: #292f2b;
+  color: var(--text);
+}
+
+.manual-toc-entry:active:not(:disabled),
+.manual-search-result:active:not(:disabled) {
+  background: #343a34;
+}
+
+.manual-toc-entry:focus-visible,
+.manual-search-result:focus-visible {
+  outline-color: var(--amber);
+}
+
 #manual-toc {
+  display: grid;
+  gap: 20px;
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid #343a36;
+}
+
+.manual-part {
+  display: grid;
+  gap: 6px;
+}
+
+.manual-part-title {
+  margin: 0;
+  color: #abb4ae;
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  line-height: 1.4;
+  text-transform: uppercase;
+}
+
+.manual-part-chapters {
   display: grid;
   gap: 2px;
 }
@@ -547,7 +610,7 @@ dialog p {
 }
 
 .manual-toc-entry > span:first-child {
-  color: #6f7972;
+  color: #a5aea8;
   font-size: 10px;
 }
 
@@ -577,6 +640,78 @@ dialog p {
 
 .manual-toc-entry[aria-current="page"] > span:first-child {
   color: var(--amber);
+}
+
+.manual-current-marker {
+  width: max-content;
+  color: var(--amber);
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  line-height: 1.2;
+  text-transform: uppercase;
+}
+
+.manual-search-result {
+  display: grid;
+  gap: 5px;
+  width: 100%;
+  min-height: 78px;
+  padding: 9px;
+  border-color: var(--line);
+  color: var(--muted);
+  text-align: left;
+  text-transform: none;
+}
+
+.manual-search-result[aria-current="location"] {
+  border-color: var(--amber);
+  background: #2b312d;
+  color: var(--text);
+}
+
+.manual-search-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  color: #a5aea8;
+  font-size: 8px;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+.manual-search-type {
+  color: var(--amber);
+  font-weight: 700;
+}
+
+.manual-search-applicability {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-transform: none;
+  white-space: nowrap;
+}
+
+.manual-search-meta .manual-current-marker {
+  margin-left: auto;
+}
+
+.manual-search-breadcrumb {
+  color: var(--text);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.manual-search-snippet {
+  display: -webkit-box;
+  overflow: hidden;
+  font-size: 9px;
+  font-weight: 400;
+  line-height: 1.45;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 
 .manual-empty {
@@ -618,6 +753,31 @@ dialog p {
   font-weight: 700;
   letter-spacing: 0.08em;
   text-transform: uppercase;
+}
+
+.manual-chapter-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 0 12px;
+  font-family: var(--terminal-font);
+  font-size: 9px;
+  letter-spacing: 0.04em;
+}
+
+.manual-chapter-meta > span {
+  padding: 3px 6px;
+  border: 1px solid var(--manual-rule);
+  background: var(--manual-paper-dark);
+}
+
+.manual-chapter-kind {
+  color: var(--manual-accent);
+  font-weight: 700;
+}
+
+.manual-chapter-applies {
+  color: var(--manual-ink);
 }
 
 .manual-page h2 {
@@ -753,6 +913,11 @@ dialog p {
   font-size: 13px;
   letter-spacing: 0.04em;
   text-transform: uppercase;
+}
+
+.manual-section h3:focus-visible {
+  outline: 3px solid var(--manual-accent);
+  outline-offset: 4px;
 }
 
 .manual-page p {
@@ -946,13 +1111,16 @@ dialog form {
   }
 
   .manual-workspace {
-    grid-template-rows: 172px minmax(0, 1fr);
+    grid-template-rows: 132px minmax(0, 1fr);
     grid-template-columns: 1fr;
     height: calc(100% - 120px);
   }
 
   .manual-sidebar {
-    padding: 12px;
+    display: grid;
+    grid-template-rows: auto minmax(0, 1fr);
+    gap: 4px;
+    padding: 4px 8px;
     border-right: 0;
     border-bottom: 1px solid #343a36;
     overflow: hidden;
@@ -960,17 +1128,79 @@ dialog form {
 
   .manual-sidebar label {
     margin-bottom: 4px;
+    font-size: 9px;
+    line-height: 1.35;
   }
 
-  .manual-sidebar input {
-    min-height: 36px;
-    margin-bottom: 8px;
+  .manual-sidebar input,
+  .manual-sidebar select {
+    min-height: 44px;
+    padding: 6px 8px;
+  }
+
+  .manual-search-status {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
   }
 
   #manual-toc {
-    grid-auto-columns: 210px;
-    grid-auto-flow: column;
+    display: flex;
+    gap: 8px;
+    min-width: 0;
+    margin: 0;
+    padding: 0;
+    border-top: 0;
     overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-width: thin;
+  }
+
+  .manual-part {
+    flex: 0 0 auto;
+    gap: 2px;
+  }
+
+  .manual-part-title {
+    font-size: 8px;
+    line-height: 10px;
+  }
+
+  .manual-part-chapters {
+    display: flex;
+    gap: 2px;
+  }
+
+  .manual-toc-entry {
+    flex: 0 0 180px;
+    min-height: 44px;
+    padding: 5px 7px;
+  }
+
+  .manual-toc-entry small {
+    display: none;
+  }
+
+  .manual-toc-entry .manual-current-marker {
+    display: block;
+  }
+
+  .manual-search-result {
+    flex: 0 0 260px;
+    min-height: 56px;
+    padding: 5px 7px;
+    gap: 2px;
+  }
+
+  .manual-search-snippet {
+    white-space: nowrap;
+    -webkit-line-clamp: 1;
   }
 
   .manual-page {

@@ -30,6 +30,7 @@ describe("PersistentComputerIdentityService", (): void => {
       },
     );
     expect(service.observation("c-000001")?.physicalKey).toBe("nether:4,5,6");
+    expect(service.atPhysicalKey("nether:4,5,6")?.computerId).toBe("c-000001");
   });
 
   it("rejects duplicate carried IDs and family changes", (): void => {
@@ -85,6 +86,36 @@ describe("PersistentComputerIdentityService", (): void => {
     });
     expect(repository.snapshot).toMatchObject({ schema: 2 });
     expect(repository.snapshot).not.toHaveProperty("nextId");
+  });
+
+  it("walks placed identities in fixed O(K) batches without snapshot sorting", (): void => {
+    const repository = new MemoryRepository();
+    const service = serviceWithIds(repository, 1, 2, 3, 4, 5);
+    for (const key of ["a", "b", "c", "d", "e"]) {
+      service.place(key, "standard");
+    }
+    const first = service.blockObservationBatch(0, 2);
+    const second = service.blockObservationBatch(first.nextCursor, 2);
+    const third = service.blockObservationBatch(second.nextCursor, 2);
+    expect(first.observations.map(({ physicalKey }) => physicalKey)).toEqual([
+      "a",
+      "b",
+    ]);
+    expect(second.observations.map(({ physicalKey }) => physicalKey)).toEqual([
+      "c",
+      "d",
+    ]);
+    expect(third.observations.map(({ physicalKey }) => physicalKey)).toEqual([
+      "e",
+      "a",
+    ]);
+
+    service.break("c");
+    const remaining = service.blockObservationBatch(0, 8);
+    expect(
+      remaining.observations.map(({ physicalKey }) => physicalKey),
+    ).not.toContain("c");
+    expect(remaining.observations).toHaveLength(4);
   });
 });
 

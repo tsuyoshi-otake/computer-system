@@ -16,6 +16,10 @@ const web = new WebCompanionServer({
     process.env.WEB_COMPANION_AUTO_OPEN,
     "WEB_COMPANION_AUTO_OPEN",
   ),
+  debugIgnoreRange: parseBooleanFlag(
+    process.env.WEB_COMPANION_DEBUG_IGNORE_RANGE,
+    "WEB_COMPANION_DEBUG_IGNORE_RANGE",
+  ),
 });
 let shuttingDown = false;
 

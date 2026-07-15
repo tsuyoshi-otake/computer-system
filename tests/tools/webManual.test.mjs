@@ -1,6 +1,12 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
-import { manualChapters } from "../../web/manual.js";
+import {
+  manualChapters,
+  manualParts,
+  manualPaths,
+  searchManual,
+} from "../../web/manual.js";
 
 describe("Web terminal field manual", () => {
   it("provides a complete, uniquely indexed sixteen-chapter publication", () => {
@@ -26,14 +32,14 @@ describe("Web terminal field manual", () => {
     ]);
     expect(manualChapters.map(({ id }) => id)).toEqual([
       "orientation",
-      "architecture",
       "terminal-editor",
-      "shell",
       "io-files",
+      "shell",
       "micropython",
-      "api-reference",
       "redstone-peripherals",
       "worked-project",
+      "api-reference",
+      "architecture",
       "assembly",
       "basic",
       "c-family",
@@ -42,13 +48,80 @@ describe("Web terminal field manual", () => {
       "faults",
       "limits-glossary",
     ]);
+    const partIds = new Set(manualParts.map(({ id }) => id));
+    const sectionIds = new Set();
     for (const chapter of manualChapters) {
       expect(chapter.title.length).toBeGreaterThan(2);
       expect(chapter.summary.length).toBeGreaterThan(8);
+      expect(partIds.has(chapter.partId)).toBe(true);
+      expect(["tutorial", "how-to", "concept", "reference"]).toContain(
+        chapter.kind,
+      );
+      expect(chapter.appliesTo.length).toBeGreaterThan(0);
+      expect(chapter.sections.length).toBeGreaterThan(0);
       expect(chapter.html).toContain("manual-page-header");
       expect(chapter.html).toContain("manual-section");
       expect(chapter.html).toContain(`Chapter ${chapter.number}`);
+      for (const section of chapter.sections) {
+        expect(section.id.length).toBeGreaterThan(2);
+        expect(section.title.length).toBeGreaterThan(2);
+        expect(sectionIds.has(section.id)).toBe(false);
+        sectionIds.add(section.id);
+        expect(chapter.html).toContain(`id="${section.id}"`);
+      }
     }
+  });
+
+  it("defines valid goal paths with a Python-free Portable route", () => {
+    const chapterIds = new Set(manualChapters.map(({ id }) => id));
+
+    expect(manualParts.map(({ id }) => id)).toEqual([
+      "start-operate",
+      "build-connect",
+      "understand-compile",
+      "profiles-support",
+    ]);
+    expect(manualPaths.map(({ id }) => id)).toEqual([
+      "first-program",
+      "python-redstone",
+      "linux-operator",
+      "native-development",
+      "portable-dos",
+      "diagnostics",
+    ]);
+    for (const path of manualPaths) {
+      expect(path.chapterIds.length).toBeGreaterThan(1);
+      expect(new Set(path.chapterIds).size).toBe(path.chapterIds.length);
+      expect(path.chapterIds.every((id) => chapterIds.has(id))).toBe(true);
+    }
+
+    const portable = manualPaths.find(({ id }) => id === "portable-dos");
+    expect(portable?.chapterIds).toContain("dos-profile");
+    expect(portable?.chapterIds).not.toContain("micropython");
+    expect(portable?.chapterIds).not.toContain("api-reference");
+  });
+
+  it("returns bounded section-level search results with stable targets", () => {
+    for (const query of [
+      "instruction",
+      "fault",
+      "BASIC",
+      "EDIT",
+      "CS386SX",
+      "redstone",
+    ]) {
+      const results = searchManual(query);
+      expect(results.length).toBeGreaterThan(0);
+      for (const result of results) {
+        expect(result.chapterId.length).toBeGreaterThan(2);
+        expect(result.sectionId.length).toBeGreaterThan(2);
+        expect(result.sectionTitle.length).toBeGreaterThan(2);
+        expect(result.snippet.length).toBeGreaterThan(0);
+        expect(result.snippet.length).toBeLessThanOrEqual(180);
+      }
+    }
+    expect(searchManual("")).toEqual([]);
+    expect(searchManual("a", { limit: 3 }).length).toBeLessThanOrEqual(3);
   });
 
   it("documents every runtime, the machine, optimization, and terminal faults", () => {
@@ -200,7 +273,11 @@ describe("Web terminal field manual", () => {
   });
 
   it("documents CS-Linux boot reset and password storage semantics", () => {
-    const shell = manualChapters.find(({ id }) => id === "shell")?.html ?? "";
+    const startup = ["orientation", "terminal-editor", "shell"]
+      .map(
+        (id) => manualChapters.find((chapter) => chapter.id === id)?.html ?? "",
+      )
+      .join("\n");
 
     for (const required of [
       "Boot and first login",
@@ -212,7 +289,89 @@ describe("Web terminal field manual", () => {
       "computer:cs-sha256-v1:512:",
       "plaintext is never stored",
     ]) {
-      expect(shell).toContain(required);
+      expect(startup).toContain(required);
+    }
+  });
+
+  it("keeps the live benchmark and cross-profile limits explicit", () => {
+    const optimization =
+      manualChapters.find(({ id }) => id === "optimization")?.html ?? "";
+    const toolchain =
+      manualChapters.find(({ id }) => id === "c-family")?.html ?? "";
+    const python =
+      manualChapters.find(({ id }) => id === "micropython")?.html ?? "";
+
+    for (const required of [
+      "live BDS measurements captured through the Computer System MCP on 2026-07-15",
+      "sum(i*i + 3*i + 7)",
+      "1129513000",
+      "9367",
+      "c-hvq8k7",
+      "42,106 · 637.970 µs",
+      "12,084 · 183.091 µs",
+      "1272",
+      "c-s33g1r",
+      "638,083 · 19,335.848 µs",
+      "551,195 · 16,702.879 µs",
+      "2985",
+      "c-cqvhcs",
+      "365,061 · 22,816.313 µs",
+      "276,173 · 17,260.813 µs",
+      "status 127",
+      "Bad command or file name",
+      "13.3 Cost priorities",
+      "13.4 Alignment and cache locality",
+      "13.5 Branches and pipelines",
+    ]) {
+      expect(optimization).toContain(required);
+    }
+    for (const required of [
+      "Computer System CS486 executable",
+      "not Linux ELF",
+      "valid DOS 8.3 path",
+      "no guest command for copying a file between two different Computer identities",
+      "not a demonstration of an operator-visible cross-machine transfer",
+    ]) {
+      expect(toolchain).toContain(required);
+    }
+    expect(python).toContain("python /tmp/program.py");
+    expect(python).toContain("python --stats /tmp/program.py");
+    expect(python).toContain("restores the prompt after completion");
+  });
+
+  it("keeps every captured live benchmark optimization lower than its baseline", () => {
+    const capture = JSON.parse(
+      readFileSync(
+        new URL(
+          "../../docs/benchmarks/strength-reduction/results-2026-07-15.json",
+          import.meta.url,
+        ),
+        "utf8",
+      ),
+    );
+
+    expect(capture.measurement).toBe("live-bds-mcp");
+    expect(capture.checksum).toBe("1129513000");
+    expect(capture.machines).toHaveLength(3);
+    for (const machine of capture.machines) {
+      for (const language of ["ASM", "BASIC", "C", "C++", "Python"]) {
+        const baseline = machine.results.find(
+          (result) =>
+            result.language === language && result.variant === "baseline",
+        );
+        const optimized = machine.results.find(
+          (result) =>
+            result.language === language && result.variant === "optimized",
+        );
+        expect(baseline).toBeDefined();
+        expect(optimized).toBeDefined();
+        if (machine.cpu === "CS386SX" && language === "Python") {
+          expect([baseline.exitCode, optimized.exitCode]).toEqual([127, 127]);
+        } else {
+          expect([baseline.exitCode, optimized.exitCode]).toEqual([0, 0]);
+          expect(optimized.cycles).toBeLessThan(baseline.cycles);
+        }
+      }
     }
   });
 });

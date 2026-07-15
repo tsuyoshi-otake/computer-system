@@ -1,7 +1,6 @@
 import type { InMemoryFilesystem } from "../../domain/filesystem/inMemoryFilesystem.js";
 import { utf8ByteLength } from "../../domain/text/utf8.js";
 import { DosPathError, type OsProfile } from "./osProfile.js";
-import type { EditorScreen } from "../editor/editorScreen.js";
 import type { ShellClockSource } from "./clock.js";
 import type { ComputerHardwareProfile } from "../../domain/computer/hardware.js";
 import type { VirtualDevice } from "./osProfile.js";
@@ -29,25 +28,31 @@ import {
 } from "../toolchain/highLevelCompilers.js";
 import { linkCs486Objects } from "../toolchain/cs486Linker.js";
 import { sha256Hex } from "./passwordHash.js";
+import { commandRegistryFor, type CommandRegistry } from "./commandRegistry.js";
+import { DosCommandAdapter } from "./dosCommands.js";
+import {
+  shellAccessPolicyFor,
+  type ShellAccessPolicy,
+} from "./shellAccessPolicy.js";
+import { shellTextPolicyFor, type ShellTextPolicy } from "./shellTextPolicy.js";
+import type {
+  ShellAction,
+  ShellCommandResult,
+  ShellCompletionResult,
+} from "./shellTypes.js";
+import type { PeripheralBusBroker } from "../io/peripheralBusBroker.js";
+import {
+  machineFaceAt,
+  type MachineFace,
+} from "../../domain/computer/machineFace.js";
 
-export type ShellAction = "clear" | "reboot" | "shutdown";
-
-export interface ShellCommandResult {
-  readonly action?: ShellAction;
-  readonly exitCode: number;
-  readonly stderr: string;
-  readonly stdout: string;
-  readonly sleepTicks?: number;
-  readonly terminalScreen?: EditorScreen;
-  readonly resetTerminal?: boolean;
-  readonly cpuCycles?: number;
-}
-
-export interface ShellCompletionResult {
-  readonly candidates: readonly string[];
-  readonly cursor: number;
-  readonly value: string;
-}
+export type {
+  ShellAction,
+  ShellCommandResult,
+  ShellCompletionResult,
+  ShellForegroundRequest,
+  ShellForegroundPython,
+} from "./shellTypes.js";
 
 export interface ShellCommandRuntimeOptions {
   readonly clock: ShellClockSource;
@@ -58,6 +63,9 @@ export interface ShellCommandRuntimeOptions {
   readonly ticksPerSecond: number;
   readonly hardware: ComputerHardwareProfile;
   readonly memoryUsageBytes: () => number;
+  readonly virtualDevices?: ReadonlyMap<string, VirtualDevice>;
+  readonly peripherals?: PeripheralBusBroker;
+  readonly deferGuestExecution?: boolean;
 }
 
 interface MemoryRegion {
@@ -81,120 +89,14 @@ interface DosMemoryLayout {
   readonly xms: boolean;
 }
 
-export const shellCommandNames = [
-  "basename",
-  "bash",
-  "cat",
-  "cd",
-  "clear",
-  "cp",
-  "dirname",
-  "du",
-  "date",
-  "echo",
-  "edit",
-  "env",
-  "exit",
-  "export",
-  "false",
-  "find",
-  "grep",
-  "head",
-  "help",
-  "hostname",
-  "id",
-  "ls",
-  "mkdir",
-  "mv",
-  "printf",
-  "pwd",
-  "quota",
-  "reboot",
-  "rm",
-  "sh",
-  "shutdown",
-  "sort",
-  "sleep",
-  "seq",
-  "stat",
-  "source",
-  "tail",
-  "touch",
-  "tr",
-  "true",
-  "uname",
-  "type",
-  "uptime",
-  "uniq",
-  "unset",
-  "wc",
-  "which",
-  "whoami",
-  "vi",
-  "cut",
-  "cpu",
-  "cpuinfo",
-  "df",
-  "free",
-  "mem",
-  "systeminfo",
-  "test",
-  "[",
-  "time",
-  "timer",
-  "history",
-  "as",
-  "cc",
-  "c++",
-  "basic",
-  "basicc",
-  "run",
-  "objdump",
-  "ld",
-  "nm",
-  "path",
-  "prompt",
-  "rem",
-  "set",
-  "doskey",
-  "tree",
-  "vol",
-  "chmod",
-  "chown",
-  "chgrp",
-  "cmp",
-  "diff",
-  "dmesg",
-  "file",
-  "groups",
-  "hexdump",
-  "ln",
-  "mktemp",
-  "mount",
-  "od",
-  "printenv",
-  "readlink",
-  "realpath",
-  "rmdir",
-  "sha256sum",
-  "sync",
-  "tee",
-  "xargs",
-  "yes",
-  "alias",
-  "command",
-  "getopts",
-  "local",
-  "read",
-  "shift",
-  "unalias",
-] as const;
-
-const knownCommands = new Set<string>(shellCommandNames);
 const maximumOutputLength = 256_000;
 
 export class ShellCommandRuntime {
+  private readonly accessPolicy: ShellAccessPolicy;
   private readonly bootTick: number;
+  private readonly dosCommands: DosCommandAdapter | undefined;
+  private readonly registry: CommandRegistry;
+  private readonly textPolicy: ShellTextPolicy;
   private currentDirectory: string;
   private previousDirectory: string;
   private readonly environment: Map<string, string>;
@@ -206,10 +108,15 @@ export class ShellCommandRuntime {
     private readonly filesystem: InMemoryFilesystem,
     private readonly options: ShellCommandRuntimeOptions,
   ) {
+    this.accessPolicy = shellAccessPolicyFor(options.profile.id, filesystem);
     this.bootTick = options.currentTick();
     this.currentDirectory = options.profile.initialDirectory;
     this.previousDirectory = options.profile.initialDirectory;
     this.environment = new Map(options.profile.environment);
+    this.registry = commandRegistryFor(options.profile.id);
+    this.textPolicy = shellTextPolicyFor(options.profile.id);
+    this.dosCommands =
+      options.profile.id === "dos" ? new DosCommandAdapter(this) : undefined;
   }
 
   get cwd(): string {
@@ -280,7 +187,7 @@ export class ShellCommandRuntime {
   }
 
   isBuiltInCommand(name: string): boolean {
-    return knownCommands.has(this.canonicalCommand(name));
+    return this.registry.has(name);
   }
 
   get dosEchoEnabled(): boolean {
@@ -293,7 +200,6 @@ export class ShellCommandRuntime {
     arguments_: readonly string[],
     lastExitCode: number,
   ): string {
-    if (this.options.profile.id !== "dos") return value;
     return value.replace(
       /%([A-Za-z_][A-Za-z0-9_]*)%|%([0-9])/gu,
       (_match, variable: string | undefined, position: string | undefined) => {
@@ -309,7 +215,6 @@ export class ShellCommandRuntime {
   }
 
   executeDosControlLine(line: string): ShellCommandResult | undefined {
-    if (this.options.profile.id !== "dos") return undefined;
     const normalized = line.trim().replace(/^@/u, "").trimStart();
     const match = /^([A-Za-z]+)(?:\s+(.*))?$/su.exec(normalized);
     if (match === null) return undefined;
@@ -338,8 +243,7 @@ export class ShellCommandRuntime {
   ):
     | { readonly kind: "batch" | "executable"; readonly path: string }
     | undefined {
-    if (this.options.profile.id !== "dos" || name.length === 0)
-      return undefined;
+    if (name.length === 0) return undefined;
     const hasDirectory = name.includes("/") || name.includes("\\");
     const directories = hasDirectory
       ? [""]
@@ -392,15 +296,16 @@ export class ShellCommandRuntime {
     const [requestedCommand = "", ...arguments_] = words;
     const command = this.canonicalCommand(requestedCommand);
     try {
-      if (this.options.profile.id === "dos") {
-        const dosResult = this.dispatchDosCommand(
-          requestedCommand.toLowerCase(),
-          arguments_,
-          stdin,
-        );
-        if (dosResult !== undefined) return dosResult;
-      }
-      if (knownCommands.has(command) && !this.commandAvailable(command)) {
+      const profileResult = this.dosCommands?.execute(
+        requestedCommand,
+        arguments_,
+        stdin,
+      );
+      if (profileResult !== undefined) return profileResult;
+      if (
+        !this.registry.has(requestedCommand) &&
+        !isExecutableCommand(command)
+      ) {
         return this.commandNotFound(requestedCommand);
       }
       const result = this.dispatch(command, arguments_, stdin);
@@ -414,6 +319,13 @@ export class ShellCommandRuntime {
     } catch (error: unknown) {
       if (this.options.profile.id === "dos" && error instanceof DosPathError) {
         return status(1, "", "Invalid filename or extension.\r\n");
+      }
+      if (this.dosCommands !== undefined) {
+        return status(
+          1,
+          "",
+          `${this.dosCommands.failureMessage(requestedCommand)}\r\n`,
+        );
       }
       return failure(command, message(error));
     }
@@ -429,90 +341,11 @@ export class ShellCommandRuntime {
     );
   }
 
-  private dispatchDosCommand(
-    command: string,
-    arguments_: readonly string[],
-    stdin: string,
-  ): ShellCommandResult | undefined {
-    switch (command) {
-      case "cd":
-      case "chdir":
-        if (arguments_.length === 0) {
-          return success(
-            `${this.options.profile.pathDialect.display(this.currentDirectory)}\r\n`,
-          );
-        }
-        return this.dosResult(
-          "The system cannot find the path specified.",
-          this.changeDirectory(arguments_),
-        );
-      case "copy":
-        if (arguments_.some((value) => value.startsWith("/"))) {
-          return status(2, "", "Invalid switch.\r\n");
-        }
-        return this.dosResult(
-          "File not found.",
-          this.copy(arguments_),
-          "        1 file(s) copied.\r\n",
-        );
-      case "del":
-      case "erase":
-        return this.dosResult("File not found.", this.remove(arguments_));
-      case "dir":
-        return this.dosDirectory(arguments_);
-      case "date":
-        return this.dosDate(arguments_);
-      case "md":
-      case "mkdir":
-        return this.dosResult(
-          "Unable to create directory.",
-          this.makeDirectories(arguments_),
-        );
-      case "move":
-        return this.dosResult(
-          "The system cannot find the file specified.",
-          this.move(arguments_),
-          "        1 file(s) moved.\r\n",
-        );
-      case "rd":
-      case "rmdir":
-        return this.dosRemoveDirectory(arguments_);
-      case "ren":
-      case "rename":
-        return this.dosResult(
-          "The system cannot find the file specified.",
-          this.move(arguments_),
-        );
-      case "type":
-        return this.dosResult("File not found.", this.cat(arguments_, stdin));
-      case "ver":
-        return arguments_.length === 0
-          ? success("Computer System DOS Version 6.20\r\n")
-          : status(2, "", "Invalid number of parameters.\r\n");
-      default:
-        return undefined;
-    }
+  currentDirectoryDisplay(): string {
+    return this.options.profile.pathDialect.display(this.currentDirectory);
   }
 
-  private dosResult(
-    errorMessage: string,
-    result: ShellCommandResult,
-    successOutput = "",
-  ): ShellCommandResult {
-    if (result.exitCode === 0) {
-      return {
-        ...result,
-        stdout:
-          successOutput ||
-          result.stdout.replaceAll("\r\n", "\n").replaceAll("\n", "\r\n"),
-      };
-    }
-    return status(result.exitCode, "", `${errorMessage}\r\n`);
-  }
-
-  private dosRemoveDirectory(
-    arguments_: readonly string[],
-  ): ShellCommandResult {
+  dosRemoveDirectory(arguments_: readonly string[]): ShellCommandResult {
     if (arguments_.length !== 1) {
       return status(2, "", "Required parameter missing.\r\n");
     }
@@ -531,7 +364,7 @@ export class ShellCommandRuntime {
     return success();
   }
 
-  private dosDirectory(arguments_: readonly string[]): ShellCommandResult {
+  dosDirectory(arguments_: readonly string[]): ShellCommandResult {
     let bare = false;
     let path = ".";
     for (const argument of arguments_) {
@@ -599,8 +432,7 @@ export class ShellCommandRuntime {
   }
 
   isKnownCommand(name: string): boolean {
-    const command = this.canonicalCommand(name);
-    return knownCommands.has(command) && this.commandAvailable(command);
+    return this.registry.has(name);
   }
 
   private dispatch(
@@ -613,23 +445,21 @@ export class ShellCommandRuntime {
     }
     switch (command) {
       case "help":
-        return this.options.profile.id === "dos"
-          ? this.dosHelp(arguments_)
-          : success(
-              [
-                "Computer System BusyBox shell",
-                "files: pwd cd ls cat mkdir rmdir touch rm cp mv ln readlink realpath find du quota",
-                "text: echo printf head tail wc grep sort uniq tr",
-                "text+: tee cmp diff sha256sum od hexdump xargs",
-                "shell: sh bash source env printenv export unset alias unalias command read local shift getopts",
-                "system: clear vi shutdown reboot exit true false",
-                "info: whoami id hostname uname date uptime stat df du quota",
-                "hardware: cpuinfo free mount dmesg /proc/cpuinfo /proc/meminfo",
-                "utility: history time sleep seq cut test [",
-                "toolchain: as cc c++ basic basicc ld nm run objdump",
-                "syntax: |  >  >>  <  &&  ||  ;  '...'  \"...\"  $VAR  $?",
-              ].join("\n") + "\n",
-            );
+        return success(
+          [
+            "Computer System BusyBox shell",
+            "files: pwd cd ls cat mkdir rmdir touch rm cp mv ln readlink realpath find du quota",
+            "text: echo printf head tail wc grep sort uniq tr",
+            "text+: tee cmp diff sha256sum od hexdump xargs",
+            "shell: sh bash source env printenv export unset alias unalias command read local shift getopts",
+            "system: clear vi shutdown reboot exit true false",
+            "info: whoami id hostname uname date uptime stat df du quota",
+            "hardware: cpuinfo free mount dmesg spi i2c /proc/cpuinfo /proc/meminfo",
+            "utility: history time sleep seq cut test [",
+            "toolchain: as cc c++ basic basicc ld nm run objdump",
+            "syntax: |  >  >>  <  &&  ||  ;  '...'  \"...\"  $VAR  $?",
+          ].join("\n") + "\n",
+        );
       case "pwd":
         return arguments_.length === 0
           ? success(
@@ -643,9 +473,7 @@ export class ShellCommandRuntime {
       case "cat":
         return this.cat(arguments_, stdin);
       case "echo":
-        return this.options.profile.id === "dos"
-          ? this.dosEchoCommand(arguments_.join(" "))
-          : this.echo(arguments_);
+        return this.echo(arguments_);
       case "printf":
         return this.printf(arguments_);
       case "mkdir":
@@ -687,11 +515,7 @@ export class ShellCommandRuntime {
           ? success(`${this.options.profile.username}\n`)
           : usage("whoami");
       case "id":
-        if (this.options.profile.id === "linux")
-          return this.linuxId(arguments_);
-        return arguments_.length === 0
-          ? success("uid=0(COMPUTER) gid=0(COMPUTER) groups=0(COMPUTER)\r\n")
-          : usage("id");
+        return this.linuxId(arguments_);
       case "hostname":
         return arguments_.length === 0
           ? success(`${this.options.computerName}\n`)
@@ -701,37 +525,21 @@ export class ShellCommandRuntime {
       case "date":
         return this.date(arguments_);
       case "time":
-        return this.options.profile.id === "dos"
-          ? this.dosTime(arguments_)
-          : this.commandNotFound(command);
+        return this.commandNotFound(command);
       case "cpuinfo":
-        return this.options.profile.id === "linux"
-          ? this.cpuInfo(arguments_)
-          : this.commandNotFound(command);
+        return this.cpuInfo(arguments_);
       case "free":
-        return this.options.profile.id === "linux"
-          ? this.freeMemory(arguments_)
-          : this.commandNotFound(command);
+        return this.freeMemory(arguments_);
+      case "spi":
+        return this.spiCommand(arguments_);
+      case "i2c":
+        return this.i2cCommand(arguments_);
       case "cpu":
-        return this.options.profile.id === "dos"
-          ? this.dosCpu(arguments_)
-          : this.commandNotFound(command);
       case "mem":
-        return this.options.profile.id === "dos"
-          ? this.dosMemory(arguments_)
-          : this.commandNotFound(command);
       case "systeminfo":
-        return this.options.profile.id === "dos"
-          ? this.dosSystemInfo(arguments_)
-          : this.commandNotFound(command);
       case "tree":
-        return this.options.profile.id === "dos"
-          ? this.dosTree(arguments_)
-          : this.commandNotFound(command);
       case "vol":
-        return this.options.profile.id === "dos"
-          ? this.dosVolume(arguments_)
-          : this.commandNotFound(command);
+        return this.commandNotFound(command);
       case "chmod":
         return this.linuxChangeMode(arguments_);
       case "chown":
@@ -794,27 +602,12 @@ export class ShellCommandRuntime {
       case "nm":
         return this.listSymbols(arguments_);
       case "path":
-        return this.options.profile.id === "dos"
-          ? this.dosPath(arguments_.join(" "))
-          : this.commandNotFound(command);
       case "prompt":
-        return this.options.profile.id === "dos"
-          ? this.dosPrompt(arguments_.join(" "))
-          : this.commandNotFound(command);
       case "rem":
-        return this.options.profile.id === "dos"
-          ? success()
-          : this.commandNotFound(command);
       case "set":
-        return this.options.profile.id === "dos"
-          ? this.dosSet(arguments_.join(" "))
-          : this.commandNotFound(command);
+        return this.commandNotFound(command);
       case "uptime":
-        return this.options.profile.id === "linux"
-          ? this.linuxUptime(arguments_)
-          : arguments_.length === 0
-            ? success(`${this.uptimeSeconds().toFixed(2)} seconds\r\n`)
-            : usage("uptime");
+        return this.linuxUptime(arguments_);
       case "sleep":
         return this.sleep(arguments_);
       case "seq":
@@ -876,7 +669,7 @@ export class ShellCommandRuntime {
     }
   }
 
-  private changeDirectory(arguments_: readonly string[]): ShellCommandResult {
+  changeDirectory(arguments_: readonly string[]): ShellCommandResult {
     if (arguments_.length > 1) return usage("cd [directory]");
     const requested = arguments_[0] ?? this.environment.get("HOME") ?? "/";
     const destination =
@@ -919,11 +712,7 @@ export class ShellCommandRuntime {
       }
       const listDirectory =
         this.filesystem.isDirectory(resolved) && !directoryEntry;
-      if (
-        this.options.profile.id === "linux" &&
-        listDirectory &&
-        !this.linuxHasAccess(resolved, 0b101)
-      )
+      if (listDirectory && !this.accessPolicy.hasAccess(resolved, 0b101))
         return failure(
           "ls",
           `cannot open directory '${path}': Permission denied`,
@@ -943,8 +732,7 @@ export class ShellCommandRuntime {
           }
         }
         names.sort();
-        if (all && this.options.profile.id === "linux")
-          names.unshift(".", "..");
+        if (all) names.unshift(".", "..");
       }
       const prefix = paths.length > 1 ? `${path}:\n` : "";
       const listing = long
@@ -966,10 +754,6 @@ export class ShellCommandRuntime {
                 : symbolic
                   ? utf8ByteLength(this.filesystem.readLink(target))
                   : this.filesystem.getSize(target);
-              if (this.options.profile.id === "dos") {
-                const kind = device ? "dev " : directory ? "dir " : "file";
-                return `${kind} ${String(size).padStart(7)} ${this.displayName(name)}`;
-              }
               const metadata = device
                 ? {
                     gid: 0,
@@ -986,7 +770,7 @@ export class ShellCommandRuntime {
             .join("\n")
         : names.map((name) => this.displayName(name)).join("  ");
       const total =
-        long && listDirectory && this.options.profile.id === "linux"
+        long && listDirectory
           ? `total ${String(
               names.reduce((sum, name) => {
                 if (name === "." || name === "..") return sum;
@@ -1005,10 +789,7 @@ export class ShellCommandRuntime {
     return success(sections.join("") + "\n");
   }
 
-  private cat(
-    arguments_: readonly string[],
-    stdin: string,
-  ): ShellCommandResult {
+  cat(arguments_: readonly string[], stdin: string): ShellCommandResult {
     let numbered = false;
     const paths: string[] = [];
     for (const argument of arguments_) {
@@ -1057,15 +838,171 @@ export class ShellCommandRuntime {
     return success(output);
   }
 
-  private makeDirectories(arguments_: readonly string[]): ShellCommandResult {
+  private spiCommand(arguments_: readonly string[]): ShellCommandResult {
+    if (arguments_.length !== 3) {
+      return this.protocolUsage("spi <bus> <chip-select> <hex-bytes>");
+    }
+    const peripherals = this.options.peripherals;
+    if (peripherals === undefined) {
+      return this.protocolFailure("spi", "controller unavailable");
+    }
+    try {
+      const endpoint = {
+        computerId: this.options.computerName,
+        face: this.protocolBusFace(arguments_[0]!),
+      };
+      const chipSelect = protocolInteger(arguments_[1]!);
+      const transmit = protocolHexBytes(arguments_[2]!);
+      const result = peripherals.transferSpi(endpoint, chipSelect, transmit);
+      switch (result.outcome) {
+        case "completed":
+          return success(
+            `${formatProtocolHex(result.receive)}${this.protocolNewline()}`,
+          );
+        case "chip_select_conflict":
+          return this.protocolFailure(
+            "spi",
+            `chip-select ${String(result.chipSelect)} conflict`,
+          );
+        case "detached":
+          return this.protocolFailure("spi", "no peripheral attached");
+        case "missing_computer":
+          return this.protocolFailure("spi", "controller unavailable");
+        case "powered_off":
+          return this.protocolFailure("spi", "controller is powered off");
+        case "protocol_error":
+          return this.protocolFailure("spi", result.message);
+        case "transfer_limit_exceeded":
+          return this.protocolFailure(
+            "spi",
+            `transfer exceeds ${String(result.maximum)} bytes`,
+          );
+      }
+    } catch (error: unknown) {
+      return this.protocolFailure("spi", message(error));
+    }
+  }
+
+  private i2cCommand(arguments_: readonly string[]): ShellCommandResult {
+    if (arguments_.length === 2 && arguments_[1]!.toLowerCase() === "scan") {
+      const peripherals = this.options.peripherals;
+      if (peripherals === undefined) {
+        return this.protocolFailure("i2c", "controller unavailable");
+      }
+      try {
+        const result = peripherals.scanI2c({
+          computerId: this.options.computerName,
+          face: this.protocolBusFace(arguments_[0]!),
+        });
+        if (result.outcome === "missing_computer") {
+          return this.protocolFailure("i2c", "controller unavailable");
+        }
+        if (result.outcome === "powered_off") {
+          return this.protocolFailure("i2c", "controller is powered off");
+        }
+        if (result.conflicts.length > 0) {
+          return this.protocolFailure(
+            "i2c",
+            `address conflict: ${result.conflicts.map(formatI2cAddress).join(" ")}`,
+          );
+        }
+        return success(
+          `${result.addresses.map(formatI2cAddress).join(" ")}${this.protocolNewline()}`,
+        );
+      } catch (error: unknown) {
+        return this.protocolFailure("i2c", message(error));
+      }
+    }
+    if (arguments_.length !== 4) {
+      return this.protocolUsage(
+        "i2c <bus> scan | i2c <bus> <address> <write-hex|-> <read-length>",
+      );
+    }
+    const peripherals = this.options.peripherals;
+    if (peripherals === undefined) {
+      return this.protocolFailure("i2c", "controller unavailable");
+    }
+    try {
+      const endpoint = {
+        computerId: this.options.computerName,
+        face: this.protocolBusFace(arguments_[0]!),
+      };
+      const address = protocolInteger(arguments_[1]!);
+      const write = protocolHexBytes(arguments_[2]!);
+      const readLength = protocolInteger(arguments_[3]!);
+      const result = peripherals.transactI2c(
+        endpoint,
+        address,
+        write,
+        readLength,
+      );
+      switch (result.outcome) {
+        case "completed":
+          return success(
+            `${formatProtocolHex(result.read)}${this.protocolNewline()}`,
+          );
+        case "address_conflict":
+          return this.protocolFailure(
+            "i2c",
+            `address ${formatI2cAddress(result.address)} conflict`,
+          );
+        case "missing_computer":
+          return this.protocolFailure("i2c", "controller unavailable");
+        case "nack":
+          return this.protocolFailure(
+            "i2c",
+            `NACK at ${formatI2cAddress(result.address)}`,
+          );
+        case "powered_off":
+          return this.protocolFailure("i2c", "controller is powered off");
+        case "protocol_error":
+          return this.protocolFailure("i2c", result.message);
+        case "transaction_limit_exceeded":
+          return this.protocolFailure(
+            "i2c",
+            `transaction exceeds ${String(result.maximum)} bytes`,
+          );
+      }
+    } catch (error: unknown) {
+      return this.protocolFailure("i2c", message(error));
+    }
+  }
+
+  private protocolBusFace(value: string): MachineFace {
+    const bus = protocolInteger(value);
+    const index = this.options.profile.id === "dos" ? bus - 1 : bus;
+    return machineFaceAt(index);
+  }
+
+  private protocolFailure(command: string, detail: string): ShellCommandResult {
+    return status(
+      1,
+      "",
+      `${this.options.profile.id === "dos" ? command.toUpperCase() : command}: ${detail}${this.protocolNewline()}`,
+    );
+  }
+
+  private protocolUsage(value: string): ShellCommandResult {
+    const rendered =
+      this.options.profile.id === "dos" ? value.toUpperCase() : value;
+    return status(2, "", `usage: ${rendered}${this.protocolNewline()}`);
+  }
+
+  private protocolNewline(): string {
+    return this.options.profile.id === "dos" ? "\r\n" : "\n";
+  }
+
+  makeDirectories(arguments_: readonly string[]): ShellCommandResult {
     const recursive = arguments_.includes("-p");
     const paths = arguments_.filter((argument) => argument !== "-p");
     if (paths.length === 0) return usage("mkdir [-p] <directory ...>");
     for (const path of paths) {
       const resolved = this.resolvePath(path);
       if (
-        this.options.profile.id === "linux" &&
-        !this.linuxHasAccess(this.closestExistingDirectory(resolved), 0b011)
+        !this.accessPolicy.hasAccess(
+          this.closestExistingDirectory(resolved),
+          0b011,
+        )
       )
         return failure(
           "mkdir",
@@ -1090,10 +1027,7 @@ export class ShellCommandRuntime {
         return failure("touch", `${path}: is a directory`);
       }
       if (!this.filesystem.exists(resolved)) this.writeFile(path, "");
-      else if (
-        this.options.profile.id === "linux" &&
-        !this.linuxHasAccess(resolved, 0b010)
-      )
+      else if (!this.accessPolicy.hasAccess(resolved, 0b010))
         return failure("touch", `cannot touch '${path}': Permission denied`);
       this.filesystem.setModifiedTime(
         resolved,
@@ -1103,7 +1037,7 @@ export class ShellCommandRuntime {
     return success();
   }
 
-  private remove(arguments_: readonly string[]): ShellCommandResult {
+  remove(arguments_: readonly string[]): ShellCommandResult {
     let recursive = false;
     let force = false;
     const paths: string[] = [];
@@ -1126,17 +1060,14 @@ export class ShellCommandRuntime {
       if (this.filesystem.isDirectory(resolved) && !recursive) {
         return failure("rm", `${path}: is a directory`);
       }
-      if (
-        this.options.profile.id === "linux" &&
-        !this.linuxHasAccess(parentPath(resolved), 0b011)
-      )
+      if (!this.accessPolicy.hasAccess(parentPath(resolved), 0b011))
         return failure("rm", `cannot remove '${path}': Permission denied`);
       this.filesystem.delete(resolved);
     }
     return success();
   }
 
-  private copy(arguments_: readonly string[]): ShellCommandResult {
+  copy(arguments_: readonly string[]): ShellCommandResult {
     const recursive = arguments_.includes("-r") || arguments_.includes("-R");
     const paths = arguments_.filter(
       (argument) => argument !== "-r" && argument !== "-R",
@@ -1146,29 +1077,22 @@ export class ShellCommandRuntime {
     if (this.filesystem.isDirectory(source) && !recursive) {
       return failure("cp", `${paths[0]}: omitting directory`);
     }
-    if (
-      this.options.profile.id === "linux" &&
-      !this.linuxHasAccess(source, 0b100)
-    )
+    if (!this.accessPolicy.hasAccess(source, 0b100))
       return failure("cp", `cannot open '${paths[0]}': Permission denied`);
     const destination = this.transferDestination(source, paths[1]!);
-    if (
-      this.options.profile.id === "linux" &&
-      !this.linuxHasAccess(parentPath(destination), 0b011)
-    )
+    if (!this.accessPolicy.hasAccess(parentPath(destination), 0b011))
       return failure("cp", `cannot create '${paths[1]}': Permission denied`);
     this.filesystem.copy(source, destination);
     return success();
   }
 
-  private move(arguments_: readonly string[]): ShellCommandResult {
+  move(arguments_: readonly string[]): ShellCommandResult {
     if (arguments_.length !== 2) return usage("mv <source> <destination>");
     const source = this.resolvePath(arguments_[0]!);
     const destination = this.transferDestination(source, arguments_[1]!);
     if (
-      this.options.profile.id === "linux" &&
-      (!this.linuxHasAccess(parentPath(source), 0b011) ||
-        !this.linuxHasAccess(parentPath(destination), 0b011))
+      !this.accessPolicy.hasAccess(parentPath(source), 0b011) ||
+      !this.accessPolicy.hasAccess(parentPath(destination), 0b011)
     )
       return failure("mv", "cannot move: Permission denied");
     this.filesystem.move(source, destination);
@@ -1385,7 +1309,7 @@ export class ShellCommandRuntime {
     return success(`${paths.join("\n")}\n`);
   }
 
-  private dosEchoCommand(value: string): ShellCommandResult {
+  dosEchoCommand(value: string): ShellCommandResult {
     const normalized = value.trim();
     if (normalized.length === 0) {
       return success(`ECHO is ${this.dosEcho ? "on" : "off"}.\r\n`);
@@ -1401,7 +1325,7 @@ export class ShellCommandRuntime {
     return success(`${value}\r\n`);
   }
 
-  private dosSet(value: string): ShellCommandResult {
+  dosSet(value: string): ShellCommandResult {
     const assignment = value.trim();
     if (assignment.length === 0) {
       return success(
@@ -1433,7 +1357,7 @@ export class ShellCommandRuntime {
     return success();
   }
 
-  private dosPath(value: string): ShellCommandResult {
+  dosPath(value: string): ShellCommandResult {
     const requested = value.trim();
     if (requested.length === 0)
       return success(`PATH=${this.environment.get("PATH") ?? ""}\r\n`);
@@ -1441,7 +1365,7 @@ export class ShellCommandRuntime {
     return success();
   }
 
-  private dosPrompt(value: string): ShellCommandResult {
+  dosPrompt(value: string): ShellCommandResult {
     const requested = value.trim();
     if (requested.length > 64)
       return failure("prompt", "prompt template limit exceeded", 2);
@@ -1481,7 +1405,7 @@ export class ShellCommandRuntime {
   }
 
   private environmentName(name: string): string {
-    return this.options.profile.id === "dos" ? name.toUpperCase() : name;
+    return this.textPolicy.environmentName(name);
   }
 
   private environmentCommand(
@@ -1525,8 +1449,7 @@ export class ShellCommandRuntime {
     if (arguments_.length === 0) return usage(`${command} <command ...>`);
     const output: string[] = [];
     for (const name of arguments_) {
-      const canonical = this.canonicalCommand(name);
-      if (!knownCommands.has(canonical) || !this.commandAvailable(canonical))
+      if (!this.registry.has(name))
         return status(1, "", `${name}: not found\n`);
       output.push(
         command === "type"
@@ -1549,11 +1472,7 @@ export class ShellCommandRuntime {
   readFile(path: string): string {
     const resolved = this.resolvePath(path);
     const device = this.virtualDevice(resolved);
-    if (
-      device === undefined &&
-      this.options.profile.id === "linux" &&
-      !this.linuxHasAccess(resolved, 0b100)
-    ) {
+    if (device === undefined && !this.accessPolicy.hasAccess(resolved, 0b100)) {
       throw new Error(`${path}: Permission denied`);
     }
     return device === undefined
@@ -1568,14 +1487,12 @@ export class ShellCommandRuntime {
       device.write(contents);
       return;
     }
-    if (this.options.profile.id === "linux") {
-      const accessPath = this.filesystem.exists(resolved)
-        ? resolved
-        : parentPath(resolved);
-      const required = this.filesystem.exists(resolved) ? 0b010 : 0b011;
-      if (!this.linuxHasAccess(accessPath, required))
-        throw new Error(`${path}: Permission denied`);
-    }
+    const accessPath = this.filesystem.exists(resolved)
+      ? resolved
+      : parentPath(resolved);
+    const required = this.filesystem.exists(resolved) ? 0b010 : 0b011;
+    if (!this.accessPolicy.hasAccess(accessPath, required))
+      throw new Error(`${path}: Permission denied`);
     if (append) this.filesystem.appendFile(resolved, contents);
     else this.filesystem.writeFile(resolved, contents);
   }
@@ -1596,12 +1513,6 @@ export class ShellCommandRuntime {
     this.environment.delete(this.environmentName(name));
   }
 
-  private linuxHasAccess(path: string, required: number): boolean {
-    const metadata = this.filesystem.getMetadata(path);
-    const shift = metadata.uid === 1_000 ? 6 : metadata.gid === 1_000 ? 3 : 0;
-    return ((metadata.mode >> shift) & 0b111 & required) === required;
-  }
-
   private closestExistingDirectory(path: string): string {
     let candidate = parentPath(path);
     while (!this.filesystem.isDirectory(candidate)) {
@@ -1616,29 +1527,15 @@ export class ShellCommandRuntime {
   }
 
   canonicalCommand(name: string): string {
-    const normalized =
-      this.options.profile.id === "dos" ? name.toLowerCase() : name;
-    return this.options.profile.aliases.get(normalized) ?? normalized;
+    return this.registry.canonical(name);
   }
 
   private displayName(name: string): string {
-    return this.options.profile.id === "dos" ? name.toUpperCase() : name;
+    return this.textPolicy.displayName(name);
   }
 
   private commandCompletions(prefix: string): string[] {
-    return [
-      ...new Set([
-        ...shellCommandNames,
-        ...this.options.profile.aliases.keys(),
-      ]),
-    ]
-      .filter(
-        (name) =>
-          name.startsWith(prefix) &&
-          this.commandAvailable(this.canonicalCommand(name)),
-      )
-      .sort()
-      .slice(0, 64);
+    return this.registry.names(prefix).slice(0, 64);
   }
 
   private pathCompletions(token: string): string[] {
@@ -1673,74 +1570,13 @@ export class ShellCommandRuntime {
       });
   }
 
-  private commandAvailable(command: string): boolean {
-    if (command === "edit") return this.options.profile.id === "dos";
-    if (
-      command === "chmod" ||
-      command === "alias" ||
-      command === "chown" ||
-      command === "chgrp" ||
-      command === "cmp" ||
-      command === "cpuinfo" ||
-      command === "diff" ||
-      command === "dmesg" ||
-      command === "file" ||
-      command === "free" ||
-      command === "groups" ||
-      command === "getopts" ||
-      command === "hexdump" ||
-      command === "ln" ||
-      command === "local" ||
-      command === "mktemp" ||
-      command === "mount" ||
-      command === "od" ||
-      command === "printenv" ||
-      command === "readlink" ||
-      command === "read" ||
-      command === "realpath" ||
-      command === "rmdir" ||
-      command === "sha256sum" ||
-      command === "sync" ||
-      command === "shift" ||
-      command === "tee" ||
-      command === "xargs" ||
-      command === "yes" ||
-      command === "command" ||
-      command === "unalias"
-    )
-      return this.options.profile.id === "linux";
-    if (
-      command === "cpu" ||
-      command === "doskey" ||
-      command === "mem" ||
-      command === "systeminfo" ||
-      command === "timer" ||
-      command === "tree" ||
-      command === "vol"
-    )
-      return this.options.profile.id === "dos";
-    if (
-      command === "path" ||
-      command === "prompt" ||
-      command === "rem" ||
-      command === "set"
-    )
-      return this.options.profile.id === "dos";
-    return true;
-  }
-
   private commandNotFound(command: string): ShellCommandResult {
-    return {
-      exitCode: 127,
-      stderr:
-        this.options.profile.id === "dos"
-          ? "Bad command or file name\r\n"
-          : `bash: ${command}: command not found\n`,
-      stdout: "",
-    };
+    return this.textPolicy.commandNotFound(command);
   }
 
   private virtualDevice(path: string): VirtualDevice | undefined {
+    const dynamic = this.options.virtualDevices?.get(path);
+    if (dynamic !== undefined) return dynamic;
     const configured = this.options.profile.virtualDevices.get(path);
     if (configured !== undefined) return configured;
     if (this.options.profile.id !== "linux") return undefined;
@@ -1773,6 +1609,7 @@ export class ShellCommandRuntime {
 
   private virtualDevicePaths(): readonly string[] {
     return [
+      ...(this.options.virtualDevices?.keys() ?? []),
       ...this.options.profile.virtualDevices.keys(),
       ...(this.options.profile.id === "linux"
         ? [
@@ -2023,7 +1860,7 @@ export class ShellCommandRuntime {
     return success(`${formatDate(date, parsed.format)}\n`);
   }
 
-  private dosTime(arguments_: readonly string[]): ShellCommandResult {
+  dosTime(arguments_: readonly string[]): ShellCommandResult {
     if (arguments_.length !== 0) {
       return status(
         2,
@@ -2042,7 +1879,7 @@ export class ShellCommandRuntime {
     );
   }
 
-  private dosDate(arguments_: readonly string[]): ShellCommandResult {
+  dosDate(arguments_: readonly string[]): ShellCommandResult {
     if (arguments_.length !== 0)
       return status(
         2,
@@ -2058,7 +1895,7 @@ export class ShellCommandRuntime {
     );
   }
 
-  private dosHelp(arguments_: readonly string[]): ShellCommandResult {
+  dosHelp(arguments_: readonly string[]): ShellCommandResult {
     if (arguments_.length > 1) {
       return status(2, "", "Invalid number of parameters.\r\n");
     }
@@ -2077,7 +1914,7 @@ export class ShellCommandRuntime {
         "",
         "CD CHDIR CLS COPY DATE DEL DIR DOSKEY ECHO EDIT ERASE EXIT",
         "MD MEM MKDIR MOVE PATH PROMPT RD REN RENAME RMDIR SET TIME",
-        "TIMER TREE TYPE VER VOL",
+        "I2C SPI TIMER TREE TYPE VER VOL",
         "",
         "Development extensions: AS CC C++ BASIC BASICC LD NM OBJDUMP RUN VI",
         "Type HELP command for a short availability summary.",
@@ -2335,15 +2172,32 @@ export class ShellCommandRuntime {
     stats: boolean,
     compileCycles = 0,
   ): ShellCommandResult {
+    if (this.options.deferGuestExecution === true) {
+      return {
+        exitCode: 0,
+        foreground: {
+          command: compileCycles > 0 ? "basic" : "run",
+          compileCycles,
+          executable,
+          kind: "cs486",
+          stats,
+        },
+        stderr: "",
+        stdout: "",
+      };
+    }
     const result = runCs486(executable, {
       cpuModel: this.options.hardware.cpuModel,
-      instructionLimit: 10_000,
+      // Keep guest execution bounded, but allow medium-sized benchmark and
+      // compiled workloads to complete in the same 100k-instruction envelope
+      // used by the core CS486 runner.
+      instructionLimit: 100_000,
       memoryBytes: this.options.hardware.memoryBytes,
     });
     const runtimeName = cpuModelSpecification(
       this.options.hardware.cpuModel,
     ).runtimeName;
-    const newline = this.options.profile.id === "dos" ? "\r\n" : "\n";
+    const newline = this.textPolicy.newline;
     const stderr = stats
       ? `${runtimeName}: ${result.executedInstructions} instructions, ${result.cycles} CPU cycles, ${cpuCyclesToMicroseconds(result.cycles, this.options.hardware.clockHz).toFixed(3)} us at ${formatClock(this.options.hardware.clockHz)}, ${result.state}${newline}${formatMicroarchitectureStats(result.microarchitecture)}${newline}`
       : result.state === "yielded"
@@ -2459,7 +2313,7 @@ export class ShellCommandRuntime {
     );
   }
 
-  private dosCpu(arguments_: readonly string[]): ShellCommandResult {
+  dosCpu(arguments_: readonly string[]): ShellCommandResult {
     if (arguments_.length !== 0) return usage("CPU");
     const cpu = cpuModelSpecification(this.options.hardware.cpuModel);
     return success(
@@ -2481,7 +2335,7 @@ export class ShellCommandRuntime {
     );
   }
 
-  private dosMemory(arguments_: readonly string[]): ShellCommandResult {
+  dosMemory(arguments_: readonly string[]): ShellCommandResult {
     const option = arguments_[0]?.toUpperCase();
     if (
       arguments_.length > 1 ||
@@ -2547,7 +2401,7 @@ export class ShellCommandRuntime {
     return success(`${lines.join("\r\n")}\r\n`);
   }
 
-  private dosVolume(arguments_: readonly string[]): ShellCommandResult {
+  dosVolume(arguments_: readonly string[]): ShellCommandResult {
     if (
       arguments_.length > 1 ||
       (arguments_[0] !== undefined && !/^C:?$/iu.test(arguments_[0]))
@@ -2569,7 +2423,7 @@ export class ShellCommandRuntime {
     ];
   }
 
-  private dosTree(arguments_: readonly string[]): ShellCommandResult {
+  dosTree(arguments_: readonly string[]): ShellCommandResult {
     let path = ".";
     let includeFiles = false;
     for (const argument of arguments_) {
@@ -2683,12 +2537,10 @@ export class ShellCommandRuntime {
   }
 
   private dosOption(argument: string): string {
-    return this.options.profile.id === "dos" && argument.startsWith("-")
-      ? argument.toLowerCase()
-      : argument;
+    return this.textPolicy.option(argument);
   }
 
-  private dosSystemInfo(arguments_: readonly string[]): ShellCommandResult {
+  dosSystemInfo(arguments_: readonly string[]): ShellCommandResult {
     if (arguments_.length !== 0) return usage("SYSTEMINFO");
     const cpu = cpuModelSpecification(this.options.hardware.cpuModel);
     const capacity = this.filesystem.limits.capacityBytes;
@@ -2867,7 +2719,7 @@ export class ShellCommandRuntime {
     if (paths.length !== 2) return usage("ln [-s] <target> <link-name>");
     const target = symbolic ? paths[0]! : this.resolvePath(paths[0]!);
     const link = this.resolvePath(paths[1]!);
-    if (!this.linuxHasAccess(parentPath(link), 0b011))
+    if (!this.accessPolicy.hasAccess(parentPath(link), 0b011))
       return failure(
         "ln",
         `failed to create link '${paths[1]}': Permission denied`,
@@ -2912,7 +2764,7 @@ export class ShellCommandRuntime {
           "rmdir",
           `failed to remove '${path}': Directory not empty`,
         );
-      if (!this.linuxHasAccess(parentPath(resolved), 0b011))
+      if (!this.accessPolicy.hasAccess(parentPath(resolved), 0b011))
         return failure(
           "rmdir",
           `failed to remove '${path}': Permission denied`,
@@ -3453,6 +3305,40 @@ function joinPath(parent: string, child: string): string {
   return parent === "/" ? `/${child}` : `${parent}/${child}`;
 }
 
+function protocolInteger(value: string): number {
+  if (!/^(?:0x[0-9a-f]+|[0-9]+)$/iu.test(value)) {
+    throw new Error(`invalid integer '${value}'`);
+  }
+  const parsed = Number.parseInt(
+    value,
+    value.toLowerCase().startsWith("0x") ? 16 : 10,
+  );
+  if (!Number.isSafeInteger(parsed))
+    throw new Error(`invalid integer '${value}'`);
+  return parsed;
+}
+
+function protocolHexBytes(value: string): Uint8Array {
+  if (value === "-") return new Uint8Array();
+  const normalized = value.replaceAll("_", "");
+  if (!/^(?:[0-9a-f]{2})*$/iu.test(normalized)) {
+    throw new Error("hex bytes must contain complete byte pairs");
+  }
+  return Uint8Array.from(
+    Array.from({ length: normalized.length / 2 }, (_unused, index) =>
+      Number.parseInt(normalized.slice(index * 2, index * 2 + 2), 16),
+    ),
+  );
+}
+
+function formatProtocolHex(bytes: Uint8Array): string {
+  return [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function formatI2cAddress(address: number): string {
+  return `0x${address.toString(16).padStart(2, "0")}`;
+}
+
 function splitLines(value: string): string[] {
   if (value.length === 0) return [];
   const lines = value.replaceAll("\r\n", "\n").split("\n");
@@ -3594,4 +3480,13 @@ function globMatches(value: string, pattern: string): boolean {
 
 function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function isExecutableCommand(command: string): boolean {
+  return (
+    command.startsWith(".") ||
+    command.includes("/") ||
+    command.includes("\\") ||
+    /^[A-Za-z]:/u.test(command)
+  );
 }

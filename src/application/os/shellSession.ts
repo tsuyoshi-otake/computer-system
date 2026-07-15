@@ -6,14 +6,18 @@ import {
   type ShellAction,
   type ShellCommandResult,
   type ShellCompletionResult,
+  type ShellForegroundRequest,
 } from "./shellCommands.js";
 import type { ComputerOsProfile } from "../../domain/computer/computer.js";
 import {
   defaultComputerHardware,
   type ComputerHardwareProfile,
 } from "../../domain/computer/hardware.js";
+import { cpuModelSpecification } from "../../domain/cpu/models.js";
 import { createVirtualShellClock, type ShellClockSource } from "./clock.js";
-import { DosPathError, getOsProfile } from "./osProfile.js";
+import { getOsProfile } from "./osProfile.js";
+import type { VirtualDevice } from "./osProfile.js";
+import type { PeripheralBusBroker } from "../io/peripheralBusBroker.js";
 import { LinuxAuthentication } from "./linuxAuthentication.js";
 import { DosEditSession } from "../editor/dosEditSession.js";
 import type { EditorResult, EditorScreen } from "../editor/editorScreen.js";
@@ -24,6 +28,9 @@ import {
   type ShellCommandNode,
   type ShellPipelineNode,
 } from "./shellSyntax.js";
+import { shellFrontendFor } from "./createShellFrontend.js";
+import type { ShellFrontend } from "./shellFrontend.js";
+import { shellTerminalStateOf } from "./shellTerminalState.js";
 
 export interface ShellResult {
   readonly action?: ShellAction;
@@ -35,6 +42,7 @@ export interface ShellResult {
   readonly terminalScreen?: EditorScreen;
   readonly resetTerminal?: boolean;
   readonly cpuCycles?: number;
+  readonly foreground?: ShellForegroundRequest;
 }
 
 export interface ShellSessionOptions {
@@ -50,6 +58,9 @@ export interface ShellSessionOptions {
   readonly memoryUsageBytes?: () => number;
   readonly requireLogin?: boolean;
   readonly passwordSalt?: () => string;
+  readonly virtualDevices?: ReadonlyMap<string, VirtualDevice>;
+  readonly peripherals?: PeripheralBusBroker;
+  readonly deferGuestExecution?: boolean;
 }
 
 const maximumScriptDepth = 8;
@@ -59,7 +70,6 @@ const maximumDosConfigLines = 64;
 const maximumPipelineBuffer = 256_000;
 const variableMarkerStart = "\u{e000}";
 const variableMarkerEnd = "\u{e001}";
-const dosBackslashMarker = "\u{e002}";
 
 interface ScriptFrame {
   arguments: string[];
@@ -78,6 +88,8 @@ export class ShellSession {
   private editor: DosEditSession | undefined;
   private vi: ViSession | undefined;
   private readonly commands: ShellCommandRuntime;
+  private readonly frontend: ShellFrontend;
+  private readonly hardware: ComputerHardwareProfile;
   private readonly history: string[] = [];
   private lastExitCode = 0;
   private readonly scriptFrames: ScriptFrame[] = [];
@@ -99,6 +111,7 @@ export class ShellSession {
     this.terminalWidth = options.terminalWidth ?? 51;
     this.terminalHeight = options.terminalHeight ?? 19;
     const profile = getOsProfile(options.osProfile ?? "linux");
+    this.frontend = shellFrontendFor(profile.id);
     const currentTick = options.currentTick ?? ((): number => 0);
     const ticksPerSecond = options.ticksPerSecond ?? 20;
     const runtimeOptions: ShellCommandRuntimeOptions = {
@@ -111,7 +124,11 @@ export class ShellSession {
       ticksPerSecond,
       hardware: options.hardware ?? defaultComputerHardware,
       memoryUsageBytes: options.memoryUsageBytes ?? ((): number => 0),
+      virtualDevices: options.virtualDevices,
+      peripherals: options.peripherals,
+      deferGuestExecution: options.deferGuestExecution,
     };
+    this.hardware = runtimeOptions.hardware;
     profile.boot(filesystem, { computerName: runtimeOptions.computerName });
     this.authentication = new LinuxAuthentication(filesystem, {
       enabled: options.requireLogin === true && profile.id === "linux",
@@ -214,6 +231,10 @@ export class ShellSession {
     return result;
   }
 
+  completeForegroundProcess(exitCode: number): void {
+    this.lastExitCode = exitCode;
+  }
+
   complete(line: string, cursor: number): ShellCompletionResult {
     if (
       !this.authentication.isAuthenticated() ||
@@ -259,6 +280,7 @@ export class ShellSession {
   }
 
   private withCpuCycles(result: ShellResult): ShellResult {
+    shellTerminalStateOf(result);
     const outputBytes = utf8ByteLength(`${result.stdout}${result.stderr}`);
     return {
       ...result,
@@ -270,43 +292,34 @@ export class ShellSession {
   }
 
   private executeLine(line: string, depth: number): ShellResult {
-    if (this.commands.profile.id === "dos") {
-      const frame = this.scriptFrames.at(-1);
-      line = this.commands.expandDosVariables(
-        line,
-        frame?.name ?? "",
-        frame?.arguments ?? [],
-        this.lastExitCode,
+    const frame = this.scriptFrames.at(-1);
+    const prepared = this.frontend.prepare(line, this.commands, {
+      arguments: frame?.arguments ?? [],
+      lastExitCode: this.lastExitCode,
+      scriptName: frame?.name ?? "",
+    });
+    if (prepared.kind === "command-result") {
+      this.cpuCyclesValue += 4;
+      this.lastExitCode = prepared.result.exitCode;
+      return resultFromStreams(
+        prepared.result.stdout,
+        prepared.result.stderr,
+        prepared.result.exitCode,
+        prepared.result.action,
+        prepared.result.sleepTicks,
       );
-      const control = this.commands.executeDosControlLine(line);
-      if (control !== undefined) {
-        this.cpuCyclesValue += 4;
-        this.lastExitCode = control.exitCode;
-        return resultFromStreams(
-          control.stdout,
-          control.stderr,
-          control.exitCode,
-          control.action,
-          control.sleepTicks,
-        );
-      }
-      line = line.trimStart().replace(/^@/u, "");
     }
     let program;
     try {
-      const source =
-        this.commands.profile.id === "dos"
-          ? line.replaceAll("\\", dosBackslashMarker)
-          : line;
-      program = parseShellProgram(
-        source,
+      program = this.frontend.parse(
+        prepared.source,
         (name) => `${variableMarkerStart}${name}${variableMarkerEnd}`,
       );
     } catch (error: unknown) {
       const detail =
         error instanceof ShellSyntaxError ? error.message : message(error);
       this.lastExitCode = 2;
-      return resultFromStreams("", `bash: syntax error: ${detail}\n`, 2);
+      return resultFromStreams("", this.frontend.syntaxError(detail), 2);
     }
     if (program.chains.length === 0) {
       this.lastExitCode = 0;
@@ -324,11 +337,21 @@ export class ShellSession {
         (chain.operator === "&&" && exitCode === 0) ||
         (chain.operator === "||" && exitCode !== 0);
       if (!shouldRun) continue;
-      const executed = this.executePipeline(chain.pipeline, depth);
+      const executed = this.executePipeline(
+        chain.pipeline,
+        depth,
+        program.chains.length === 1,
+      );
       stdout += executed.stdout;
       stderr += executed.stderr;
       exitCode = executed.exitCode;
       this.lastExitCode = exitCode;
+      if (executed.foreground !== undefined) {
+        return {
+          ...resultFromStreams(stdout, stderr, exitCode, action),
+          foreground: executed.foreground,
+        };
+      }
       if (executed.terminalScreen !== undefined || executed.resetTerminal) {
         return {
           ...resultFromStreams(stdout, stderr, exitCode, action),
@@ -359,6 +382,7 @@ export class ShellSession {
   private executePipeline(
     pipeline: ShellPipelineNode,
     depth: number,
+    foregroundAllowed: boolean,
   ): ShellCommandResult {
     let stdin = "";
     let stderr = "";
@@ -367,6 +391,7 @@ export class ShellSession {
     let sleepTicks: number | undefined;
     let terminalScreen: EditorScreen | undefined;
     let resetTerminal = false;
+    let foreground: ShellForegroundRequest | undefined;
     for (const command of pipeline.commands) {
       const expanded = this.expandCommand(command);
       const inputRedirect = expanded.redirects.find(
@@ -391,6 +416,7 @@ export class ShellSession {
           stdin,
           depth,
           pipeline.commands.length === 1,
+          foregroundAllowed,
         );
       } catch (error: unknown) {
         return {
@@ -405,6 +431,7 @@ export class ShellSession {
       sleepTicks = executed.sleepTicks;
       terminalScreen = executed.terminalScreen;
       resetTerminal = executed.resetTerminal ?? false;
+      foreground = executed.foreground;
       if (sleepTicks !== undefined && pipeline.commands.length > 1) {
         return commandFailure("sleep", "cannot run in a pipeline");
       }
@@ -430,12 +457,13 @@ export class ShellSession {
       if (stdin.length > maximumPipelineBuffer) {
         return {
           exitCode: 1,
-          stderr: `${stderr}bash: pipeline buffer limit exceeded\n`,
+          stderr: this.frontend.pipelineLimitError(stderr),
           stdout: "",
         };
       }
       if (action !== undefined) break;
       if (sleepTicks !== undefined) break;
+      if (foreground !== undefined) break;
     }
     return {
       ...(action === undefined ? {} : { action }),
@@ -445,24 +473,22 @@ export class ShellSession {
       ...(sleepTicks === undefined ? {} : { sleepTicks }),
       ...(terminalScreen === undefined ? {} : { terminalScreen }),
       ...(resetTerminal ? { resetTerminal: true } : {}),
+      ...(foreground === undefined ? {} : { foreground }),
     };
   }
 
   private commandError(command: string, error: unknown): string {
-    if (this.commands.profile.id === "dos" && error instanceof DosPathError) {
-      return "Invalid filename or extension.\r\n";
-    }
-    return `${command}: ${message(error)}\n`;
+    return this.frontend.commandError(command, error);
   }
 
   private expandCommand(command: ShellCommandNode): ShellCommandNode {
-    const expand = (value: string): string =>
-      value
-        .replace(
-          /\u{e000}([A-Za-z_][A-Za-z0-9_]*|[?#@*]|[0-9]+)\u{e001}/gu,
-          (_match, name: string) => this.resolveVariable(name),
-        )
-        .replaceAll(dosBackslashMarker, "\\");
+    const expand = (value: string): string => {
+      const expanded = value.replace(
+        /\u{e000}([A-Za-z_][A-Za-z0-9_]*|[?#@*]|[0-9]+)\u{e001}/gu,
+        (_match, name: string) => this.resolveVariable(name),
+      );
+      return this.frontend.restore(expanded);
+    };
     return {
       words: command.words.map(expand),
       redirects: command.redirects.map((redirect) => ({
@@ -477,6 +503,7 @@ export class ShellSession {
     stdin: string,
     depth: number,
     interactiveAllowed: boolean,
+    foregroundAllowed: boolean,
   ): ShellCommandResult {
     this.cpuCyclesValue += 8;
     const [requestedName = "", ...arguments_] = command.words;
@@ -496,6 +523,7 @@ export class ShellSession {
           stdin,
           depth,
           interactiveAllowed,
+          foregroundAllowed,
         );
       } finally {
         this.aliasDepth -= 1;
@@ -515,15 +543,71 @@ export class ShellSession {
         this.scriptFrames.pop();
       }
     }
-    const shellBuiltin = this.executeLinuxShellBuiltin(name, arguments_, stdin);
-    if (shellBuiltin !== undefined) return shellBuiltin;
-    if (name === "history") {
+    const sessionCommand = this.frontend.sessionCommand(name);
+    if (sessionCommand === "linux-python") {
+      if (
+        depth !== 0 ||
+        !interactiveAllowed ||
+        !foregroundAllowed ||
+        command.redirects.length > 0
+      ) {
+        return commandFailure(
+          name,
+          "cannot run in a pipeline, redirect, script, or command chain",
+          2,
+        );
+      }
+      if (!cpuModelSpecification(this.hardware.cpuModel).supportsMicroPython) {
+        return commandFailure(
+          name,
+          `MicroPython is not available on ${cpuModelSpecification(this.hardware.cpuModel).runtimeName}`,
+          127,
+        );
+      }
+      const stats = arguments_[0] === "--stats";
+      const pathArgument = stats ? arguments_[1] : arguments_[0];
+      if (pathArgument === undefined || arguments_.length !== (stats ? 2 : 1)) {
+        return commandUsage(`${name} [--stats] <file>`);
+      }
+      this.commands.readFile(pathArgument);
+      return {
+        exitCode: 0,
+        foreground: {
+          command: name === "micropython" ? "micropython" : "python",
+          kind: "python",
+          path: this.commands.resolvePath(pathArgument),
+          stats,
+        },
+        stderr: "",
+        stdout: "",
+      };
+    }
+    if (!this.commands.isBuiltInCommand(requestedName)) {
+      const program = this.frontend.resolveProgram(
+        requestedName,
+        this.commands,
+      );
+      if (program?.kind === "batch")
+        return this.executeDosBatch(program.path, arguments_, depth);
+      if (program?.kind === "executable")
+        return this.commands.execute([program.path, ...arguments_], stdin);
+      return this.commands.execute(command.words, stdin);
+    }
+    if (sessionCommand === "linux-builtin") {
+      const shellBuiltin = this.executeLinuxShellBuiltin(
+        name,
+        arguments_,
+        stdin,
+      );
+      if (shellBuiltin !== undefined) return shellBuiltin;
+    }
+    if (sessionCommand === "linux-history") {
       if (arguments_.length > 0) return commandUsage("history");
       return commandSuccess(
         `${this.history.map((value, index) => `${String(index + 1).padStart(5)}  ${value}`).join("\n")}\n`,
       );
     }
-    if (name === "doskey" && this.commands.profile.id === "dos") {
+    if (sessionCommand === "dos-history") {
       if (arguments_.length === 0) {
         return commandSuccess("DOSKey installed. Use DOSKEY /HISTORY.\r\n");
       }
@@ -539,16 +623,14 @@ export class ShellSession {
       }
       return commandSuccess(`${this.history.join("\r\n")}\r\n`);
     }
-    if (
-      (name === "time" && this.commands.profile.id === "linux") ||
-      (name === "timer" && this.commands.profile.id === "dos")
-    ) {
+    if (sessionCommand === "linux-timer" || sessionCommand === "dos-timer") {
       if (arguments_.length === 0) return commandUsage(`${name} <command ...>`);
       const startedAt = this.commands.currentTick();
       const timed = this.executeCommand(
         { words: arguments_, redirects: [] },
         stdin,
         depth,
+        false,
         false,
       );
       const elapsed =
@@ -557,35 +639,33 @@ export class ShellSession {
       return {
         ...timed,
         stderr:
-          this.commands.profile.id === "dos"
+          sessionCommand === "dos-timer"
             ? `${timed.stderr.replaceAll("\r\n", "\n").replaceAll("\n", "\r\n")}Elapsed time: ${elapsed.toFixed(3)} seconds\r\n`
             : `${timed.stderr}real ${elapsed.toFixed(3)}s\n`,
       };
     }
-    if (name === "vi") {
+    if (sessionCommand === "vi") {
       if (!interactiveAllowed || command.redirects.length > 0) {
         return commandFailure(name, "cannot run in a pipeline or redirect");
       }
       return this.startVi(arguments_);
     }
-    if (name === "edit" && this.commands.profile.id === "dos") {
+    if (sessionCommand === "dos-editor") {
       if (!interactiveAllowed || command.redirects.length > 0) {
         return commandFailure(name, "cannot run in a pipeline or redirect");
       }
       return this.startEditor(arguments_);
     }
-    if (name === "sh" || name === "bash" || name === "source") {
-      return this.executeScript(name, arguments_, stdin, depth);
-    }
-    if (
-      this.commands.profile.id === "dos" &&
-      !this.commands.isBuiltInCommand(requestedName)
-    ) {
-      const program = this.commands.resolveDosProgram(requestedName);
-      if (program?.kind === "batch")
-        return this.executeDosBatch(program.path, arguments_, depth);
-      if (program?.kind === "executable")
-        return this.commands.execute([program.path, ...arguments_], stdin);
+    if (sessionCommand === "linux-script") {
+      if (name !== "bash" && name !== "sh" && name !== "source") {
+        return commandFailure(
+          name,
+          "invalid shell script command registration",
+        );
+      }
+      if (name === "sh" || name === "bash" || name === "source")
+        return this.executeScript(name, arguments_, stdin, depth);
+      return commandFailure(name, "invalid shell script command", 2);
     }
     const result = this.commands.execute(command.words, stdin);
     this.cpuCyclesValue += result.cpuCycles ?? 0;
@@ -597,7 +677,6 @@ export class ShellSession {
     arguments_: readonly string[],
     stdin: string,
   ): ShellCommandResult | undefined {
-    if (this.commands.profile.id !== "linux") return undefined;
     if (name === "alias") {
       if (arguments_.length === 0) {
         return commandSuccess(

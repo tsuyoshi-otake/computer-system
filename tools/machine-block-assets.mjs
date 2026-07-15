@@ -120,7 +120,7 @@ function geometry(identifier, cubes) {
       visible_bounds_height: 2.5,
       visible_bounds_offset: [0, 0.75, 0],
     },
-    bones: [{ name: "root", pivot: [0, 0, 0], cubes }],
+    bones: [{ name: "root", pivot: [0, 0, 0], rotation: [0, 180, 0], cubes }],
   };
 }
 

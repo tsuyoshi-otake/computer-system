@@ -24,6 +24,7 @@ import {
   requireDisplayProfileId,
   type DisplayProfileId,
 } from "../display/displayProfile.js";
+import { FaceIoHardware } from "../io/faceIoHardware.js";
 
 const legacyDefaultClockHz = 20_000;
 
@@ -57,6 +58,7 @@ export class ComputerRecord {
   readonly filesystem: InMemoryFilesystem;
   readonly terminal: TerminalBuffer;
   readonly redstone = new RedstoneState();
+  readonly faceIo = new FaceIoHardware();
   private osProfileValue: ComputerOsProfile;
   private hardwareValue: ComputerHardwareProfile;
   private displayProfileIdValue: DisplayProfileId;

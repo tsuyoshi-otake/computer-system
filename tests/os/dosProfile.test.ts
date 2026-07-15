@@ -73,7 +73,7 @@ describe("DOS profile contract", (): void => {
     });
 
     expect(shell.submit("CD C:\\DOS").exitCode).toBe(0);
-    expect(shell.submit("PWD").lines).toEqual(["C:\\DOS"]);
+    expect(shell.submit("CD").lines).toEqual(["C:\\DOS"]);
     expect(shell.submit("ECHO VALUE > C:\\Mixed.TXT").exitCode).toBe(0);
     expect(shell.submit("TYPE c:\\mixed.txt").lines).toEqual(["VALUE"]);
     expect(filesystem.readFile("/drives/c/autoexec.bat")).toContain("\r\n");
@@ -271,7 +271,7 @@ describe("DOS profile contract", (): void => {
         "@ECHO OFF",
         "ECHO %0",
         "ECHO %1",
-        "FALSE",
+        "TYPE C:\\MISSING.TXT",
         "ECHO %ERRORLEVEL%",
         "SET RESULT=%2",
         "",
@@ -281,7 +281,12 @@ describe("DOS profile contract", (): void => {
 
     const result = shell.submit("HELLO alpha beta");
     expect(result.exitCode).toBe(0);
-    expect(result.lines).toEqual(["C:\\TOOLS\\HELLO.BAT", "alpha", "1"]);
+    expect(result.lines).toEqual([
+      "File not found.",
+      "C:\\TOOLS\\HELLO.BAT",
+      "alpha",
+      "1",
+    ]);
     expect(shell.submit("SET RESULT").lines).toEqual(["RESULT=beta"]);
   });
 
