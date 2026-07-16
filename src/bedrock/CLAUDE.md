@@ -1,5 +1,11 @@
 # Bedrock adapter guidance
 
+## Child scopes
+
+| Child scope                   | Responsibility                                       |
+| ----------------------------- | ---------------------------------------------------- |
+| [`probes/`](probes/CLAUDE.md) | Bounded real-BDS/GDK probe construction and evidence |
+
 ## Adapter boundary
 
 - This is the Minecraft Script API edge. Keep it thin: translate events and UI
@@ -34,47 +40,30 @@
 - A form close produces one observable terminal-close request. Cancellation,
   competing form, player disconnect, machine break, server close, and adapter
   failure must all converge on application-owned finalization exactly once.
-- BDS transport readiness precedes Script API readiness. Preserve the bounded
-  startup grace period. For player UI probes, wait for join completion and retry
-  `competing_form` only a bounded number of times.
 - Syntax/runtime fault, shutdown, reboot, and display replacement must release
   adapter/broker attachments. Never destructively drain framebuffer tiles per
   player.
 
-## Web handoff and probes
+## Debug and Web bridge
 
 - Enforce the writer/viewer decision returned by the terminal application at the
   Script API bridge. Do not duplicate writer ownership or promote a viewer in
   the adapter; only application-declared final detach may emit
   `terminal_closed`.
-- Four-digit connection numbers derive permanently from stable identity and are
-  activated for two minutes. Keep lookup O(1), rate-limit invalid guesses per
-  client, and fail simultaneous collisions explicitly. Bearer tokens and one-use
-  URLs must not enter BDS logs.
-- `bds_issue_web_handoff` installs the exact Computer waiter before asking the
-  single debug player for its one-use URL. `bds_wait_for_web_handoff` remains
-  the passive interaction-first path. Own at most one bounded wait per Computer
-  and finalize zero/multiple player, relay, disconnect, cancellation, and
-  timeout.
-- `bds_execute_computer_command` accepts one exact Computer, a bounded non-TUI
-  guest command, and returns bounded stdout/stderr, exit code, and modeled
-  cycles. Reject TUI editors, sleep, lifecycle commands, unknown identities,
-  commands over 128 characters, and timeouts over 30 seconds. Never broaden it
-  into host shell or arbitrary BDS execution.
+- Validate and correlate bounded Script API debug requests/responses by exact
+  Computer identity, and finalize relay success, rejection, disconnect, and
+  disposal explicitly. The host MCP API, waiter, command limits, connection-code
+  exchange, and rate limiting belong to `tools/`.
+- Never place bearer tokens, one-use URLs, or passwords in Script API details or
+  BDS logs.
 
 ## Known production constraints
 
 - The native CustomForm width/scroll behavior is a client constraint; do not
   mutate terminal geometry to mask it. The Web Terminal normalizes a writer to
   80x25 once and scales it without changing cell state.
-- BDS 1.26 rejects a block declaring both `minecraft:redstone_consumer` and
-  `minecraft:redstone_producer`. Computer blocks keep the producer component and
-  sample all six adjacent inputs through the bounded redstone poll.
-- Minecraft for Windows may reject loopback with `InitialConnection-13`; use the
-  host's active LAN IPv4 for testing. Never hard-code a workstation address.
-- `WEB_COMPANION_DEBUG_IGNORE_RANGE=1` is managed-debug only. It cannot bypass
-  interaction, connection, writer lease, bearer token, session lifetime, or
-  disconnect finalization.
+- Sample all six adjacent redstone inputs through the bounded adapter poll. Pack
+  component compatibility belongs to `packs/behavior/`.
 
 ## Verification
 

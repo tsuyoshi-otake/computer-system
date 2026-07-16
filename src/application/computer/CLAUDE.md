@@ -5,9 +5,9 @@
 - `ComputerRuntime` is the application owner of one Computer's boot, execution,
   terminal, authentication, display, OS state, persistence callbacks, and final
   lifecycle result. Adapters request transitions; they do not finalize them.
-- Preserve the same identity and hardware/storage/display profile through
-  placement, breaking, item transfer, portable use, Monitor attachment, reload,
-  rollback, and migration.
+- Preserve the same identity, hardware/display profile, filesystem state, and OS
+  state through placement, breaking, item transfer, portable use, Monitor
+  attachment, reload, rollback, and migration.
 - Periodic snapshots must be fixed-batch O(K), without allocating an O(N) list
   on every pass.
 
@@ -41,14 +41,17 @@
   post-callback success line. On marker/callback failure, remove only that
   attempt's provisional markers before shared fault finalization.
 - Safe boot is a one-shot bypass of a broken `/startup.py`, available only while
-  `crashed`. It preserves the file. The Web action becomes `safe_boot`; Bedrock
-  requires sneaking. Do not expose a guest or MCP safe-boot command, and do not
-  reset, rename, delete, or rewrite the startup file.
+  `crashed`. It preserves the file. Do not expose a guest or MCP safe-boot
+  command, and do not reset, rename, delete, or rewrite the startup file.
 
 ## Snapshot and startup migration orchestration
 
 - Gate Computer and Web startup until storage migration reaches an explicit
   complete or failed terminal result.
+- The coordinator accepts an explicit bounded operation budget (1..64), while
+  the production host advances it with budget 1: at most one Dynamic Property
+  operation per host tick. Do not describe every direct coordinator call as one
+  operation.
 - Validate and migrate every referenced Computer even when the identity store is
   already current. Commit and verify Computer generations before activating the
   identity registry last.
@@ -63,8 +66,11 @@
 
 ## Hardware handoff
 
-- Hardware-profile migration rewrites only an exactly recognized former default;
-  preserve every customized OS, CPU, clock, RAM, disk, and display field.
+- Stationary hardware migration rewrites only an exact former hardware tuple.
+  Portable migration requires the recognized legacy Linux profile plus the exact
+  default/former-desktop CPU, clock, and RAM tuple, then sets the complete
+  Portable DOS/display profile. Preserve any customized OS, CPU, clock, or RAM;
+  there is no persisted disk-profile field in this aggregate.
 - Hand display attachment/replacement/power-off transitions to the display
   application boundary exactly once; its scoped guidance owns delta draining.
 

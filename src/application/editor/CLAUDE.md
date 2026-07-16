@@ -24,8 +24,6 @@
 - Preserve insert/overwrite state and deterministic cursor/selection behavior.
   DOS `EDIT` includes its five menus, bounded undo/search, Ctrl+Y line deletion,
   and save feedback; do not replace these with host editor behavior.
-- Rendering uses complete terminal-cell backgrounds so full-screen colors do not
-  develop row gaps in the Web adapter.
 
 ## Finalization
 

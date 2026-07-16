@@ -20,36 +20,24 @@ Production interaction uses the local Web Terminal companion started with
 `npm run dev:bds:web`. Companion failure must remain explicit and must not open
 the native GDK terminal as a fallback.
 
-## Instruction scopes
+## Child scopes
 
 This root file contains only repository-wide rules. More specific `CLAUDE.md`
 files are loaded on demand when work enters their directory. Apply all ancestor
 instructions together; a child file narrows its scope and must not silently
 weaken a repository-wide safety rule.
 
-| Scope                           | Responsibility                                                                  |
-| ------------------------------- | ------------------------------------------------------------------------------- |
-| `src/`                          | Dependency direction, deterministic state, and shared source rules              |
-| `src/domain/`                   | Pure domain models: filesystem, CPU, display, terminal, and devices             |
-| `src/application/computer/`     | Computer identity, boot, lifecycle, hardware, and migration orchestration       |
-| `src/application/display/`      | Shared display-delta fan-out and consumer lifecycle                             |
-| `src/application/editor/`       | Bounded DOS `EDIT`, `vi`, and `nano` state machines                             |
-| `src/application/io/`           | Face I/O, serial links, and peripheral bus brokers                              |
-| `src/application/os/`           | CS-Linux/CS-DOS accounts, shell, filesystem images, and OS presence             |
-| `src/application/runtime/`      | Scheduler, work monitor, Python, block I/O, and guest execution                 |
-| `src/application/terminal/`     | Terminal sessions, snapshot scheduling, targets, and writer authority           |
-| `src/application/toolchain/`    | CS486 assembler, IR, compilers, debugger, object format, and linker             |
-| `src/adapters/storage/`         | Dynamic Property persistence, paged generations, recovery, and migration        |
-| `src/bedrock/`                  | Script API adapters, player interaction, blocks, terminal, and Web handoff      |
-| `src/phase0/`                   | Production compatibility facades and bounded feasibility primitives             |
-| `web/`                          | Live authenticated Web Terminal and canonical authored manual module            |
-| `site/`                         | Static public landing page and progressively enhanced field manual              |
-| `tools/`                        | Build tooling, BDS/MCP companion, Web service, deployment, and asset generation |
-| `packs/`                        | Authored Behavior/Resource Pack manifests, definitions, and versioning          |
-| `tests/`                        | Test placement, acceptance evidence, and focused verification                   |
-| `docs/`                         | Maintainer/operator documentation, verification records, and issue evidence     |
-| `.github/`                      | GitHub Actions, least privilege, and Pages publication                          |
-| `vendor/bedrock-core-ui-0.9.2/` | Pinned upstream UI source, compiled mirror, and RP protocol assets              |
+| Child scope                                                               | Responsibility                                                                  |
+| ------------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| [`src/`](src/CLAUDE.md)                                                   | Production TypeScript and its deeper architecture scopes                        |
+| [`web/`](web/CLAUDE.md)                                                   | Live authenticated Web Terminal, canonical manual, and authored Web assets      |
+| [`site/`](site/CLAUDE.md)                                                 | Static public landing page and progressively enhanced field manual              |
+| [`tools/`](tools/CLAUDE.md)                                               | Build tooling, BDS/MCP companion, Web service, deployment, and asset generation |
+| [`packs/`](packs/CLAUDE.md)                                               | Authored Behavior/Resource Pack manifests, definitions, and versioning          |
+| [`tests/`](tests/CLAUDE.md)                                               | Test placement, acceptance evidence, and focused verification                   |
+| [`docs/`](docs/CLAUDE.md)                                                 | Maintainer/operator documentation, verification records, and issue evidence     |
+| [`.github/`](.github/CLAUDE.md)                                           | GitHub automation and its workflow-specific rules                               |
+| [`vendor/bedrock-core-ui-0.9.2/`](vendor/bedrock-core-ui-0.9.2/CLAUDE.md) | Pinned upstream UI source, compiled mirror, and RP protocol assets              |
 
 Keep a scoped rule in the narrowest directory that owns it. Do not copy the same
 rule into several files. If a change crosses scopes, read each applicable
@@ -133,8 +121,8 @@ Issue. Issue #4 remains relevant while Phase 2 work is in scope.
 
 The Pages artifact and workflow exist, but the public site is not live because
 of an external private-repository plan constraint. Do not claim publication or
-make the repository public without explicit user authorization. Operational
-status and recovery steps belong to `.github/CLAUDE.md`.
+make the repository public without explicit user authorization. Exact Actions
+evidence and recovery steps belong to `.github/workflows/CLAUDE.md`.
 
 ## Working references
 

@@ -12,6 +12,9 @@ before effects.
 - MCP Computer commands stay inside `ShellSession`. Keep the allowlist, exact
   Computer targeting, non-TUI restriction, 128-character command limit, bounded
   output, and 30-second timeout ceiling.
+- Web lifecycle relays allowlist and scope `safe_boot` to the exact Computer.
+  They do not expose it as an MCP or guest-shell command and do not decide
+  crashed-state eligibility.
 - Keep passwords, bearer tokens, one-use URLs, connection-code exchanges, and
   private origins out of repository files and logs. Mask secrets in errors.
 - `BDS_HOME` is a read-only distribution source. Never modify or recursively
@@ -99,6 +102,14 @@ the isolated server. Never point it at the interactive world.
   public origin never enables automatic mode. This opens the server host's
   browser, not a remote player's; remote players use the LAN page and four-digit
   number.
+- Derive each stable four-digit Computer number from identity, activate it for
+  two minutes, keep lookup O(1), rate-limit guesses per client, and fail active
+  collisions explicitly. Tokens and one-use paths never enter BDS logs.
+- `WEB_COMPANION_DEBUG_IGNORE_RANGE=1` is managed-debug only. It cannot bypass
+  initial interaction, connection, writer lease, bearer token, session lifetime,
+  or disconnect finalization.
+- Minecraft for Windows may reject loopback with `InitialConnection-13`; test
+  through the host's active LAN IPv4 and never hard-code a workstation address.
 - Deduplicate reconnect work, honor rate-limit windows and `Retry-After`, use
   exponential backoff with jitter, and cap attempts/session lifetime. Diagnose
   429s by proving whether startup, refresh, retry, or multiple tabs generate
@@ -110,6 +121,9 @@ the isolated server. Never point it at the interactive world.
   templates/assets. Publish the exact static allowlist to `dist/pages`; never
   include live `web/index.html`, `web/app.js`, tokens, API calls, or session
   code.
+- Treat scoped `CLAUDE.md` files under authored asset directories as private
+  repository metadata: skip them explicitly and prove they never enter the Pages
+  artifact. Continue rejecting every other unsupported asset.
 - Support arbitrary base URLs, deterministic 404 recovery, no-JS manual content,
   `.nojekyll`, robots, and sitemap. Reject hidden/unsupported/symlink assets and
   unexpected outputs. Recursive cleanup is allowed only under repository

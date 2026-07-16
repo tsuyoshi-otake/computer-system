@@ -53,21 +53,19 @@
   filesystem operation. No import, extension, syscall, wait, or resume path may
   regain a broader credential.
 
-## Statistics and load evidence
+## Modeled statistics
 
 - `run --stats` and Python statistics are authoritative modeled guest cost. Keep
   instruction, L1/L2 hit/miss, bus transfer, unaligned access, pipeline flush,
   and cycle counters synchronized with the CPU model.
-- Wall-clock MCP latency includes relay, shell, compile, and BDS tick delay.
-  Label it responsiveness, not guest execution speed.
-- Establish correctness and sequential baselines before bounded concurrency.
-  Record server tick p50/p95/p99/max and MCP response latency, and exercise one
-  request above each capacity to prove explicit rejection while admitted work
-  continues.
+- Host benchmark sequencing, concurrency, tick percentiles, capacity probes, and
+  interaction evidence belong to `tools/` and `docs/benchmarks/`.
 
 ## Verification
 
 Use `tests/runtime/` for scheduler, CPU process, Python compiler/runtime, native
 modules, cache/timing, pause/resume, cancellation, credential propagation, and
-capacity-plus-one coverage. See `docs/work-monitor.md` for the measurement
-contract and `tools/CLAUDE.md` for real-BDS benchmark procedure.
+capacity-plus-one coverage. Block-I/O admission is directly covered by
+`tests/application/runtime/blockIoScheduler.test.ts`. See `docs/work-monitor.md`
+for the measurement contract and `tools/CLAUDE.md` for real-BDS benchmark
+procedure.

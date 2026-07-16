@@ -1,6 +1,11 @@
 # Documentation guidance
 
-## Ownership
+## Child scopes
+
+| Child scope                           | Responsibility                                                 |
+| ------------------------------------- | -------------------------------------------------------------- |
+| [`issues/`](issues/CLAUDE.md)         | Phase/Issue evidence snapshots and acceptance traceability     |
+| [`benchmarks/`](benchmarks/CLAUDE.md) | Reproducible guest benchmark definitions and result provenance |
 
 - `development.md` owns local setup, commands, build, test, and deployment.
 - `mcp-debugging.md` owns MCP/BDS operation and troubleshooting.
@@ -38,10 +43,11 @@ publication source.
 ## GitHub Pages
 
 - Describe Pages as a static reference, never a terminal endpoint.
-- Reflect the authoritative publication status and recovery procedure from the
-  root and `.github/CLAUDE.md`. Do not claim publication until deployment and
-  URL readback pass. Once live, update README/development/manual verification
-  with the verified URL and close Issue #21 with Actions and browser evidence.
+- Reflect the publication safety boundary from the root and the exact recovery
+  procedure from `.github/workflows/CLAUDE.md`. Do not claim publication until
+  deployment and URL readback pass. Once live, update README/development/manual
+  verification with the verified URL and close Issue #21 with Actions and
+  browser evidence.
 
 ## Change discipline
 

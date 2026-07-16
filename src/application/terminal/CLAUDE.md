@@ -6,9 +6,9 @@
   scheduling, target selection, and access objects may cache only bounded
   derived state and must not invent cursor, history, editor, or guest-process
   state.
-- `TerminalSession` emits at most one `terminal_closed` event with one explicit
-  final result. Success, cancel, fault, detach, shutdown, and disconnect all
-  converge on that close state.
+- `ManagedTerminalSession` emits at most one `terminal_closed` event with one
+  explicit final result. Success, cancel, fault, detach, shutdown, and
+  disconnect all converge on that close state.
 - Keep terminal targets keyed by stable Computer identity. Reject unknown,
   replaced, ambiguous, or stale targets explicitly.
 
@@ -26,9 +26,9 @@
 
 ## Writer access
 
-- `WebTerminalAccess` owns one writer per Computer while allowing bounded
-  viewers. Attaching or taking control atomically demotes the previous writer;
-  closing the writer does not silently promote an arbitrary viewer.
+- `WebTerminalAccessRegistry` owns one writer per Computer while allowing
+  bounded viewers. Attaching or taking control atomically demotes the previous
+  writer; closing the writer does not silently promote an arbitrary viewer.
 - Viewer input is rejected at the application and transport boundaries. Viewer
   selection/copy remains a presentation capability, not guest input.
 - A final detach requests guest `terminal_closed`; replacing the writer alone

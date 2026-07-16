@@ -1,9 +1,17 @@
 # Source guidance
 
-## Scope
+## Child scopes
 
 These rules apply to all production TypeScript under `src/`. Read the deeper
 `CLAUDE.md` before changing a listed subsystem.
+
+| Child scope                             | Responsibility                                                 |
+| --------------------------------------- | -------------------------------------------------------------- |
+| [`domain/`](domain/CLAUDE.md)           | Pure deterministic models, split further by model family       |
+| [`application/`](application/CLAUDE.md) | Use-case orchestration, split further by application subsystem |
+| [`adapters/`](adapters/CLAUDE.md)       | Outward persistence/integration implementations                |
+| [`bedrock/`](bedrock/CLAUDE.md)         | Minecraft Script API edge and deeper probe rules               |
+| [`phase0/`](phase0/CLAUDE.md)           | Production compatibility facades and feasibility primitives    |
 
 ## Dependency direction
 
@@ -15,10 +23,6 @@ src/bedrock and src/adapters
     -> src/domain and runtime abstractions
 ```
 
-- `src/domain/` owns deterministic models and must not import Minecraft, Web,
-  host process, persistence-adapter, or UI packages.
-- `src/application/` coordinates use cases against abstractions. It must not
-  import `@minecraft/*`.
 - `src/adapters/` implements outward persistence and integration boundaries.
 - `src/bedrock/` is the only Minecraft Script API edge. Keep it thin.
 - Do not create dependency cycles or move a stable abstraction outward merely to
@@ -29,8 +33,6 @@ src/bedrock and src/adapters
 - Give every mutable aggregate one authoritative owner. Presentation layers and
   virtual files derive views from that owner; they do not maintain parallel
   truth.
-- Define who commits, rolls back, finalizes, and reports every state transition.
-  An intermediate state must never become an accidental terminal state.
 - Validate capacities and invariants before mutation. Capacity-plus-one and
   malformed persisted input must fail without partial state change.
 - Bound all work that can run in a BDS tick or grow from guest input. Prefer

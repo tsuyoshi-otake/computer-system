@@ -32,5 +32,5 @@
 
 Use `tests/io/` for face identity, byte order, buffer capacity, disconnect,
 replacement generations, simultaneous links, I2C/SPI limits, and exact cleanup.
-Real-BDS serial acceptance must cover three machines, six faces, 36 ordered
-links, and 72 bidirectional Linux ttyS/DOS COM transmissions.
+The exact real-BDS serial matrix fixture belongs to the Bedrock probe and
+tooling scopes.

@@ -67,9 +67,13 @@ describe("GitHub Pages publication", () => {
   });
 
   it("publishes only the explicit static-site and image allowlist", async () => {
-    const sourceAssets = (
-      await listFiles(path.join(root, "web", "assets"))
-    ).map((file) => `assets/${file}`);
+    const assetFiles = await listFiles(path.join(root, "web", "assets"));
+    const sourceAssets = assetFiles
+      .filter((file) => path.extname(file).toLowerCase() === ".png")
+      .map((file) => `assets/${file}`);
+    const privateGuidance = assetFiles
+      .filter((file) => path.basename(file) === "CLAUDE.md")
+      .map((file) => `assets/${file}`);
     const expectedFiles = [...coreOutputFiles, ...sourceAssets].sort();
 
     expect(result).toMatchObject({
@@ -81,6 +85,8 @@ describe("GitHub Pages publication", () => {
     expect(result.files.filter((file) => file.startsWith("assets/"))).toEqual(
       expect.arrayContaining(sourceAssets),
     );
+    expect(privateGuidance.length).toBeGreaterThan(0);
+    expect(result.files).not.toEqual(expect.arrayContaining(privateGuidance));
     expect(result.files).not.toEqual(
       expect.arrayContaining([
         "app.js",

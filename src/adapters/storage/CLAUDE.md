@@ -27,22 +27,14 @@
   may incrementally and boundedly sweep target-only blobs, legacy indexed pages,
   or stray manifests that no longer have valid metadata ownership.
 
-## Startup migration
+## Migration adapter boundary
 
-- The startup migration state machine performs at most one Dynamic Property
-  read, write, or delete per host tick. Every branch terminates explicitly as
-  complete or failed and restart is idempotent.
-- Recognize only supported schema-1 indexed manifests and schema-1
-  Computer/filesystem payloads. Reject unsupported identity payload schemas
-  rather than guessing.
-- Validate the current generation before fallback. Migrate and verify every
-  referenced Computer even when identity storage is already current.
-- Commit each current-format Computer first and activate the identity registry
-  last. A registry must never point at an unverified Computer generation.
-- A valid schema-2 identity registry may be re-encoded from the legacy paged
-  store, but existing `computer-N` identities are never renumbered.
-- Log observable transitions as `CS_STORAGE_MIGRATION` and gate Computer/Web
-  startup until one terminal result is published.
+- Decode only supported legacy indexed-page manifests and expose bounded
+  read/write/delete operations with explicit typed failures. Do not reinterpret
+  unsupported payload schemas or activate partially written target data.
+- This adapter does not choose Computer migration order, identity-last
+  activation, startup gating, or `CS_STORAGE_MIGRATION` state transitions. Those
+  decisions belong to the application coordinator in `application/computer/`.
 
 ## Transactions and failure ownership
 
@@ -58,10 +50,10 @@
 
 ## Verification
 
-Use `tests/phase0/transactionalPagedStore.test.ts`,
-`tests/computer/persistence.test.ts`, `tests/computer/storageMigration.test.ts`,
-and `tests/computer/snapshotMigration.test.ts`. Cover current head, valid
-fallback, fallback repair, corrupt previous metadata, legacy migration,
-already-current payload migration, restart at every state, capacity-plus-one,
-partial write/delete, checksum failure, bounded cleanup, and identity-last
-activation.
+Use `tests/adapters/dynamicPropertyComputerRepository.test.ts` and
+`tests/phase0/transactionalPagedStore.test.ts`. Cover current head, valid
+fallback, fallback repair, corrupt previous metadata, legacy indexed-page
+decoding, capacity-plus-one, partial write/delete, checksum failure, readback,
+and bounded cleanup. Application sequencing and restart ownership live in
+`tests/computer/storageMigration.test.ts` and
+`tests/computer/snapshotMigration.test.ts`.

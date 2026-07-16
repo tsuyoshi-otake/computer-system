@@ -304,13 +304,13 @@ crossing the aligned static-data/BSS floor.
 
 ## July 2026 authored machine artwork and display topology update
 
-The seven authored machine/CPU plates are now part of Web Terminal Manual
-Chapter 2. The four machine plates are also the source for transparent 256 px
-inventory icons. A separate bounded generator creates purpose-built 16 px block
-textures, a terrain atlas, and custom geometry for Desktop, Advanced Desktop,
-Monitor, and the open-laptop Portable Computer System rather than stretching an
-isometric plate across cube faces. Resource Pack version 0.1.8 forces clients to
-fetch the shipped artwork.
+The seven authored machine/CPU plates are now part of the Web Terminal manual's
+stable `architecture` chapter (published as Chapter 09). The four machine plates
+are also the source for transparent 256 px inventory icons. A separate bounded
+generator creates purpose-built 16 px block textures, a terrain atlas, and
+custom geometry for Desktop, Advanced Desktop, Monitor, and the open-laptop
+Portable Computer System rather than stretching an isometric plate across cube
+faces. Resource Pack version 0.1.8 forces clients to fetch the shipped artwork.
 
 Desktop and Advanced Desktop browser handoffs now require an adjacent Monitor. A
 bare Computer is selected but does not open Web Terminal. Monitor touch resolves

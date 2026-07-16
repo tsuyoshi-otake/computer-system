@@ -21,6 +21,6 @@ code.
 
 ## Verification
 
-Run `tests/phase0/` plus the focused tests for every production consumer. If a
-facade participates in Bedrock probes, also run the smallest real-BDS
-acceptance.
+Run `npm test -- tests/phase0` plus the focused command for every production
+consumer. If a facade participates in Bedrock probes, also run the smallest
+real-BDS acceptance.

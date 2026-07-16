@@ -32,9 +32,10 @@
 
 ## Linker and ABI
 
-- The current ABI exposes zero-argument integer functions returning through EAX.
-  Keep calling convention, stack bounds, entry validation, debugger, object
-  readers, Python extensions, tests, and manual synchronized.
+- Version 2 symbol metadata exposes zero-argument `()->i32` and `()->void`
+  functions; integer results return through EAX. Keep calling convention, stack
+  bounds, instruction-zero startup, debugger, object readers, Python extensions,
+  tests, and manual synchronized.
 - Use Map-backed symbol and local-relocation lookup. Compute section layout
   once; do not rescan all symbols or rewrite text per relocation.
 - Reject duplicate, unresolved, type-mismatched, out-of-range, misaligned,
@@ -73,8 +74,9 @@
 
 ## Verification
 
-Use `tests/os/*Profiles.test.ts` for shell/frontend integration and
-`tests/runtime/cs486*.test.ts` plus debugger/linker/IR suites for formats and
-execution. Cover v1 read compatibility, v2 round trips, malformed budgets,
-capacity-plus-one, unresolved/type mismatch, stack boundaries, credentials,
-rollback, and cross-profile diagnostics.
+Run `npm test -- tests/runtime` for formats/execution and explicitly include
+`tests/os/assemblerProfiles.test.ts`, `tests/os/cFamilyProfiles.test.ts`, and
+`tests/os/cs486DebuggerProfiles.test.ts` for shell/frontend integration. Cover
+v1 read compatibility, v2 round trips, malformed budgets, capacity-plus-one,
+unresolved/type mismatch, stack boundaries, credentials, rollback, and
+cross-profile diagnostics.

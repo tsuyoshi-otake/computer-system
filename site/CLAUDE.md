@@ -5,6 +5,12 @@
 `site/` contains authored templates and presentation code for the public static
 landing page and field manual. It is documentation only.
 
+## Child scopes
+
+| Child scope                   | Responsibility                                     |
+| ----------------------------- | -------------------------------------------------- |
+| [`manual/`](manual/CLAUDE.md) | Manual progressive enhancement, search, navigation |
+
 - The site cannot connect to BDS, accept a Computer number, exchange/hold a
   bearer token, display a live terminal, submit guest input, call `/api/*`, or
   imply that a local companion is reachable.
@@ -14,19 +20,11 @@ landing page and field manual. It is documentation only.
 - Manual prose and IDs come only from `web/manual.js`. Templates own layout and
   progressive enhancement, not a second publication source.
 
-## Static and enhanced behavior
+## Static publication behavior
 
-- Pre-render every chapter and stable section target. The complete manual, table
-  of contents, reading routes, and section links remain usable with JavaScript
-  disabled.
-- Enhanced search uses the canonical search function and retains the 24-result
-  bound. Submit, reset, hashchange, popstate, and restored-page paths keep URL,
-  query, visible results, and active chapter synchronized.
 - Support arbitrary project/repository base paths. Asset, landing/manual,
   stylesheet/script, sitemap, robots, and 404 recovery links must not assume
   `/`.
-- Deep links and 404 recovery preserve chapter/section fragments and bounded
-  search state without redirect loops.
 - Generated output is `dist/pages` and is never committed. Keep the output
   allowlist exact and include `.nojekyll`; reject unexpected files and symlinks.
 
@@ -45,7 +43,7 @@ landing page and field manual. It is documentation only.
 ## Verification
 
 Run `npm run build:pages` and `npm run test:pages`, inspect the exact
-`dist/pages` allowlist, and test landing, manual, search, no-JS reading, deep
-hashes, back/forward, 404 recovery, desktop, and mobile in a real browser. A
-local pass does not prove the deployed GitHub Pages URL; verify deployment
+`dist/pages` allowlist, and test landing, no-JS links, 404 recovery, desktop,
+and mobile in a real browser. The child manual scope owns its interactive
+matrix. A local pass does not prove the deployed GitHub Pages URL; verify it
 separately.

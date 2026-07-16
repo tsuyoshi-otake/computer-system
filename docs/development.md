@@ -429,12 +429,13 @@ the Minecraft chat UI, use the local
 
 Keep the original machine illustrations in `web/assets/machines/` and the CPU
 identification plates in `web/assets/cpu/`. The Web Terminal serves both sets
-directly in Manual Chapter 2. During `npm run build`,
-`tools/machine-textures.mjs` validates each machine source as a bounded,
-non-interlaced 4-bit indexed PNG, removes its pure-white canvas, and scales the
-visible content into a transparent 256 by 256 RGBA item icon. The work is
-O(source pixels + 256 squared) for each of the fixed four machine assets, and
-malformed, oversized, or unsupported inputs fail the build explicitly.
+directly in the manual's stable `architecture` chapter (published as Chapter
+09). During `npm run build`, `tools/machine-textures.mjs` validates each machine
+source as a bounded, non-interlaced 4-bit indexed PNG, removes its pure-white
+canvas, and scales the visible content into a transparent 256 by 256 RGBA item
+icon. The work is O(source pixels + 256 squared) for each of the fixed four
+machine assets, and malformed, oversized, or unsupported inputs fail the build
+explicitly.
 
 Do not map the isometric machine plates directly onto block faces: they are
 manual and inventory artwork, not six-face UV textures.

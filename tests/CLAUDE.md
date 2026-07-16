@@ -1,11 +1,31 @@
 # Test guidance
 
-## Placement and scope
+## Child scopes
 
-- Mirror production ownership: `tests/domains/` for domain models;
-  `tests/computer/`, `tests/os/`, `tests/runtime/`, `tests/io/`,
-  `tests/terminal/`, and `tests/editor/` for application behavior;
-  `tests/adapters/` for outward repositories; `tests/architecture/` for
+| Child scope                                 | Responsibility                                                         |
+| ------------------------------------------- | ---------------------------------------------------------------------- |
+| [`adapters/`](adapters/CLAUDE.md)           | Concrete outward repository and payload-boundary tests                 |
+| [`application/`](application/CLAUDE.md)     | Directly mirrored application-unit test scopes                         |
+| [`architecture/`](architecture/CLAUDE.md)   | Dependency and host/guest boundary enforcement                         |
+| [`domains/`](domains/CLAUDE.md)             | Filesystem, display, redstone, and terminal domain contracts           |
+| [`domain/`](domain/CLAUDE.md)               | Other domain-family test scopes                                        |
+| [`language/`](language/CLAUDE.md)           | Core Computer System lexer/parser contracts                            |
+| [`computer/`](computer/CLAUDE.md)           | Computer aggregate, lifecycle, persistence, migration, and integration |
+| [`os/`](os/CLAUDE.md)                       | Linux/DOS profiles, accounts, DAC, shell, and OS presence              |
+| [`runtime/`](runtime/CLAUDE.md)             | Scheduler, WorkMonitor, CS486, Python, cache, and core toolchain       |
+| [`terminal/`](terminal/CLAUDE.md)           | Session, target, snapshot, viewport, and writer authority              |
+| [`editor/`](editor/CLAUDE.md)               | DOS `EDIT`, vi, nano, and bounded highlighting                         |
+| [`io/`](io/CLAUDE.md)                       | RS-232C, I2C/SPI, brokers, and serial matrix                           |
+| [`phase0/`](phase0/CLAUDE.md)               | Production compatibility facades and feasibility contracts             |
+| [`compatibility/`](compatibility/CLAUDE.md) | ComputerCraft-facing compatibility boundary                            |
+| [`bedrock/`](bedrock/CLAUDE.md)             | Script API adapter/probe wiring and native evidence boundary           |
+| [`tools/`](tools/CLAUDE.md)                 | MCP, Web, Pages, manual, build, and asset tooling                      |
+
+- Mirror production ownership: `tests/domains/`, `tests/domain/`, and
+  `tests/language/` for domain models; `tests/computer/`, `tests/os/`,
+  `tests/runtime/`, `tests/io/`, `tests/terminal/`, and `tests/editor/` for
+  application behavior; `tests/application/` for directly mirrored application
+  units; `tests/adapters/` for outward repositories; `tests/architecture/` for
   dependency and host/guest-shell boundaries; `tests/compatibility/` and
   `tests/phase0/` for preserved facades/contracts; `tests/bedrock/` for thin
   adapter/probe contracts; and `tests/tools/` for Node, Web, MCP, build, and
@@ -37,26 +57,11 @@
   ports and work directories. Clean up owned processes/servers and never reset
   the interactive BDS world.
 
-## Focused gates
-
-- `npm run test:web`: session store, companion server/config, live Web behavior.
-- `npm run test:pages`: static builder/UI and canonical manual agreement.
-- `npm run test:mcp`: MCP server/debug-session host contract.
-- `npm run test:mcp:bds`: managed real-BDS smoke acceptance.
-- `npm run test:mcp:serial:bds`: isolated serial matrix acceptance.
-- `npm run test:bds` / `npm run test:bds:disconnect`: production pack probes.
-
-The Linux authentication BDS record must prove pre-login MCP rejection, masked
-first-boot setup, rebooted `cs` username/password login, authenticated `whoami`,
-explicit shutdown, and no probe-password emission.
-
-`tests/tools/webManual.test.mjs` locks the 16-chapter order, chapter/header
-agreement, IDs, goal paths, and search/navigation contract. Update canonical
-manual content and its agreement tests together.
-
 ## Evidence
 
 Host tests do not replace real behavior checks. Bedrock-facing work needs real
 BDS/GDK evidence; live Web and Pages changes need a real browser. Record an
 executable `Verify:` and observable `Expect:` for every acceptance criterion,
 and keep failures/log excerpts bounded and free of secrets.
+
+`npm run validate` remains the complete host gate after focused child tests.

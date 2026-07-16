@@ -1,5 +1,11 @@
 # Live Web Terminal guidance
 
+## Child scopes
+
+| Child scope                   | Responsibility                           |
+| ----------------------------- | ---------------------------------------- |
+| [`assets/`](assets/CLAUDE.md) | Authored plates and manual illustrations |
+
 ## Security boundary
 
 `web/` is the authenticated live terminal client served by the local companion.
@@ -36,6 +42,8 @@ It is not the public Pages site.
 - Copy acts only on demand and copies the active selection or visible cell grid;
   it must not poll the terminal. Viewers may select/copy but cannot submit
   input.
+- Present the `safe_boot` action only from authoritative crashed-machine state;
+  the client does not decide eligibility or turn it into a guest command.
 - Preserve full cell-height color spans for full-screen editor backgrounds. Test
   DOS `EDIT`, `vi`, prompt input, masked secrets, resize, disconnect, and
   takeover through the same rendered snapshot path.
@@ -56,15 +64,6 @@ It is not the public Pages site.
   Portable CS-DOS, and diagnostics.
 - User-visible behavior, limits, error messages, hardware profiles, commands,
   and recovery steps must update the relevant chapter in the same change.
-
-## Authored assets
-
-- Machine plates live in `assets/machines/`; CPU identification plates live in
-  `assets/cpu/`. Manual Chapter 2 serves both directly.
-- Keep intrinsic image dimensions and useful alt text. Do not replace authored
-  plates with generated block-face textures or generated Pages output.
-- Asset-generation and pack-version rules live in `tools/CLAUDE.md` and
-  `packs/CLAUDE.md`.
 
 ## Verification
 

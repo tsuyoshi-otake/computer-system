@@ -312,6 +312,7 @@ async function copyAssets(source, target, relative = "") {
     if (!entry.isFile()) {
       throw new Error(`Unsupported Pages asset type: ${relativePath}`);
     }
+    if (entry.name === "CLAUDE.md") continue;
     if (!allowedAssetExtensions.has(path.extname(entry.name).toLowerCase())) {
       throw new Error(`Unsupported public Pages asset: ${relativePath}`);
     }
