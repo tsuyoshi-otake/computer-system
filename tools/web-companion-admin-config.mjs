@@ -11,9 +11,10 @@ const allowedKeys = new Set(["version", "port", "publicOrigin"]);
 export function defaultWebCompanionConfigPath(options = {}) {
   const platform = options.platform ?? process.platform;
   const environment = options.environment ?? process.env;
+  const platformPath = platform === "win32" ? path.win32 : path.posix;
   if (Object.hasOwn(environment, "WEB_COMPANION_CONFIG_FILE")) {
     const configured = environment.WEB_COMPANION_CONFIG_FILE;
-    return configured === "" ? undefined : path.resolve(configured);
+    return configured === "" ? undefined : platformPath.resolve(configured);
   }
   if (platform === "win32") {
     const programData =
@@ -21,7 +22,11 @@ export function defaultWebCompanionConfigPath(options = {}) {
       environment.PROGRAMDATA ??
       environment.ALLUSERSPROFILE ??
       "C:\\ProgramData";
-    return path.join(programData, "Computer System", "web-companion.json");
+    return platformPath.join(
+      programData,
+      "Computer System",
+      "web-companion.json",
+    );
   }
   if (platform === "darwin") {
     return "/Library/Application Support/Computer System/web-companion.json";

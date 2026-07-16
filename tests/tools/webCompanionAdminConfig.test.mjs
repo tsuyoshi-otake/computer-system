@@ -33,6 +33,14 @@ describe("persistent Web companion administrator configuration", () => {
     ).toBe("D:\\ProgramData\\Computer System\\web-companion.json");
     expect(
       defaultWebCompanionConfigPath({
+        platform: "win32",
+        environment: {
+          WEB_COMPANION_CONFIG_FILE: "D:\\Config\\web-companion.json",
+        },
+      }),
+    ).toBe("D:\\Config\\web-companion.json");
+    expect(
+      defaultWebCompanionConfigPath({
         platform: "linux",
         environment: {},
       }),
