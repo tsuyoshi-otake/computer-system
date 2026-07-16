@@ -1,110 +1,234 @@
-import { type Player, system } from "@minecraft/server";
-import {
-  CustomForm,
-  type DataDrivenScreenClosedReason,
-  ObservableString,
-} from "@minecraft/server-ui";
+import { system, type Player } from "@minecraft/server";
 
-import {
-  TerminalSession,
-  type TerminalCloseReason,
-  type TerminalFinalization,
-} from "../../phase0/terminalSession.js";
+import { NanoEditorSession } from "../../application/editor/nanoSession.js";
+import { TerminalBuffer } from "../../domain/terminal/terminalBuffer.js";
+import { showCustomNanoView } from "../customNanoView.js";
+import { showCustomTerminalView } from "../customTerminalView.js";
+import { showTerminalView } from "../terminalView.js";
 
-const terminalWidth = 51;
-const terminalHeight = 19;
+const probeTerminal = new TerminalBuffer();
+probeTerminal.write("Computer System terminal ready");
+for (let color = 0; color < 16; color += 1) {
+  probeTerminal.setCursorPosition(color + 1, 3);
+  probeTerminal.setTextColor(15 - color);
+  probeTerminal.setBackgroundColor(color);
+  probeTerminal.write(color.toString(16));
+}
+for (let color = 0; color < 16; color += 1) {
+  probeTerminal.setCursorPosition(color + 1, 4);
+  probeTerminal.setTextColor(color);
+  probeTerminal.setBackgroundColor(color);
+  probeTerminal.write(color === 15 ? "█" : " ");
+}
+probeTerminal.setBackgroundColor(15);
+probeTerminal.setCursorPosition(18, 3);
+probeTerminal.setCursorBlink(true);
 
 export async function showTerminalProbe(player: Player): Promise<void> {
-  const session = new TerminalSession();
-  const output = new ObservableString(createTerminalFrame(0, "Ready"));
-  const input = new ObservableString("", { clientWritable: true });
-  const form = new CustomForm(player, "Computer System Phase 0 Terminal")
-    .label(output)
-    .textField("Command", input, {
-      description: "Enter one line and press Submit.",
-    })
-    .button("Submit", (): void => {
-      const event = session.submitLine(input.getData());
-      if (event === undefined) {
-        return;
-      }
-      output.setData(
-        createTerminalFrame(0, `event:${event.type} > ${event.line}`),
-      );
-      input.setData("");
-    })
-    .button("Terminate", (): void => {
-      session.requestTermination();
-      output.setData(createTerminalFrame(0, "Terminated"));
-      form.close();
-    })
-    .closeButton();
-
-  let updates = 0;
-  const updateRun = system.runInterval((): void => {
-    updates += 1;
-    output.setData(createTerminalFrame(updates, `Input: ${input.getData()}`));
-  }, 10);
-
-  try {
-    const reason = await form.show();
-    reportFinalization(
-      player,
-      session.finalizeClose(toTerminalCloseReason(reason)),
-      updates,
-      input.getData().length,
-    );
-  } catch (error: unknown) {
-    reportFinalization(
-      player,
-      session.finalizeFailure(error, player.isValid),
-      updates,
-      input.getData().length,
-    );
-  } finally {
-    system.clearRun(updateRun);
-  }
-}
-
-function toTerminalCloseReason(
-  reason: DataDrivenScreenClosedReason,
-): TerminalCloseReason {
-  return reason;
-}
-
-function reportFinalization(
-  player: Player,
-  finalization: TerminalFinalization,
-  updates: number,
-  inputLength: number,
-): void {
-  if (!player.isValid) {
-    console.warn(
-      `UI probe finalized: result=${finalization.kind}, updates=${updates}, inputLength=${inputLength}.`,
-    );
-    return;
-  }
-
-  const detail =
-    finalization.detail === undefined ? "" : `, detail=${finalization.detail}`;
-  player.sendMessage(
-    `UI probe finalized: result=${finalization.kind}, updates=${updates}, inputLength=${inputLength}${detail}.`,
+  await showTerminalView(
+    player,
+    probeTerminal,
+    {
+      onLine: (line): void => {
+        probeTerminal.setCursorPosition(1, 2);
+        probeTerminal.clearLine();
+        probeTerminal.write(`> ${line}`);
+      },
+      onTerminate: (): void => undefined,
+      onClosed: (kind, detail): void => {
+        console.warn(
+          `CS_TERMINAL_CLOSE ${JSON.stringify({
+            kind,
+            ...(detail === undefined ? {} : { detail }),
+          })}`,
+        );
+        if (player.isValid) player.sendMessage(`Terminal closed: ${kind}`);
+      },
+    },
+    "Computer System Terminal",
   );
 }
 
-function createTerminalFrame(updates: number, status: string): string {
-  const lines = Array.from({ length: terminalHeight }, () => "");
-  lines[0] = "Computer System OS - DDUI feasibility probe";
-  lines[1] = `Size: ${terminalWidth}x${terminalHeight}`;
-  lines[2] = `Observable updates: ${updates}`;
-  lines[3] = status;
-  lines[5] = "The lines below exercise fixed terminal dimensions.";
-  for (let index = 6; index < terminalHeight; index += 1) {
-    lines[index] =
-      `${String(index + 1).padStart(2, "0")}: ${".".repeat(terminalWidth - 4)}`;
-  }
+export function showCustomTerminalProbe(player: Player): void {
+  const terminal = new TerminalBuffer();
+  terminal.write("Computer System Linux 1.0");
+  terminal.setCursorPosition(1, 2);
+  terminal.write("Bedrock Core UI 0.9.2 prototype");
+  terminal.setCursorPosition(1, 3);
+  terminal.write("Compact modal: no scrolling required.");
 
-  return lines
-    .map((line) => line.slice(0, terminalWidth).padEnd(terminalWidth, " "))
-    .join("\n");
+  showCustomTerminalView(
+    player,
+    terminal,
+    {
+      onLine: (line): void => {
+        terminal.setCursorBlink(false);
+        terminal.setCursorPosition(1, 4);
+        terminal.clearLine();
+        terminal.write(`~$ ${line}`.slice(0, terminal.width));
+        terminal.setCursorPosition(1, 5);
+        terminal.clearLine();
+        terminal.write(
+          "Command accepted; the form reopened.".slice(0, terminal.width),
+        );
+        terminal.setCursorPosition(1, 6);
+        terminal.clearLine();
+        terminal.write("~$ ");
+        terminal.setCursorBlink(true);
+      },
+      onTerminate: (): void => undefined,
+      onClosed: (kind, detail): void => {
+        const record = `CS_CUSTOM_TERMINAL_CLOSE ${JSON.stringify({
+          kind,
+          ...(detail === undefined ? {} : { detail }),
+        })}`;
+        console.warn(record);
+        if (player.isValid) player.sendMessage(record);
+      },
+    },
+    "COMPUTER — SHELL / CUSTOM UI",
+  );
+}
+
+export function showNanoProbe(player: Player): void {
+  const editor = new NanoEditorSession(
+    "/home/user/startup.lua",
+    [
+      "-- Computer System startup file",
+      'print("Hello from Bedrock")',
+      "",
+      'local side = "back"',
+      "redstone.setOutput(side, true)",
+    ].join("\n"),
+  );
+
+  showCustomNanoView(player, editor, {
+    onSave: (snapshot): void => {
+      const record = `CS_NANO_SAVE ${JSON.stringify({
+        fileName: snapshot.fileName,
+        revision: snapshot.revision,
+        lineCount: snapshot.lines.length,
+      })}`;
+      console.warn(record);
+      if (player.isValid) player.sendMessage(record);
+    },
+    onClosed: (result): void => {
+      const record = `CS_NANO_CLOSE ${JSON.stringify({
+        saved: result.saved,
+        discardedChanges: result.discardedChanges,
+        revision: result.snapshot.revision,
+      })}`;
+      console.warn(record);
+      if (player.isValid) player.sendMessage(record);
+    },
+  });
+}
+
+export function startTerminalCompetitionProbe(player: Player): void {
+  const runId = `compete-${system.currentTick}`;
+  const counts = { holder: 0, challenger: 0 };
+  const report = (
+    role: keyof typeof counts,
+    kind: string,
+    detail?: string,
+  ): void => {
+    counts[role] += 1;
+    const record = `CS_TERMINAL_COMPETE ${JSON.stringify({
+      runId,
+      role,
+      kind,
+      count: counts[role],
+      ...(detail === undefined ? {} : { detail }),
+    })}`;
+    console.warn(record);
+    if (player.isValid) player.sendMessage(record);
+  };
+
+  void showTerminalView(
+    player,
+    competitionTerminal("holder"),
+    {
+      onLine: (): void => undefined,
+      onTerminate: (): void => undefined,
+      onClosed: (kind, detail): void => report("holder", kind, detail),
+    },
+    "Competition Holder",
+  );
+  system.runTimeout((): void => {
+    void showTerminalView(
+      player,
+      competitionTerminal("challenger"),
+      {
+        onLine: (): void => undefined,
+        onTerminate: (): void => undefined,
+        onClosed: (kind, detail): void => report("challenger", kind, detail),
+      },
+      "Competition Challenger",
+    );
+  }, 10);
+}
+
+export function startTerminalStreamProbe(player: Player): void {
+  const terminal = new TerminalBuffer();
+  terminal.write("Bounded continuous-output probe");
+  const runId = `stream-${system.currentTick}`;
+  let updates = 0;
+  let state: "running" | "completed" | "closed" = "running";
+
+  const report = (phase: "complete" | "closed", kind?: string): void => {
+    const record = `CS_TERMINAL_STREAM ${JSON.stringify({
+      runId,
+      phase,
+      updates,
+      state,
+      ...(kind === undefined ? {} : { kind }),
+    })}`;
+    console.warn(record);
+    if (player.isValid) player.sendMessage(record);
+  };
+
+  const streamRun = system.runInterval((): void => {
+    if (state !== "running") return;
+    updates += 1;
+    const row = ((updates - 1) % terminal.height) + 1;
+    terminal.setCursorPosition(1, row);
+    terminal.setTextColor(updates % 16);
+    terminal.setBackgroundColor((updates + 8) % 16);
+    terminal.clearLine();
+    terminal.write(
+      `frame ${updates.toString().padStart(3, "0")} tick ${system.currentTick}`.padEnd(
+        terminal.width,
+        ".",
+      ),
+    );
+    if (updates !== 200) return;
+    state = "completed";
+    system.clearRun(streamRun);
+    report("complete");
+  }, 1);
+
+  void showTerminalView(
+    player,
+    terminal,
+    {
+      onLine: (): void => undefined,
+      onTerminate: (): void => undefined,
+      onClosed: (kind): void => {
+        if (state === "running") {
+          state = "closed";
+          system.clearRun(streamRun);
+        }
+        report("closed", kind);
+      },
+    },
+    "Continuous Output Probe",
+  );
+}
+
+function competitionTerminal(role: string): TerminalBuffer {
+  const terminal = new TerminalBuffer();
+  terminal.write(`Competition ${role}`);
+  terminal.setCursorPosition(1, 2);
+  terminal.write("Keep this form open for the competing-form probe.");
+  return terminal;
 }

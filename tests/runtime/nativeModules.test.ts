@@ -1,11 +1,13 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
-import { compileSource } from "../../src/application/runtime/compiler.js";
 import { createNativeEnvironment } from "../../src/application/runtime/nativeModules.js";
 import { RoundRobinScheduler } from "../../src/application/runtime/scheduler.js";
-import { StackVm } from "../../src/application/runtime/vm.js";
+import { ShellSession } from "../../src/application/os/shellSession.js";
 import { InMemoryFilesystem } from "../../src/domain/filesystem/inMemoryFilesystem.js";
+import type { NativeFunction } from "../../src/domain/runtime/value.js";
 import { TerminalBuffer } from "../../src/domain/terminal/terminalBuffer.js";
+import { RedstoneState } from "../../src/domain/redstone/redstoneState.js";
+import { PythonCs486Harness } from "./pythonCs486Harness.js";
 
 describe("initial native modules", (): void => {
   it("exposes allowlisted os, term, and fs operations to programs", (): void => {
@@ -16,9 +18,8 @@ describe("initial native modules", (): void => {
       terminal,
       filesystem,
     });
-    const vm = new StackVm(
-      {
-        code: compileSource(`
+    const vm = new PythonCs486Harness(
+      `
 import os
 import term
 import fs
@@ -30,9 +31,12 @@ fs.make_dir("/etc")
 fs.write_file("/etc/id", "23")
 size = fs.get_size("/etc/id")
 free = fs.get_free_space()
-`),
+`,
+      {
+        environment,
+        filesystem,
+        terminal,
       },
-      environment.moduleLoader,
     );
 
     run(vm);
@@ -42,15 +46,15 @@ free = fs.get_free_space()
     expect(terminal.cell(2, 2).foreground).toBe(1);
     expect(filesystem.readFile("/etc/id")).toBe("23");
     expect(vm.globals.get("size")).toBe(2);
-    expect(vm.globals.get("free")).toBe(999_998);
+    expect(vm.globals.get("free")).toBe(filesystem.getFreeSpace());
   });
 
   it("integrates os timers and event waits with the scheduler", (): void => {
     const scheduler = new RoundRobinScheduler({
       eventCapacity: 8,
       timerCapacity: 8,
-      instructionsPerComputer: 100,
-      instructionsPerTick: 100,
+      cpuCyclesPerComputer: 100_000,
+      cpuCyclesPerTick: 100_000,
     });
     const terminal = new TerminalBuffer();
     const filesystem = new InMemoryFilesystem();
@@ -65,20 +69,22 @@ free = fs.get_free_space()
       cancelTimer: (id) => scheduler.cancelTimer(5, id),
       ticksPerSecond: 20,
     });
-    const vm = new StackVm(
-      {
-        code: compileSource(`
+    const vm = new PythonCs486Harness(
+      `
 import os
 timer_id = os.start_timer(0.1)
 timer_event = os.pull_event("timer")
 os.queue_event("custom", 9)
 custom_event = os.pull_event("custom")
 elapsed = os.clock()
-`),
+`,
+      {
+        environment,
+        filesystem,
+        terminal,
       },
-      environment.moduleLoader,
     );
-    scheduler.add(5, vm);
+    scheduler.add(5, vm.program.process);
 
     scheduler.runTick();
     expect(vm.state).toEqual({ kind: "waiting_event", filter: "timer" });
@@ -101,24 +107,27 @@ elapsed = os.clock()
   });
 
   it("rejects modules and host capabilities outside the explicit surface", (): void => {
+    const filesystem = new InMemoryFilesystem();
+    const terminal = new TerminalBuffer();
     const environment = createNativeEnvironment({
       computerId: 1,
-      terminal: new TerminalBuffer(),
-      filesystem: new InMemoryFilesystem(),
+      terminal,
+      filesystem,
     });
-    const importVm = new StackVm(
-      { code: compileSource("import host\n") },
-      environment.moduleLoader,
-    );
+    const importVm = new PythonCs486Harness("import host\n", {
+      environment,
+      filesystem,
+      terminal,
+    });
     run(importVm);
     expect(importVm.state.kind).toBe("crashed");
     if (importVm.state.kind === "crashed") {
       expect(importVm.state.error.typeName).toBe("ImportError");
     }
 
-    const capabilityVm = new StackVm(
-      { code: compileSource('import os\nos.queue_event("hidden")\n') },
-      environment.moduleLoader,
+    const capabilityVm = new PythonCs486Harness(
+      'import os\nos.queue_event("hidden")\n',
+      { environment, filesystem, terminal },
     );
     run(capabilityVm);
     expect(capabilityVm.state.kind).toBe("crashed");
@@ -126,9 +135,79 @@ elapsed = os.clock()
       expect(capabilityVm.state.error.typeName).toBe("UnsupportedError");
     }
   });
+
+  it("exposes validated six-sided redstone input and digital output", (): void => {
+    const redstone = new RedstoneState();
+    redstone.setInput("left", 12);
+    const filesystem = new InMemoryFilesystem();
+    const terminal = new TerminalBuffer();
+    const environment = createNativeEnvironment({
+      computerId: 2,
+      terminal,
+      filesystem,
+      redstone,
+    });
+    const vm = new PythonCs486Harness(
+      `
+import redstone
+level = redstone.get_analog_input("left")
+active = redstone.get_input("left")
+redstone.set_output("right", active)
+output = redstone.get_output("right")
+`,
+      { environment, filesystem, terminal },
+    );
+    run(vm);
+    expect(vm.state.kind).toBe("completed");
+    expect(vm.globals.get("level")).toBe(12);
+    expect(vm.globals.get("output")).toBe(true);
+    expect(redstone.outputMask).toBe(2);
+  });
+
+  it("admits a shell command before executing and rendering it", (): void => {
+    const filesystem = new InMemoryFilesystem();
+    const terminal = new TerminalBuffer();
+    const shell = new ShellSession(filesystem, { osProfile: "dos" });
+    let insideTerminalLane = false;
+    let admissionCount = 0;
+    const originalSubmit = shell.submit.bind(shell);
+    const submitSpy = vi.spyOn(shell, "submit").mockImplementation((line) => {
+      expect(insideTerminalLane).toBe(true);
+      return originalSubmit(line);
+    });
+    const environment = createNativeEnvironment({
+      computerId: 3,
+      filesystem,
+      osProfile: "dos",
+      shell,
+      terminal,
+      runHostWork: (lane, units, operation) => {
+        expect(lane).toBe("terminal");
+        expect(units).toBe(1);
+        expect(insideTerminalLane).toBe(false);
+        admissionCount += 1;
+        insideTerminalLane = true;
+        try {
+          return operation();
+        } finally {
+          insideTerminalLane = false;
+        }
+      },
+    });
+    const shellModule = environment.modules.get("shell");
+    const submit = shellModule?.values.get("submit") as NativeFunction;
+
+    expect(submit.call(["DIR"], new Map())).toMatchObject({ kind: "work" });
+    expect(admissionCount).toBe(1);
+    expect(submitSpy).toHaveBeenCalledWith("DIR");
+  });
 });
 
-function run(vm: StackVm): void {
-  for (let count = 0; count < 100 && vm.state.kind === "ready"; count += 1)
-    vm.runSlice(100);
+function run(vm: PythonCs486Harness): void {
+  for (
+    let count = 0;
+    count < 100 && (vm.state.kind === "ready" || vm.hasPendingCpuCycles);
+    count += 1
+  )
+    vm.runCpuSlice(100_000);
 }

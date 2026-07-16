@@ -1,5 +1,3 @@
-import type { CodeObject, FunctionPrototype } from "./bytecode.js";
-
 export type RuntimeValue =
   | boolean
   | null
@@ -10,7 +8,6 @@ export type RuntimeValue =
   | RuntimeList
   | RuntimeNamespace
   | RuntimeTuple
-  | UserFunction
   | NativeFunction;
 
 export interface RuntimeList {
@@ -40,13 +37,6 @@ export interface RuntimeIterator {
   index: number;
 }
 
-export interface UserFunction {
-  readonly kind: "function";
-  readonly prototype: FunctionPrototype;
-  readonly defaults: readonly RuntimeValue[];
-  readonly globals: Map<string, RuntimeValue>;
-}
-
 export interface NativeFunction {
   readonly kind: "native_function";
   readonly name: string;
@@ -56,13 +46,17 @@ export interface NativeFunction {
 export type NativeCall = (
   positional: readonly RuntimeValue[],
   keywords: ReadonlyMap<string, RuntimeValue>,
-) => RuntimeValue | VmWaitRequest;
+) => RuntimeValue | VmWaitRequest | VmWorkRequest;
 
 export type VmWaitRequest =
   | { readonly kind: "sleep"; readonly ticks: number }
   | { readonly kind: "wait_event"; readonly filter?: string };
 
-export type ModuleLoader = (name: string) => RuntimeNamespace | undefined;
+export interface VmWorkRequest {
+  readonly cycles: number;
+  readonly kind: "work";
+  readonly value: RuntimeValue;
+}
 
 export function namespace(
   name: string,
@@ -73,15 +67,4 @@ export function namespace(
 
 export function nativeFunction(name: string, call: NativeCall): NativeFunction {
   return { kind: "native_function", name, call };
-}
-
-export function isObjectValue(
-  value: RuntimeValue,
-): value is Exclude<RuntimeValue, boolean | null | number | string> {
-  return typeof value === "object" && value !== null;
-}
-
-export interface RuntimeProgram {
-  readonly code: CodeObject;
-  readonly globals?: ReadonlyMap<string, RuntimeValue>;
 }

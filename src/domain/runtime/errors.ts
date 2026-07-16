@@ -18,3 +18,9 @@ export class VmLimitError extends VmRuntimeError {
     super("ResourceLimitError", `${limit} limit exceeded`, span);
   }
 }
+
+export class VmMemoryError extends VmRuntimeError {
+  constructor(span?: SourceSpan) {
+    super("MemoryError", "memory limit exceeded", span);
+  }
+}

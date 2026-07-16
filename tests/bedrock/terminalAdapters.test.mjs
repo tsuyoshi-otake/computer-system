@@ -1,0 +1,258 @@
+import { readFile } from "node:fs/promises";
+import path from "node:path";
+import { describe, expect, it } from "vitest";
+
+const root = path.resolve(import.meta.dirname, "../..");
+
+describe("Bedrock terminal adapters", () => {
+  it("adds the terminal header before interactive controls", async () => {
+    const terminalView = await source("src/bedrock/terminalView.ts");
+    expect(terminalView.indexOf(".label(display)")).toBeLessThan(
+      terminalView.indexOf('.textField("Command line", input)'),
+    );
+    expect(terminalView).toContain('.button("Enter"');
+    expect(terminalView).toContain('.button("Ctrl+C"');
+    expect(terminalView).not.toContain("form.closeButton()");
+  });
+
+  it("maps every terminal palette index to a distinct native formatting color", async () => {
+    const viewport = await source("src/application/terminal/viewport.ts");
+    const paletteSource = viewport.match(
+      /const formattingCodes = \[([\s\S]*?)\] as const;/u,
+    )?.[1];
+    const codes = [...(paletteSource ?? "").matchAll(/"([0-9a-f])"/gu)].map(
+      (match) => match[1],
+    );
+
+    expect(codes).toHaveLength(16);
+    expect(new Set(codes)).toHaveProperty("size", 16);
+  });
+
+  it("routes Computer and Portable Computer System through the production coordinator", async () => {
+    const [computer, portable, coordinator, registry] = await Promise.all([
+      source("src/bedrock/computerComponent.ts"),
+      source("src/bedrock/portableComputer.ts"),
+      source("src/bedrock/computerTerminal.ts"),
+      source("src/bedrock/computerRegistry.ts"),
+    ]);
+
+    expect(computer).toContain("requestWebComputerTerminal");
+    expect(computer).toContain(
+      "requestWebComputerTerminal(player, record, event.block)",
+    );
+    expect(computer).toContain("hasAdjacentMonitor(event.block)");
+    expect(computer).toContain("selectComputerTerminal");
+    expect(portable).toContain("requestWebComputerTerminal");
+    expect(portable).toContain("resolvePortableComputer(source, itemStack)");
+    expect(portable).toContain("Portable Computer System");
+    expect(portable).toContain(
+      "inventory.setItem(player.selectedSlotIndex, selectedItem)",
+    );
+    expect(portable).not.toContain("showTerminalProbe");
+    expect(coordinator).toContain("showTerminalView");
+    expect(coordinator).toContain('"terminal_line"');
+    expect(coordinator).toContain('"terminal_closed"');
+    expect(coordinator).toContain("selectComputerTerminal");
+    expect(portable).toContain("ensurePortableComputer");
+    expect(portable).toContain("playerOwnsPortableIdentity");
+    expect(portable).toContain('location: "transferred"');
+    expect(portable).toContain(
+      'disconnectWebTerminalPlayer(previous.ownerId, "transferred", identity)',
+    );
+    expect(registry).toContain("applyPortableComputerProfile");
+    expect(registry).toContain("hardware: portableComputerHardware");
+    expect(registry).toContain('osProfile: "dos"');
+  });
+
+  it("does not expose the native terminal as an automatic Web fallback", async () => {
+    const bridge = await source("src/bedrock/webTerminalBridge.ts");
+
+    expect(bridge).not.toContain("openComputerTerminal");
+    expect(bridge).not.toContain("openFallback");
+    expect(bridge).not.toContain("Opening the in-game terminal");
+    expect(bridge).toContain("Web Terminal companion did not respond");
+  });
+
+  it("normalizes the GDK single-entity item-drop shape and keeps the world in daytime", async () => {
+    const [portable, daylight, main, headless] = await Promise.all([
+      source("src/bedrock/portableComputer.ts"),
+      source("src/bedrock/daylightController.ts"),
+      source("src/bedrock/main.ts"),
+      source("src/bedrock/probes/headlessProbe.ts"),
+    ]);
+
+    expect(portable).toContain("Array.isArray(items) ? items : [items]");
+    expect(portable).not.toContain("for (const entity of items)");
+    expect(portable).not.toContain("for (const entity of droppedEntities)");
+    expect(portable).toContain("maximumDroppedItemsToInspect");
+    expect(portable).toContain(
+      "for (let index = 0; index < count; index += 1)",
+    );
+    expect(portable).toContain("handlePortableItemUseOn");
+    expect(portable).toContain("handlePortableBlockInteraction");
+    expect(portable).toContain("handlePortableBlockBreak");
+    expect(portable).toContain("portableComputerBlockTypeId");
+    expect(daylight).toContain("world.gameRules.doDayLightCycle = false");
+    expect(daylight).toContain("world.setTimeOfDay(TimeOfDay.Day)");
+    expect(daylight).toContain("system.runInterval");
+    expect(daylight).toContain("inspectAlwaysDayState");
+    expect(main).toContain("startAlwaysDayController()");
+    expect(headless).toContain("if (!computerStorageReady())");
+    expect(headless).toContain('phase: "storage_migration"');
+    expect(headless.indexOf("if (!computerStorageReady())")).toBeLessThan(
+      headless.indexOf("executeComputerVerticalProbe()"),
+    );
+    expect(headless).toContain('emit(runId, "always_day"');
+  });
+
+  it("hands every Computer System interaction to the bounded Web companion bridge", async () => {
+    const [main, computer, portable, bridge] = await Promise.all([
+      source("src/bedrock/main.ts"),
+      source("src/bedrock/computerComponent.ts"),
+      source("src/bedrock/portableComputer.ts"),
+      source("src/bedrock/webTerminalBridge.ts"),
+    ]);
+
+    expect(main).toContain("startWebTerminalBridge");
+    expect(main).toContain("handleWebTerminalScriptEvent");
+    expect(main).toContain("handleDebugWebSessionRequest");
+    expect(computer).toContain(
+      "requestWebComputerTerminal(player, record, event.block)",
+    );
+    expect(portable).toContain("requestWebComputerTerminal(source, record)");
+    expect(bridge).toContain("CS_WEB_SESSION_REQUEST");
+    expect(bridge).toContain(
+      "selectComputerTerminal(player.id, record.computerId)",
+    );
+    expect(bridge).toContain("CS_WEB_TERMINAL");
+    expect(bridge).toContain("maxSnapshotsPerPass = 2");
+    expect(bridge).toContain("maxEagerSnapshotsPerPass = 4");
+    expect(bridge).toContain("TerminalSnapshotScheduler");
+    expect(bridge).toContain("snapshotScheduler.requestEager");
+    expect(bridge).toContain("snapshotScheduler.takePeriodicBatch");
+    expect(bridge).toContain("FloppyAudioEventBroker");
+    expect(bridge).toContain("audioCursor");
+    expect(bridge).toContain("setFloppyActivityHandler");
+    expect(bridge).toContain("sessionsByComputer");
+    expect(bridge).toContain('"terminal_line"');
+    expect(bridge).toContain('"terminal_keys"');
+    expect(bridge).toContain('"terminal_mouse"');
+    expect(bridge).toContain("isTerminalKeyBatch");
+    expect(bridge).toContain("flushPendingMouseMoves");
+    expect(bridge).toContain("releaseMouseButtons");
+    expect(bridge).toContain('"terminal_closed"');
+    expect(bridge).toContain("WebTerminalAccessRegistry");
+    expect(bridge).toContain("terminalAccess.canWrite");
+    expect(bridge).toContain("detached.wasLast");
+    expect(bridge).toContain("rejectSession");
+    expect(bridge).toContain("x * x + y * y + z * z <= 9");
+    expect(bridge).toContain("rangeCheckDisabledForDebug");
+    expect(bridge).toContain('debugMarker === "debug"');
+    expect(bridge).toContain('setSessionAccess(session, "out_of_range")');
+    expect(bridge).toContain('setSessionAccess(session, "in_range")');
+    expect(bridge).toContain("Connection code:");
+    const debugBridge = await source("src/bedrock/debugWebSessionBridge.ts");
+    expect(debugBridge).toContain("world.getAllPlayers()");
+    expect(debugBridge).toContain("players.length !== 1");
+    expect(debugBridge).toContain("requestWebComputerTerminal(player, record)");
+    expect(debugBridge).toContain("CS_DEBUG_WEB_REQUEST");
+  });
+
+  it("keeps the Bedrock Core prototype isolated from the production DDUI coordinator", async () => {
+    const [main, probe, coordinator] = await Promise.all([
+      source("src/bedrock/main.ts"),
+      source("src/bedrock/probes/uiProbe.ts"),
+      source("src/bedrock/computerTerminal.ts"),
+    ]);
+
+    expect(main).toContain('case "ui-custom"');
+    expect(main).toContain('case "ui-nano"');
+    expect(probe).toContain("showCustomTerminalProbe");
+    expect(probe).toContain("showNanoProbe");
+    expect(probe).toContain("showCustomTerminalView");
+    expect(coordinator).toContain("showTerminalView");
+    expect(coordinator).not.toContain("showCustomTerminalView");
+  });
+
+  it("routes Monitor touch only to one physically adjacent desktop computer", async () => {
+    const [monitor, coordinator] = await Promise.all([
+      source("src/bedrock/monitorComponent.ts"),
+      source("src/bedrock/computerTerminal.ts"),
+    ]);
+
+    expect(monitor).toContain("adjacentDesktopComputers");
+    expect(monitor).toContain(
+      "requestWebComputerTerminal(player, record, block)",
+    );
+    expect(monitor).not.toContain("openSelectedComputerTerminal");
+    expect(monitor).not.toContain("showTerminalProbe");
+    expect(coordinator).toContain("TerminalTargetRegistry");
+    expect(coordinator).toContain("targets.resolve(player.id)");
+  });
+
+  it("guards a broken Computer coordinate until residual block cleanup finishes", async () => {
+    const computer = await source("src/bedrock/computerComponent.ts");
+
+    expect(computer).toContain("scheduleOwnedFinalization(");
+    expect(computer).toContain("if (breakingBlocks.has(physicalKey)) return");
+    expect(computer).toContain('residual.setType("minecraft:air")');
+    expect(computer).toContain("giveComputerItem(player");
+    expect(computer).toContain("!isComputerBlock(block.typeId)");
+  });
+
+  it("exposes a bounded GDK competing-form probe with per-session finalization counts", async () => {
+    const [main, probe] = await Promise.all([
+      source("src/bedrock/main.ts"),
+      source("src/bedrock/probes/uiProbe.ts"),
+    ]);
+
+    expect(main).toContain('case "compete"');
+    expect(probe).toContain("startTerminalCompetitionProbe");
+    expect(probe).toContain("CS_TERMINAL_COMPETE");
+    expect(probe).toContain('report("challenger", kind, detail)');
+    expect(probe).toContain('report("holder", kind, detail)');
+  });
+
+  it("records real-player terminal closure for the isolated BDS disconnect harness", async () => {
+    const [probe, runner, packageJson] = await Promise.all([
+      source("src/bedrock/probes/uiProbe.ts"),
+      source("tools/bds-probe-runner.mjs"),
+      source("package.json"),
+    ]);
+
+    expect(probe).toContain("CS_TERMINAL_CLOSE");
+    expect(runner).toContain('process.argv.includes("--disconnect")');
+    expect(runner).toContain("BDS_DISCONNECT_READY");
+    expect(runner).toContain("verifyDisconnect(session)");
+    expect(runner).toContain("session.terminalCloseRecords.length !== 1");
+    expect(runner).toContain(
+      'const storageMigrationLogPrefix = "CS_STORAGE_MIGRATION "',
+    );
+    expect(runner).toContain('if (migration.state === "complete")');
+    expect(runner).toContain("!probeSent");
+    expect(runner).toContain('"runtime"');
+    expect(runner).toContain("resetManagedDirectory(workRoot)");
+    expect(runner).toContain(
+      "const executable = path.join(serverRoot, executableName)",
+    );
+    expect(packageJson).toContain('"test:bds:disconnect"');
+  });
+
+  it("exposes bounded background and continuous-output GDK probes", async () => {
+    const [main, probe] = await Promise.all([
+      source("src/bedrock/main.ts"),
+      source("src/bedrock/probes/uiProbe.ts"),
+    ]);
+
+    expect(main).toContain('case "stream"');
+    expect(probe).toContain("startTerminalStreamProbe");
+    expect(probe).toContain("CS_TERMINAL_STREAM");
+    expect(probe).toContain("updates !== 200");
+    expect(probe).toContain("system.clearRun(streamRun)");
+    expect(probe).toContain('color === 15 ? "█" : " "');
+  });
+});
+
+async function source(relative) {
+  return readFile(path.join(root, relative), "utf8");
+}

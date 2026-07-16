@@ -3,11 +3,16 @@ import minecraftLinting from "eslint-plugin-minecraft-linting";
 import globals from "globals";
 import tseslint from "typescript-eslint";
 
-const typedFiles = ["src/**/*.ts", "tests/**/*.ts", "vitest.config.ts"];
+const typedFiles = [
+  "src/**/*.ts",
+  "src/**/*.tsx",
+  "tests/**/*.ts",
+  "vitest.config.ts",
+];
 
 export default tseslint.config(
   {
-    ignores: ["coverage/**", "dist/**", "node_modules/**"],
+    ignores: ["coverage/**", "dist/**", "node_modules/**", "vendor/**"],
   },
   eslint.configs.recommended,
   ...tseslint.configs.recommendedTypeChecked.map((config) => ({
@@ -18,6 +23,12 @@ export default tseslint.config(
     files: ["**/*.mjs"],
     languageOptions: {
       globals: globals.node,
+    },
+  },
+  {
+    files: ["web/**/*.js", "site/**/*.js"],
+    languageOptions: {
+      globals: globals.browser,
     },
   },
   {

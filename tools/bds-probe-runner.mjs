@@ -14,9 +14,20 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const probeLogPrefix = "CS_PROBE_RESULT ";
+const storageMigrationLogPrefix = "CS_STORAGE_MIGRATION ";
+const terminalCloseLogPrefix = "CS_TERMINAL_CLOSE ";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const distributionRoot = process.env.BDS_HOME;
 const worldName = "ComputerSystemPhase0";
+const disconnectMode = process.argv.includes("--disconnect");
+const serverPort = Number.parseInt(
+  process.env.BDS_PORT ?? String(20_000 + (process.pid % 20_000)),
+  10,
+);
+
+if (!Number.isInteger(serverPort) || serverPort < 1 || serverPort > 65_534) {
+  throw new Error("BDS_PORT must be an integer between 1 and 65534.");
+}
 
 if (distributionRoot === undefined) {
   throw new Error(
@@ -34,15 +45,17 @@ const defaultWorkRoot = path.join(
   os.homedir(),
   "tmp",
   "computer-system-bds",
-  String(Date.now()),
+  "runtime",
 );
 const workRoot = path.resolve(process.env.BDS_WORKDIR ?? defaultWorkRoot);
+const managedWorkRoot = process.env.BDS_WORKDIR === undefined;
 
 if (isWithin(workRoot, sourceRoot) || workRoot === sourceRoot) {
   throw new Error("BDS_WORKDIR must not be inside BDS_HOME.");
 }
 
-await ensureEmptyDirectory(workRoot);
+if (managedWorkRoot) await resetManagedDirectory(workRoot);
+else await ensureEmptyDirectory(workRoot);
 await cp(sourceRoot, workRoot, { recursive: true });
 await rm(path.join(workRoot, "worlds", worldName), {
   force: true,
@@ -50,9 +63,30 @@ await rm(path.join(workRoot, "worlds", worldName), {
 });
 await configureServer(workRoot);
 
-console.log(`Preparing isolated Bedrock Dedicated Server at ${workRoot}`);
+console.log(
+  `Preparing isolated Bedrock Dedicated Server at stable runtime path ${workRoot}`,
+);
 await runServer(workRoot, "generate");
 await installWorldPacks(workRoot);
+
+if (disconnectMode) {
+  const session = await runServer(workRoot, "disconnect");
+  verifyDisconnect(session);
+  console.log(
+    JSON.stringify(
+      {
+        status: "PASS",
+        mode: "disconnect",
+        workRoot,
+        result: "disconnected",
+        terminalResults: session.terminalCloseRecords.length,
+      },
+      null,
+      2,
+    ),
+  );
+  process.exit(0);
+}
 
 const first = await runServer(workRoot, "probe");
 const second = await runServer(workRoot, "probe");
@@ -88,21 +122,32 @@ async function ensureEmptyDirectory(directory) {
   }
 }
 
+async function resetManagedDirectory(directory) {
+  if (directory !== defaultWorkRoot) {
+    throw new Error(
+      `Refusing to reset unexpected managed directory: ${directory}`,
+    );
+  }
+  await rm(directory, { force: true, recursive: true });
+  await mkdir(directory, { recursive: true });
+}
+
 async function configureServer(serverRoot) {
   const propertiesPath = path.join(serverRoot, "server.properties");
   let properties = await readFile(propertiesPath, "utf8");
-  const basePort = 20_000 + (process.pid % 20_000);
   const overrides = {
     "allow-cheats": "true",
-    "allow-list": "true",
+    "allow-list": disconnectMode ? "false" : "true",
     "content-log-file-enabled": "true",
     "content-log-console-output-enabled": "true",
     "default-player-permission-level": "operator",
     "level-name": worldName,
     "online-mode": "true",
-    "server-name": "Computer System Phase 0",
-    "server-port": String(basePort),
-    "server-portv6": String(basePort + 1),
+    "server-name": disconnectMode
+      ? "Computer System Disconnect Probe"
+      : "Computer System Phase 0",
+    "server-port": String(serverPort),
+    "server-portv6": String(serverPort + 1),
   };
 
   for (const [key, value] of Object.entries(overrides)) {
@@ -181,23 +226,28 @@ function runServer(serverRoot, mode) {
       windowsHide: true,
     });
     const records = [];
+    const terminalCloseRecords = [];
     const memoryWarningLines = [];
     const recentLines = [];
     let buffer = "";
     let ready = false;
+    let probeSent = false;
     let terminalObserved = false;
     let stopSent = false;
     let diagnosticContinuation = 0;
 
-    const timeout = setTimeout(() => {
-      requestStop();
-      setTimeout(() => child.kill(), 5_000).unref();
-      reject(
-        new Error(
-          `Bedrock Dedicated Server ${mode} session timed out. Recent output:\n${recentLines.join("\n")}`,
-        ),
-      );
-    }, 90_000);
+    const timeout = setTimeout(
+      () => {
+        requestStop();
+        setTimeout(() => child.kill(), 5_000).unref();
+        reject(
+          new Error(
+            `Bedrock Dedicated Server ${mode} session timed out. Recent output:\n${recentLines.join("\n")}`,
+          ),
+        );
+      },
+      mode === "disconnect" ? 300_000 : 90_000,
+    );
 
     function requestStop() {
       if (stopSent || child.stdin.destroyed) {
@@ -237,10 +287,64 @@ function runServer(serverRoot, mode) {
           ready = true;
           if (mode === "generate") {
             requestStop();
-          } else {
-            setTimeout(() => {
+          } else if (mode === "disconnect") {
+            console.log(
+              `BDS_DISCONNECT_READY ${JSON.stringify({
+                address: "127.0.0.1",
+                port: serverPort,
+                command: "/scriptevent computer_system:probe ui",
+                action:
+                  "Open the terminal, then leave the server while it remains open.",
+              })}`,
+            );
+          }
+        }
+
+        const migrationPrefixIndex = line.indexOf(storageMigrationLogPrefix);
+        if (
+          mode === "probe" &&
+          ready &&
+          !probeSent &&
+          migrationPrefixIndex !== -1
+        ) {
+          try {
+            const migration = JSON.parse(
+              line
+                .slice(migrationPrefixIndex + storageMigrationLogPrefix.length)
+                .trim(),
+            );
+            if (migration.state === "complete") {
+              probeSent = true;
               child.stdin.write("scriptevent computer_system:probe headless\n");
-            }, 1_000);
+            }
+          } catch {
+            // The normal diagnostics path retains malformed log output. A
+            // later valid readiness record may still start the bounded probe.
+          }
+        }
+
+        const closePrefixIndex = line.indexOf(terminalCloseLogPrefix);
+        if (closePrefixIndex !== -1) {
+          let record;
+          try {
+            record = JSON.parse(
+              line
+                .slice(closePrefixIndex + terminalCloseLogPrefix.length)
+                .trim(),
+            );
+          } catch (error) {
+            requestStop();
+            reject(
+              new Error(
+                `Invalid terminal close record: ${error instanceof Error ? error.message : String(error)}`,
+              ),
+            );
+            continue;
+          }
+          terminalCloseRecords.push(record);
+          console.log(`${terminalCloseLogPrefix}${JSON.stringify(record)}`);
+          if (mode === "disconnect" && record.kind === "disconnected") {
+            setTimeout(requestStop, 2_000).unref();
           }
         }
 
@@ -300,9 +404,22 @@ function runServer(serverRoot, mode) {
         );
         return;
       }
-      resolve({ records, memoryWarningLines });
+      resolve({ records, memoryWarningLines, terminalCloseRecords });
     });
   });
+}
+
+function verifyDisconnect(session) {
+  if (session.terminalCloseRecords.length !== 1) {
+    throw new Error(
+      `Disconnect probe expected exactly one terminal result, received ${session.terminalCloseRecords.length}.`,
+    );
+  }
+  if (session.terminalCloseRecords[0]?.kind !== "disconnected") {
+    throw new Error(
+      `Disconnect probe expected disconnected, received ${JSON.stringify(session.terminalCloseRecords[0])}.`,
+    );
+  }
 }
 
 function verifySessions(first, second, bundleBytes) {
@@ -313,6 +430,10 @@ function verifySessions(first, second, bundleBytes) {
   const firstMonitor = requirePassingRecord(first.records, "monitor");
   const firstSpeaker = requirePassingRecord(first.records, "speaker");
   const firstRedstone = requirePassingRecord(first.records, "redstone");
+  const firstComputer = requirePassingRecord(
+    first.records,
+    "computer_vertical",
+  );
   const secondStorage = requirePassingRecord(second.records, "storage");
   const secondRuntime = requirePassingRecord(second.records, "runtime");
   const secondTurtle = requirePassingRecord(second.records, "turtle");
@@ -320,6 +441,10 @@ function verifySessions(first, second, bundleBytes) {
   const secondMonitor = requirePassingRecord(second.records, "monitor");
   const secondSpeaker = requirePassingRecord(second.records, "speaker");
   const secondRedstone = requirePassingRecord(second.records, "redstone");
+  const secondComputer = requirePassingRecord(
+    second.records,
+    "computer_vertical",
+  );
   requirePassingRecord(first.records, "suite", "complete");
   requirePassingRecord(second.records, "suite", "complete");
 
@@ -357,6 +482,20 @@ function verifySessions(first, second, bundleBytes) {
     throw new Error(
       "Dynamic Property sequence did not persist across restart.",
     );
+  }
+  for (const [name, record, loadedSnapshot] of [
+    ["first computer", firstComputer, false],
+    ["second computer", secondComputer, true],
+  ]) {
+    if (
+      record.details.identityStable !== true ||
+      record.details.loadedSnapshot !== loadedSnapshot ||
+      record.details.outputMask !== 2 ||
+      record.details.startupPresent !== true ||
+      record.details.terminatedOff !== true
+    ) {
+      throw new Error(`${name} did not verify the Phase 2 vertical slice.`);
+    }
   }
   if (firstIdentity.details.previousIdentityPresent !== false) {
     throw new Error("First session unexpectedly found an identity item.");
@@ -452,6 +591,7 @@ function verifySessions(first, second, bundleBytes) {
     runtimeMinimum: secondRuntime.details.minimum,
     runtimeMaximum: secondRuntime.details.maximum,
     itemIdentityPersisted: secondIdentity.details.previousIdentityPresent,
+    computerSnapshotPersisted: secondComputer.details.loadedSnapshot,
     monitorTiles: secondMonitor.details.tilesDiscovered,
     monitorCells: `${String(secondMonitor.details.cellsWide)}x${String(secondMonitor.details.cellsHigh)}`,
     redstoneInputFaces: secondRedstone.details.inputFacesVerified,

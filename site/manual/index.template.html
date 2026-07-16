@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="The searchable 16-chapter Computer System operator and programming field manual."
+    />
+    <meta name="theme-color" content="#171b19" />
+    <meta name="build-revision" content="{{BUILD_REVISION}}" />
+    <meta property="og:type" content="article" />
+    <meta property="og:title" content="Computer System Field Manual" />
+    <meta
+      property="og:description"
+      content="Operate, program, measure, and recover Computer System machines in Minecraft Bedrock."
+    />
+    <meta property="og:url" content="{{MANUAL_URL}}" />
+    <meta property="og:image" content="{{OG_IMAGE_URL}}" />
+    <link rel="canonical" href="{{MANUAL_URL}}" />
+    <link rel="stylesheet" href="../styles.css" />
+    <script type="module" src="./app.js"></script>
+    <title>Computer System Field Manual</title>
+  </head>
+  <body class="manual-site-page">
+    <a class="skip-link" href="#manual-content">Skip to manual content</a>
+    <header class="site-header">
+      <a class="site-identity" href="../" aria-label="Computer System home"
+        ><span class="site-mark" aria-hidden="true">CS</span
+        ><span
+          ><b>Computer System</b><small>Field Manual · Rev 0.5</small></span
+        ></a
+      >
+      <nav class="site-nav" aria-label="Primary navigation">
+        <a aria-current="page" href="./">Manual</a
+        ><a href="../#machines">Machines</a
+        ><a href="../#quick-start">Quick start</a
+        ><a href="https://github.com/tsuyoshi-otake/computer-system">GitHub</a>
+      </nav>
+    </header>
+
+    <main id="manual-content" class="manual-publication">
+      <header class="manual-publication-header">
+        <p class="eyebrow">CS technical publication · 16 chapters · 4 parts</p>
+        <h1>Computer System Field Manual</h1>
+        <p>
+          Canonical operator, programming, architecture, and recovery guidance
+          for CS-Linux, CS-DOS, CS486DX, CS486DX2, and CS386SX machines.
+        </p>
+      </header>
+
+      <aside class="manual-navigation" aria-label="Manual navigation">
+        <form class="manual-search" role="search">
+          <label for="manual-search-input">Search the manual</label>
+          <div>
+            <input
+              id="manual-search-input"
+              type="search"
+              maxlength="80"
+              autocomplete="off"
+              placeholder="instruction, fault, BASIC…"
+            /><button type="reset">Clear</button>
+          </div>
+          <p id="manual-search-status" role="status" aria-live="polite">
+            16 chapters in 4 parts.
+          </p>
+        </form>
+        <noscript
+          ><p class="noscript-note">
+            Search and single-chapter view require JavaScript.
+            <span>The complete manual remains available below.</span>
+          </p></noscript
+        >
+        <div
+          id="manual-search-results"
+          class="manual-search-results"
+          aria-label="Manual search results"
+          hidden
+        ></div>
+        <nav
+          id="manual-toc"
+          class="manual-toc"
+          aria-label="Publication chapters"
+        >
+          {{MANUAL_TOC}}
+        </nav>
+      </aside>
+
+      <section class="manual-reader" aria-label="Manual chapters">
+        <section class="reading-paths" aria-labelledby="reading-paths-title">
+          <header>
+            <p class="section-number">Choose a route</p>
+            <h2 id="reading-paths-title">
+              Start with the work you need to finish.
+            </h2>
+          </header>
+          <div class="reading-path-grid">{{MANUAL_PATHS}}</div>
+        </section>
+        <div class="manual-reader-toolbar" aria-label="Chapter controls">
+          <span id="manual-position" aria-live="polite">01 / 16</span>
+          <div>
+            <a
+              id="manual-previous"
+              class="button button-paper"
+              href="#chapter-orientation"
+              aria-disabled="true"
+              >Previous</a
+            ><a
+              id="manual-next"
+              class="button button-paper"
+              href="#chapter-terminal-editor"
+              >Next</a
+            >
+          </div>
+        </div>
+        <div id="manual-chapters" class="manual-chapters">
+          {{MANUAL_CHAPTERS}}
+        </div>
+        <div
+          class="manual-reader-toolbar manual-reader-toolbar-bottom"
+          aria-label="Chapter controls"
+        >
+          <a href="#manual-content">Back to top</a>
+          <div>
+            <a
+              id="manual-previous-bottom"
+              class="button button-paper"
+              href="#chapter-orientation"
+              aria-disabled="true"
+              >Previous</a
+            ><a
+              id="manual-next-bottom"
+              class="button button-paper"
+              href="#chapter-terminal-editor"
+              >Next</a
+            >
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <div>
+        <span class="site-mark" aria-hidden="true">CS</span>
+        <p>
+          <b>Computer System</b><br />Public documentation;
+          <span>live Web Terminal access requires the local BDS companion</span
+          >.
+        </p>
+      </div>
+      <nav aria-label="Footer navigation">
+        <a href="../">Project home</a
+        ><a href="https://github.com/tsuyoshi-otake/computer-system">GitHub</a
+        ><a
+          href="https://github.com/tsuyoshi-otake/computer-system/blob/main/docs/roadmap.md"
+          >Roadmap</a
+        >
+      </nav>
+    </footer>
+  </body>
+</html>

@@ -1,18 +1,24 @@
 import { describe, expect, it } from "vitest";
 
-import { compileSource } from "../../src/application/runtime/compiler.js";
+import { createNativeEnvironment } from "../../src/application/runtime/nativeModules.js";
 import {
   RoundRobinScheduler,
   type SchedulerLimits,
 } from "../../src/application/runtime/scheduler.js";
-import { StackVm } from "../../src/application/runtime/vm.js";
 import { nativeFunction } from "../../src/domain/runtime/value.js";
+import { InMemoryFilesystem } from "../../src/domain/filesystem/inMemoryFilesystem.js";
+import { TerminalBuffer } from "../../src/domain/terminal/terminalBuffer.js";
+import type {
+  CpuProcess,
+  CpuProcessState,
+} from "../../src/domain/runtime/cpuProcess.js";
+import { PythonCs486Harness } from "./pythonCs486Harness.js";
 
 const limits: SchedulerLimits = {
   eventCapacity: 8,
   timerCapacity: 8,
-  instructionsPerComputer: 5,
-  instructionsPerTick: 100,
+  cpuCyclesPerComputer: 1_000,
+  cpuCyclesPerTick: 20_000,
 };
 
 describe("round-robin scheduler", (): void => {
@@ -26,13 +32,9 @@ describe("round-robin scheduler", (): void => {
 
     expect(result.tick).toBe(1_200);
     expect(result.computers).toHaveLength(20);
-    expect(
-      new Set(
-        result.computers.map(
-          ({ executedInstructions }) => executedInstructions,
-        ),
-      ),
-    ).toEqual(new Set([6_000]));
+    expect(new Set(result.computers.map(({ cpuCycles }) => cpuCycles))).toEqual(
+      new Set([1_200_000]),
+    );
     expect(result.computers.every(({ state }) => state.kind === "ready")).toBe(
       true,
     );
@@ -41,7 +43,7 @@ describe("round-robin scheduler", (): void => {
   it("rotates the first slice when the global budget is smaller than runnable demand", (): void => {
     const scheduler = new RoundRobinScheduler({
       ...limits,
-      instructionsPerTick: 5,
+      cpuCyclesPerTick: 1_000,
     });
     for (let id = 0; id < 4; id += 1)
       scheduler.add(id, vm("while True:\n    pass\n"));
@@ -49,9 +51,51 @@ describe("round-robin scheduler", (): void => {
     let result = scheduler.runTick();
     for (let tick = 1; tick < 8; tick += 1) result = scheduler.runTick();
 
+    expect(result.computers.map(({ cpuCycles }) => cpuCycles)).toEqual([
+      2_000, 2_000, 2_000, 2_000,
+    ]);
+  });
+
+  it("applies mixed per-computer clock credits deterministically", (): void => {
+    const scheduler = new RoundRobinScheduler(limits);
+    scheduler.add(1, vm("while True:\n    pass\n"), 400);
+    scheduler.add(2, vm("while True:\n    pass\n"), 1_000);
+
+    let result = scheduler.runTick();
+    for (let tick = 1; tick < 10; tick += 1) result = scheduler.runTick();
+
+    expect(result.computers.map(({ cpuCycles }) => cpuCycles)).toEqual([
+      4_000, 10_000,
+    ]);
+    expect(result.cpuCycles).toBe(1_400);
+  });
+
+  it("bounds host instruction work independently from modeled CPU cycles", (): void => {
+    const scheduler = new RoundRobinScheduler({
+      ...limits,
+      cpuCyclesPerComputer: 1_000_000,
+      cpuCyclesPerTick: 1_000_000,
+      instructionsPerComputer: 200,
+      instructionsPerTick: 1_000,
+    });
+    for (let id = 0; id < 10; id += 1)
+      scheduler.add(id, vm("while True:\n    pass\n"));
+
+    const first = scheduler.runTick();
+    const second = scheduler.runTick();
+
+    expect(first.executedInstructions).toBeLessThanOrEqual(1_000);
+    expect(second.executedInstructions).toBeLessThanOrEqual(1_000);
     expect(
-      result.computers.map(({ executedInstructions }) => executedInstructions),
-    ).toEqual([10, 10, 10, 10]);
+      first.computers.every(
+        ({ executedInstructions }) => executedInstructions <= 200,
+      ),
+    ).toBe(true);
+    expect(
+      second.computers.some(
+        ({ executedInstructions }) => executedInstructions > 200,
+      ),
+    ).toBe(true);
   });
 
   it("resumes sleep and filtered event waits exactly once", (): void => {
@@ -117,17 +161,75 @@ describe("round-robin scheduler", (): void => {
     expect(result.computers[0]!.state.kind).toBe("crashed");
     expect(result.computers[1]).toMatchObject({
       state: { kind: "ready" },
-      executedInstructions: 5,
+      cpuCycles: 1_000,
     });
   });
+
+  it("bounds preparation and result materialization independently of population", (): void => {
+    const scheduler = new RoundRobinScheduler({
+      ...limits,
+      computersPerTick: 7,
+      cpuCyclesPerTick: 7_000,
+    });
+    for (let id = 0; id < 1_000; id += 1) {
+      scheduler.add(id, alwaysReadyProcess());
+    }
+
+    const visited = new Set<number>();
+    for (let tick = 0; tick < 143; tick += 1) {
+      const result = scheduler.runTick();
+      expect(result.computers.length).toBeLessThanOrEqual(7);
+      for (const computer of result.computers) visited.add(computer.id);
+    }
+
+    expect(visited.size).toBe(1_000);
+  });
 });
+
+function alwaysReadyProcess(): CpuProcess {
+  let state: CpuProcessState = { kind: "ready" };
+  return {
+    get state(): CpuProcessState {
+      return state;
+    },
+    hasPendingCpuCycles: false,
+    memoryLimitBytes: 1,
+    memoryUsageBytes: 0,
+    advanceTick: (): CpuProcessState => state,
+    deliverEvent: (): boolean => false,
+    fail: (error): CpuProcessState => {
+      state = { error, kind: "crashed" };
+      return state;
+    },
+    runCpuSlice: (cpuCycleBudget, instructionBudget = 1) => ({
+      cpuCycles: Math.min(1_000, cpuCycleBudget),
+      executedInstructions: Math.min(1, instructionBudget),
+      state,
+    }),
+    terminate: (reason = "terminated"): CpuProcessState => {
+      state = { kind: "terminated", reason };
+      return state;
+    },
+  };
+}
 
 function vm(
   source: string,
   globals: Readonly<Record<string, ReturnType<typeof nativeFunction>>> = {},
-): StackVm {
-  return new StackVm({
-    code: compileSource(source),
-    globals: new Map(Object.entries(globals)),
+): PythonCs486Harness {
+  const filesystem = new InMemoryFilesystem();
+  const terminal = new TerminalBuffer();
+  const base = createNativeEnvironment({
+    computerId: 1,
+    filesystem,
+    terminal,
+  });
+  return new PythonCs486Harness(source, {
+    environment: {
+      ...base,
+      globals: new Map([...base.globals, ...Object.entries(globals)]),
+    },
+    filesystem,
+    terminal,
   });
 }

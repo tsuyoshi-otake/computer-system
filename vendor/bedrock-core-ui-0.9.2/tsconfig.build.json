@@ -1,0 +1,31 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2023"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "rootDir": ".",
+    "outDir": "compiled",
+    "declaration": true,
+    "declarationMap": false,
+    "sourceMap": false,
+    "strict": true,
+    "noUncheckedIndexedAccess": false,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "types": ["node"],
+    "paths": {
+      "@bedrock-core/flexbox": ["./flexbox/src/index.ts"],
+      "@bedrock-core/ui/jsx-runtime": [
+        "./ui-runtime/src/jsx/jsx-runtime.ts"
+      ]
+    }
+  },
+  "include": ["flexbox/src/**/*.ts", "ui-runtime/src/**/*.ts"],
+  "exclude": [
+    "**/__mocks__/**",
+    "**/__tests__/**",
+    "ui-runtime/src/test-setup.ts"
+  ]
+}

@@ -7,11 +7,11 @@ import {
 
 import { offset, probeArenaY, requireCondition } from "./worldProbeSupport.js";
 import {
-  pocketComputerTypeId,
-  pocketIdentityProperty,
-} from "../pocketComputer.js";
+  portableComputerTypeId,
+  portableIdentityProperty,
+} from "../portableComputer.js";
 
-const identityProperty = pocketIdentityProperty;
+const identityProperty = portableIdentityProperty;
 
 export interface ItemIdentityProbeResult {
   readonly droppedIdentityPreserved: boolean;
@@ -42,7 +42,7 @@ export function executeItemIdentityProbe(
   const previousIdentityPresent = typeof previousIdentity === "string";
   if (previous !== undefined) {
     requireCondition(
-      previous.typeId === pocketComputerTypeId && previousIdentityPresent,
+      previous.typeId === portableComputerTypeId && previousIdentityPresent,
       "Persisted identity item was corrupt.",
     );
   }
@@ -50,10 +50,10 @@ export function executeItemIdentityProbe(
   const identity = `computer-${world.getAbsoluteTime()}`;
   const placedLocation = { x: 14, y: probeArenaY, z: 0 };
   const placedIdentityProperty = "computer_system:phase0_placed_identity";
-  const item = new ItemStack(pocketComputerTypeId, 1);
+  const item = new ItemStack(portableComputerTypeId, 1);
   requireCondition(
     !item.isStackable && item.maxAmount === 1,
-    `Pocket Computer item definition is stackable (isStackable=${String(item.isStackable)}, maxAmount=${String(item.maxAmount)}).`,
+    `Portable Computer System item definition is stackable (isStackable=${String(item.isStackable)}, maxAmount=${String(item.maxAmount)}).`,
   );
   item.setDynamicProperty(identityProperty, identity);
   inventory.container.setItem(0, item);
@@ -93,7 +93,7 @@ export function executeItemIdentityProbe(
   );
 
   placed.setType("minecraft:air");
-  const roundTripItem = new ItemStack(pocketComputerTypeId, 1);
+  const roundTripItem = new ItemStack(portableComputerTypeId, 1);
   roundTripItem.setDynamicProperty(
     identityProperty,
     world.getDynamicProperty(placedIdentityProperty),

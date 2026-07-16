@@ -1,7 +1,11 @@
 import { world } from "@minecraft/server";
 
 import { formatProbeRecord } from "../../phase0/probeProtocol.js";
+import { runLinuxAuthenticationProbe } from "../../application/computer/linuxAuthenticationProbe.js";
+import { inspectAlwaysDayState } from "../daylightController.js";
+import { computerStorageReady } from "../computerRegistry.js";
 import { executeItemIdentityProbe } from "./itemIdentityProbe.js";
+import { executeComputerVerticalProbe } from "./computerVerticalProbe.js";
 import { executeMonitorProbe } from "./monitorProbe.js";
 import { executeRedstoneProbe } from "./redstoneProbe.js";
 import {
@@ -11,6 +15,7 @@ import {
 import { executeStorageProbe } from "./storageProbe.js";
 import { executeSpeakerProbe } from "./speakerProbe.js";
 import { executeTurtleProbe } from "./turtleProbe.js";
+import { executeSerialMatrixProbe } from "./serialMatrixProbe.js";
 import {
   getProbeDimension,
   prepareProbeArena,
@@ -20,6 +25,11 @@ import {
 let activeRunId: string | undefined;
 
 export function startHeadlessProbeSuite(): void {
+  if (!computerStorageReady()) {
+    const runId = `headless-${world.getAbsoluteTime()}`;
+    emit(runId, "suite", "FAIL", { phase: "storage_migration" });
+    return;
+  }
   if (activeRunId !== undefined) {
     emit(activeRunId, "suite", "BUSY", { phase: "runtime" });
     return;
@@ -48,6 +58,42 @@ async function executeSuite(runId: string): Promise<void> {
     } catch (error: unknown) {
       failures += 1;
       emitFailure(runId, "storage", error);
+    }
+
+    try {
+      const daylight = inspectAlwaysDayState();
+      emit(runId, "always_day", daylight.passed ? "PASS" : "FAIL", {
+        daylightCycleEnabled: daylight.daylightCycleEnabled,
+        timeOfDay: daylight.timeOfDay,
+      });
+      if (!daylight.passed) failures += 1;
+    } catch (error: unknown) {
+      failures += 1;
+      emitFailure(runId, "always_day", error);
+    }
+
+    try {
+      const computer = executeComputerVerticalProbe();
+      emit(runId, "computer_vertical", "PASS", { ...computer });
+    } catch (error: unknown) {
+      failures += 1;
+      emitFailure(runId, "computer_vertical", error);
+    }
+
+    try {
+      const authentication = runLinuxAuthenticationProbe();
+      emit(runId, "linux_authentication", "PASS", { ...authentication });
+    } catch (error: unknown) {
+      failures += 1;
+      emitFailure(runId, "linux_authentication", error);
+    }
+
+    try {
+      const serial = executeSerialMatrixProbe();
+      emit(runId, "serial_matrix", "PASS", { ...serial });
+    } catch (error: unknown) {
+      failures += 1;
+      emitFailure(runId, "serial_matrix", error);
     }
 
     const dimension = getProbeDimension();
@@ -162,5 +208,7 @@ function emit(
   status: "BUSY" | "FAIL" | "PASS",
   details: Readonly<Record<string, boolean | number | string>>,
 ): void {
-  console.warn(formatProbeRecord({ runId, probe, status, details }));
+  const record = formatProbeRecord({ runId, probe, status, details });
+  console.warn(record);
+  for (const player of world.getAllPlayers()) player.sendMessage(record);
 }
