@@ -130,9 +130,16 @@ describe("Bedrock terminal adapters", () => {
     expect(bridge).toContain("TerminalSnapshotScheduler");
     expect(bridge).toContain("snapshotScheduler.requestEager");
     expect(bridge).toContain("snapshotScheduler.takePeriodicBatch");
+    expect(bridge).toContain("FloppyAudioEventBroker");
+    expect(bridge).toContain("audioCursor");
+    expect(bridge).toContain("setFloppyActivityHandler");
+    expect(bridge).toContain("sessionsByComputer");
     expect(bridge).toContain('"terminal_line"');
     expect(bridge).toContain('"terminal_keys"');
+    expect(bridge).toContain('"terminal_mouse"');
     expect(bridge).toContain("isTerminalKeyBatch");
+    expect(bridge).toContain("flushPendingMouseMoves");
+    expect(bridge).toContain("releaseMouseButtons");
     expect(bridge).toContain('"terminal_closed"');
     expect(bridge).toContain("WebTerminalAccessRegistry");
     expect(bridge).toContain("terminalAccess.canWrite");
@@ -218,6 +225,11 @@ describe("Bedrock terminal adapters", () => {
     expect(runner).toContain("BDS_DISCONNECT_READY");
     expect(runner).toContain("verifyDisconnect(session)");
     expect(runner).toContain("session.terminalCloseRecords.length !== 1");
+    expect(runner).toContain(
+      'const storageMigrationLogPrefix = "CS_STORAGE_MIGRATION "',
+    );
+    expect(runner).toContain('if (migration.state === "complete")');
+    expect(runner).toContain("!probeSent");
     expect(runner).toContain('"runtime"');
     expect(runner).toContain("resetManagedDirectory(workRoot)");
     expect(runner).toContain(

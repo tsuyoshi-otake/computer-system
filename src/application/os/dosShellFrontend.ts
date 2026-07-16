@@ -63,6 +63,7 @@ export class DosShellFrontend implements ShellFrontend {
     if (name === "doskey") return "dos-history";
     if (name === "timer") return "dos-timer";
     if (name === "edit") return "dos-editor";
+    if (name === "qbasic") return "dos-qbasic";
     if (name === "vi") return "vi";
     return undefined;
   }

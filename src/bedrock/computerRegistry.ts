@@ -1,10 +1,4 @@
-import {
-  EntityComponentTypes,
-  ItemStack,
-  system,
-  world,
-  type Player,
-} from "@minecraft/server";
+import { ItemStack, system, world, type Player } from "@minecraft/server";
 
 import { DynamicPropertyIdentityRepository } from "../adapters/storage/dynamicPropertyIdentityRepository.js";
 import { PersistentComputerIdentityService } from "../application/computer/identityPersistence.js";
@@ -15,6 +9,7 @@ import {
 import { ComputerRecord } from "../domain/computer/computer.js";
 import { portableComputerHardware } from "../domain/computer/hardware.js";
 import type { ComputerFamily } from "../domain/computer/identity.js";
+import { giveOrDropItem } from "./giveOrDropItem.js";
 import {
   computerHost,
   registerComputer,
@@ -157,13 +152,7 @@ function giveRecoveredComputerItem(
     : `computer_system:${family === "advanced" ? "advanced_computer" : "computer"}_item`;
   const item = new ItemStack(typeId, 1);
   item.setDynamicProperty(computerIdentityProperty, record.computerId);
-  const inventory = player.getComponent(
-    EntityComponentTypes.Inventory,
-  )?.container;
-  const remainder = inventory === undefined ? item : inventory.addItem(item);
-  if (remainder !== undefined) {
-    player.dimension.spawnItem(remainder, player.location);
-  }
+  giveOrDropItem(player, item);
 }
 
 export function ensureComputer(

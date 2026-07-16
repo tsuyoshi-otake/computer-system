@@ -126,6 +126,11 @@ describe("BDS debug session", () => {
     ).toBe(true);
     expect(
       isAllowedWebRelayCommand(
+        "scriptevent computer_system:web-input abcdefghijkl mouse %7B%22action%22%3A%22move%22%2C%22button%22%3A0%2C%22sequence%22%3A1%2C%22x%22%3A12%2C%22y%22%3A4%7D",
+      ),
+    ).toBe(true);
+    expect(
+      isAllowedWebRelayCommand(
         "scriptevent computer_system:web-interrupt abcdefghijkl",
       ),
     ).toBe(true);

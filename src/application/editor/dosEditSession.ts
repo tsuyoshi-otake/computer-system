@@ -5,10 +5,13 @@ export type DosEditMode = "confirm-exit" | "editing" | "menu" | "search";
 
 type MenuName = "edit" | "file" | "help" | "options" | "search";
 type MenuAction =
+  | "copy"
+  | "cut"
   | "exit"
   | "find"
   | "find-next"
   | "help"
+  | "paste"
   | "save"
   | "save-exit"
   | "toggle-insert"
@@ -30,6 +33,7 @@ interface UndoOperation {
 }
 
 const maximumEditorLines = 4_096;
+const maximumClipboardCharacters = 4_096;
 const maximumLineCharacters = 4_096;
 const maximumSearchCharacters = 64;
 const maximumUndoStates = 32;
@@ -53,7 +57,12 @@ const menuEntries: Readonly<Record<MenuName, readonly MenuEntry[]>> = {
     },
     { action: "exit", label: "Exit", mnemonic: "x", shortcut: "Alt+F X" },
   ],
-  edit: [{ action: "undo", label: "Undo", mnemonic: "u", shortcut: "Ctrl+Z" }],
+  edit: [
+    { action: "undo", label: "Undo", mnemonic: "u", shortcut: "Ctrl+Z" },
+    { action: "cut", label: "Cut", mnemonic: "t", shortcut: "Ctrl+X" },
+    { action: "copy", label: "Copy", mnemonic: "c", shortcut: "Ctrl+C" },
+    { action: "paste", label: "Paste", mnemonic: "p", shortcut: "Ctrl+V" },
+  ],
   search: [
     { action: "find", label: "Find", mnemonic: "f", shortcut: "Ctrl+F" },
     {
@@ -77,6 +86,7 @@ const menuEntries: Readonly<Record<MenuName, readonly MenuEntry[]>> = {
 };
 
 export class DosEditSession {
+  private clipboard = "";
   private readonly lines: string[];
   private readonly undo: UndoOperation[] = [];
   private cursorColumn = 0;
@@ -88,6 +98,7 @@ export class DosEditSession {
   private menuItemIndex = 0;
   private modeValue: DosEditMode = "editing";
   private searchQuery = "";
+  private selectionAnchor?: { readonly column: number; readonly line: number };
   private stateValue: "closed" | "editing" = "editing";
   private status = "Ready";
   private viewLeft = 0;
@@ -107,6 +118,10 @@ export class DosEditSession {
 
   get contents(): string {
     return this.lines.join("\n");
+  }
+
+  get cursor(): { readonly column: number; readonly line: number } {
+    return { column: this.cursorColumn, line: this.cursorLine };
   }
 
   get mode(): DosEditMode {
@@ -137,14 +152,15 @@ export class DosEditSession {
     const rows: HighlightedCell[][] = [];
     rows.push(this.menuBar());
     for (let offset = 0; offset < this.contentRows; offset += 1) {
-      const line = this.lines[this.viewTop + offset] ?? "";
-      rows.push(
-        this.plainRow(
-          [...line].slice(this.viewLeft, this.viewLeft + this.width).join(""),
-          0,
-          11,
-        ),
+      const lineIndex = this.viewTop + offset;
+      const line = this.lines[lineIndex] ?? "";
+      const rendered = this.plainRow(
+        [...line].slice(this.viewLeft, this.viewLeft + this.width).join(""),
+        0,
+        11,
       );
+      this.paintSelection(rendered, lineIndex);
+      rows.push(rendered);
     }
     rows.push(this.plainRow(this.statusLine(), 15, 8));
     rows.push(this.plainRow(this.helpLine(), 15, 8));
@@ -167,6 +183,67 @@ export class DosEditSession {
     return this.editingKey(key);
   }
 
+  pointerDown(x: number, y: number): EditorResult {
+    this.assertEditing();
+    if (
+      !Number.isSafeInteger(x) ||
+      !Number.isSafeInteger(y) ||
+      x < 1 ||
+      x > this.width ||
+      y < 1 ||
+      y > this.height
+    ) {
+      return this.continue("Pointer ignored");
+    }
+    const column = x - 1;
+    const row = y - 1;
+    if (row === 0) {
+      const menu = menuOrder.findIndex((_name, index) => {
+        const heading = this.menuHeading(index);
+        return (
+          column >= heading.start && column < heading.start + heading.width
+        );
+      });
+      if (menu >= 0) return this.openMenu(menuOrder[menu]!);
+    }
+    if (this.modeValue === "menu") {
+      const entries = this.activeMenuEntries();
+      const item = row - 2;
+      if (item >= 0 && item < entries.length) {
+        this.menuItemIndex = item;
+        return this.applyMenuAction(entries[item]!.action);
+      }
+      this.modeValue = "editing";
+      return this.continue("Menu cancelled");
+    }
+    if (row >= 1 && row <= this.contentRows) {
+      this.modeValue = "editing";
+      this.movePointer(column, row);
+      this.selectionAnchor = this.cursor;
+      return this.continue("Pointer cursor");
+    }
+    return this.continue(this.status);
+  }
+
+  pointerMove(x: number, y: number): EditorResult {
+    this.assertEditing();
+    if (
+      this.selectionAnchor === undefined ||
+      !Number.isSafeInteger(x) ||
+      !Number.isSafeInteger(y) ||
+      x < 1 ||
+      x > this.width ||
+      y < 2 ||
+      y > this.contentRows + 1
+    ) {
+      return this.continue("Pointer ignored");
+    }
+    this.movePointer(x - 1, y - 1);
+    return this.continue(
+      this.selectedRange() === undefined ? "Pointer cursor" : "Selected",
+    );
+  }
+
   completeSave(closeAfter: boolean): EditorResult {
     this.dirty = false;
     this.status = `Saved ${this.displayName}`;
@@ -186,7 +263,10 @@ export class DosEditSession {
     if (key === "F2" || normalized === "ctrl+s") return this.save(false);
     if (key === "F3") return this.findNext();
     if (key === "F10") return this.openMenu("file");
+    if (normalized === "ctrl+c") return this.copySelection();
     if (normalized === "ctrl+f") return this.beginSearch();
+    if (normalized === "ctrl+v") return this.pasteClipboard();
+    if (normalized === "ctrl+x") return this.cutSelection();
     if (normalized === "ctrl+z") return this.undoLast();
     if (normalized === "ctrl+y") return this.deleteLine();
     if (normalized.startsWith("alt+") && normalized.length === 5) {
@@ -195,6 +275,22 @@ export class DosEditSession {
     if (key === "Insert") {
       this.insertMode = !this.insertMode;
       return this.continue(this.insertMode ? "Insert mode" : "Overwrite mode");
+    }
+    if (
+      key === "Ctrl+Home" ||
+      key === "Ctrl+End" ||
+      key === "Ctrl+ArrowLeft" ||
+      key === "Ctrl+ArrowRight" ||
+      key === "ArrowLeft" ||
+      key === "ArrowRight" ||
+      key === "ArrowUp" ||
+      key === "ArrowDown" ||
+      key === "Home" ||
+      key === "End" ||
+      key === "PageUp" ||
+      key === "PageDown"
+    ) {
+      this.selectionAnchor = undefined;
     }
     if (key === "Ctrl+Home") {
       this.cursorLine = 0;
@@ -261,6 +357,9 @@ export class DosEditSession {
     if (action === "save-exit") return this.save(true);
     if (action === "exit") return this.requestExit();
     if (action === "undo") return this.undoLast();
+    if (action === "copy") return this.copySelection();
+    if (action === "cut") return this.cutSelection();
+    if (action === "paste") return this.pasteClipboard();
     if (action === "find") return this.beginSearch();
     if (action === "find-next") return this.findNext();
     if (action === "toggle-insert") {
@@ -368,6 +467,7 @@ export class DosEditSession {
   }
 
   private insertText(value: string): EditorResult {
+    if (this.selectedRange() !== undefined) return this.replaceSelection(value);
     const inserted = [...value];
     const characters = this.currentCharacters();
     const replaced = this.insertMode
@@ -384,6 +484,7 @@ export class DosEditSession {
   }
 
   private insertNewline(): EditorResult {
+    if (this.selectedRange() !== undefined) return this.replaceSelection("\n");
     if (this.lines.length >= maximumEditorLines)
       return this.continue("Line limit reached");
     const original = this.lines[this.cursorLine] ?? "";
@@ -398,6 +499,7 @@ export class DosEditSession {
   }
 
   private backspace(): EditorResult {
+    if (this.selectedRange() !== undefined) return this.deleteSelection();
     if (this.cursorColumn > 0) {
       const characters = this.currentCharacters();
       this.rememberLines(this.cursorLine, 1, [
@@ -422,6 +524,7 @@ export class DosEditSession {
   }
 
   private deleteForward(): EditorResult {
+    if (this.selectedRange() !== undefined) return this.deleteSelection();
     const characters = this.currentCharacters();
     if (this.cursorColumn < characters.length) {
       this.rememberLines(this.cursorLine, 1, [
@@ -453,12 +556,14 @@ export class DosEditSession {
     );
     this.cursorLine = operation.cursorLine;
     this.cursorColumn = operation.cursorColumn;
+    this.selectionAnchor = undefined;
     this.dirty = true;
     this.clampCursor();
     return this.continue("Undo");
   }
 
   private deleteLine(): EditorResult {
+    this.selectionAnchor = undefined;
     const current = this.lines[this.cursorLine] ?? "";
     if (this.lines.length === 1) {
       this.rememberLines(this.cursorLine, 1, [current]);
@@ -470,6 +575,143 @@ export class DosEditSession {
     this.cursorColumn = 0;
     this.clampCursor();
     return this.changed();
+  }
+
+  private copySelection(): EditorResult {
+    const selected = this.selectedText();
+    if (selected === undefined) return this.continue("Nothing selected");
+    if ([...selected].length > maximumClipboardCharacters) {
+      return this.continue("Selection exceeds clipboard limit");
+    }
+    this.clipboard = selected;
+    return this.continue("Copied");
+  }
+
+  private cutSelection(): EditorResult {
+    const selected = this.selectedText();
+    if (selected === undefined) return this.continue("Nothing selected");
+    if ([...selected].length > maximumClipboardCharacters) {
+      return this.continue("Selection exceeds clipboard limit");
+    }
+    this.clipboard = selected;
+    return this.deleteSelection("Cut");
+  }
+
+  private pasteClipboard(): EditorResult {
+    if (this.clipboard.length === 0) return this.continue("Clipboard is empty");
+    return this.replaceSelection(this.clipboard, "Pasted");
+  }
+
+  private deleteSelection(status = "Modified"): EditorResult {
+    const range = this.selectedRange();
+    if (range === undefined) return this.continue("Nothing selected");
+    const originals = this.lines.slice(range.start.line, range.end.line + 1);
+    const prefix = [...(this.lines[range.start.line] ?? "")]
+      .slice(0, range.start.column)
+      .join("");
+    const suffix = [...(this.lines[range.end.line] ?? "")]
+      .slice(range.end.column)
+      .join("");
+    const merged = `${prefix}${suffix}`;
+    if ([...merged].length > maximumLineCharacters) {
+      return this.continue("Line limit reached");
+    }
+    this.rememberLines(range.start.line, 1, originals);
+    this.lines.splice(
+      range.start.line,
+      range.end.line - range.start.line + 1,
+      merged,
+    );
+    this.cursorLine = range.start.line;
+    this.cursorColumn = range.start.column;
+    this.selectionAnchor = undefined;
+    this.dirty = true;
+    return this.continue(status);
+  }
+
+  private replaceSelection(value: string, status = "Modified"): EditorResult {
+    const range = this.selectedRange() ?? {
+      end: this.cursor,
+      start: this.cursor,
+    };
+    const originals = this.lines.slice(range.start.line, range.end.line + 1);
+    const prefix = [...(this.lines[range.start.line] ?? "")]
+      .slice(0, range.start.column)
+      .join("");
+    const suffix = [...(this.lines[range.end.line] ?? "")]
+      .slice(range.end.column)
+      .join("");
+    const insertedLines = value.replaceAll("\r\n", "\n").split("\n");
+    const replacements =
+      insertedLines.length === 1
+        ? [`${prefix}${insertedLines[0] ?? ""}${suffix}`]
+        : [
+            `${prefix}${insertedLines[0] ?? ""}`,
+            ...insertedLines.slice(1, -1),
+            `${insertedLines.at(-1) ?? ""}${suffix}`,
+          ];
+    const resultingLineCount =
+      this.lines.length - originals.length + replacements.length;
+    if (resultingLineCount > maximumEditorLines) {
+      return this.continue("Line limit reached");
+    }
+    if (
+      replacements.some(
+        (replacement) => [...replacement].length > maximumLineCharacters,
+      )
+    ) {
+      return this.continue("Line limit reached");
+    }
+    this.rememberLines(range.start.line, replacements.length, originals);
+    this.lines.splice(range.start.line, originals.length, ...replacements);
+    this.cursorLine = range.start.line + insertedLines.length - 1;
+    this.cursorColumn =
+      insertedLines.length === 1
+        ? range.start.column + [...(insertedLines[0] ?? "")].length
+        : [...(insertedLines.at(-1) ?? "")].length;
+    this.selectionAnchor = undefined;
+    this.dirty = true;
+    return this.continue(status);
+  }
+
+  private selectedText(): string | undefined {
+    const range = this.selectedRange();
+    if (range === undefined) return undefined;
+    if (range.start.line === range.end.line) {
+      return [...(this.lines[range.start.line] ?? "")]
+        .slice(range.start.column, range.end.column)
+        .join("");
+    }
+    const selected = [
+      [...(this.lines[range.start.line] ?? "")]
+        .slice(range.start.column)
+        .join(""),
+      ...this.lines.slice(range.start.line + 1, range.end.line),
+      [...(this.lines[range.end.line] ?? "")]
+        .slice(0, range.end.column)
+        .join(""),
+    ];
+    return selected.join("\n");
+  }
+
+  private selectedRange():
+    | {
+        readonly end: { readonly column: number; readonly line: number };
+        readonly start: { readonly column: number; readonly line: number };
+      }
+    | undefined {
+    const anchor = this.selectionAnchor;
+    if (anchor === undefined) return undefined;
+    const cursor = this.cursor;
+    if (anchor.line === cursor.line && anchor.column === cursor.column) {
+      return undefined;
+    }
+    const anchorFirst =
+      anchor.line < cursor.line ||
+      (anchor.line === cursor.line && anchor.column < cursor.column);
+    return anchorFirst
+      ? { end: cursor, start: anchor }
+      : { end: anchor, start: cursor };
   }
 
   private rememberLines(
@@ -528,6 +770,33 @@ export class DosEditSession {
     const match = /^\S*\s*/u.exec(suffix)?.[0] ?? "";
     if (match.length === 0) this.moveRight();
     else this.cursorColumn += [...match].length;
+  }
+
+  private movePointer(column: number, row: number): void {
+    this.cursorLine = Math.min(this.lines.length - 1, this.viewTop + row - 1);
+    this.cursorColumn = this.viewLeft + column;
+    this.clampCursor();
+  }
+
+  private paintSelection(row: HighlightedCell[], line: number): void {
+    const range = this.selectedRange();
+    if (
+      range === undefined ||
+      line < range.start.line ||
+      line > range.end.line
+    ) {
+      return;
+    }
+    const start = line === range.start.line ? range.start.column : 0;
+    const end =
+      line === range.end.line
+        ? range.end.column
+        : [...(this.lines[line] ?? "")].length;
+    const visibleStart = Math.max(0, start - this.viewLeft);
+    const visibleEnd = Math.min(this.width, end - this.viewLeft);
+    if (visibleEnd > visibleStart) {
+      this.paint(row, visibleStart, visibleEnd - visibleStart, 15, 1);
+    }
   }
 
   private openMenu(name: MenuName): EditorResult {
@@ -683,12 +952,12 @@ export class DosEditSession {
     if (this.modeValue === "menu")
       return "Arrows navigate  Enter select  Esc cancel";
     if (this.status === "Ready")
-      return "F1 Help  F2 Save  F3 Next  Ctrl+F Find  F10 Menu";
+      return "F1 Help F2 Save F3 Next Ctrl+F Find Ctrl+C/X/V F10 Menu";
     return `${this.status} | F2 Save  F10 Menu`;
   }
 
   private keyboardHelp(): string {
-    return "Arrows move  Ins toggles mode  F2 saves  Alt+F X exits";
+    return "Arrows move  Drag selects  Ctrl+C/X/V clipboard  F2 saves";
   }
 
   private menuHeading(index: number): {

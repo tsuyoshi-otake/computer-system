@@ -6,8 +6,8 @@ Computer System is a ComputerCraft-inspired Minecraft Bedrock Add-On. It ships
 deterministic, sandboxed CS-Linux and CS-DOS computers backed by one validated
 CS process. Computer System Python compiles to that process; it has no separate
 Python VM. Desktop machines use CS486DX/CS486DX2 profiles. Portable machines use
-CS386SX, retain ASM, C, C++, BASIC, and bounded DOS batch support, and reject
-user MicroPython.
+CS386SX, retain ASM, C, C++, CS QBASIC, and bounded DOS batch support, and
+reject user MicroPython.
 
 Minecraft-specific code is a thin adapter around host-testable domain and
 application layers:

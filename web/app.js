@@ -1,6 +1,7 @@
 import { hasCopySelection, insertPastedCommand } from "/terminal-input.js";
 import { manualChapters, manualParts, searchManual } from "/manual.js";
 import { calculateFixedGridFontSize } from "/terminal-layout.js";
+import { WebFloppyDriveAudio } from "/floppy-audio.js";
 
 const palette = [
   "#f0f0f0",
@@ -105,6 +106,9 @@ let accessMode = "unknown";
 let editorActive = false;
 let secretInput = false;
 let editorKeyPending = false;
+let mouseRequestPending = false;
+let pendingMouseMove;
+let mouseSequence = Date.now() * 1_000;
 let historyCursor = 0;
 let historyDraft = "";
 let resizeFrame = 0;
@@ -114,6 +118,15 @@ let manualChapterIndex = 0;
 let manualSectionId = "";
 const commandHistory = [];
 const editorKeyQueue = [];
+const mouseTransitionQueue = [];
+const floppyAudio = new WebFloppyDriveAudio();
+
+const unlockFloppyAudio = () => void floppyAudio.unlock();
+window.addEventListener("pointerdown", unlockFloppyAudio, { passive: true });
+window.addEventListener("keydown", unlockFloppyAudio);
+window.addEventListener("pagehide", () => void floppyAudio.close(), {
+  once: true,
+});
 
 if (location.hash.length > 1) sessionStorage.setItem(tokenStorageKey, token);
 window.history.replaceState(null, "", `${location.pathname}${location.search}`);
@@ -224,6 +237,39 @@ elements.commandInput.addEventListener("blur", () => {
 elements.terminalStage.addEventListener("click", () => {
   if (window.getSelection()?.isCollapsed === false) return;
   if (!elements.commandInput.disabled) elements.commandInput.focus();
+});
+elements.terminalScreen.addEventListener("pointerdown", (event) => {
+  if (!terminalMouseAvailable()) return;
+  const point = terminalMousePoint(event);
+  if (point === undefined) return;
+  event.preventDefault();
+  elements.terminalScreen.setPointerCapture?.(event.pointerId);
+  queueTerminalMouse("down", event.button, point);
+  if (!elements.commandInput.disabled) elements.commandInput.focus();
+});
+elements.terminalScreen.addEventListener("pointermove", (event) => {
+  if (!terminalMouseAvailable()) return;
+  const point = terminalMousePoint(event);
+  if (point === undefined) return;
+  queueTerminalMouse("move", pointerMoveButton(event.buttons), point);
+});
+elements.terminalScreen.addEventListener("pointerup", (event) => {
+  if (!terminalMouseAvailable()) return;
+  const point = terminalMousePoint(event);
+  if (point === undefined) return;
+  event.preventDefault();
+  queueTerminalMouse("up", event.button, point);
+  if (elements.terminalScreen.hasPointerCapture?.(event.pointerId)) {
+    elements.terminalScreen.releasePointerCapture(event.pointerId);
+  }
+});
+elements.terminalScreen.addEventListener("pointercancel", (event) => {
+  if (!terminalMouseAvailable()) return;
+  const point = terminalMousePoint(event);
+  if (point !== undefined) queueTerminalMouse("up", event.button, point);
+});
+elements.terminalScreen.addEventListener("contextmenu", (event) => {
+  if (terminalMouseAvailable()) event.preventDefault();
 });
 elements.reconnectButton.addEventListener("click", () => {
   elements.reconnectButton.hidden = true;
@@ -658,14 +704,101 @@ async function sendInput(payload) {
   }
 }
 
+function terminalMouseAvailable() {
+  return (
+    editorActive &&
+    !sessionClosed &&
+    connectionState === "online" &&
+    accessMode === "writer"
+  );
+}
+
+function terminalMousePoint(event) {
+  const bounds = elements.terminalScreen.getBoundingClientRect();
+  if (bounds.width <= 0 || bounds.height <= 0) return undefined;
+  const relativeX = (event.clientX - bounds.left) / bounds.width;
+  const relativeY = (event.clientY - bounds.top) / bounds.height;
+  if (relativeX < 0 || relativeX >= 1 || relativeY < 0 || relativeY >= 1)
+    return undefined;
+  return {
+    x: Math.max(
+      1,
+      Math.min(
+        hardwareTextColumns,
+        Math.floor(relativeX * hardwareTextColumns) + 1,
+      ),
+    ),
+    y: Math.max(
+      1,
+      Math.min(hardwareTextRows, Math.floor(relativeY * hardwareTextRows) + 1),
+    ),
+  };
+}
+
+function pointerMoveButton(buttons) {
+  if ((buttons & 1) !== 0) return 0;
+  if ((buttons & 4) !== 0) return 1;
+  if ((buttons & 2) !== 0) return 2;
+  return 0;
+}
+
+function queueTerminalMouse(action, button, point) {
+  if (![0, 1, 2].includes(button)) return;
+  const event = { action, button, x: point.x, y: point.y };
+  if (action === "move") pendingMouseMove = event;
+  else {
+    if (mouseTransitionQueue.length >= 16) return;
+    mouseTransitionQueue.push(event);
+  }
+  void drainTerminalMouse();
+}
+
+async function drainTerminalMouse() {
+  if (mouseRequestPending || !terminalMouseAvailable()) return;
+  const event = mouseTransitionQueue.shift() ?? pendingMouseMove;
+  if (event === undefined) return;
+  if (event === pendingMouseMove) pendingMouseMove = undefined;
+  mouseRequestPending = true;
+  try {
+    mouseSequence += 1;
+    await api("/api/input", {
+      method: "POST",
+      headers: {
+        ...authorizationHeaders(),
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        kind: "mouse",
+        value: { ...event, sequence: mouseSequence },
+      }),
+    });
+  } catch (error) {
+    pendingMouseMove = undefined;
+    mouseTransitionQueue.length = 0;
+    if (error?.code === "read_only") {
+      accessMode = "viewer";
+      setInputAvailable(false, "VIEW ONLY");
+    } else if (error?.code === "out_of_range") {
+      setConnection("offline", "OUT OF RANGE");
+      setInputAvailable(false, "MOVE WITHIN 3 BLOCKS");
+    }
+  } finally {
+    mouseRequestPending = false;
+    if (terminalMouseAvailable()) void drainTerminalMouse();
+  }
+}
+
 function renderTerminal(payload) {
+  floppyAudio.consume(payload?.audio);
   const terminal = payload?.terminal;
   if (!Array.isArray(terminal?.rows)) return;
   editorActive =
     terminal.rows.some((row) =>
       /^-- (?:COMMAND|INSERT|NORMAL) --/u.test(row.trimStart()),
     ) ||
-    /^ File\s+Edit\s+Search\s+Options\s+Help/u.test(terminal.rows[0] ?? "");
+    /^ File\s+Edit\s+(?:(?:View\s+)?Search\s+(?:Run\s+Debug\s+)?)?Options\s+Help/u.test(
+      terminal.rows[0] ?? "",
+    );
   secretInput = terminal.secretInput === true;
   elements.commandInput.classList.toggle("secret-input", secretInput);
   elements.commandInput.setAttribute(
@@ -1029,6 +1162,7 @@ function updateSession(session) {
     );
   }
   if (session.access === "out_of_range") {
+    floppyAudio.stopAll();
     setConnection("offline", "OUT OF RANGE");
     setInputAvailable(false, "MOVE WITHIN 3 BLOCKS");
   } else if (session.access === "in_range" && !sessionClosed) {
@@ -1036,6 +1170,7 @@ function updateSession(session) {
     setInputAvailable(connectionState === "online", "INPUT");
   }
   if (session.state === "closed" || session.state === "expired") {
+    void floppyAudio.close();
     sessionClosed = true;
     sessionStorage.removeItem(tokenStorageKey);
     streamGeneration += 1;
@@ -1084,6 +1219,7 @@ function authorizationHeaders() {
 
 function setConnection(state, label) {
   connectionState = state;
+  if (state !== "online") floppyAudio.stopAll();
   elements.statusLight.dataset.state = state;
   elements.statusText.textContent = label;
   elements.terminalOutput.setAttribute(

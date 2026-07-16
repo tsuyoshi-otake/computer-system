@@ -17,6 +17,7 @@ export type PreparedShellLine =
 export type SessionCommandKind =
   | "dos-editor"
   | "dos-history"
+  | "dos-qbasic"
   | "dos-timer"
   | "linux-builtin"
   | "linux-history"

@@ -13,6 +13,7 @@ export const machineTextureKeys = {
   monitor: "computer_system:monitor",
   portable_computer: "computer_system:portable_computer",
 };
+export const floppyTextureKey = "computer_system:floppy_disk";
 
 const pngSignature = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
 const outputSize = 256;
@@ -23,14 +24,17 @@ export function createMachineItemTextureAtlas() {
   return {
     resource_pack_name: "computer_system",
     texture_name: "atlas.items",
-    texture_data: Object.fromEntries(
-      Object.entries(machineTextureKeys).map(([family, key]) => [
-        key,
-        {
-          textures: `textures/items/${machineTextureSources[family].replace(/\.png$/u, "")}`,
-        },
-      ]),
-    ),
+    texture_data: {
+      ...Object.fromEntries(
+        Object.entries(machineTextureKeys).map(([family, key]) => [
+          key,
+          {
+            textures: `textures/items/${machineTextureSources[family].replace(/\.png$/u, "")}`,
+          },
+        ]),
+      ),
+      [floppyTextureKey]: { textures: "textures/items/floppy_disk" },
+    },
   };
 }
 

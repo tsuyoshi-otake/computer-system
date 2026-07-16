@@ -6,7 +6,7 @@ Minecraft Bedrock Edition.
 The project aims to reproduce the ComputerCraft experience as closely as the
 Bedrock Add-On and Script APIs allow. Desktop programs can use a sandboxed,
 MicroPython-compatible language called Computer System Python. The portable DOS
-profile instead supports ASM, C, C++, BASIC, and bounded batch programs. The
+profile instead supports ASM, C, C++, CS QBASIC, and bounded batch programs. The
 computer lifecycle, terminal, filesystem, events, networking, peripherals,
 portable computers, and turtles follow ComputerCraft-style behavior.
 
@@ -539,17 +539,23 @@ fails before changing memory state.
 
 The DOS runtime owns A: and C:, the active drive, a separate current directory
 for each drive, media generations, volume labels, and FAT metadata. Production
-C: is persistent; A: reports not ready until a future Bedrock media adapter
-inserts a floppy, and cold restore always detaches A: before activation. `DIR`,
-`COPY`, `DEL`/`ERASE`, and `REN`/`RENAME` support bounded DOS `*`/`?` file
-specifications and use each file's persisted two-second FAT timestamp. `DIR /A`
-filters read-only, hidden, system, directory, and archive state. `ATTRIB`
-displays or changes R/H/S/A (including bounded `/S`), and read-only state is
-enforced by write, delete, rename, copy, and editor paths. `LABEL` reads or
-changes the generation-bound volume label. `CHKDSK` reports actual
-file/directory/byte/free counts and metadata consistency but never repairs the
-volume. It does not alter guest file contents, labels, or attributes, although
-reading a legacy entry may materialize its missing versioned FAT metadata.
+C: is persistent; A: is backed by the removable `computer_system:floppy_disk`
+item and reports not ready while its bay is empty. Cold restore never invents an
+A: medium. `FORMAT A:` creates a 1.44 MiB FAT12 volume, `FORMAT A: /S` or
+`SYS A:` installs the bounded CS-DOS system files, and `EJECT [A:]` returns the
+same identity-carrying item. A bootable disk takes boot priority unless one-shot
+safe boot was requested. On a Linux-installed machine that boot is an ephemeral
+A:-only DOS session: C: is unavailable and the Linux filesystem and OS snapshots
+are not changed. `DIR`, `COPY`, `DEL`/`ERASE`, and `REN`/`RENAME` support
+bounded DOS `*`/`?` file specifications and use each file's persisted two-second
+FAT timestamp. `DIR /A` filters read-only, hidden, system, directory, and
+archive state. `ATTRIB` displays or changes R/H/S/A (including bounded `/S`),
+and read-only state is enforced by write, delete, rename, copy, and editor
+paths. `LABEL` reads or changes the generation-bound volume label. `CHKDSK`
+reports actual file/directory/byte/free counts and metadata consistency but
+never repairs the volume. It does not alter guest file contents, labels, or
+attributes, although reading a legacy entry may materialize its missing
+versioned FAT metadata.
 
 Single-path writes, `MD`/`RD`, the shipped wildcard `COPY`, `REN`/`RENAME`, and
 `DEL`/`ERASE` paths, plus `MOVE` and `ATTRIB`, trial their complete FAT
@@ -592,7 +598,7 @@ manual: man apropos
 info:   hostname uname date uptime cpuinfo free
 system: clear vi history time sleep test [ umask sync shutdown reboot exit true false
 DOS:    EDIT DIR ATTRIB LABEL CHKDSK TREE VOL TIME TIMER DOSKEY MEM DEBUG + aliases
-toolchain: as cc c++ basic basicc ld nm run objdump csdb (DEBUG on DOS)
+toolchain: as cc c++ ld nm run objdump csdb (QBASIC and DEBUG on DOS)
 ```
 
 The parser supports single and double quotes, backslash escapes, environment
@@ -640,11 +646,16 @@ relay.
 The Web Terminal top bar places **PWR**, **HDD**, and **FDD** indicators plus an
 explicit writer-only **Power** button immediately after **Copy** and before
 **Manual**. The indicators follow the real lifecycle and block-device state; FDD
-reports absent media until a future media-attachment adapter inserts a floppy;
-no operator insertion command ships yet. **Copy** copies an active terminal
-selection, or the visible fixed-cell screen when nothing is selected. It uses
-the Clipboard API when available and a synchronous browser copy fallback for LAN
-HTTP deployments; no polling or background clipboard work is performed.
+reports absent media only while no Floppy Disk item is loaded. FDD insert,
+eject, motor start, seek, read, and write sounds are synthesized locally with
+Web Audio after a browser gesture; no Resource Pack sound file is required.
+Events use a per-Computer monotonic sequence, a 32-event ring, and an eight-per-
+second ceiling. Reconnect does not replay retained sounds, both writers and
+viewers can hear live activity, and leaving range or closing the session stops
+active voices. **Copy** copies an active terminal selection, or the visible
+fixed-cell screen when nothing is selected. It uses the Clipboard API when
+available and a synchronous browser copy fallback for LAN HTTP deployments; no
+polling or background clipboard work is performed.
 
 Computer snapshots remain canonical in Bedrock World Dynamic Properties, which
 BDS stores in the world's LevelDB. Clean persistence checks compare O(1)
@@ -803,9 +814,11 @@ aligned static-data/BSS floor. ESP remains a general register, so these are RAM
 boundary checks rather than PUSH-word provenance tracking; RET separately
 validates its popped target against real instruction addresses, so one-past-end
 is valid only for sequential fallthrough and never as a return target. `as`,
-`cc`, `c++`, and `basicc` compile safe initial language subsets to the same
-versioned, validated `CS486` executable. All four accept `-c` to emit a bounded
-`CS486OBJ` relocatable object.
+`cc`, and `c++` compile safe initial language subsets to the same versioned,
+validated `CS486` executable and accept `-c` to emit a bounded `CS486OBJ`
+relocatable object. CS-DOS alone exposes the original, sandboxed `QBASIC.EXE`;
+its currently supported integer/console source subset compiles to the same
+validated process. Current CS-Linux exposes neither `basic` nor `basicc`.
 
 New ASM objects use `CS486OBJ` v2. A dedicated tokenizer, bounded preprocessor,
 parser, constant-expression evaluator, and source-span diagnostics feed `.text`,
@@ -860,15 +873,17 @@ zero-argument functions as Python attributes and executes them in the same CS486
 process with EAX returns. Global data symbols are never callable. For example,
 `cc -c fastmath.c -o fastmath.o` beside a script enables `import fastmath`.
 Missing, circular, oversized, corrupt, or ABI-incompatible imports fail
-explicitly. `basic` runs BASIC source directly, while `run --stats` reports the
-active CS486DX, CS486DX2, or CS386SX model, instructions, CPU cycles, and
-virtual microseconds at its persisted clock. No frontend invokes a host
+explicitly. `run --stats` reports the active CS486DX, CS486DX2, or CS386SX
+model, instructions, CPU cycles, and virtual microseconds at its persisted
+clock. On CS-DOS, `QBASIC file.bas` opens the IDE and `QBASIC /RUN file.bas`
+compiles and runs the supported CS QBASIC subset. No frontend invokes a host
 compiler, linker, or native binary. General dynamic/shared libraries remain a
 follow-up on the versioned object and ABI foundation. MCP's `cpuCycles` field
-uses one unit across ASM, C, C++, BASIC, and desktop Python; machine-instruction
-counts remain diagnostic values, not timing units. The portable CS386SX retains
-ASM, C, C++, BASIC, and batch support, but rejects `python`/`micropython`
-commands with status 127 and does not execute `/startup.py`.
+uses one unit across ASM, C, C++, CS QBASIC, and desktop Python;
+machine-instruction counts remain diagnostic values, not timing units. The
+portable CS386SX retains ASM, C, C++, CS QBASIC, and batch support, but rejects
+`python`/`micropython` commands with status 127 and does not execute
+`/startup.py`.
 
 The native Python `shell` module is not a user API. It is enabled only for the
 built-in shell program selected when `/startup.py` is empty. User-authored
@@ -891,6 +906,25 @@ fail explicitly. The current display block is named Monitor rather than Display.
 `computer_system:portable_computer` is the portable DOS item and applies the
 CS386SX 16 MHz / 2 MiB profile when its persistent identity is created or a
 legacy-default portable identity is safely migrated.
+
+`computer_system:floppy_disk` is a non-stackable 1.44 MiB removable medium. Use
+it on a Computer to insert it. On a non-crashed Computer, sneak with an empty
+hand to eject; a guest `EJECT`/`eject` command and breaking the machine also
+return or drop the item. On a crashed Computer, sneak remains exclusively the
+one-shot safe-boot gesture. Media identity and generation survive inventory and
+drop round trips; duplicated/stale identities and a second insertion of one
+loaded identity are rejected. At most 256 media records are cataloged per world.
+Linux uses the root-only commands below; its vfat projection fixes UID/GID 1000,
+files at 0644, and directories at 0755, while `chmod`, `chown`, and links fail
+explicitly:
+
+```sh
+sudo mkfs.fat -F 12 -n SHARED /dev/fd0
+sudo mount -t vfat /dev/fd0 /mnt/floppy
+cp README.TXT /mnt/floppy/
+sudo umount /mnt/floppy
+sudo eject /dev/fd0
+```
 
 Every placed Computer exposes six machine-relative local-I/O faces in the stable
 order `bottom`, `right`, `front`, `back`, `top`, `left`. The chassis cardinal
@@ -916,9 +950,9 @@ interface. The bounded network state above is only the future Issue #6 adapter
 boundary: it does not register a default `lo` or `eth0`, route packets, make a
 host or guest connection, or fabricate routes or DNS. CS-Linux does not
 currently ship IP addressing, `ip`, `ping`, `ss`, package management, or
-Internet access. Likewise, the registered `/dev/fd0` reports absent media until
-a future Bedrock media adapter inserts a floppy, and the modeled VGA framebuffer
-still has no production Web Canvas or guest graphics API. These boundaries fail
+Internet access. The registered `/dev/fd0` now reflects the removable Floppy
+Disk item and its FAT12 volume; the modeled VGA framebuffer still has no
+production Web Canvas or guest graphics API. Unsupported boundaries fail
 explicitly rather than pretending that host facilities exist inside the guest
 OS.
 

@@ -25,6 +25,9 @@ export interface DosCommandHost {
   dosTime(arguments_: readonly string[]): ShellCommandResult;
   dosTree(arguments_: readonly string[]): ShellCommandResult;
   dosVolume(arguments_: readonly string[]): ShellCommandResult;
+  dosFormat(arguments_: readonly string[]): ShellCommandResult;
+  dosSystemDisk(arguments_: readonly string[]): ShellCommandResult;
+  dosEject(arguments_: readonly string[]): ShellCommandResult;
   makeDirectories(arguments_: readonly string[]): ShellCommandResult;
   move(arguments_: readonly string[]): ShellCommandResult;
   remove(arguments_: readonly string[]): ShellCommandResult;
@@ -72,6 +75,12 @@ export class DosCommandAdapter {
         return arguments_.length === 0
           ? dosSuccess("", { action: "shutdown" })
           : dosStatus(2, "Invalid number of parameters.\r\n");
+      case "format":
+        return this.host.dosFormat(arguments_);
+      case "sys":
+        return this.host.dosSystemDisk(arguments_);
+      case "eject":
+        return this.host.dosEject(arguments_);
       case "help":
         return this.host.dosHelp(arguments_);
       case "label":

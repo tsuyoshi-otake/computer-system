@@ -626,6 +626,44 @@ export class WebCompanionServer {
         );
         return;
       }
+      if (body?.kind === "mouse") {
+        const value = body.value;
+        if (
+          value === null ||
+          typeof value !== "object" ||
+          !["down", "move", "up"].includes(value.action) ||
+          ![0, 1, 2].includes(value.button) ||
+          !Number.isSafeInteger(value.sequence) ||
+          value.sequence < 0 ||
+          !Number.isSafeInteger(value.x) ||
+          value.x < 1 ||
+          value.x > 80 ||
+          !Number.isSafeInteger(value.y) ||
+          value.y < 1 ||
+          value.y > 25
+        ) {
+          throw new WebSessionError("input", "Invalid terminal mouse event.");
+        }
+        const encodedMouse = encodeURIComponent(
+          JSON.stringify({
+            action: value.action,
+            button: value.button,
+            sequence: value.sequence,
+            x: value.x,
+            y: value.y,
+          }),
+        );
+        if (encodedMouse.length > 180) {
+          throw new WebSessionError(
+            "input",
+            "Encoded terminal mouse event is too long.",
+          );
+        }
+        await this.bds.runWebRelay(
+          `scriptevent computer_system:web-input ${active.sessionId} mouse ${encodedMouse}`,
+        );
+        return;
+      }
       if (body?.kind === "keys") {
         if (
           !Array.isArray(body.value) ||

@@ -5,10 +5,11 @@
 - Portable, Desktop, and Advanced Desktop fixed disks are 20, 40, and 80 MiB.
   IDE timing models controller setup, CHS seek, 3,600 RPM rotation, PIO
   transfer, and write settling.
-- The future 1.44 MB / 1,474,560-byte FDD models 80 cylinders, two heads, 18
-  sectors per track, 300 RPM, motor spin-up/idle, media generations, write
-  protection, ejection, and controller/DMA timing. Production media remains
-  absent until an insertion adapter ships.
+- The shipped removable 1.44 MB / 1,474,560-byte FDD models 80 cylinders, two
+  heads, 18 sectors per track, 300 RPM, motor spin-up/idle, media generations,
+  write protection, ejection, and controller/DMA timing. The Bedrock Floppy Disk
+  item is the insertion adapter; the drive remains absent only when no item is
+  loaded.
 - Profile geometry, byte capacity, sector size, request limit, and timing values
   are versioned invariants. Construction validates positive integer geometry,
   geometry product, and nonnegative queue depth; named timing profiles are
@@ -29,7 +30,8 @@
 - Bound queues, request bytes, deadline storage, completion batches, and motor
   state transitions.
 - Queue depth excludes the one active request. Maximum request sizes are 128 IDE
-  sectors and 36 FDD sectors. The device models timing/state, not sector bytes.
+  sectors and 36 FDD sectors. The block device owns timing/state; `FloppyMedia`
+  separately owns FAT12 bytes and maps file extents to those timed requests.
 
 ## Verification
 

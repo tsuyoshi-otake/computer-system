@@ -11,10 +11,14 @@ const executableHeader = "CSUTIL1\n";
 const legacyLinuxImageId = "cs-linux-1.0-rootfs-v1";
 const olderLinuxImageId = "cs-linux-1.0-rootfs-v2";
 const previousLinuxImageId = "cs-linux-1.0-rootfs-v3";
-const linuxImageId = "cs-linux-1.0-rootfs-v4";
+const recentLinuxImageId = "cs-linux-1.0-rootfs-v4";
+const formerLinuxImageId = "cs-linux-1.0-rootfs-v5";
+const linuxImageId = "cs-linux-1.0-rootfs-v6";
 const legacyDosImageId = "cs-dos-6.2-rootfs-v1";
 const previousDosImageId = "cs-dos-6.2-rootfs-v2";
-const dosImageId = "cs-dos-6.2-rootfs-v3";
+const recentDosImageId = "cs-dos-6.2-rootfs-v3";
+const formerDosImageId = "cs-dos-6.2-rootfs-v4";
+const dosImageId = "cs-dos-6.2-rootfs-v5";
 
 const previousLinuxImageDirectories = Object.freeze([
   "/bin",
@@ -150,6 +154,195 @@ const legacyLinuxCommands = Object.freeze([
   "yes",
 ]);
 
+// Immutable command snapshots shipped by the immediately previous images.
+// These cannot be derived from the live registry: persisted overlays may still
+// name v5/v4 after the current profile removes BASIC or adds QBASIC.
+const formerLinuxCommands = Object.freeze([
+  "[",
+  "alias",
+  "apropos",
+  "as",
+  "basename",
+  "bash",
+  "basic",
+  "basicc",
+  "bg",
+  "c++",
+  "cat",
+  "cc",
+  "cd",
+  "chgrp",
+  "chmod",
+  "chown",
+  "clear",
+  "cmp",
+  "command",
+  "cp",
+  "cpuinfo",
+  "csdb",
+  "cut",
+  "date",
+  "df",
+  "diff",
+  "dirname",
+  "dmesg",
+  "du",
+  "echo",
+  "eject",
+  "env",
+  "exit",
+  "export",
+  "false",
+  "fg",
+  "file",
+  "find",
+  "free",
+  "getent",
+  "getopts",
+  "grep",
+  "groupadd",
+  "groupdel",
+  "groups",
+  "head",
+  "help",
+  "hexdump",
+  "history",
+  "hostname",
+  "i2c",
+  "id",
+  "jobs",
+  "kill",
+  "last",
+  "ld",
+  "ln",
+  "local",
+  "login",
+  "logout",
+  "ls",
+  "man",
+  "micropython",
+  "mkdir",
+  "mkfs.fat",
+  "mktemp",
+  "mount",
+  "mv",
+  "nm",
+  "objdump",
+  "od",
+  "passwd",
+  "printenv",
+  "printf",
+  "ps",
+  "pwd",
+  "python",
+  "quota",
+  "read",
+  "readlink",
+  "realpath",
+  "reboot",
+  "rm",
+  "rmdir",
+  "run",
+  "seq",
+  "service",
+  "sh",
+  "sha256sum",
+  "shift",
+  "shutdown",
+  "sleep",
+  "sort",
+  "source",
+  "spi",
+  "stat",
+  "su",
+  "sudo",
+  "sync",
+  "tail",
+  "tee",
+  "test",
+  "time",
+  "top",
+  "touch",
+  "tr",
+  "true",
+  "tty",
+  "type",
+  "umask",
+  "umount",
+  "unalias",
+  "uname",
+  "uniq",
+  "unset",
+  "uptime",
+  "useradd",
+  "userdel",
+  "usermod",
+  "vi",
+  "w",
+  "wait",
+  "wc",
+  "which",
+  "who",
+  "whoami",
+  "xargs",
+  "yes",
+]);
+
+const formerDosCommands = Object.freeze([
+  "as",
+  "attrib",
+  "basic",
+  "basicc",
+  "c++",
+  "cc",
+  "cd",
+  "chdir",
+  "chkdsk",
+  "cls",
+  "copy",
+  "cpu",
+  "csdb",
+  "date",
+  "del",
+  "dir",
+  "doskey",
+  "echo",
+  "edit",
+  "eject",
+  "erase",
+  "exit",
+  "format",
+  "help",
+  "i2c",
+  "label",
+  "ld",
+  "md",
+  "mem",
+  "mkdir",
+  "move",
+  "nm",
+  "objdump",
+  "path",
+  "prompt",
+  "rd",
+  "rem",
+  "ren",
+  "rename",
+  "rmdir",
+  "run",
+  "set",
+  "spi",
+  "sys",
+  "systeminfo",
+  "time",
+  "timer",
+  "tree",
+  "type",
+  "ver",
+  "vi",
+  "vol",
+]);
+
 const toolchainCommands = new Set([
   "as",
   "basic",
@@ -180,11 +373,62 @@ const osPresenceCommands = new Set([
   "who",
 ]);
 
+const floppyCommands = new Set([
+  "eject",
+  "format",
+  "mkfs.fat",
+  "sys",
+  "umount",
+]);
+
 export const linuxFilesystemImage: FilesystemBaseImage = Object.freeze({
   id: linuxImageId,
   directories: linuxImageDirectories,
   files: Object.freeze([
     ...commandFiles("linux"),
+    dataFile("/boot/vmlinuz-cs486", "CS-Linux 1.0 kernel image", 786_432),
+    dataFile("/lib/libcs.so.1", "CS-Linux shared runtime", 393_216),
+    plainFile(
+      "/etc/motd",
+      "Welcome to CS-Linux 1.0. Type 'help' for commands or 'man cs-linux' for the field guide.\n",
+    ),
+    plainFile(
+      "/usr/share/man/README",
+      "CS-Linux manual pages are served by the versioned man/apropos command index.\n",
+    ),
+    plainFile("/var/log/messages", "", 0o640),
+    plainFile("/var/log/auth.log", "", 0o600),
+  ]),
+});
+
+const formerLinuxFilesystemImage: FilesystemBaseImage = Object.freeze({
+  id: formerLinuxImageId,
+  directories: linuxImageDirectories,
+  files: Object.freeze([
+    ...commandFiles("linux", formerLinuxCommands),
+    dataFile("/boot/vmlinuz-cs486", "CS-Linux 1.0 kernel image", 786_432),
+    dataFile("/lib/libcs.so.1", "CS-Linux shared runtime", 393_216),
+    plainFile(
+      "/etc/motd",
+      "Welcome to CS-Linux 1.0. Type 'help' for commands or 'man cs-linux' for the field guide.\n",
+    ),
+    plainFile(
+      "/usr/share/man/README",
+      "CS-Linux manual pages are served by the versioned man/apropos command index.\n",
+    ),
+    plainFile("/var/log/messages", "", 0o640),
+    plainFile("/var/log/auth.log", "", 0o600),
+  ]),
+});
+
+const recentLinuxFilesystemImage: FilesystemBaseImage = Object.freeze({
+  id: recentLinuxImageId,
+  directories: linuxImageDirectories,
+  files: Object.freeze([
+    ...commandFiles(
+      "linux",
+      formerLinuxCommands.filter((command) => !floppyCommands.has(command)),
+    ),
     dataFile("/boot/vmlinuz-cs486", "CS-Linux 1.0 kernel image", 786_432),
     dataFile("/lib/libcs.so.1", "CS-Linux shared runtime", 393_216),
     plainFile(
@@ -206,9 +450,7 @@ const previousLinuxFilesystemImage: FilesystemBaseImage = Object.freeze({
   files: Object.freeze([
     ...commandFiles(
       "linux",
-      commandExecutableNamesFor("linux").filter(
-        (command) => !osPresenceCommands.has(command),
-      ),
+      formerLinuxCommands.filter((command) => !osPresenceCommands.has(command)),
     ),
     dataFile("/boot/vmlinuz-cs486", "CS-Linux 1.0 kernel image", 786_432),
     dataFile("/lib/libcs.so.1", "CS-Linux shared runtime", 393_216),
@@ -221,7 +463,7 @@ const olderLinuxFilesystemImage: FilesystemBaseImage = Object.freeze({
   files: Object.freeze([
     ...commandFiles(
       "linux",
-      commandExecutableNamesFor("linux").filter(
+      formerLinuxCommands.filter(
         (command) => command !== "csdb" && !osPresenceCommands.has(command),
       ),
     ),
@@ -257,13 +499,38 @@ export const dosFilesystemImage: FilesystemBaseImage = Object.freeze({
   ]),
 });
 
+const formerDosFilesystemImage: FilesystemBaseImage = Object.freeze({
+  id: formerDosImageId,
+  directories: dosFilesystemImage.directories,
+  files: Object.freeze([
+    ...commandFiles("dos", formerDosCommands),
+    imageFile("/drives/c/command.com", "command", 55_968),
+    dataFile("/drives/c/dos/himem.sys", "CS-DOS XMS manager", 14_592),
+    dataFile("/drives/c/dos/emm386.exe", "CS-DOS UMB manager", 22_528),
+  ]),
+});
+
+const recentDosFilesystemImage: FilesystemBaseImage = Object.freeze({
+  id: recentDosImageId,
+  directories: dosFilesystemImage.directories,
+  files: Object.freeze([
+    ...commandFiles(
+      "dos",
+      formerDosCommands.filter((command) => !floppyCommands.has(command)),
+    ),
+    imageFile("/drives/c/command.com", "command", 55_968),
+    dataFile("/drives/c/dos/himem.sys", "CS-DOS XMS manager", 14_592),
+    dataFile("/drives/c/dos/emm386.exe", "CS-DOS UMB manager", 22_528),
+  ]),
+});
+
 const previousDosFilesystemImage: FilesystemBaseImage = Object.freeze({
   id: previousDosImageId,
   directories: dosFilesystemImage.directories,
   files: Object.freeze([
     ...commandFiles(
       "dos",
-      commandExecutableNamesFor("dos").filter(
+      formerDosCommands.filter(
         (command) => !["attrib", "chkdsk", "label"].includes(command),
       ),
     ),
@@ -279,7 +546,7 @@ const legacyDosFilesystemImage: FilesystemBaseImage = Object.freeze({
   files: Object.freeze([
     ...commandFiles(
       "dos",
-      commandExecutableNamesFor("dos").filter(
+      formerDosCommands.filter(
         (command) =>
           command !== "csdb" &&
           !["attrib", "chkdsk", "label"].includes(command),
@@ -296,9 +563,13 @@ export function registerOsFilesystemImages(): void {
   registerFilesystemBaseImage(legacyLinuxFilesystemImage);
   registerFilesystemBaseImage(olderLinuxFilesystemImage);
   registerFilesystemBaseImage(previousLinuxFilesystemImage);
+  registerFilesystemBaseImage(recentLinuxFilesystemImage);
+  registerFilesystemBaseImage(formerLinuxFilesystemImage);
   registerFilesystemBaseImage(linuxFilesystemImage);
   registerFilesystemBaseImage(legacyDosFilesystemImage);
   registerFilesystemBaseImage(previousDosFilesystemImage);
+  registerFilesystemBaseImage(recentDosFilesystemImage);
+  registerFilesystemBaseImage(formerDosFilesystemImage);
   registerFilesystemBaseImage(dosFilesystemImage);
 }
 
@@ -328,7 +599,7 @@ export function decodeSystemUtility(contents: string): string | undefined {
   const newline = contents.indexOf("\n", executableHeader.length);
   if (newline < 0) return undefined;
   const command = contents.slice(executableHeader.length, newline);
-  return /^[A-Za-z0-9+_[\]-]{1,32}$/u.test(command) ? command : undefined;
+  return /^[A-Za-z0-9+_.[\]-]{1,32}$/u.test(command) ? command : undefined;
 }
 
 function commandFiles(
@@ -353,9 +624,11 @@ function commandFiles(
               : profile === "linux" && command === "sh"
                 ? 32_768
                 : profile === "dos"
-                  ? command === "edit"
-                    ? 65_536
-                    : 4_096
+                  ? command === "qbasic"
+                    ? 196_608
+                    : command === "edit"
+                      ? 65_536
+                      : 4_096
                   : 8_192,
       ),
     );
@@ -401,6 +674,7 @@ function plainFile(
 function dosExecutableName(command: string): string {
   if (command === "c++") return "cpp.com";
   if (command === "csdb") return "debug.exe";
+  if (command === "qbasic") return "qbasic.exe";
   if (command === "systeminfo") return "sysinfo.com";
   return `${command.toLowerCase()}.com`;
 }

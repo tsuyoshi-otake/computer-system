@@ -179,8 +179,8 @@ work after a fixed cycle ceiling. The normal CS-Linux Web Terminal separately
 supports foreground `python <file>`, `python --stats <file>`, and the
 `micropython` alias; that operator path may wait for guest events and supports
 Ctrl+C. Returned machine-instruction counts are diagnostic only. The `cpuCycles`
-field is the deterministic modeled CPU cost shared with ASM, C, C++, and BASIC;
-`run --stats` and Python/CS486 diagnostics also convert it to virtual
+field is the deterministic modeled CPU cost shared with ASM, C, C++, and CS
+QBASIC; `run --stats` and Python/CS486 diagnostics also convert it to virtual
 microseconds at the selected hardware clock. Do not use host wall-clock time for
 language rankings. Ordinary MCP shell commands still require a completed
 CS-Linux login. The isolated Python compile/run probe is a separate

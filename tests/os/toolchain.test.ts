@@ -70,15 +70,19 @@ describe("CS486DX shell toolchain", (): void => {
       ].join("\n"),
     );
 
-    expect(shell.submit("basic /work/sum.bas").stdout).toBe("15\n");
-    expect(
-      shell.submit("basicc /work/sum.bas -o /work/sum-basic").exitCode,
-    ).toBe(0);
+    const basicExecutable = compileCs486Source(
+      "basic",
+      filesystem.readFile("/work/sum.bas"),
+    );
+    expect(runCs486(basicExecutable, { memoryBytes: 65_536 }).output).toBe(
+      "15\n",
+    );
+    expect(shell.submit("basic /work/sum.bas").exitCode).toBe(127);
+    expect(shell.submit("basicc /work/sum.bas").exitCode).toBe(127);
     expect(shell.submit("cc /work/sum.c -o /work/sum-c").exitCode).toBe(0);
     expect(shell.submit("c++ /work/answer.cpp -o /work/answer").exitCode).toBe(
       0,
     );
-    expect(shell.submit("/work/sum-basic").stdout).toBe("15\n");
     expect(shell.submit("/work/sum-c").stdout).toBe("15\n");
     expect(shell.submit("/work/answer").stdout).toBe("42\n");
   });
@@ -274,9 +278,12 @@ describe("CS486DX shell toolchain", (): void => {
       ].join("\n"),
     );
 
-    expect(
-      shell.submit("basicc -c /work/answer.bas -o /work/answer.o").exitCode,
-    ).toBe(0);
+    filesystem.writeFile(
+      "/work/answer.o",
+      `CS486OBJ\n${JSON.stringify(
+        compileCs486Object("basic", filesystem.readFile("/work/answer.bas")),
+      )}`,
+    );
     expect(shell.submit("ld /work/answer.o -o /work/answer").exitCode).toBe(0);
     expect(shell.submit("/work/answer").stdout).toBe("42\n");
     expect(shell.submit("c++ /work/inline.cpp -o /work/inline").exitCode).toBe(

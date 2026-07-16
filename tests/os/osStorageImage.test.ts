@@ -49,7 +49,7 @@ describe("OS filesystem images and disk profiles", (): void => {
 
     expect(afterSecond).toEqual(afterFirst);
     const snapshot = second.filesystem.snapshot();
-    expect(snapshot.baseImageId).toBe("cs-linux-1.0-rootfs-v4");
+    expect(snapshot.baseImageId).toBe("cs-linux-1.0-rootfs-v6");
     expect(second.filesystem.exists("/home/cs")).toBe(true);
     expect(second.filesystem.exists("/home/computer")).toBe(false);
     expect(snapshot.files.some(([path]) => path.startsWith("/usr/bin/"))).toBe(
@@ -112,7 +112,7 @@ describe("OS filesystem images and disk profiles", (): void => {
 
     new ShellSession(filesystem, { osProfile: "linux" });
 
-    expect(filesystem.baseImageId).toBe("cs-linux-1.0-rootfs-v4");
+    expect(filesystem.baseImageId).toBe("cs-linux-1.0-rootfs-v6");
     expect(filesystem.exists("/usr/bin/sudo")).toBe(true);
     expect(filesystem.exists("/usr/bin/ls")).toBe(false);
     expect(filesystem.exists("/home/computer")).toBe(false);
@@ -128,6 +128,52 @@ describe("OS filesystem images and disk profiles", (): void => {
       "project.txt",
     );
     expect(filesystem.snapshot().tombstones).toContain("/usr/bin/ls");
+  });
+
+  it("removes BASIC from current Linux and replaces DOS BASIC tools with QBASIC.EXE", (): void => {
+    const linux = new InMemoryFilesystem();
+    const linuxShell = new ShellSession(linux, { osProfile: "linux" });
+    const dos = new InMemoryFilesystem();
+    const dosShell = new ShellSession(dos, { osProfile: "dos" });
+
+    expect(linux.baseImageId).toBe("cs-linux-1.0-rootfs-v6");
+    expect(linux.exists("/usr/bin/basic")).toBe(false);
+    expect(linux.exists("/usr/bin/basicc")).toBe(false);
+    expect(linuxShell.submit("basic C:/DEMO.BAS").exitCode).toBe(127);
+    expect(linuxShell.submit("basicc C:/DEMO.BAS").exitCode).toBe(127);
+
+    expect(dos.baseImageId).toBe("cs-dos-6.2-rootfs-v5");
+    expect(dos.exists("/drives/c/command/basic.com")).toBe(false);
+    expect(dos.exists("/drives/c/command/basicc.com")).toBe(false);
+    expect(dos.exists("/drives/c/command/qbasic.exe")).toBe(true);
+    expect(dos.getSize("/drives/c/command/qbasic.exe")).toBe(196_608);
+    expect(dosShell.submit("BASIC C:\\DEMO.BAS").exitCode).toBe(127);
+  });
+
+  it("keeps the pre-QBASIC Linux v5 and DOS v4 base images immutable", (): void => {
+    registerOsFilesystemImages();
+    const linux = new InMemoryFilesystem();
+    linux.restore({
+      baseImageId: "cs-linux-1.0-rootfs-v5",
+      blobs: [],
+      directories: [],
+      files: [],
+      schema: 2,
+    });
+    const dos = new InMemoryFilesystem();
+    dos.restore({
+      baseImageId: "cs-dos-6.2-rootfs-v4",
+      blobs: [],
+      directories: [],
+      files: [],
+      schema: 2,
+    });
+
+    expect(linux.exists("/usr/bin/basic")).toBe(true);
+    expect(linux.exists("/usr/bin/basicc")).toBe(true);
+    expect(dos.exists("/drives/c/command/basic.com")).toBe(true);
+    expect(dos.exists("/drives/c/command/basicc.com")).toBe(true);
+    expect(dos.exists("/drives/c/command/qbasic.exe")).toBe(false);
   });
 
   it("renames a full legacy home with internal and external hard links without duplicating bytes", (): void => {

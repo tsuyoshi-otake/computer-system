@@ -46,9 +46,18 @@ import {
   type GuestFilesystem,
   unrestrictedGuestFilesystem,
 } from "./guestFilesystem.js";
-import { DosEditSession } from "../editor/dosEditSession.js";
-import type { EditorResult, EditorScreen } from "../editor/editorScreen.js";
+import type { FloppyDrive, FloppyDriveIo } from "./floppyDrive.js";
+import type { EditorScreen } from "../editor/editorScreen.js";
+import {
+  parseTerminalMouseEvent,
+  QBasicSession,
+  type QBasicSessionResult,
+} from "../editor/qbasicSession.js";
 import { ViSession, type ViResult } from "../editor/viSession.js";
+import {
+  parseQBasicCommandLine,
+  QBasicCommandLineError,
+} from "./qbasicCommandLine.js";
 import {
   parseShellProgram,
   ShellSyntaxError,
@@ -102,6 +111,11 @@ export interface ShellSessionOptions {
     operation: "read" | "write",
     bytes: number,
   ) => string | undefined;
+  readonly requestFloppyIo?: (
+    requests: readonly FloppyDriveIo[],
+  ) => string | undefined;
+  readonly floppyDrive?: FloppyDrive;
+  readonly guestFilesystem?: GuestFilesystem;
   readonly syncFilesystem?: () => void;
   readonly osRuntime?: OsRuntimeState;
   readonly onOsRuntimeChanged?: (state: OsRuntimeState) => void;
@@ -188,7 +202,7 @@ export class ShellSession {
   private readonly authentication: LinuxAuthentication | undefined;
   private readonly credentialContext: CredentialContext;
   private readonly guestFilesystem: GuestFilesystem;
-  private editor: DosEditSession | undefined;
+  private editor: QBasicSession | undefined;
   private vi: ViSession | undefined;
   private readonly commands: ShellCommandRuntime;
   private readonly frontend: ShellFrontend;
@@ -283,15 +297,18 @@ export class ShellSession {
       this.credentialContext = new CredentialContext(
         this.authentication.credentials ?? unauthenticatedCredentials,
       );
-      this.guestFilesystem = credentialedFilesystem(
-        filesystem,
-        () => this.credentialContext.current,
-      );
+      this.guestFilesystem =
+        options.guestFilesystem ??
+        credentialedFilesystem(
+          filesystem,
+          () => this.credentialContext.current,
+        );
     } else {
       this.accounts = undefined;
       this.authentication = undefined;
       this.credentialContext = new CredentialContext(initialUserCredentials);
-      this.guestFilesystem = unrestrictedGuestFilesystem(filesystem);
+      this.guestFilesystem =
+        options.guestFilesystem ?? unrestrictedGuestFilesystem(filesystem);
     }
     if (this.osRuntime !== undefined) {
       ensureLinuxRuntimePresence(
@@ -317,6 +334,8 @@ export class ShellSession {
       peripherals: options.peripherals,
       deferGuestExecution: options.deferGuestExecution,
       requestFilesystemIo: options.requestFilesystemIo,
+      requestFloppyIo: options.requestFloppyIo,
+      floppyDrive: options.floppyDrive,
       syncFilesystem: options.syncFilesystem,
       osRuntime: this.osRuntime,
       sessionId: () =>
@@ -621,8 +640,15 @@ export class ShellSession {
     });
   }
 
-  completeForegroundProcess(exitCode: number): void {
+  completeForegroundProcess(
+    exitCode: number,
+    output = "",
+  ): EditorScreen | undefined {
     this.lastExitCode = exitCode;
+    if (this.editor?.options.editorMode === false) {
+      return this.editor.completeRun(exitCode, output);
+    }
+    return undefined;
   }
 
   complete(line: string, cursor: number): ShellCompletionResult {
@@ -669,6 +695,23 @@ export class ShellSession {
       else break;
     }
     return this.withCpuCycles(result);
+  }
+
+  mouse(encoded: string): ShellResult {
+    this.disconnected = false;
+    this.cpuCyclesValue = 1;
+    if (!this.isAuthenticated() || this.editor === undefined) {
+      return this.withCpuCycles(resultFromStreams("", "", 0));
+    }
+    try {
+      return this.withCpuCycles(
+        this.editorResult(this.editor.mouse(parseTerminalMouseEvent(encoded))),
+      );
+    } catch (error: unknown) {
+      return this.withCpuCycles(
+        resultFromStreams("", `editor: ${message(error)}\n`, 2),
+      );
+    }
   }
 
   private withCpuCycles(result: ShellResult): ShellResult {
@@ -1211,6 +1254,12 @@ export class ShellSession {
         return commandFailure(name, "cannot run in a pipeline or redirect");
       }
       return this.startEditor(arguments_);
+    }
+    if (sessionCommand === "dos-qbasic") {
+      if (!interactiveAllowed || command.redirects.length > 0) {
+        return commandFailure(name, "cannot run in a pipeline or redirect");
+      }
+      return this.startQBasic(arguments_);
     }
     if (sessionCommand === "linux-script") {
       if (name !== "bash" && name !== "sh" && name !== "source") {
@@ -3057,12 +3106,13 @@ export class ShellSession {
       const existing = this.filesystem.exists(path)
         ? this.commands.readFile(path)
         : "";
-      this.editor = new DosEditSession(
+      this.editor = new QBasicSession(
         path,
         existing,
         this.terminalWidth,
         this.terminalHeight,
         untitled ? "UNTITLED" : this.commands.profile.pathDialect.display(path),
+        { editorMode: true },
       );
       return {
         exitCode: 0,
@@ -3072,6 +3122,56 @@ export class ShellSession {
       };
     } catch (error: unknown) {
       return commandFailure("edit", message(error));
+    }
+  }
+
+  private startQBasic(arguments_: readonly string[]): ShellCommandResult {
+    try {
+      const commandLine = parseQBasicCommandLine(arguments_);
+      if (commandLine.editorMode) {
+        return this.startEditor(
+          commandLine.fileName === undefined ? [] : [commandLine.fileName],
+        );
+      }
+      const untitled = commandLine.fileName === undefined;
+      const path = this.commands.resolvePath(
+        commandLine.fileName ?? "C:\\UNTITLED.BAS",
+      );
+      const contents = this.filesystem.exists(path)
+        ? this.commands.readFile(path)
+        : "";
+      this.editor = new QBasicSession(
+        path,
+        contents,
+        this.terminalWidth,
+        this.terminalHeight,
+        untitled ? "Untitled" : this.commands.profile.pathDialect.display(path),
+        { editorMode: false, showWelcome: untitled },
+      );
+      const terminalScreen = this.editor.screen();
+      if (!commandLine.run) {
+        return { exitCode: 0, stderr: "", stdout: "", terminalScreen };
+      }
+      const run = this.commands.runQBasicSource(path, contents);
+      if (run.foreground !== undefined) return { ...run, terminalScreen };
+      return {
+        ...run,
+        stdout: "",
+        stderr: "",
+        terminalScreen: this.editor.completeRun(
+          run.exitCode,
+          `${run.stdout}${run.stderr}`,
+        ),
+      };
+    } catch (error: unknown) {
+      this.editor = undefined;
+      return commandFailure(
+        "qbasic",
+        error instanceof QBasicCommandLineError
+          ? error.message
+          : message(error),
+        2,
+      );
     }
   }
 
@@ -3165,9 +3265,28 @@ export class ShellSession {
     return result;
   }
 
-  private editorResult(result: EditorResult): ShellResult {
+  private editorResult(result: QBasicSessionResult): ShellResult {
     const editor = this.editor;
     if (editor === undefined) throw new Error("Editor state is unavailable");
+    if (result.kind === "run") {
+      const run = this.commands.runQBasicSource(
+        editor.fileName,
+        editor.contents,
+      );
+      if (run.foreground !== undefined) {
+        return {
+          ...shellResultFromCommand(run),
+          terminalScreen: result.screen,
+        };
+      }
+      return {
+        ...shellResultFromCommand({ ...run, stderr: "", stdout: "" }),
+        terminalScreen: editor.completeRun(
+          run.exitCode,
+          `${run.stdout}${run.stderr}`,
+        ),
+      };
+    }
     if (result.kind === "save") {
       try {
         this.commands.writeFile(editor.fileName, result.contents);
@@ -3181,7 +3300,11 @@ export class ShellSession {
       this.lastExitCode = 0;
       return {
         ...resultFromStreams(
-          result.discardedChanges ? "Changes discarded\n" : "EDIT closed\n",
+          result.discardedChanges
+            ? "Changes discarded\n"
+            : editor.options.editorMode === true
+              ? "EDIT closed\n"
+              : "QBASIC closed\n",
           "",
           0,
         ),
@@ -3677,8 +3800,6 @@ function dosBatchCommandRequiresInteractiveOwner(commandLine: string): boolean {
     .toLowerCase();
   return new Set([
     "as",
-    "basic",
-    "basicc",
     "c",
     "c++",
     "cc",
@@ -3688,6 +3809,7 @@ function dosBatchCommandRequiresInteractiveOwner(commandLine: string): boolean {
     "ld",
     "micropython",
     "python",
+    "qbasic",
     "reboot",
     "run",
     "shutdown",

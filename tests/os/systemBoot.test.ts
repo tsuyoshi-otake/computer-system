@@ -75,6 +75,53 @@ describe("default Computer System Linux boot", (): void => {
     });
   });
 
+  it("runs QBASIC asynchronously on CS386SX and returns to its IDE output window", (): void => {
+    const record = new ComputerRecord("computer-133", "standard", {
+      displayProfileId: "portable-vga-256k",
+      hardware: {
+        clockHz: 16_000_000,
+        cpuModel: "cs386sx",
+        memoryBytes: 2_097_152,
+      },
+      osProfile: "dos",
+    });
+    const runtime = new ComputerRuntime();
+    runtime.register(record);
+    runtime.powerOn(record.computerId);
+    runtime.runTick();
+    record.filesystem.writeFile(
+      "/drives/c/demo.bas",
+      "FOR I = 1 TO 6\nTOTAL = TOTAL + I\nNEXT\nPRINT TOTAL * 2\nEND\n",
+    );
+
+    runtime.queueEvent(
+      record.computerId,
+      "terminal_line",
+      "QBASIC /RUN C:\\DEMO.BAS",
+    );
+    for (let tick = 0; tick < 20; tick += 1) runtime.runTick();
+
+    let screen = record.terminal.snapshot().rows.join("\n");
+    expect(screen).toContain("File  Edit  View  Search  Run  Debug");
+    expect(screen).toContain("Program finished");
+    runtime.queueEvent(
+      record.computerId,
+      "terminal_keys",
+      JSON.stringify(["F4"]),
+    );
+    runtime.runTick();
+    screen = record.terminal.snapshot().rows.join("\n");
+    expect(screen).toContain("42");
+
+    runtime.queueEvent(
+      record.computerId,
+      "terminal_mouse",
+      JSON.stringify({ action: "down", button: 0, sequence: 1, x: 4, y: 2 }),
+    );
+    runtime.runTick();
+    expect(record.lifecycle.state.kind).toBe("waiting_event");
+  });
+
   it("shows only the Linux identity, blank line, and username prompt on later boots", (): void => {
     const record = new ComputerRecord("computer-87", "standard");
     const setup = new ShellSession(record.filesystem, {

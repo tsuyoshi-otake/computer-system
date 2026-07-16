@@ -568,6 +568,37 @@ describe("Web companion HTTP server", () => {
       /^scriptevent computer_system:web-input [A-Za-z0-9_-]+ keys %5B%22i%22%2C%22x%22%2C%22Escape%22%5D$/u,
     );
 
+    const mouse = await fetch(`${status.origin}/api/input`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+        Origin: status.origin,
+      },
+      body: JSON.stringify({
+        kind: "mouse",
+        value: { action: "down", button: 0, sequence: 1, x: 12, y: 4 },
+      }),
+    });
+    expect(mouse.status).toBe(202);
+    expect(bds.commands.at(-1)).toMatch(
+      /^scriptevent computer_system:web-input [A-Za-z0-9_-]+ mouse /u,
+    );
+
+    const invalidMouse = await fetch(`${status.origin}/api/input`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+        Origin: status.origin,
+      },
+      body: JSON.stringify({
+        kind: "mouse",
+        value: { action: "move", button: 0, sequence: 2, x: 81, y: 4 },
+      }),
+    });
+    expect(invalidMouse.status).toBe(400);
+
     const invalidResize = await fetch(`${status.origin}/api/resize`, {
       method: "POST",
       headers: {

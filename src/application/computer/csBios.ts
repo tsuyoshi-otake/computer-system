@@ -3,6 +3,7 @@ import { cpuModelSpecification } from "../../domain/cpu/models.js";
 import type { DisplayDevice } from "../../domain/display/displayDevice.js";
 import type { TerminalBuffer } from "../../domain/terminal/terminalBuffer.js";
 import { formatOsIdentity, getOsIdentity } from "../os/osIdentity.js";
+import type { ComputerOsProfile } from "../../domain/computer/computer.js";
 
 const biosColumns = 80;
 const biosRows = 25;
@@ -12,7 +13,13 @@ const rightColumns = innerColumns - leftColumns - 1;
 const textAttribute = 0x07;
 
 /** Render one deterministic, real-profile CSBIOS POST frame in VGA text mode. */
-export function renderCsBiosPost(record: ComputerRecord): void {
+export function renderCsBiosPost(
+  record: ComputerRecord,
+  options: {
+    readonly bootProfile?: ComputerOsProfile;
+    readonly floppyPresent?: boolean;
+  } = {},
+): void {
   const { display, terminal } = record;
   if (display.state.kind !== "post") {
     throw new Error("CSBIOS POST requires the display post state");
@@ -29,6 +36,7 @@ export function renderCsBiosPost(record: ComputerRecord): void {
   const extendedKiB = Math.max(0, memoryKiB - 640);
   const videoMemoryKiB = displayProfile.videoMemoryBytes / 1_024;
   const diskKiB = Math.floor(record.filesystem.limits.capacityBytes / 1_024);
+  const bootProfile = options.bootProfile ?? record.osProfile;
   const panel =
     displayProfile.panel.kind === "integrated_lcd"
       ? `${String(displayProfile.panel.width)}x480 LCD`
@@ -59,11 +67,11 @@ export function renderCsBiosPost(record: ComputerRecord): void {
     ),
     splitRow("Display Mode   : VGA text 80x25", `Display Panel    : ${panel}`),
     splitRow(
-      `Operating Sys. : ${formatOsIdentity(getOsIdentity(record.osProfile))}`,
+      `Operating Sys. : ${formatOsIdentity(getOsIdentity(bootProfile))}`,
       `Maximum Graphics: 640x480`,
     ),
     splitRow(
-      "Floppy Drive A : 1.44 MB, 3.5 in",
+      `Floppy Drive A : ${options.floppyPresent === false ? "Not Present" : "1.44 MB, 3.5 in"}`,
       `Fixed Disk C     : ${String(diskKiB)} KB`,
     ),
     splitBorder(),
@@ -78,7 +86,9 @@ export function renderCsBiosPost(record: ComputerRecord): void {
     row(`Memory Modules: ${cpu.microarchitecture.memoryModules}`),
     row("CSBIOS Date 07/14/26  Revision 1.0"),
     row(""),
-    row(`Starting ${formatOsIdentity(getOsIdentity(record.osProfile))}...`),
+    row(
+      `Starting ${formatOsIdentity(getOsIdentity(bootProfile))}${bootProfile !== record.osProfile ? " from Floppy A:" : ""}...`,
+    ),
     row(""),
     row(""),
     border(),

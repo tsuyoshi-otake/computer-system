@@ -40,6 +40,8 @@ import {
   type TickWorkScope,
   type TickWorkSummary,
 } from "../runtime/computerWorkMonitor.js";
+import type { FloppyMedia } from "../../domain/storage/floppyMedia.js";
+import type { FloppyDriveActivity, FloppyDriveIo } from "../os/floppyDrive.js";
 
 export interface ComputerHostOptions {
   readonly blockIoScheduler?: BlockIoScheduler;
@@ -50,6 +52,12 @@ export interface ComputerHostOptions {
     "status" | "step"
   >;
   readonly workMonitor?: ComputerWorkMonitor;
+  readonly saveFloppy?: (computerId: string, media: FloppyMedia) => void;
+  readonly onGuestFloppyEject?: (computerId: string) => void;
+  readonly onFloppyActivity?: (
+    computerId: string,
+    activity: FloppyDriveActivity,
+  ) => void;
 }
 
 export type ComputerBlockDeviceKind = "fdd" | "hdd";
@@ -65,6 +73,14 @@ interface ComputerBlockDevices {
   readonly diskProfile: ComputerDiskProfile;
   readonly fdd: DeterministicBlockDevice;
   readonly hdd: DeterministicBlockDevice;
+}
+
+interface PendingFloppyIoJob {
+  readonly computerId: string;
+  readonly event: string;
+  readonly id: string;
+  readonly parts: readonly Omit<BlockRequest, "id">[];
+  nextPart: number;
 }
 
 export type HostRegistrationResult =
@@ -91,10 +107,13 @@ export class ComputerHost {
     Pick<ComputerStorageMigrationCoordinator, "status" | "step"> | undefined;
   private hostTick = 0;
   private filesystemIoSequence = 0;
+  private floppyIoSequence = 0;
   private readonly pendingFilesystemIo = new Map<
     string,
     { readonly computerId: string; readonly event: string }
   >();
+  private readonly pendingFloppyJobs = new Map<string, PendingFloppyIoJob>();
+  private readonly floppyPartJobs = new Map<string, string>();
   private lastWorkSummaryValue: TickWorkSummary | undefined;
   private persistenceCursor = 0;
 
@@ -109,6 +128,21 @@ export class ComputerHost {
     runtime.configureFilesystemIo((computerId, operation, bytes) =>
       this.requestFilesystemIo(computerId, operation, bytes),
     );
+    runtime.configureFloppy({
+      requestIo: (computerId, requests) =>
+        this.requestFloppyIo(computerId, requests),
+      save: (computerId, media) => {
+        if (options.saveFloppy === undefined)
+          throw new Error("Floppy persistence boundary is unavailable");
+        options.saveFloppy(computerId, media);
+      },
+      guestEject: (computerId) => {
+        if (options.onGuestFloppyEject === undefined)
+          throw new Error("Guest Floppy eject boundary is unavailable");
+        options.onGuestFloppyEject(computerId);
+      },
+      activity: options.onFloppyActivity,
+    });
     runtime.configureLifecycleBoundaries({
       pendingFilesystemIo: (computerId) => this.pendingBlockIo(computerId),
       stopDevices: (computerId) => this.stopBlockDevices(computerId),
@@ -207,14 +241,54 @@ export class ComputerHost {
     return this.blockIo.insertMedia(blockDeviceId(computerId, "fdd"), media);
   }
 
+  insertFloppyMedia(computerId: string, media: FloppyMedia): number {
+    const drive = this.runtime.floppyDrive(computerId);
+    if (drive === undefined) throw new Error(`Unknown Computer ${computerId}`);
+    drive.insert(media);
+    try {
+      const generation = this.insertFloppy(computerId, {
+        id: media.mediaId,
+        sectorCount: floppy1440kProfile.sectorCount,
+        writeProtected: media.writeProtected,
+      });
+      this.runtime.attachFloppyMedia(computerId, media);
+      return generation;
+    } catch (error: unknown) {
+      try {
+        this.ejectFloppy(computerId);
+      } catch {
+        // The original insertion failure remains authoritative. The drive
+        // object is still cleared below so callers cannot observe half-media.
+      }
+      drive.eject();
+      throw error;
+    }
+  }
+
   ejectFloppy(computerId: string): void {
     const record = this.records.get(computerId);
     if (record === undefined) throw new Error(`Unknown Computer ${computerId}`);
     this.ensureBlockDevices(record);
-    this.blockIo.ejectMedia(
+    const completions = this.blockIo.ejectMedia(
       blockDeviceId(computerId, "fdd"),
       this.guestNanoseconds,
     );
+    this.deliverBlockIo({
+      budgetDeferred: false,
+      bytes: 0,
+      completions,
+      hostDeferred: false,
+      sectors: 0,
+    });
+  }
+
+  ejectFloppyMedia(computerId: string): FloppyMedia {
+    const drive = this.runtime.floppyDrive(computerId);
+    if (drive === undefined) throw new Error(`Unknown Computer ${computerId}`);
+    this.ejectFloppy(computerId);
+    const media = drive.eject();
+    this.runtime.detachFloppyMedia(computerId);
+    return media;
   }
 
   get lastWorkSummary(): TickWorkSummary | undefined {
@@ -319,8 +393,113 @@ export class ComputerHost {
     return event;
   }
 
+  private requestFloppyIo(
+    computerId: string,
+    requests: readonly FloppyDriveIo[],
+  ): string | undefined {
+    const record = this.records.get(computerId);
+    const drive = this.runtime.floppyDrive(computerId);
+    const media = drive?.media;
+    if (record === undefined || media === undefined || requests.length === 0)
+      return undefined;
+    if (
+      requests.some(
+        (request) => request.mediaGeneration !== media.instanceGeneration,
+      )
+    ) {
+      return undefined;
+    }
+    const devices = this.ensureBlockDevices(record);
+    const parts: Omit<BlockRequest, "id">[] = [];
+    for (const request of requests) {
+      for (const extent of request.extents) {
+        let lba = extent.lba;
+        let remaining = extent.sectorCount;
+        while (remaining > 0) {
+          const sectorCount = Math.min(
+            remaining,
+            devices.fdd.profile.maximumRequestSectors,
+          );
+          parts.push({ lba, operation: request.operation, sectorCount });
+          if (parts.length > 4_096) return undefined;
+          lba += sectorCount;
+          remaining -= sectorCount;
+        }
+      }
+    }
+    if (parts.length === 0) return undefined;
+    this.floppyIoSequence =
+      this.floppyIoSequence === Number.MAX_SAFE_INTEGER
+        ? 1
+        : this.floppyIoSequence + 1;
+    const id = `fd-${computerId}-${this.floppyIoSequence.toString(36)}`;
+    const job: PendingFloppyIoJob = {
+      computerId,
+      event: `block_io:${id}`,
+      id,
+      nextPart: 0,
+      parts: Object.freeze(parts.map((part) => Object.freeze({ ...part }))),
+    };
+    this.pendingFloppyJobs.set(id, job);
+    if (!this.submitNextFloppyPart(job)) {
+      this.pendingFloppyJobs.delete(id);
+      return undefined;
+    }
+    return job.event;
+  }
+
+  private submitNextFloppyPart(job: PendingFloppyIoJob): boolean {
+    const part = job.parts[job.nextPart];
+    if (part === undefined) return false;
+    const requestId = `${job.id}-${job.nextPart.toString(36)}`;
+    const result = this.submitBlockIo(job.computerId, "fdd", {
+      ...part,
+      id: requestId,
+    });
+    if (result.outcome !== "accepted") return false;
+    job.nextPart += 1;
+    this.floppyPartJobs.set(requestId, job.id);
+    return true;
+  }
+
   private deliverBlockIo(result: BlockIoTickResult): void {
     for (const { completion } of result.completions) {
+      const floppyJobId = this.floppyPartJobs.get(completion.request.id);
+      if (floppyJobId !== undefined) {
+        this.floppyPartJobs.delete(completion.request.id);
+        const job = this.pendingFloppyJobs.get(floppyJobId);
+        if (job === undefined) continue;
+        if (completion.outcome !== "completed") {
+          this.pendingFloppyJobs.delete(floppyJobId);
+          this.runtime.queueEvent(
+            job.computerId,
+            job.event,
+            completion.outcome,
+            completion.code,
+          );
+          continue;
+        }
+        if (job.nextPart < job.parts.length) {
+          if (!this.submitNextFloppyPart(job)) {
+            this.pendingFloppyJobs.delete(floppyJobId);
+            this.runtime.queueEvent(
+              job.computerId,
+              job.event,
+              "failed",
+              "io_queue_full",
+            );
+          }
+          continue;
+        }
+        this.pendingFloppyJobs.delete(floppyJobId);
+        this.runtime.queueEvent(
+          job.computerId,
+          job.event,
+          completion.outcome,
+          completion.code,
+        );
+        continue;
+      }
       const pending = this.pendingFilesystemIo.get(completion.request.id);
       if (pending === undefined) continue;
       this.pendingFilesystemIo.delete(completion.request.id);

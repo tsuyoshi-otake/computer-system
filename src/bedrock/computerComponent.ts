@@ -38,6 +38,11 @@ import {
   isComputerSystemBlock,
   refreshFaceIoTopology,
 } from "./faceIoTopology.js";
+import {
+  ejectFloppyForBreak,
+  handleFloppyInteraction,
+} from "./floppyComponent.js";
+import { giveOrDropItem } from "./giveOrDropItem.js";
 
 export { computerIdentityProperty } from "./computerRegistry.js";
 export const desktopComputerDisplayName = "Desktop Computer System";
@@ -192,6 +197,7 @@ function breakComputerBlock(
 ): void {
   const result = identityService().break(physicalKey);
   if (result.outcome !== "placed") return;
+  ejectFloppyForBreak(result.computerId, player, blockFromKey(physicalKey));
   computerHost.serial.disconnectComputer(result.computerId, "block_broken");
   computerHost.peripherals.clearComputer(result.computerId);
   scheduleOwnedFinalization(breakingBlocks, physicalKey, {
@@ -261,6 +267,8 @@ function handleInteraction(event: BlockComponentPlayerInteractEvent): void {
     return;
   }
   const player = event.player;
+  const record = ensureComputer(observation.computerId, observation.family);
+  if (handleFloppyInteraction(event, record)) return;
   selectComputerTerminal(player.id, observation.computerId);
   if (!hasAdjacentMonitor(event.block)) {
     player.sendMessage(
@@ -271,7 +279,6 @@ function handleInteraction(event: BlockComponentPlayerInteractEvent): void {
   system.run((): void => {
     if (!player.isValid) return;
     try {
-      const record = ensureComputer(observation.computerId, observation.family);
       requestWebComputerTerminal(player, record, event.block);
     } catch (error: unknown) {
       if (player.isValid) {
@@ -399,12 +406,7 @@ function giveComputerItem(
   if (computerId !== undefined) {
     item.setDynamicProperty(computerIdentityProperty, computerId);
   }
-  const inventory = player.getComponent(
-    EntityComponentTypes.Inventory,
-  )?.container;
-  const remainder = inventory === undefined ? item : inventory.addItem(item);
-  if (remainder !== undefined)
-    player.dimension.spawnItem(remainder, player.location);
+  giveOrDropItem(player, item);
 }
 
 function familyParameter(

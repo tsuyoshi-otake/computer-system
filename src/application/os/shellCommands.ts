@@ -76,6 +76,7 @@ import {
   truncateToDosFatTimestamp,
   type DosFatMetadataSnapshotV1,
 } from "./dosRuntimeState.js";
+import type { FloppyDrive, FloppyDriveIo } from "./floppyDrive.js";
 
 export type {
   ShellAction,
@@ -105,6 +106,10 @@ export interface ShellCommandRuntimeOptions {
     operation: "read" | "write",
     bytes: number,
   ) => string | undefined;
+  readonly requestFloppyIo?: (
+    requests: readonly FloppyDriveIo[],
+  ) => string | undefined;
+  readonly floppyDrive?: FloppyDrive;
   readonly syncFilesystem?: () => void;
   readonly osRuntime?: OsRuntimeState;
   readonly sessionId?: () => string | undefined;
@@ -267,6 +272,11 @@ export class ShellCommandRuntime {
   ): { readonly generation: number; readonly letter: string } | undefined {
     const match = /^\/drives\/([a-z])(?:\/|$)/u.exec(path);
     if (match === null || state === undefined) return undefined;
+    // Real removable A: media owns its FAT metadata in FloppyMedia. The DOS
+    // aggregate still owns drive selection/generation, but must not maintain a
+    // second metadata truth for the same files.
+    if (match[1] === "a" && this.options.floppyDrive?.media !== undefined)
+      return undefined;
     const media = state.requireMedia(match[1]!.toUpperCase());
     return { generation: media.mediaGeneration, letter: media.letter };
   }
@@ -1347,6 +1357,34 @@ export class ShellCommandRuntime {
     return this.installedSystemUtility(name) !== undefined;
   }
 
+  runQBasicSource(sourceName: string, source: string): ShellCommandResult {
+    if (source.length > 128_000)
+      return this.toolchainFailure("qbasic", "source limit exceeded");
+    if (this.options.deferGuestExecution === true) {
+      return {
+        exitCode: 0,
+        foreground: {
+          command: "qbasic",
+          credentials: this.options.credentials(),
+          kind: "compile",
+          task: {
+            compileOnly: false,
+            kind: "source",
+            language: "basic",
+            runAfterCompile: true,
+            source,
+            sourceName,
+          },
+          umask: this.filesystem.getUmask(),
+        },
+        stderr: "",
+        stdout: "",
+      };
+    }
+    const executable = compileCs486Source("basic", source, { sourceName });
+    return this.executeCs486(executable, false, Math.ceil(source.length / 4));
+  }
+
   private dispatch(
     command: string,
     arguments_: readonly string[],
@@ -1371,7 +1409,7 @@ export class ShellCommandRuntime {
             "info: whoami id hostname uname date uptime stat df du quota man apropos",
             "hardware: cpuinfo free mount dmesg spi i2c /proc/cpuinfo /proc/meminfo",
             "utility: history time sleep seq cut test [",
-            "toolchain: as cc c++ basic basicc ld nm run objdump csdb",
+            "toolchain: as cc c++ ld nm run objdump csdb",
             "syntax: |  >  >>  <  &&  ||  ;  '...'  \"...\"  $VAR  $?",
           ].join("\n") + "\n",
         );
@@ -1510,6 +1548,12 @@ export class ShellCommandRuntime {
         return this.linuxMakeTemporary(arguments_);
       case "mount":
         return this.linuxMount(arguments_);
+      case "umount":
+        return this.linuxUnmount(arguments_);
+      case "eject":
+        return this.linuxEject(arguments_);
+      case "mkfs.fat":
+        return this.linuxFormatFloppy(arguments_);
       case "printenv":
         return this.linuxPrintEnvironment(arguments_);
       case "readlink":
@@ -1538,10 +1582,6 @@ export class ShellCommandRuntime {
         return this.compileExecutable("c", arguments_);
       case "c++":
         return this.compileExecutable("cpp", arguments_);
-      case "basicc":
-        return this.compileExecutable("basic", arguments_);
-      case "basic":
-        return this.runBasic(arguments_);
       case "run":
         return this.runExecutable(arguments_);
       case "csdb":
@@ -2641,6 +2681,14 @@ export class ShellCommandRuntime {
   }
 
   completeFilesystemIo(schedule = true): string | undefined {
+    const floppy = this.options.floppyDrive?.drainIo() ?? [];
+    if (
+      schedule &&
+      floppy.length > 0 &&
+      this.options.requestFloppyIo !== undefined
+    ) {
+      return this.options.requestFloppyIo(floppy);
+    }
     const bytes = this.ioReadBytes + this.ioWriteBytes;
     if (
       !schedule ||
@@ -3106,7 +3154,7 @@ export class ShellCommandRuntime {
         "MD MEM MKDIR MOVE PATH PROMPT RD REN RENAME RMDIR SET TIME",
         "I2C SPI TIMER TREE TYPE VER VOL",
         "",
-        "Development extensions: AS CC C++ BASIC BASICC LD NM OBJDUMP RUN DEBUG VI",
+        "Development extensions: AS CC C++ QBASIC LD NM OBJDUMP RUN DEBUG VI",
         "Type HELP command for a short availability summary.",
         "",
       ].join("\r\n"),
@@ -3236,7 +3284,7 @@ export class ShellCommandRuntime {
   }
 
   private compileExecutable(
-    language: Cs486SourceLanguage | "asm",
+    language: Exclude<Cs486SourceLanguage, "basic"> | "asm",
     arguments_: readonly string[],
   ): ShellCommandResult {
     const name = language === "asm" ? "as" : language;
@@ -3270,14 +3318,7 @@ export class ShellCommandRuntime {
       return {
         exitCode: 0,
         foreground: {
-          command:
-            language === "asm"
-              ? "as"
-              : language === "cpp"
-                ? "c++"
-                : language === "basic"
-                  ? "basicc"
-                  : "c",
+          command: language === "asm" ? "as" : language === "cpp" ? "c++" : "c",
           credentials: this.options.credentials(),
           kind: "compile",
           task: {
@@ -3392,36 +3433,6 @@ export class ShellCommandRuntime {
         ),
       ),
     };
-  }
-
-  private runBasic(arguments_: readonly string[]): ShellCommandResult {
-    if (arguments_.length !== 1)
-      return this.toolchainUsage("basic <source.bas>");
-    const source = this.readFile(arguments_[0]!);
-    if (source.length > 128_000)
-      return this.toolchainFailure("basic", "source limit exceeded");
-    if (this.options.deferGuestExecution === true) {
-      return {
-        exitCode: 0,
-        foreground: {
-          command: "basic",
-          credentials: this.options.credentials(),
-          kind: "compile",
-          task: {
-            compileOnly: false,
-            kind: "source",
-            language: "basic",
-            runAfterCompile: true,
-            source,
-          },
-          umask: this.filesystem.getUmask(),
-        },
-        stderr: "",
-        stdout: "",
-      };
-    }
-    const executable = compileCs486Source("basic", source);
-    return this.executeCs486(executable, false, Math.ceil(source.length / 4));
   }
 
   private runExecutable(arguments_: readonly string[]): ShellCommandResult {
@@ -4974,7 +4985,38 @@ export class ShellCommandRuntime {
   }
 
   private linuxMount(arguments_: readonly string[]): ShellCommandResult {
-    if (arguments_.length !== 0) return usage("mount");
+    if (arguments_.length !== 0) {
+      if (this.options.credentials().effectiveUserId !== 0)
+        return failure("mount", "permission denied", 1);
+      const filtered = arguments_.filter(
+        (value) => value !== "-t" && value !== "vfat",
+      );
+      if (
+        filtered.length !== 2 ||
+        filtered[0] !== "/dev/fd0" ||
+        filtered[1] !== "/mnt/floppy"
+      ) {
+        return usage("mount [-t vfat] /dev/fd0 /mnt/floppy");
+      }
+      const drive = this.options.floppyDrive;
+      if (drive === undefined)
+        return failure("mount", "floppy drive is unavailable", 1);
+      drive.mountLinux();
+      this.options.osRuntime?.mount({
+        filesystemType: "vfat",
+        mountedTick: this.options.currentTick(),
+        options: Object.freeze([
+          "uid=1000",
+          "gid=1000",
+          "fmask=0133",
+          "dmask=0022",
+        ]),
+        readOnly: drive.media?.writeProtected === true,
+        source: "/dev/fd0",
+        target: "/mnt/floppy",
+      });
+      return success();
+    }
     if (this.options.osRuntime !== undefined) {
       return success(
         this.options.osRuntime
@@ -5000,6 +5042,122 @@ export class ShellCommandRuntime {
         "",
       ].join("\n"),
     );
+  }
+
+  dosFormat(arguments_: readonly string[]): ShellCommandResult {
+    const drive = this.options.floppyDrive;
+    if (drive === undefined)
+      return status(1, "", "Not ready reading drive A\r\n");
+    let bootable = false;
+    let label = "";
+    let driveSeen = false;
+    for (const argument of arguments_) {
+      if (/^A:$/iu.test(argument)) driveSeen = true;
+      else if (/^\/S$/iu.test(argument)) bootable = true;
+      else if (/^\/V:/iu.test(argument)) label = argument.slice(3);
+      else return status(2, "", "Invalid switch.\r\n");
+    }
+    if (!driveSeen) return status(2, "", "Required parameter missing.\r\n");
+    drive.format(bootable, label);
+    this.refreshDosFloppyState();
+    return success("Formatting 1.44M\r\nFormat complete.\r\n");
+  }
+
+  dosSystemDisk(arguments_: readonly string[]): ShellCommandResult {
+    if (arguments_.length !== 1 || !/^A:$/iu.test(arguments_[0]!))
+      return status(2, "", "The syntax of the command is incorrect.\r\n");
+    const drive = this.options.floppyDrive;
+    if (drive === undefined)
+      return status(1, "", "Not ready reading drive A\r\n");
+    drive.installSystem();
+    return success("System transferred.\r\n");
+  }
+
+  dosEject(arguments_: readonly string[]): ShellCommandResult {
+    if (
+      arguments_.length > 1 ||
+      (arguments_[0] !== undefined && !/^A:$/iu.test(arguments_[0]))
+    ) {
+      return status(2, "", "The syntax of the command is incorrect.\r\n");
+    }
+    const drive = this.options.floppyDrive;
+    if (drive === undefined)
+      return status(1, "", "Not ready reading drive A\r\n");
+    drive.requestGuestEject();
+    return success("Diskette ejected from drive A:.\r\n");
+  }
+
+  private refreshDosFloppyState(): void {
+    const state = this.dosRuntime;
+    const media = this.options.floppyDrive?.media;
+    if (state === undefined || media === undefined) return;
+    const current = state.driveState("A");
+    if (current.mediaPresent) state.ejectMedia("A", current.mediaGeneration);
+    const detached = state.driveState("A");
+    state.mountMedia("A", {
+      generation: Math.max(
+        media.instanceGeneration,
+        detached.mediaGeneration + 1,
+      ),
+      readOnly: media.writeProtected,
+      volumeLabel: media.volumeLabel,
+    });
+  }
+
+  private linuxUnmount(arguments_: readonly string[]): ShellCommandResult {
+    if (arguments_.length !== 1 || arguments_[0] !== "/mnt/floppy")
+      return usage("umount /mnt/floppy");
+    if (this.options.credentials().effectiveUserId !== 0)
+      return failure("umount", "permission denied", 1);
+    const drive = this.options.floppyDrive;
+    if (drive === undefined)
+      return failure("umount", "floppy drive is unavailable", 1);
+    drive.unmountLinux();
+    this.options.osRuntime?.unmount("/mnt/floppy");
+    return success();
+  }
+
+  private linuxEject(arguments_: readonly string[]): ShellCommandResult {
+    if (
+      arguments_.length > 1 ||
+      (arguments_[0] !== undefined && arguments_[0] !== "/dev/fd0")
+    ) {
+      return usage("eject [/dev/fd0]");
+    }
+    if (this.options.credentials().effectiveUserId !== 0)
+      return failure("eject", "permission denied", 1);
+    const drive = this.options.floppyDrive;
+    if (drive === undefined)
+      return failure("eject", "floppy drive is unavailable", 1);
+    if (drive.linuxMounted) {
+      drive.unmountLinux();
+      this.options.osRuntime?.unmount("/mnt/floppy");
+    }
+    drive.requestGuestEject();
+    return success();
+  }
+
+  private linuxFormatFloppy(arguments_: readonly string[]): ShellCommandResult {
+    if (this.options.credentials().effectiveUserId !== 0)
+      return failure("mkfs.fat", "permission denied", 1);
+    let label = "";
+    const operands: string[] = [];
+    for (let index = 0; index < arguments_.length; index += 1) {
+      if (arguments_[index] === "-n") label = arguments_[++index] ?? "";
+      else if (arguments_[index] === "-F") {
+        if (arguments_[++index] !== "12")
+          return failure("mkfs.fat", "only FAT12 is supported", 1);
+      } else operands.push(arguments_[index]!);
+    }
+    if (operands.length !== 1 || operands[0] !== "/dev/fd0")
+      return usage("mkfs.fat [-F 12] [-n LABEL] /dev/fd0");
+    const drive = this.options.floppyDrive;
+    if (drive === undefined)
+      return failure("mkfs.fat", "floppy drive is unavailable", 1);
+    if (drive.linuxMounted)
+      return failure("mkfs.fat", "/dev/fd0 is mounted", 1);
+    drive.format(false, label);
+    return success("mkfs.fat: formatted 1.44 MiB FAT12 floppy\n");
   }
 
   private linuxDmesg(arguments_: readonly string[]): ShellCommandResult {

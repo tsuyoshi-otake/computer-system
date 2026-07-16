@@ -203,3 +203,14 @@
   tests with suspect globals removed, then execute the probe through the real
   BDS MCP boundary. — Evidence: the authentication/reboot probe passes without
   `structuredClone` and in two isolated stdio MCP runs.
+- Do not construct a service at module evaluation when its repository reads
+  Bedrock World Dynamic Properties. Instantiate it from the world-ready startup
+  owner and expose a guarded accessor to later adapters. — Evidence: the Floppy
+  repository failed real-BDS early execution until `startComputerHost()` became
+  its construction owner.
+- `Server started` is transport readiness, not application-storage readiness.
+  Restart probes that depend on migrated state must wait for the explicit
+  `CS_STORAGE_MIGRATION` complete record and deduplicate their command. —
+  Evidence: the second BDS session migrated 20 persisted probe Computers and
+  passed only after the runner replaced its fixed one-second delay with the
+  readiness record.

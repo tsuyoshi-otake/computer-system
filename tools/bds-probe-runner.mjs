@@ -14,6 +14,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const probeLogPrefix = "CS_PROBE_RESULT ";
+const storageMigrationLogPrefix = "CS_STORAGE_MIGRATION ";
 const terminalCloseLogPrefix = "CS_TERMINAL_CLOSE ";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const distributionRoot = process.env.BDS_HOME;
@@ -230,6 +231,7 @@ function runServer(serverRoot, mode) {
     const recentLines = [];
     let buffer = "";
     let ready = false;
+    let probeSent = false;
     let terminalObserved = false;
     let stopSent = false;
     let diagnosticContinuation = 0;
@@ -295,10 +297,29 @@ function runServer(serverRoot, mode) {
                   "Open the terminal, then leave the server while it remains open.",
               })}`,
             );
-          } else {
-            setTimeout(() => {
+          }
+        }
+
+        const migrationPrefixIndex = line.indexOf(storageMigrationLogPrefix);
+        if (
+          mode === "probe" &&
+          ready &&
+          !probeSent &&
+          migrationPrefixIndex !== -1
+        ) {
+          try {
+            const migration = JSON.parse(
+              line
+                .slice(migrationPrefixIndex + storageMigrationLogPrefix.length)
+                .trim(),
+            );
+            if (migration.state === "complete") {
+              probeSent = true;
               child.stdin.write("scriptevent computer_system:probe headless\n");
-            }, 1_000);
+            }
+          } catch {
+            // The normal diagnostics path retains malformed log output. A
+            // later valid readiness record may still start the bounded probe.
           }
         }
 

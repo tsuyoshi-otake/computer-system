@@ -2,16 +2,24 @@ import { system, world } from "@minecraft/server";
 
 import { DynamicPropertyComputerRepository } from "../adapters/storage/dynamicPropertyComputerRepository.js";
 import { DynamicPropertyStorageMigrationRepository } from "../adapters/storage/dynamicPropertyStorageMigrationRepository.js";
+import { DynamicPropertyFloppyRepository } from "../adapters/storage/dynamicPropertyFloppyRepository.js";
 import { ComputerHost } from "../application/computer/computerHost.js";
 import { ComputerPersistenceService } from "../application/computer/persistence.js";
 import { ComputerStorageMigrationCoordinator } from "../application/computer/storageMigration.js";
 import { ComputerRuntime } from "../application/computer/computerRuntime.js";
 import { ComputerWorkMonitor } from "../application/runtime/computerWorkMonitor.js";
 import type { GameClockSnapshot } from "../application/os/clock.js";
+import type { FloppyDriveActivity } from "../application/os/floppyDrive.js";
 import type { ComputerRecord } from "../domain/computer/computer.js";
+import { FloppyMediaService } from "../application/computer/floppyMediaService.js";
 
 const repository = new DynamicPropertyComputerRepository(world);
 const persistence = new ComputerPersistenceService(repository);
+let floppyIdentitySequence = 0;
+let floppyMediaServiceValue: FloppyMediaService | undefined;
+let guestFloppyEjectHandler: ((computerId: string) => void) | undefined;
+let floppyActivityHandler:
+  ((computerId: string, activity: FloppyDriveActivity) => void) | undefined;
 export const storageMigration = new ComputerStorageMigrationCoordinator(
   new DynamicPropertyStorageMigrationRepository(world),
 );
@@ -46,8 +54,63 @@ export const computerHost = new ComputerHost(
     },
     storageMigration,
     workMonitor,
+    saveFloppy: (_computerId, media): void => {
+      const result = floppyMediaService().save(media);
+      if (result.outcome === "failed") throw result.error;
+      if (result.outcome === "missing")
+        throw new Error(`Floppy media ${result.mediaId} is not cataloged`);
+    },
+    onGuestFloppyEject: (computerId): void => {
+      if (guestFloppyEjectHandler === undefined)
+        throw new Error("Guest Floppy eject handler is unavailable");
+      guestFloppyEjectHandler(computerId);
+    },
+    onFloppyActivity: (computerId, activity): void =>
+      floppyActivityHandler?.(computerId, activity),
   },
 );
+
+export function setGuestFloppyEjectHandler(
+  handler: (computerId: string) => void,
+): void {
+  guestFloppyEjectHandler = handler;
+}
+
+export function floppyMediaService(): FloppyMediaService {
+  if (floppyMediaServiceValue === undefined)
+    throw new Error("Floppy media storage is not ready");
+  return floppyMediaServiceValue;
+}
+
+export function setFloppyActivityHandler(
+  handler: (computerId: string, activity: FloppyDriveActivity) => void,
+): void {
+  floppyActivityHandler = handler;
+}
+
+function allocateFloppyMediaId(): string {
+  floppyIdentitySequence =
+    floppyIdentitySequence === Number.MAX_SAFE_INTEGER
+      ? 1
+      : floppyIdentitySequence + 1;
+  const alphabet = "0123456789abcdefghjkmnpqrstvwxyz";
+  let value = fnv32(`${String(Date.now())}:${String(floppyIdentitySequence)}`);
+  let suffix = "";
+  for (let index = 0; index < 8; index += 1) {
+    suffix += alphabet[value & 31]!;
+    value = (Math.imul(value, 1_664_525) + 1_013_904_223) >>> 0;
+  }
+  return `f-${suffix}`;
+}
+
+function fnv32(value: string): number {
+  let hash = 0x811c9dc5;
+  for (const character of value) {
+    hash ^= character.charCodeAt(0);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash;
+}
 
 let started = false;
 let storageBootstrapStarted = false;
@@ -58,6 +121,10 @@ const workMonitorLogPrefix = "CS_WORK_MONITOR ";
 export function startComputerHost(): void {
   if (started) return;
   started = true;
+  floppyMediaServiceValue = new FloppyMediaService(
+    new DynamicPropertyFloppyRepository(world),
+    allocateFloppyMediaId,
+  );
   system.runInterval((): void => {
     computerHost.runTick();
     workMonitorLogTick += 1;

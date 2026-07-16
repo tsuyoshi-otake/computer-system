@@ -29,6 +29,7 @@ import {
 } from "./portable-computer-block.mjs";
 import { createMonitorBlock } from "./monitor-block.mjs";
 import { createMonitorItem } from "./monitor-item.mjs";
+import { createFloppyItem } from "./floppy-item.mjs";
 import {
   createMachineBlockGeometry,
   createMachineBlockTextureAtlas,
@@ -117,6 +118,11 @@ await writeFile(
   "utf8",
 );
 await writeFile(
+  path.join(generatedItemsDirectory, "floppy_disk.json"),
+  `${JSON.stringify(createFloppyItem(), null, 2)}\n`,
+  "utf8",
+);
+await writeFile(
   path.join(resourceOutput, "textures", "item_texture.json"),
   `${JSON.stringify(createMachineItemTextureAtlas(), null, 2)}\n`,
   "utf8",
@@ -140,6 +146,10 @@ await Promise.all(
       );
     },
   ),
+);
+await writeFile(
+  path.join(resourceOutput, "textures", "items", "floppy_disk.png"),
+  await readFile(path.join(root, "tools", "assets", "floppy-disk.png")),
 );
 await Promise.all(
   Object.values(machineTextureSources).map(async (filename) => {

@@ -3,11 +3,12 @@ import { system, world, type Block, type Player } from "@minecraft/server";
 import type { ComputerRecord } from "../domain/computer/computer.js";
 import type { RuntimeCommandResult } from "../application/computer/computerRuntime.js";
 import { TerminalSnapshotScheduler } from "../application/terminal/terminalSnapshotScheduler.js";
+import { FloppyAudioEventBroker } from "../application/terminal/floppyAudioEvents.js";
 import {
   WebTerminalAccessRegistry,
   type WebTerminalAccessMode,
 } from "../application/terminal/webTerminalAccess.js";
-import { computerHost } from "./computerHost.js";
+import { computerHost, setFloppyActivityHandler } from "./computerHost.js";
 import { selectComputerTerminal } from "./computerTerminal.js";
 
 const requestMarker = "CS_WEB_SESSION_REQUEST ";
@@ -41,7 +42,13 @@ interface ActiveSession {
   readonly rangeCheckDisabledForDebug: boolean;
   readonly sessionId: string;
   access: "in_range" | "out_of_range";
+  audioCursor: number;
   lastSnapshot?: string;
+  mouseButtons: number;
+  mouseSequence: number;
+  mouseX: number;
+  mouseY: number;
+  pendingMouseMove?: string;
 }
 
 interface WebTerminalAccessPoint {
@@ -53,6 +60,8 @@ interface WebTerminalAccessPoint {
 
 const pendingRequests = new Map<string, PendingRequest>();
 const activeSessions = new Map<string, ActiveSession>();
+const sessionsByComputer = new Map<string, Set<string>>();
+const floppyAudio = new FloppyAudioEventBroker(256);
 const terminalAccess = new WebTerminalAccessRegistry(maxActiveSessions);
 const snapshotScheduler = new TerminalSnapshotScheduler({
   maximumEagerAttempts: maxEagerSnapshotAttempts,
@@ -156,7 +165,14 @@ export function handleWebTerminalScriptEvent(
 export function startWebTerminalBridge(): void {
   if (started) return;
   started = true;
+  setFloppyActivityHandler((computerId, activity): void => {
+    const event = floppyAudio.record(computerId, activity, system.currentTick);
+    if (event === undefined) return;
+    for (const sessionId of sessionsByComputer.get(computerId) ?? [])
+      snapshotScheduler.requestEager(sessionId);
+  });
   system.runInterval(emitEagerSnapshots, 1);
+  system.runInterval(flushPendingMouseMoves, 1);
   system.runInterval(emitChangedSnapshots, 5);
   system.runInterval(pruneExpiredSessions, 100);
   world.afterEvents.playerLeave.subscribe(({ playerId }): void => {
@@ -244,14 +260,22 @@ function handleResponse(message: string): void {
     rangeCheckDisabledForDebug,
     sessionId,
     access: "in_range",
+    audioCursor: floppyAudio.latestSequence(request.computerId),
+    mouseButtons: 0,
+    mouseSequence: -1,
+    mouseX: 1,
+    mouseY: 1,
   };
   try {
     snapshotScheduler.attach(sessionId);
-    terminalAccess.attach(
+    const attached = terminalAccess.attach(
       sessionId,
       request.computerId,
       mode as WebTerminalAccessMode,
     );
+    if (attached.demotedSessionId !== undefined) {
+      releaseMouseButtons(activeSessions.get(attached.demotedSessionId));
+    }
   } catch {
     snapshotScheduler.detach(sessionId);
     request.player.sendMessage(
@@ -261,6 +285,12 @@ function handleResponse(message: string): void {
     return;
   }
   activeSessions.set(sessionId, session);
+  let computerSessions = sessionsByComputer.get(session.computerId);
+  if (computerSessions === undefined) {
+    computerSessions = new Set();
+    sessionsByComputer.set(session.computerId, computerSessions);
+  }
+  computerSessions.add(sessionId);
   request.player.sendMessage(
     "Open Computer System Web Terminal (valid for 2 minutes):",
   );
@@ -275,9 +305,8 @@ function handleResponse(message: string): void {
 }
 
 function handleInput(message: string): void {
-  const match = /^([A-Za-z0-9_-]{12,32}) (line|keys) ([^\s]{0,180})$/u.exec(
-    message,
-  );
+  const match =
+    /^([A-Za-z0-9_-]{12,32}) (line|keys|mouse) ([^\s]{0,180})$/u.exec(message);
   if (match === null) return;
   const session = requireActiveSession(match[1] ?? "");
   if (session === undefined || !terminalAccess.canWrite(session.sessionId))
@@ -288,7 +317,31 @@ function handleInput(message: string): void {
   } catch {
     return;
   }
-  if (match[2] === "keys") {
+  if (match[2] === "mouse") {
+    const event = parseTerminalMouseEvent(value);
+    if (event === undefined || event.sequence <= session.mouseSequence) return;
+    session.mouseSequence = event.sequence;
+    session.mouseX = event.x;
+    session.mouseY = event.y;
+    if (event.action === "move") {
+      session.pendingMouseMove = value;
+      return;
+    }
+    flushPendingMouseMove(session);
+    const mask = 1 << event.button;
+    if (event.action === "down") {
+      if ((session.mouseButtons & mask) !== 0) return;
+      session.mouseButtons |= mask;
+    } else {
+      if ((session.mouseButtons & mask) === 0) return;
+      session.mouseButtons &= ~mask;
+    }
+    computerHost.runtime.queueEvent(
+      session.computerId,
+      "terminal_mouse",
+      value,
+    );
+  } else if (match[2] === "keys") {
     if (!isTerminalKeyBatch(value)) return;
     computerHost.runtime.queueEvent(session.computerId, "terminal_keys", value);
   } else {
@@ -297,6 +350,43 @@ function handleInput(message: string): void {
     computerHost.runtime.queueEvent(session.computerId, "terminal_line", value);
   }
   snapshotScheduler.requestEager(session.sessionId);
+}
+
+function parseTerminalMouseEvent(value: string):
+  | {
+      readonly action: "down" | "move" | "up";
+      readonly button: 0 | 1 | 2;
+      readonly sequence: number;
+      readonly x: number;
+      readonly y: number;
+    }
+  | undefined {
+  try {
+    const event: unknown = JSON.parse(value);
+    if (typeof event !== "object" || event === null) return undefined;
+    const candidate = event as Record<string, unknown>;
+    if (
+      (candidate.action !== "down" &&
+        candidate.action !== "move" &&
+        candidate.action !== "up") ||
+      (candidate.button !== 0 &&
+        candidate.button !== 1 &&
+        candidate.button !== 2) ||
+      !Number.isSafeInteger(candidate.sequence) ||
+      (candidate.sequence as number) < 0 ||
+      !Number.isSafeInteger(candidate.x) ||
+      (candidate.x as number) < 1 ||
+      (candidate.x as number) > 80 ||
+      !Number.isSafeInteger(candidate.y) ||
+      (candidate.y as number) < 1 ||
+      (candidate.y as number) > 25
+    ) {
+      return undefined;
+    }
+    return candidate as ReturnType<typeof parseTerminalMouseEvent>;
+  } catch {
+    return undefined;
+  }
 }
 
 function handleCompletion(message: string): void {
@@ -383,7 +473,15 @@ function handleTakeControl(message: string): void {
   const match = /^([A-Za-z0-9_-]{12,32})$/u.exec(message);
   if (match === null) return;
   const session = requireActiveSession(match[1] ?? "");
-  if (session !== undefined) terminalAccess.takeControl(session.sessionId);
+  if (session !== undefined) {
+    const takeover = terminalAccess.takeControl(session.sessionId);
+    if (
+      takeover.outcome === "transferred" &&
+      takeover.demotedSessionId !== undefined
+    ) {
+      releaseMouseButtons(activeSessions.get(takeover.demotedSessionId));
+    }
+  }
 }
 
 function handlePower(message: string): void {
@@ -468,6 +566,10 @@ function setSessionAccess(
 ): boolean {
   if (session.access === access) return false;
   session.access = access;
+  if (access === "out_of_range") {
+    releaseMouseButtons(session);
+    session.audioCursor = floppyAudio.latestSequence(session.computerId);
+  }
   if (session.player.isValid) {
     session.player.sendMessage(
       access === "in_range"
@@ -514,6 +616,45 @@ function emitEagerSnapshots(): void {
   }
 }
 
+function flushPendingMouseMoves(): void {
+  for (const session of activeSessions.values()) flushPendingMouseMove(session);
+}
+
+function flushPendingMouseMove(session: ActiveSession): void {
+  const pending = session.pendingMouseMove;
+  if (pending === undefined) return;
+  session.pendingMouseMove = undefined;
+  if (!terminalAccess.canWrite(session.sessionId)) return;
+  computerHost.runtime.queueEvent(
+    session.computerId,
+    "terminal_mouse",
+    pending,
+  );
+  snapshotScheduler.requestEager(session.sessionId);
+}
+
+function releaseMouseButtons(session: ActiveSession | undefined): void {
+  if (session === undefined) return;
+  flushPendingMouseMove(session);
+  for (let button = 0; button <= 2; button += 1) {
+    const mask = 1 << button;
+    if ((session.mouseButtons & mask) === 0) continue;
+    session.mouseSequence += 1;
+    computerHost.runtime.queueEvent(
+      session.computerId,
+      "terminal_mouse",
+      JSON.stringify({
+        action: "up",
+        button,
+        sequence: session.mouseSequence,
+        x: session.mouseX,
+        y: session.mouseY,
+      }),
+    );
+  }
+  session.mouseButtons = 0;
+}
+
 function emitSnapshot(session: ActiveSession, force: boolean): boolean {
   if (
     !isWithinAccessRange(
@@ -531,7 +672,11 @@ function emitSnapshot(session: ActiveSession, force: boolean): boolean {
     finalizeSession(session, "computer_missing");
     return false;
   }
-  const serialized = JSON.stringify({
+  const audio = floppyAudio.eventsAfter(
+    session.computerId,
+    session.audioCursor,
+  );
+  const snapshot = {
     sessionId: session.sessionId,
     computerId: session.computerId,
     label: record.label ?? record.computerId,
@@ -541,10 +686,23 @@ function emitSnapshot(session: ActiveSession, force: boolean): boolean {
       ...record.terminal.snapshot(),
       secretInput: computerHost.runtime.isShellSecretInput(record.computerId),
     },
+  };
+  const comparison = JSON.stringify({
+    ...snapshot,
+    audio: { events: [], latestSequence: audio.latestSequence },
   });
-  if (!force && !resumed && session.lastSnapshot === serialized) return false;
-  session.lastSnapshot = serialized;
+  if (
+    !force &&
+    !resumed &&
+    audio.events.length === 0 &&
+    session.lastSnapshot === comparison
+  ) {
+    return false;
+  }
+  const serialized = JSON.stringify({ ...snapshot, audio });
+  session.lastSnapshot = comparison;
   console.warn(`${snapshotMarker}${serialized}`);
+  session.audioCursor = audio.latestSequence;
   return true;
 }
 
@@ -565,7 +723,12 @@ function pruneExpiredSessions(): void {
 }
 
 function finalizeSession(session: ActiveSession, reason: string): void {
+  releaseMouseButtons(session);
   if (!activeSessions.delete(session.sessionId)) return;
+  const computerSessions = sessionsByComputer.get(session.computerId);
+  computerSessions?.delete(session.sessionId);
+  if (computerSessions?.size === 0)
+    sessionsByComputer.delete(session.computerId);
   snapshotScheduler.detach(session.sessionId);
   const detached = terminalAccess.detach(session.sessionId);
   if (detached.outcome === "detached" && detached.wasLast) {

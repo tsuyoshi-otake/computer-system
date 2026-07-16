@@ -24,6 +24,7 @@ import {
 } from "./portableComputer.js";
 import { handleDebugCommand } from "./debugCommandBridge.js";
 import { startComputerStorageBreakGuard } from "./computerRegistry.js";
+import { startFloppyComponent } from "./floppyComponent.js";
 import { handleDebugWebSessionRequest } from "./debugWebSessionBridge.js";
 import { startHeadlessProbeSuite } from "./probes/headlessProbe.js";
 import { registerRedstoneProbeComponent } from "./probes/redstoneProbeComponent.js";
@@ -42,7 +43,7 @@ import {
   startWebTerminalBridge,
 } from "./webTerminalBridge.js";
 
-const packVersion = "0.1.0";
+const packVersion = "0.1.1";
 
 system.beforeEvents.startup.subscribe(
   ({ blockComponentRegistry, itemComponentRegistry }): void => {
@@ -62,6 +63,7 @@ system.run((): void => {
   startComputerHost();
   startComputerStorageBootstrap((): void => {
     startComputerComponents();
+    startFloppyComponent();
     startPortableComputerLifecycle();
     startWebTerminalBridge();
     world.sendMessage(`Computer System Phase 0 loaded (${packVersion}).`);

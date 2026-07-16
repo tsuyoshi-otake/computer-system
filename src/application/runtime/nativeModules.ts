@@ -48,6 +48,7 @@ import {
 } from "../os/guestFilesystem.js";
 import type { OsProcessSignal, OsRuntimeState } from "../os/osRuntimeState.js";
 import type { DosRuntimeState } from "../os/dosRuntimeState.js";
+import type { FloppyDrive, FloppyDriveIo } from "../os/floppyDrive.js";
 
 export interface NativeModuleContext {
   readonly clock?: ShellClockSource;
@@ -100,6 +101,10 @@ export interface NativeModuleContext {
     operation: "read" | "write",
     bytes: number,
   ) => string | undefined;
+  readonly requestFloppyIo?: (
+    requests: readonly FloppyDriveIo[],
+  ) => string | undefined;
+  readonly floppyDrive?: FloppyDrive;
   readonly syncFilesystem?: () => void;
   readonly runHostWork?: <T>(
     lane: ComputerWorkLane,
@@ -186,6 +191,9 @@ export function createNativeEnvironment(
       peripherals: context.peripherals,
       deferGuestExecution: context.startForegroundProcess !== undefined,
       requestFilesystemIo: context.requestFilesystemIo,
+      requestFloppyIo: context.requestFloppyIo,
+      floppyDrive: context.floppyDrive,
+      guestFilesystem,
       syncFilesystem: context.syncFilesystem,
     });
   const modules = new Map<string, RuntimeNamespace>([
@@ -411,12 +419,26 @@ function createShellModule(
     }
     return executeShellOperation(() => shell.keys(decoded));
   });
+  const mouse = fn("mouse", (positional, keywords) => {
+    requireArity(positional, keywords, 1, 1);
+    const encoded = stringArgument(positional[0]);
+    if (encoded.length > 180)
+      throw new VmRuntimeError("ValueError", "Invalid terminal mouse event");
+    return executeShellOperation(() => shell.mouse(encoded));
+  });
   const disconnect = fn("disconnect", (positional, keywords) => {
     requireArity(positional, keywords, 0, 0);
     writeTerminalLines(context.terminal, shell.disconnect());
     return null;
   });
-  return namespace("shell", { banner, disconnect, prompt, submit, keys });
+  return namespace("shell", {
+    banner,
+    disconnect,
+    keys,
+    mouse,
+    prompt,
+    submit,
+  });
 }
 
 export function renderTerminalScreen(

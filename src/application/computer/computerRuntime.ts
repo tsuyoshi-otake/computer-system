@@ -23,7 +23,11 @@ import type {
 } from "../../domain/runtime/cpuProcess.js";
 import type { CpuProcess } from "../../domain/runtime/cpuProcess.js";
 import { Cs486Process, runCs486 } from "../../domain/cpu/cs486.js";
-import type { ComputerRecord } from "../../domain/computer/computer.js";
+import type {
+  ComputerOsProfile,
+  ComputerRecord,
+} from "../../domain/computer/computer.js";
+import { InMemoryFilesystem } from "../../domain/filesystem/inMemoryFilesystem.js";
 import { numericComputerId } from "../../domain/computer/identity.js";
 import type { RuntimeValue } from "../../domain/runtime/value.js";
 import { VmRuntimeError } from "../../domain/runtime/errors.js";
@@ -76,6 +80,13 @@ import {
   type OsProcessSignal,
 } from "../os/osRuntimeState.js";
 import { DosRuntimeState } from "../os/dosRuntimeState.js";
+import {
+  FloppyDrive,
+  FloppyGuestFilesystem,
+  type FloppyDriveActivity,
+  type FloppyDriveIo,
+} from "../os/floppyDrive.js";
+import type { FloppyMedia } from "../../domain/storage/floppyMedia.js";
 
 export interface ComputerRuntimeOptions {
   readonly clock?: ShellClockSource;
@@ -143,6 +154,17 @@ export class ComputerRuntime {
         bytes: number,
       ) => string | undefined)
     | undefined;
+  private floppyIoRequester:
+    | ((
+        computerId: string,
+        requests: readonly FloppyDriveIo[],
+      ) => string | undefined)
+    | undefined;
+  private floppySaver:
+    ((computerId: string, media: FloppyMedia) => void) | undefined;
+  private floppyGuestEjector: ((computerId: string) => void) | undefined;
+  private floppyActivityObserver:
+    ((computerId: string, activity: FloppyDriveActivity) => void) | undefined;
   private pendingFilesystemIoCounter:
     ((computerId: string) => number) | undefined;
   private persistenceSyncer:
@@ -173,6 +195,60 @@ export class ComputerRuntime {
     ) => string | undefined,
   ): void {
     this.filesystemIoRequester = requester;
+  }
+
+  configureFloppy(boundaries: {
+    readonly requestIo: (
+      computerId: string,
+      requests: readonly FloppyDriveIo[],
+    ) => string | undefined;
+    readonly save: (computerId: string, media: FloppyMedia) => void;
+    readonly guestEject: (computerId: string) => void;
+    readonly activity?: (
+      computerId: string,
+      activity: FloppyDriveActivity,
+    ) => void;
+  }): void {
+    this.floppyIoRequester = boundaries.requestIo;
+    this.floppySaver = boundaries.save;
+    this.floppyGuestEjector = boundaries.guestEject;
+    this.floppyActivityObserver = boundaries.activity;
+  }
+
+  floppyDrive(computerId: string): FloppyDrive | undefined {
+    return this.entries.get(computerId)?.floppyDrive;
+  }
+
+  attachFloppyMedia(computerId: string, media: FloppyMedia): void {
+    const entry = this.entries.get(computerId);
+    if (entry === undefined) throw new Error(`Unknown Computer ${computerId}`);
+    const state = activeDosRuntimeState(entry);
+    if (state === undefined) return;
+    state.transaction(() => {
+      const current = state.driveState("A");
+      if (current.mediaPresent) state.ejectMedia("A", current.mediaGeneration);
+      const detached = state.driveState("A");
+      state.mountMedia("A", {
+        generation: Math.max(
+          media.instanceGeneration,
+          detached.mediaGeneration + 1,
+        ),
+        readOnly: media.writeProtected,
+        volumeLabel: media.volumeLabel,
+      });
+    });
+    if (state === entry.dosRuntimeState) this.syncDosRuntimeState(entry);
+  }
+
+  detachFloppyMedia(computerId: string): void {
+    const entry = this.entries.get(computerId);
+    if (entry === undefined) throw new Error(`Unknown Computer ${computerId}`);
+    const state = activeDosRuntimeState(entry);
+    if (state === undefined) return;
+    const current = state.driveState("A");
+    if (!current.mediaPresent) return;
+    state.ejectMedia("A", current.mediaGeneration);
+    if (state === entry.dosRuntimeState) this.syncDosRuntimeState(entry);
   }
 
   configureLifecycleBoundaries(boundaries: {
@@ -222,7 +298,28 @@ export class ComputerRuntime {
         record,
         runtimeId: this.nextRuntimeId++,
         osRuntimeState,
+        installedOsRuntimeState: osRuntimeState,
         dosRuntimeState,
+        floppyDrive: new FloppyDrive({
+          nowMilliseconds: (): number =>
+            this.clock?.currentWallTimeMilliseconds() ??
+            Math.floor(
+              (this.scheduler.tickNumber * 1_000) / this.ticksPerSecond,
+            ),
+          onActivity: (activity): void => {
+            this.floppyActivityObserver?.(record.computerId, activity);
+          },
+          onGuestEject: (): void => {
+            if (this.floppyGuestEjector === undefined)
+              throw new Error("Floppy eject boundary is unavailable");
+            this.floppyGuestEjector(record.computerId);
+          },
+          save: (media): void => {
+            if (this.floppySaver === undefined)
+              throw new Error("Floppy persistence boundary is unavailable");
+            this.floppySaver(record.computerId, media);
+          },
+        }),
         syncedOsRuntimeRevision: record.osRuntimeSnapshot?.revision,
         syncedDosRuntimeRevision: record.dosRuntimeSnapshot?.revision,
       };
@@ -611,7 +708,7 @@ export class ComputerRuntime {
             formatCompileJobError(
               compileCommand,
               normalized,
-              getOsProfile(entry.record.osProfile),
+              getOsProfile(activeOsProfile(entry)),
             ),
           );
         }
@@ -810,8 +907,8 @@ export class ComputerRuntime {
       });
       return;
     }
-    const filesystem = guestFilesystemFor(
-      entry.record,
+    const filesystem = guestFilesystemForEntry(
+      entry,
       request.credentials,
       request.umask,
     );
@@ -822,10 +919,10 @@ export class ComputerRuntime {
       clock: this.clock,
       computerId: numericComputerId(entry.record.computerId),
       computerName: entry.record.computerId,
-      osProfile: entry.record.osProfile,
+      osProfile: activeOsProfile(entry),
       osRuntimeState: entry.osRuntimeState,
-      dosRuntimeState: entry.dosRuntimeState,
-      filesystem: entry.record.filesystem,
+      dosRuntimeState: activeDosRuntimeState(entry),
+      filesystem: activeFilesystem(entry),
       exposeShellModule: false,
       guestFilesystem: filesystem,
       shell: entry.shell,
@@ -1185,8 +1282,8 @@ export class ComputerRuntime {
       entry.shell?.completeForegroundProcess(result.exitCode);
       return result;
     }
-    const filesystem = guestFilesystemFor(
-      entry.record,
+    const filesystem = guestFilesystemForEntry(
+      entry,
       request.credentials,
       request.umask,
     );
@@ -1196,10 +1293,10 @@ export class ComputerRuntime {
       clock: this.clock,
       computerId: numericComputerId(entry.record.computerId),
       computerName: entry.record.computerId,
-      osProfile: entry.record.osProfile,
+      osProfile: activeOsProfile(entry),
       osRuntimeState: entry.osRuntimeState,
-      dosRuntimeState: entry.dosRuntimeState,
-      filesystem: entry.record.filesystem,
+      dosRuntimeState: activeDosRuntimeState(entry),
+      filesystem: activeFilesystem(entry),
       exposeShellModule: false,
       guestFilesystem: filesystem,
       terminal,
@@ -1302,6 +1399,24 @@ export class ComputerRuntime {
     try {
       const safeBoot = entry.safeBootOnce === true;
       entry.safeBootOnce = false;
+      const floppyMedia = entry.floppyDrive.media;
+      const floppyBoot = !safeBoot && floppyMedia?.bootable === true;
+      const activeProfile: ComputerOsProfile = floppyBoot
+        ? "dos"
+        : entry.record.osProfile;
+      entry.activeOsProfile = activeProfile;
+      entry.osRuntimeState = floppyBoot
+        ? OsRuntimeState.restore(entry.record.computerId, undefined)
+        : entry.installedOsRuntimeState;
+      entry.transientDosRuntimeState = floppyBoot
+        ? DosRuntimeState.createFloppyBoot({
+            generation: floppyMedia.instanceGeneration,
+            readOnly: floppyMedia.writeProtected,
+            volumeLabel: floppyMedia.volumeLabel,
+          })
+        : undefined;
+      const activeDosRuntime =
+        entry.transientDosRuntimeState ?? entry.dosRuntimeState;
       this.prepareOsRuntimeBoot(entry);
       entry.record.faceIo.powerOn();
       if (entry.record.display.state.kind === "faulted") {
@@ -1313,7 +1428,10 @@ export class ComputerRuntime {
       if (post.outcome !== "changed") {
         throw new Error(`Unable to start CSBIOS POST: ${post.outcome}`);
       }
-      renderCsBiosPost(entry.record);
+      renderCsBiosPost(entry.record, {
+        bootProfile: activeProfile,
+        floppyPresent: floppyMedia !== undefined,
+      });
       const supportsMicroPython = cpuModelSpecification(
         entry.record.hardware.cpuModel,
       ).supportsMicroPython;
@@ -1321,26 +1439,55 @@ export class ComputerRuntime {
       // the authoritative database before source discovery or guest execution;
       // this initial value only lets the credentialed view be constructed.
       let startupCredentials = initialUserCredentials;
-      const startupFilesystem =
-        entry.record.osProfile === "linux"
+      const activeFilesystem = floppyBoot
+        ? new InMemoryFilesystem()
+        : entry.record.filesystem;
+      entry.activeFilesystem = activeFilesystem;
+      const installedFilesystem =
+        activeProfile === "linux"
           ? credentialedFilesystem(
-              entry.record.filesystem,
+              activeFilesystem,
               () => startupCredentials,
               0o022,
             )
-          : unrestrictedGuestFilesystem(entry.record.filesystem, 0o022);
+          : unrestrictedGuestFilesystem(activeFilesystem, 0o022);
+      const startupFilesystem: GuestFilesystem = new FloppyGuestFilesystem(
+        installedFilesystem,
+        entry.floppyDrive,
+        activeProfile,
+      );
+      if (
+        activeDosRuntime !== undefined &&
+        floppyMedia !== undefined &&
+        entry.transientDosRuntimeState === undefined
+      ) {
+        const current = activeDosRuntime.driveState("A");
+        if (current.mediaPresent)
+          activeDosRuntime.ejectMedia("A", current.mediaGeneration);
+        const detached = activeDosRuntime.driveState("A");
+        activeDosRuntime.mountMedia("A", {
+          generation: Math.max(
+            floppyMedia.instanceGeneration,
+            detached.mediaGeneration + 1,
+          ),
+          readOnly: floppyMedia.writeProtected,
+          volumeLabel: floppyMedia.volumeLabel,
+        });
+      }
       const nativeContext: NativeModuleContext = {
         clock: this.clock,
         computerId: numericComputerId(entry.record.computerId),
         computerName: entry.record.computerId,
-        osProfile: entry.record.osProfile,
+        osProfile: activeProfile,
         osRuntimeState: entry.osRuntimeState,
         onOsRuntimeChanged: () => this.syncOsRuntimeState(entry),
-        dosRuntimeState: entry.dosRuntimeState,
-        onDosRuntimeChanged: () => this.syncDosRuntimeState(entry),
+        dosRuntimeState: activeDosRuntime,
+        onDosRuntimeChanged: () => {
+          if (!floppyBoot) this.syncDosRuntimeState(entry);
+        },
         signalProcess: (pid, signal) =>
           this.signalOsProcess(entry, pid, signal),
-        filesystem: entry.record.filesystem,
+        filesystem: activeFilesystem,
         exposeShellModule: false,
         guestFilesystem: startupFilesystem,
         terminal: entry.record.terminal,
@@ -1366,7 +1513,7 @@ export class ComputerRuntime {
           this.startBackgroundProcess(entry, request),
         startJobControl: (request) => this.startJobControl(entry, request),
         ticksPerSecond: this.ticksPerSecond,
-        requireLinuxLogin: this.requireLinuxLogin,
+        requireLinuxLogin: activeProfile === "linux" && this.requireLinuxLogin,
         serial: this.serial,
         peripherals: this.peripherals,
         requestFilesystemIo: (operation, bytes) =>
@@ -1375,17 +1522,20 @@ export class ComputerRuntime {
             operation,
             bytes,
           ),
+        requestFloppyIo: (requests) =>
+          this.floppyIoRequester?.(entry.record.computerId, requests),
+        floppyDrive: entry.floppyDrive,
         syncFilesystem: () => this.performPersistenceSync(entry, "manual"),
         runHostWork: (lane, units, operation) =>
           this.runHostWork(lane, units, entry.record.computerId, operation),
       };
       let environment = createNativeEnvironment(nativeContext);
-      if (entry.record.osProfile === "linux") {
+      if (activeProfile === "linux") {
         startupCredentials = linuxStartupCredentials(entry.record);
       }
       let source = this.defaultBootSource;
       let usesInternalBootProgram = true;
-      if (supportsMicroPython) {
+      if (supportsMicroPython && activeProfile === "linux") {
         if (!safeBoot && startupFilesystem.exists("/startup.py")) {
           const configuredSource = startupFilesystem.readFile("/startup.py");
           if (configuredSource.length > 0) {
@@ -1584,7 +1734,7 @@ export class ComputerRuntime {
     request: ShellBackgroundRequest,
   ): BackgroundProcessStartResult {
     if (
-      entry.record.osProfile !== "linux" ||
+      activeOsProfile(entry) !== "linux" ||
       entry.vm === undefined ||
       entry.shell === undefined ||
       entry.stopIntent !== undefined ||
@@ -1882,7 +2032,7 @@ export class ComputerRuntime {
           formatCompileJobError(
             job.request.command,
             normalized,
-            getOsProfile(entry.record.osProfile),
+            getOsProfile(activeOsProfile(entry)),
           ),
         );
       }
@@ -1892,8 +2042,8 @@ export class ComputerRuntime {
 
   private executeCompileJob(entry: RuntimeEntry, job: CompileJob): void {
     const task = job.request.task;
-    const filesystem = guestFilesystemFor(
-      entry.record,
+    const filesystem = guestFilesystemForEntry(
+      entry,
       job.request.credentials,
       job.request.umask,
     );
@@ -1909,7 +2059,7 @@ export class ComputerRuntime {
     const assemblerOptions =
       task.language === "asm"
         ? {
-            dialect: task.assemblerDialect ?? entry.record.osProfile,
+            dialect: task.assemblerDialect ?? activeOsProfile(entry),
             include: (
               request: string,
               fromSource: string,
@@ -1917,7 +2067,7 @@ export class ComputerRuntime {
               | { readonly source: string; readonly sourceName: string }
               | undefined => {
               const profile = getOsProfile(
-                task.assemblerDialect ?? entry.record.osProfile,
+                task.assemblerDialect ?? activeOsProfile(entry),
               );
               let resolved: string;
               try {
@@ -1990,6 +2140,7 @@ export class ComputerRuntime {
           job.completionEvent,
           compileCycles,
           job.osPid,
+          job.request.command === "qbasic" ? "qbasic" : "basic",
         );
       }
       this.compileReady.delete(entry);
@@ -2011,6 +2162,7 @@ export class ComputerRuntime {
     completionEvent: string,
     compileCycles: number,
     osPid: number,
+    command: "basic" | "qbasic",
   ): void {
     const runtimeId = this.nextRuntimeId++;
     const process = new Cs486Process(executable, {
@@ -2018,7 +2170,7 @@ export class ComputerRuntime {
       memoryBytes: entry.record.hardware.memoryBytes,
     });
     const foreground: ForegroundGuestProcess = {
-      command: "basic",
+      command,
       compileCycles,
       completionEvent,
       cpuCycles: 0,
@@ -2060,7 +2212,10 @@ export class ComputerRuntime {
     this.compileReady.delete(entry);
     entry.compileJob = undefined;
     this.completeOsProcess(entry, job.osPid, exitCode, cpuCycles, signal);
-    entry.shell?.completeForegroundProcess(exitCode);
+    const completionScreen = entry.shell?.completeForegroundProcess(
+      exitCode,
+      stderr,
+    );
     if (job.onComplete !== undefined) {
       job.onComplete({
         outcome: "completed",
@@ -2071,7 +2226,9 @@ export class ComputerRuntime {
       });
       return;
     }
-    if (stderr.length > 0) {
+    if (completionScreen !== undefined) {
+      renderTerminalScreen(entry.record.terminal, completionScreen);
+    } else if (stderr.length > 0) {
       writeTerminalLines(entry.record.terminal, stderr.trimEnd().split("\n"));
     }
     if (entry.vm !== undefined) {
@@ -2084,8 +2241,8 @@ export class ComputerRuntime {
     request: Extract<ShellForegroundRequest, { readonly kind: "python" }>,
     runtimeId: number,
   ): Cs486Process {
-    const filesystem = guestFilesystemFor(
-      entry.record,
+    const filesystem = guestFilesystemForEntry(
+      entry,
       request.credentials,
       request.umask,
     );
@@ -2094,10 +2251,10 @@ export class ComputerRuntime {
       clock: this.clock,
       computerId: numericComputerId(entry.record.computerId),
       computerName: entry.record.computerId,
-      osProfile: entry.record.osProfile,
+      osProfile: activeOsProfile(entry),
       osRuntimeState: entry.osRuntimeState,
-      dosRuntimeState: entry.dosRuntimeState,
-      filesystem: entry.record.filesystem,
+      dosRuntimeState: activeDosRuntimeState(entry),
+      filesystem: activeFilesystem(entry),
       exposeShellModule: false,
       guestFilesystem: filesystem,
       terminal: entry.record.terminal,
@@ -2133,8 +2290,8 @@ export class ComputerRuntime {
     request: Extract<ShellBackgroundRequest, { readonly kind: "python" }>,
     runtimeId: number,
   ): Cs486Process {
-    const filesystem = guestFilesystemFor(
-      entry.record,
+    const filesystem = guestFilesystemForEntry(
+      entry,
       request.credentials,
       request.umask,
     );
@@ -2144,10 +2301,10 @@ export class ComputerRuntime {
       clock: this.clock,
       computerId: numericComputerId(entry.record.computerId),
       computerName: entry.record.computerId,
-      osProfile: entry.record.osProfile,
+      osProfile: activeOsProfile(entry),
       osRuntimeState: entry.osRuntimeState,
-      dosRuntimeState: entry.dosRuntimeState,
-      filesystem: entry.record.filesystem,
+      dosRuntimeState: activeDosRuntimeState(entry),
+      filesystem: activeFilesystem(entry),
       exposeShellModule: false,
       guestFilesystem: filesystem,
       terminal: entry.record.terminal,
@@ -2252,16 +2409,22 @@ export class ComputerRuntime {
     } else {
       throw new Error(`Cannot complete foreground process from ${state.kind}`);
     }
+    const processOutput =
+      foreground.kind === "cs486"
+        ? (foreground.process as Cs486Process).output
+        : "";
+    const completionScreen = entry.shell?.completeForegroundProcess(
+      exitCode,
+      processOutput,
+    );
     if (
       foreground.kind === "cs486" &&
-      (foreground.process as Cs486Process).output.length > 0
+      processOutput.length > 0 &&
+      completionScreen === undefined
     ) {
       writeTerminalLines(
         entry.record.terminal,
-        (foreground.process as Cs486Process).output
-          .replaceAll("\r\n", "\n")
-          .replace(/\n$/u, "")
-          .split("\n"),
+        processOutput.replaceAll("\r\n", "\n").replace(/\n$/u, "").split("\n"),
       );
     }
     if (foreground.stats) {
@@ -2313,7 +2476,9 @@ export class ComputerRuntime {
         state.kind === "terminated" ? foreground.terminationSignal : undefined,
       );
     }
-    entry.shell?.completeForegroundProcess(exitCode);
+    if (completionScreen !== undefined) {
+      renderTerminalScreen(entry.record.terminal, completionScreen);
+    }
     this.scheduler.queueEvent(
       entry.runtimeId,
       foreground.completionEvent,
@@ -3063,8 +3228,10 @@ export class ComputerRuntime {
     if (entry.osRuntimeState.process(1) === undefined) {
       entry.osRuntimeState.createInitProcess({
         command:
-          entry.record.osProfile === "dos"
-            ? "C:\\COMMAND.COM"
+          activeOsProfile(entry) === "dos"
+            ? entry.transientDosRuntimeState === undefined
+              ? "C:\\COMMAND.COM"
+              : "A:\\COMMAND.COM"
             : "/sbin/cs-init",
         gid: 0,
         startTick: tick,
@@ -3279,6 +3446,7 @@ export class ComputerRuntime {
   }
 
   private syncOsRuntimeState(entry: RuntimeEntry): void {
+    if (entry.osRuntimeState !== entry.installedOsRuntimeState) return;
     if (
       entry.syncedOsRuntimeRevision === entry.osRuntimeState.revision &&
       entry.record.osRuntimeSnapshot !== undefined
@@ -3402,6 +3570,10 @@ export class ComputerRuntime {
     this.stoppingEntries.delete(entry);
     entry.pendingBootHandoff = false;
     this.pendingBootHandoffs.delete(entry);
+    entry.activeOsProfile = undefined;
+    entry.activeFilesystem = undefined;
+    entry.osRuntimeState = entry.installedOsRuntimeState;
+    entry.transientDosRuntimeState = undefined;
     if (finalizationFailures.length > 0) {
       writeTerminalLines(entry.record.terminal, [
         `Runtime detach completed with ${String(finalizationFailures.length)} finalization error(s)`,
@@ -3482,8 +3654,13 @@ interface RuntimeEntry {
   readonly backgroundJobs: Map<number, BackgroundGuestProcess>;
   readonly record: ComputerRecord;
   readonly runtimeId: number;
-  readonly osRuntimeState: OsRuntimeState;
+  readonly installedOsRuntimeState: OsRuntimeState;
+  osRuntimeState: OsRuntimeState;
   readonly dosRuntimeState?: DosRuntimeState;
+  readonly floppyDrive: FloppyDrive;
+  activeFilesystem?: InMemoryFilesystem;
+  activeOsProfile?: ComputerOsProfile;
+  transientDosRuntimeState?: DosRuntimeState;
   syncedOsRuntimeRevision?: number;
   syncedDosRuntimeRevision?: number;
   vm?: CpuProcess;
@@ -3522,7 +3699,8 @@ interface BackgroundJobWait {
 }
 
 interface BackgroundGuestProcess {
-  readonly command: "basic" | "micropython" | "python" | "run" | "sleep";
+  readonly command:
+    "basic" | "micropython" | "python" | "qbasic" | "run" | "sleep";
   readonly commandLine: string;
   readonly compileCycles: number;
   cpuCycles: number;
@@ -3571,7 +3749,14 @@ interface DebugGuestJob {
 
 interface ForegroundGuestProcess {
   readonly command:
-    "basic" | "csdb" | "debug" | "micropython" | "python" | "run" | "sleep";
+    | "basic"
+    | "csdb"
+    | "debug"
+    | "micropython"
+    | "python"
+    | "qbasic"
+    | "run"
+    | "sleep";
   readonly commandLine?: string;
   readonly compileCycles: number;
   readonly completionEvent: string;
@@ -3848,14 +4033,32 @@ function linuxStartupCredentials(record: ComputerRecord): ProcessCredentials {
   });
 }
 
-function guestFilesystemFor(
-  record: ComputerRecord,
+function guestFilesystemForEntry(
+  entry: RuntimeEntry,
   credentials: ProcessCredentials,
   umask: number,
 ): GuestFilesystem {
-  return record.osProfile === "linux"
-    ? credentialedFilesystem(record.filesystem, credentials, umask)
-    : unrestrictedGuestFilesystem(record.filesystem, umask);
+  const profile = activeOsProfile(entry);
+  const filesystem = activeFilesystem(entry);
+  const base =
+    profile === "linux"
+      ? credentialedFilesystem(filesystem, credentials, umask)
+      : unrestrictedGuestFilesystem(filesystem, umask);
+  return new FloppyGuestFilesystem(base, entry.floppyDrive, profile);
+}
+
+function activeFilesystem(entry: RuntimeEntry): InMemoryFilesystem {
+  return entry.activeFilesystem ?? entry.record.filesystem;
+}
+
+function activeOsProfile(entry: RuntimeEntry): ComputerOsProfile {
+  return entry.activeOsProfile ?? entry.record.osProfile;
+}
+
+function activeDosRuntimeState(
+  entry: RuntimeEntry,
+): DosRuntimeState | undefined {
+  return entry.transientDosRuntimeState ?? entry.dosRuntimeState;
 }
 
 function formatCompileJobError(

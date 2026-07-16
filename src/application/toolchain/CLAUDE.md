@@ -2,9 +2,10 @@
 
 ## Sandbox and formats
 
-- `as`, `cc`, `c++`, `basicc -c`, `ld`, `nm`, `objdump`, and the debugger remain
-  entirely inside the guest sandbox. Never invoke a host compiler, assembler,
-  linker, debugger, filesystem, or process.
+- `as`, `cc`, `c++`, the DOS-only CS QBASIC frontend, `ld`, `nm`, `objdump`, and
+  the debugger remain entirely inside the guest sandbox. Never invoke a host
+  compiler, assembler, linker, debugger, filesystem, or process. Current
+  CS-Linux exposes neither `basic` nor `basicc`.
 - New writers emit versioned v2 `CS486OBJ`; readers retain v1 compatibility.
   Objects contain `.text`, `.rodata`, `.data`, and `.bss`, typed symbols,
   initialized data, alignment, and structured relocations. Executables use the

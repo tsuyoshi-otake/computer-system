@@ -188,7 +188,7 @@ describe("Web terminal field manual", () => {
       "Computer System DOS 6.2",
       "CS-DOS 6.2",
       "ATTRIB",
-      "CHKDSK</code> reports actual",
+      "CHKDSK</code> reports state without repair",
       "GOTO :EOF",
       "BASIC",
       "C and C++",
@@ -441,8 +441,11 @@ describe("Web terminal field manual", () => {
       "exactly A: and C:",
       "ATTRIB +R +H SECRET.TXT",
       "DIR /A:H",
-      "cold restore always returns to C:",
-      "CHKDSK</code> reports actual",
+      "Cold DOS persistence preserves C:",
+      "CHKDSK</code> reports state without repair",
+      "FORMAT A: /S",
+      "temporary A:-only DOS",
+      "uid=1000,gid=1000",
       "GOTO</code>/<code>GOTO :EOF",
       "1,024 / 4,096",
       "native COMMAND.COM binary behavior",
@@ -458,8 +461,8 @@ describe("Web terminal field manual", () => {
     ]) {
       expect(dos).toContain(required);
     }
-    expect(dos).toContain("future Bedrock media adapter inserts a Floppy Disk");
-    expect(dos).toContain("performs no repair");
+    expect(dos).toContain("removable Floppy Disk item");
+    expect(dos).toContain("without repair");
     expect(linuxChapter?.sections.map(({ id }) => id)).toEqual(
       expect.arrayContaining([
         "shell-prompt-motd-and-persistent-history",

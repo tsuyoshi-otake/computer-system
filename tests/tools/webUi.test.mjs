@@ -147,14 +147,19 @@ describe("Web terminal UI", () => {
     expect(script).toContain("machineAcceptsInput(machineLifecycle)");
   });
 
-  it("detects vi and DOS EDIT screens and relays bounded editor key batches", async () => {
+  it("detects vi, EDIT, and QBASIC screens and relays bounded editor input", async () => {
     const script = await source("web/app.js");
 
     expect(script).toContain("editorActive =");
-    expect(script).toContain("File\\s+Edit\\s+Search\\s+Options\\s+Help");
+    expect(script).toContain("(?:View\\s+)?Search\\s+(?:Run\\s+Debug\\s+)?");
     expect(script).toContain("queueEditorKeys([key])");
     expect(script).toContain("Math.min(16, editorKeyQueue.length)");
     expect(script).toContain('kind: "keys"');
+    expect(script).toContain('addEventListener("pointerdown"');
+    expect(script).toContain('addEventListener("pointermove"');
+    expect(script).toContain('addEventListener("pointerup"');
+    expect(script).toContain('kind: "mouse"');
+    expect(script).toContain("mouseTransitionQueue.length >= 16");
     expect(script).toContain("editorKeyQueue.length > 0");
     expect(script).toContain("`Ctrl+${event.key.toLowerCase()}`");
     expect(script).toContain("`Alt+${event.key.toLowerCase()}`");

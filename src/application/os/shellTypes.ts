@@ -21,7 +21,7 @@ export interface ShellForegroundPython extends ShellProcessContext {
 }
 
 export interface ShellForegroundCs486 extends ShellProcessContext {
-  readonly command: "basic" | "run";
+  readonly command: "basic" | "qbasic" | "run";
   readonly compileCycles: number;
   readonly executable: Cs486Executable;
   readonly kind: "cs486";
@@ -66,7 +66,7 @@ export type ShellCompileTask =
     };
 
 export interface ShellForegroundCompile extends ShellProcessContext {
-  readonly command: "as" | "basic" | "basicc" | "c" | "c++" | "ld";
+  readonly command: "as" | "c" | "c++" | "ld" | "qbasic";
   readonly kind: "compile";
   readonly task: ShellCompileTask;
 }

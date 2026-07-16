@@ -844,15 +844,30 @@ activated before every referenced Computer generation verifies.
 
 ## CS486DX toolchain
 
-`Verify:` In the Web Terminal, create a short `.asm`, `.bas`, `.c`, and `.cpp`
-program. Compile them with `as`, `basicc`, `cc`, and `c++`, then use
-`run --stats`, direct `./program` execution, and `objdump`.
+`Verify:` In a CS-Linux Web Terminal, create a short `.asm`, `.c`, and `.cpp`
+program. Compile them with `as`, `cc`, and `c++`, then use `run --stats`, direct
+`./program` execution, and `objdump`. Submit `basic` and `basicc` separately.
 
-`Expect:` All four frontends execute inside the sandbox, `cpuinfo` reports a
-Computer System 486DX at 33 MHz, and stats show deterministic instruction/cycle
-counts. An infinite ASM jump exits with status 124 at the bounded instruction
-limit; invalid memory and corrupted executables report explicit faults without
-affecting BDS.
+`Expect:` The three installed frontends execute inside the sandbox, both BASIC
+commands return status 127, `cpuinfo` reports a Computer System 486DX at 33 MHz,
+and stats show deterministic instruction/cycle counts. An infinite ASM jump
+exits with status 124 at the bounded instruction limit; invalid memory and
+corrupted executables report explicit faults without affecting BDS.
+
+## CS386SX CS QBASIC and shared EDIT
+
+`Verify:` In the CS-DOS Web Terminal, confirm `C:\COMMAND\QBASIC.EXE`, open bare
+`QBASIC`, open the same text file with both `EDIT` and `QBASIC /EDITOR`,
+drag-select text with the writer mouse, copy/cut / paste it, save it, and run a
+supported `.BAS` file with `QBASIC /RUN`. Repeat the pointer attempt from a
+viewer, after writer takeover, and after leaving range.
+
+`Expect:` The Welcome dialog is original CS QBASIC content; EDIT and
+`QBASIC /EDITOR` show the same buffer/UI and save the same bytes. Writer drag
+selection and clipboard operations work, while viewer, stale, out-of-range, and
+disconnected input cannot mutate the guest. `/RUN` returns to the IDE and F4
+shows bounded output. F5/F7/F8/F10 explicitly report that source-debug actions
+are not implemented rather than restarting the program.
 
 `Verify:` Compile a C or C++ `main` and an ASM zero-argument function with `-c`,
 inspect both objects with `nm` and `objdump`, link them with `ld`, and execute

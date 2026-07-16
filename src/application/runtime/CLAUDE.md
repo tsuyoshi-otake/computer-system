@@ -37,7 +37,7 @@
   Python instruction pointer, bytecode VM, or second scheduler.
 - Require a hardware profile with MicroPython enabled. CS386SX returns 127.
   Python uses the same timing unit, process lifecycle, memory limits, and cycle
-  statistics as ASM, BASIC, C, and C++.
+  statistics as ASM, CS QBASIC, C, and C++.
 - Module lookup is deterministic and bounded: importer directory, `/lib/python`,
   then `/usr/lib/computer-system/python`. Initialize `.py` modules once. Reject
   missing, circular, duplicate, oversized, or excessive imports explicitly and

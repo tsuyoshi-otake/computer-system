@@ -741,6 +741,20 @@ export class DosRuntimeState {
     return new DosRuntimeState(driveTable, new Map(), 0, limits);
   }
 
+  /** Ephemeral A:-only guest view used when CSBIOS boots a system floppy. */
+  static createFloppyBoot(media: DosDriveMediaDefinition): DosRuntimeState {
+    const limits = normalizeDosRuntimeStateLimits(undefined);
+    const driveTable = DosDriveTable.create({
+      activeDrive: "A",
+      drives: [
+        { letter: "A", media },
+        { letter: "C", mediaGeneration: 0 },
+      ],
+    });
+    validateDosRuntimeDriveTable(driveTable.snapshot(), true);
+    return new DosRuntimeState(driveTable, new Map(), 0, limits);
+  }
+
   static restore(
     snapshot: unknown,
     limits: Partial<DosRuntimeStateLimits> = {},
@@ -868,7 +882,10 @@ export class DosRuntimeState {
       expectedGeneration,
     );
     if (nextDrives.activeDrive === normalizedLetter) {
-      nextDrives.selectDrive("C");
+      // An installed DOS machine always has C:, but a system-floppy boot is
+      // deliberately A:-only.  Keep A: selected (and not-ready) when there is
+      // no fixed disk instead of turning a physical eject into an exception.
+      if (nextDrives.state("C").mediaPresent) nextDrives.selectDrive("C");
     }
     const nextMetadata = withoutDriveFatMetadata(
       this.fatMetadataValue,
@@ -1443,7 +1460,10 @@ function createDosRuntimeStateSnapshot(
   });
 }
 
-function validateDosRuntimeDriveTable(snapshot: DosDriveTableSnapshotV1): void {
+function validateDosRuntimeDriveTable(
+  snapshot: DosDriveTableSnapshotV1,
+  allowFloppyBoot = false,
+): void {
   if (
     snapshot.drives.length !== 2 ||
     !snapshot.drives.some(({ letter }) => letter === "A") ||
@@ -1457,7 +1477,7 @@ function validateDosRuntimeDriveTable(snapshot: DosDriveTableSnapshotV1): void {
   const active = snapshot.drives.find(
     ({ letter }) => letter === snapshot.activeDrive,
   )!;
-  if (!c.mediaPresent) {
+  if (!c.mediaPresent && !allowFloppyBoot) {
     throw new TypeError("DOS runtime system drive C: must contain media");
   }
   if (!active.mediaPresent) {

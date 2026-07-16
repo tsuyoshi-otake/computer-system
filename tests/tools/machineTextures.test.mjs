@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 import {
   createMachineItemTexture,
   createMachineItemTextureAtlas,
+  floppyTextureKey,
   machineTextureKeys,
   machineTextureSources,
 } from "../../tools/machine-textures.mjs";
@@ -18,14 +19,17 @@ describe("authored machine textures", () => {
     expect(createMachineItemTextureAtlas()).toEqual({
       resource_pack_name: "computer_system",
       texture_name: "atlas.items",
-      texture_data: Object.fromEntries(
-        Object.entries(machineTextureKeys).map(([family, key]) => [
-          key,
-          {
-            textures: `textures/items/${machineTextureSources[family].replace(/\.png$/u, "")}`,
-          },
-        ]),
-      ),
+      texture_data: {
+        ...Object.fromEntries(
+          Object.entries(machineTextureKeys).map(([family, key]) => [
+            key,
+            {
+              textures: `textures/items/${machineTextureSources[family].replace(/\.png$/u, "")}`,
+            },
+          ]),
+        ),
+        [floppyTextureKey]: { textures: "textures/items/floppy_disk" },
+      },
     });
   });
 

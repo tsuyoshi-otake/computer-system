@@ -51,9 +51,12 @@ timers.
    one non-TUI line of at most 128 characters; use bounded `echo`/redirection
    calls. If DOS quoting cannot represent a line, use the live editor rather
    than widening MCP. Only bounded Python `-c` may contain encoded newlines.
-4. Compile in the guest with `as`, `basicc`, `cc`, or `c++`, then use
-   `run --stats`. Use `python`, `micropython`, or `python -c` only on supported
-   CS486 profiles; CS386SX status 127 is expected.
+4. Compile in the guest with `as`, `cc`, or `c++`, then use `run --stats`.
+   Current CS-Linux has no BASIC command. CS QBASIC is DOS-only and currently
+   runs through its interactive IDE or `/RUN`; do not report QBASIC benchmark
+   statistics until an explicit non-TUI statistics path exists. Use `python`,
+   `micropython`, or `python -c` only on supported CS486 profiles; CS386SX
+   status 127 is expected.
 5. Hold algorithm, input, checksum, compiler mode, and cold start constant.
    Record stdout, stderr, exit code, and modeled cycles. Label wall-clock MCP
    latency as responsiveness, not language speed.

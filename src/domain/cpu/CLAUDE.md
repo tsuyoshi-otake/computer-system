@@ -2,9 +2,9 @@
 
 ## Shared process and ABI
 
-- ASM, BASIC, C, C++, and Computer System Python execute through one validated
-  CS486 process and executable representation. Never fork a language-specific
-  CPU engine or scheduler.
+- ASM, CS QBASIC, C, C++, and Computer System Python execute through one
+  validated CS486 process and executable representation. Never fork a
+  language-specific CPU engine or scheduler.
 - Version 2 symbol metadata supports zero-argument `()->i32` and `()->void`
   functions; integer returns use EAX. Keep object readers, executable
   validation, toolchain, Python extensions, debugger, tests, and manual

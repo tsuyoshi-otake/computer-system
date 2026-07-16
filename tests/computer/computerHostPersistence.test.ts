@@ -12,6 +12,7 @@ import {
   ComputerRecord,
   type ComputerSnapshot,
 } from "../../src/domain/computer/computer.js";
+import { FloppyMedia } from "../../src/domain/storage/floppyMedia.js";
 
 describe("ComputerHost persistence bridge", (): void => {
   it("bounds persistence work and visits registered computers round-robin", (): void => {
@@ -186,6 +187,90 @@ describe("ComputerHost persistence bridge", (): void => {
     expect(host.workMetrics()).toMatchObject({
       lanes: { block_io: { admitted: 1 } },
     });
+  });
+
+  it("runs FORMAT A: /S through chunked mechanical FDD timing", (): void => {
+    const host = hostWith(new MemoryRepository(), {
+      saveFloppy: () => undefined,
+      onGuestFloppyEject: () => undefined,
+    });
+    const record = new ComputerRecord("c-000414", "standard", {
+      osProfile: "dos",
+    });
+    const media = new FloppyMedia("f-01234567");
+    host.register(record);
+    host.insertFloppyMedia(record.computerId, media);
+    host.runtime.powerOn(record.computerId);
+    for (let tick = 0; tick < 3; tick += 1) host.runTick();
+
+    host.runtime.queueEvent(record.computerId, "terminal_line", "FORMAT A: /S");
+    host.runTick();
+    expect(record.lifecycle.state).toMatchObject({ kind: "waiting_event" });
+    expect(host.storageStatus(record.computerId)?.fdd).toMatchObject({
+      mediaPresent: true,
+      pendingRequests: 1,
+      state: "write",
+    });
+
+    let modeledTicks = 0;
+    while (
+      record.lifecycle.state.kind === "waiting_event" &&
+      (record.lifecycle.state.filter ?? "").startsWith("block_io:") &&
+      modeledTicks < 1_000
+    ) {
+      host.runTick();
+      modeledTicks += 1;
+    }
+    expect(modeledTicks).toBeGreaterThan(300);
+    expect(modeledTicks).toBeLessThan(1_000);
+    expect(media.bootable).toBe(true);
+    expect(host.storageStatus(record.computerId)?.fdd).toMatchObject({
+      pendingRequests: 0,
+      state: "idle",
+    });
+  });
+
+  it("boots a Linux Computer into transient DOS from A: without mutating Linux storage", (): void => {
+    const host = hostWith(new MemoryRepository(), {
+      saveFloppy: () => undefined,
+      onGuestFloppyEject: () => undefined,
+    });
+    const record = new ComputerRecord("c-000415", "standard", {
+      osProfile: "linux",
+    });
+    record.filesystem.writeFile("/linux-only.txt", "preserved");
+    const before = record.filesystem.snapshot();
+    const media = new FloppyMedia("f-12345678");
+    media.format({
+      bootable: true,
+      modifiedAtMilliseconds: Date.UTC(2026, 6, 16),
+      volumeLabel: "BOOT",
+    });
+    host.register(record);
+    const installedOsRuntime = record.osRuntimeSnapshot;
+    host.insertFloppyMedia(record.computerId, media);
+
+    expect(host.runtime.powerOn(record.computerId).outcome).toBe("accepted");
+    const post = record.terminal.snapshot().rows.join("\n");
+    expect(post).toContain("Operating Sys. : Computer System DOS");
+    expect(post).toContain("Starting Computer System DOS 6.2 from Floppy A:");
+    for (let tick = 0; tick < 4; tick += 1) host.runTick();
+
+    const version = host.runtime.executeDebugShellCommand(
+      record.computerId,
+      "VER",
+    );
+    expect(version).toMatchObject({ outcome: "completed", exitCode: 0 });
+    if (version.outcome !== "completed")
+      throw new Error("VER did not complete");
+    expect(version.stdout).toContain("DOS Version 6.20");
+    expect(
+      host.runtime.executeDebugShellCommand(record.computerId, "C:"),
+    ).toMatchObject({ outcome: "completed", exitCode: 1 });
+    expect(record.osProfile).toBe("linux");
+    expect(record.osRuntimeSnapshot).toEqual(installedOsRuntime);
+    expect(record.dosRuntimeSnapshot).toBeUndefined();
+    expect(record.filesystem.snapshot()).toEqual(before);
   });
 
   it("accounts compile, MCP, terminal, buses, redstone, and topology on production paths", (): void => {

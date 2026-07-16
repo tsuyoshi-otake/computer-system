@@ -41,9 +41,10 @@ timing.
 - Normal Python/CS486 execution and MCP debug execution are scheduler jobs.
   Debug slices use `mcp_debug`, not `guest_cpu`, and every limit, detach,
   interrupt, and completion path has one callback/event owner.
-- `as`, `cc`, `c++`, `basicc`, `basic`, and `ld` submit explicit compile jobs. A
-  shell invocation cannot compile on its initiating event callback. The job is
-  admitted on a later tick in `guest_compile`; BASIC then hands the compiled
+- `as`, `cc`, `c++`, and `ld` submit explicit compile jobs. DOS-only `QBASIC`
+  submits the same bounded frontend work when a program starts. A shell
+  invocation cannot compile on its initiating event callback. The job is
+  admitted on a later tick in `guest_compile`; CS QBASIC then hands the compiled
   executable to the normal bounded CPU scheduler. Source, object-count, memory,
   and instruction ceilings still apply. ASM preprocessing is additionally capped
   at 1,000,000 aggregate source characters, 100,000 lexical tokens, 64 includes,
