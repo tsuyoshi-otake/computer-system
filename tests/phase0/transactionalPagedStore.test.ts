@@ -17,6 +17,7 @@ interface TestManifest {
 class MemoryPropertyStore implements StringPropertyStore {
   readonly values = new Map<string, string>();
   failOnWrite: number | undefined;
+  keyScans = 0;
   reads = 0;
   writes = 0;
   readonly deleteKeys: string[] = [];
@@ -30,6 +31,7 @@ class MemoryPropertyStore implements StringPropertyStore {
   }
 
   public keys(prefix: string): readonly string[] {
+    this.keyScans += 1;
     return [...this.values.keys()].filter((key) => key.startsWith(prefix));
   }
 
@@ -134,6 +136,107 @@ describe("TransactionalPagedStore", () => {
     ).toBeGreaterThan(1);
   });
 
+  it("enforces the generation page limit before a save can mutate storage", () => {
+    const maximumPageCount = 32_768;
+    const serializedOverhead = JSON.stringify({ body: "", version: 1 }).length;
+    const atCapacity = {
+      body: "x".repeat(maximumPageCount - serializedOverhead),
+      version: 1,
+    };
+    const overCapacity = {
+      body: `${atCapacity.body}x`,
+      version: 1,
+    };
+    const rejectedProperties = new MemoryPropertyStore();
+    const rejectedStore = new TransactionalPagedStore(
+      rejectedProperties,
+      "computer:page-capacity-plus-one",
+      1,
+    );
+    expect(() => rejectedStore.beginSave(overCapacity)).toThrow(
+      "generation page limit",
+    );
+    expect(rejectedProperties.values.size).toBe(0);
+    expect(propertyOperations(rejectedProperties)).toBe(0);
+
+    const capacityProperties = new MemoryPropertyStore();
+    const capacityStore = new TransactionalPagedStore(
+      capacityProperties,
+      "computer:page-capacity",
+      1,
+    );
+    const capacitySave = capacityStore.beginSave(atCapacity);
+    expect(() => capacitySave.step(1)).toThrow("generation manifest limit");
+    expect(capacityProperties.values.size).toBe(0);
+    expect(capacityProperties.writes).toBe(0);
+    expect(capacityProperties.deleteKeys).toEqual([]);
+    expect(capacityProperties.reads).toBe(1);
+  });
+
+  it("enforces the manifest property limit symmetrically", () => {
+    const maximumPropertyLength = 32_767;
+    const acceptsBodyLength = (bodyLength: number): boolean => {
+      const properties = new MemoryPropertyStore();
+      const transaction = new TransactionalPagedStore(
+        properties,
+        `computer:manifest-probe-${String(bodyLength)}`,
+        1,
+      ).beginSave({ body: "x".repeat(bodyLength), version: 1 });
+      try {
+        transaction.step(1);
+        return true;
+      } catch (error: unknown) {
+        if (
+          error instanceof RangeError &&
+          error.message.includes("generation manifest limit")
+        ) {
+          return false;
+        }
+        throw error;
+      }
+    };
+    let acceptedBodyLength = 0;
+    let rejectedBodyLength = 4_096;
+    expect(acceptsBodyLength(acceptedBodyLength)).toBe(true);
+    expect(acceptsBodyLength(rejectedBodyLength)).toBe(false);
+    while (rejectedBodyLength - acceptedBodyLength > 1) {
+      const candidate = Math.floor(
+        (acceptedBodyLength + rejectedBodyLength) / 2,
+      );
+      if (acceptsBodyLength(candidate)) acceptedBodyLength = candidate;
+      else rejectedBodyLength = candidate;
+    }
+
+    const accepted = { body: "x".repeat(acceptedBodyLength), version: 1 };
+    const properties = new MemoryPropertyStore();
+    const prefix = "computer:manifest-capacity";
+    const store = new TransactionalPagedStore(properties, prefix, 1);
+    expect(store.save(accepted)).toBe(1);
+    const manifestKey = `${prefix}:manifest:1`;
+    const manifest = properties.values.get(manifestKey)!;
+    expect(manifest.length).toBeLessThanOrEqual(maximumPropertyLength);
+    expect(store.load(isSavedDocument)?.value).toEqual(accepted);
+
+    const rejectedProperties = new MemoryPropertyStore();
+    const rejected = new TransactionalPagedStore(
+      rejectedProperties,
+      "computer:manifest-capacity-plus-one",
+      1,
+    ).beginSave({ body: "x".repeat(rejectedBodyLength), version: 1 });
+    expect(() => rejected.step(1)).toThrow("generation manifest limit");
+    expect(rejectedProperties.values.size).toBe(0);
+    expect(rejectedProperties.writes).toBe(0);
+    expect(rejectedProperties.deleteKeys).toEqual([]);
+
+    properties.values.set(
+      manifestKey,
+      manifest.padEnd(maximumPropertyLength + 1, " "),
+    );
+    expect(() => store.load(isSavedDocument)).toThrow(
+      "No complete storage generation could be loaded.",
+    );
+  });
+
   it("reuses unchanged content-addressed pages across generations", () => {
     const properties = new MemoryPropertyStore();
     const store = new TransactionalPagedStore(properties, "computer:reuse", 8);
@@ -149,6 +252,21 @@ describe("TransactionalPagedStore", () => {
     ).length;
     expect(allBlobWrites).toBe(firstBlobWrites);
     expect(store.load(isSavedDocument)?.value).toEqual(document);
+  });
+
+  it("does not enumerate all property keys during ordinary saves", () => {
+    const properties = new MemoryPropertyStore();
+    const store = new TransactionalPagedStore(
+      properties,
+      "computer:ordinary-save",
+      8,
+    );
+
+    store.save({ body: "ordinary generation one", version: 1 });
+    store.save({ body: "ordinary generation two", version: 2 });
+
+    expect(properties.keyScans).toBe(0);
+    expect(store.load(isSavedDocument)?.value.version).toBe(2);
   });
 
   it("keeps the previous generation readable when a staged write fails", () => {
@@ -278,6 +396,161 @@ describe("TransactionalPagedStore", () => {
     expect(store.load(isSavedDocument)).toEqual({
       generation: 1,
       recovered: true,
+      sourceFormat: "content_addressed_blobs",
+      value: original,
+    });
+  });
+
+  it("sweeps more than eighty target-only blobs after repairing a corrupt manifest", () => {
+    const properties = new MemoryPropertyStore();
+    const prefix = "computer:recovered-orphans";
+    const store = new TransactionalPagedStore(properties, prefix, 8);
+    const original = { body: "stable fallback", version: 1 };
+    store.save(original);
+    const previousManifest = manifestAt(properties, `${prefix}:manifest:1`);
+    store.save({ body: uniquePagedBody(180), version: 2 });
+    const corruptTargetManifest = manifestAt(
+      properties,
+      `${prefix}:manifest:2`,
+    );
+    const previousPageIds = new Set(previousManifest.pageIds);
+    const targetOnlyPageIds = [
+      ...new Set(
+        corruptTargetManifest.pageIds.filter(
+          (pageId) => !previousPageIds.has(pageId),
+        ),
+      ),
+    ];
+    expect(targetOnlyPageIds.length).toBeGreaterThan(80);
+    properties.values.set(`${prefix}:manifest:2`, "corrupt");
+    properties.values.set(`${prefix}:manifest:77`, "abandoned staged manifest");
+
+    const recovered = store.load(isSavedDocument)!;
+    expect(recovered).toMatchObject({ generation: 1, recovered: true });
+    properties.reads = 0;
+    properties.writes = 0;
+    properties.deleteKeys.length = 0;
+    const repair = store.beginSave(recovered.value, recovered.generation);
+    runBoundedMutation(repair, properties);
+
+    expect(properties.values.get(`${prefix}:head`)).toBe("2");
+    expect(store.load(isSavedDocument)).toEqual({
+      generation: 2,
+      recovered: false,
+      sourceFormat: "content_addressed_blobs",
+      value: original,
+    });
+    for (const pageId of targetOnlyPageIds) {
+      expect(properties.values.has(`${prefix}:blob:${pageId}`)).toBe(false);
+    }
+    expect(properties.values.has(`${prefix}:manifest:77`)).toBe(false);
+    const retainedPageIds = new Set([
+      ...manifestAt(properties, `${prefix}:manifest:1`).pageIds,
+      ...manifestAt(properties, `${prefix}:manifest:2`).pageIds,
+    ]);
+    for (const pageId of retainedPageIds) {
+      expect(properties.values.has(`${prefix}:blob:${pageId}`)).toBe(true);
+    }
+
+    const mutationsBefore = properties.writes + properties.deleteKeys.length;
+    runBoundedMutation(store.beginCleanup(2), properties);
+    expect(properties.writes + properties.deleteKeys.length).toBe(
+      mutationsBefore,
+    );
+    expect(properties.values.get(`${prefix}:head`)).toBe("2");
+  });
+
+  it("resumes an orphan sweep after a repaired head commits", () => {
+    const properties = new MemoryPropertyStore();
+    const prefix = "computer:recovered-orphan-restart";
+    const store = new TransactionalPagedStore(properties, prefix, 8);
+    const original = { body: "restart fallback", version: 1 };
+    store.save(original);
+    const previousPageIds = new Set(
+      manifestAt(properties, `${prefix}:manifest:1`).pageIds,
+    );
+    store.save({ body: uniquePagedBody(180), version: 2 });
+    const corruptTarget = manifestAt(properties, `${prefix}:manifest:2`);
+    const targetOnlyPageIds = [
+      ...new Set(
+        corruptTarget.pageIds.filter((pageId) => !previousPageIds.has(pageId)),
+      ),
+    ];
+    expect(targetOnlyPageIds.length).toBeGreaterThan(80);
+    properties.values.set(`${prefix}:manifest:2`, "corrupt");
+    const recovered = store.load(isSavedDocument)!;
+    const repair = store.beginSave(recovered.value, recovered.generation);
+    const headWritesBefore = properties.writeKeys.filter(
+      (key) => key === `${prefix}:head`,
+    ).length;
+
+    for (let step = 0; step < 10_000; step += 1) {
+      const operationsBefore = propertyOperations(properties);
+      repair.step(1);
+      expect(
+        propertyOperations(properties) - operationsBefore,
+      ).toBeLessThanOrEqual(1);
+      const headWrites = properties.writeKeys.filter(
+        (key) => key === `${prefix}:head`,
+      ).length;
+      if (headWrites > headWritesBefore) break;
+      if (step === 9_999) throw new Error("Repair did not commit its head");
+    }
+
+    properties.values.set(`${prefix}:manifest:77`, "abandoned after restart");
+    runBoundedMutation(store.beginCleanup(2), properties);
+
+    for (const pageId of targetOnlyPageIds) {
+      expect(properties.values.has(`${prefix}:blob:${pageId}`)).toBe(false);
+    }
+    expect(properties.values.has(`${prefix}:manifest:77`)).toBe(false);
+    expect(properties.values.get(`${prefix}:head`)).toBe("2");
+    expect(store.load(isSavedDocument)).toMatchObject({
+      generation: 2,
+      recovered: false,
+      value: original,
+    });
+  });
+
+  it("sweeps indexed pages hidden by a corrupt legacy target manifest", () => {
+    const properties = new MemoryPropertyStore();
+    const prefix = "computer:recovered-legacy-orphans";
+    const original = { body: "legacy fallback", version: 1 };
+    writeLegacyGeneration(properties, prefix, 1, original, 8);
+    writeLegacyGeneration(
+      properties,
+      prefix,
+      2,
+      { body: uniquePagedBody(180), version: 2 },
+      8,
+    );
+    properties.values.set(`${prefix}:head`, "2");
+    const targetPagePrefix = `${prefix}:page:2:`;
+    const targetPageKeys = [...properties.values.keys()].filter((key) =>
+      key.startsWith(targetPagePrefix),
+    );
+    expect(targetPageKeys.length).toBeGreaterThan(80);
+    properties.values.set(`${prefix}:manifest:2`, "corrupt");
+    const store = new TransactionalPagedStore(properties, prefix, 8);
+    const recovered = store.load(isSavedDocument)!;
+    expect(recovered).toMatchObject({ generation: 1, recovered: true });
+
+    runBoundedMutation(
+      store.beginSave(recovered.value, recovered.generation),
+      properties,
+    );
+
+    for (const key of targetPageKeys) {
+      expect(properties.values.has(key)).toBe(false);
+    }
+    expect(
+      [...properties.values.keys()].some((key) =>
+        key.startsWith(`${prefix}:page:1:`),
+      ),
+    ).toBe(true);
+    expect(store.load(isSavedDocument)).toEqual({
+      generation: 2,
+      recovered: false,
       sourceFormat: "content_addressed_blobs",
       value: original,
     });
@@ -479,3 +752,36 @@ describe("TransactionalPagedStore", () => {
     });
   });
 });
+
+function propertyOperations(properties: MemoryPropertyStore): number {
+  return (
+    properties.keyScans +
+    properties.reads +
+    properties.writes +
+    properties.deleteKeys.length
+  );
+}
+
+function runBoundedMutation(
+  transaction: {
+    step(maxOperations?: number): { readonly outcome: "complete" | "pending" };
+  },
+  properties: MemoryPropertyStore,
+): void {
+  for (let step = 0; step < 10_000; step += 1) {
+    const operationsBefore = propertyOperations(properties);
+    const result = transaction.step(1);
+    expect(
+      propertyOperations(properties) - operationsBefore,
+    ).toBeLessThanOrEqual(1);
+    if (result.outcome === "complete") return;
+  }
+  throw new Error("Bounded paged-store mutation did not terminate");
+}
+
+function uniquePagedBody(parts: number): string {
+  return Array.from(
+    { length: parts },
+    (_, index) => `${index.toString(36).padStart(6, "0")}|`,
+  ).join("");
+}

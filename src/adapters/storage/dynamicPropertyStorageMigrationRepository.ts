@@ -1,5 +1,6 @@
 import type {
   ComputerStorageMigrationRepository,
+  MigrationCleanupTransaction,
   MigrationLoadTransaction,
   MigrationSaveTransaction,
 } from "../../application/computer/storageMigration.js";
@@ -29,6 +30,20 @@ export class DynamicPropertyStorageMigrationRepository implements ComputerStorag
     this.identityPrefix =
       options.identityPrefix ?? "computer_system:identities";
     this.pageCharacterLimit = options.pageCharacterLimit ?? 24_000;
+  }
+
+  beginCleanupComputer(
+    computerId: string,
+    generation: number,
+  ): MigrationCleanupTransaction {
+    requireComputerId(computerId);
+    return this.store(`${this.computerPrefix}:${computerId}`).beginCleanup(
+      generation,
+    );
+  }
+
+  beginCleanupIdentities(generation: number): MigrationCleanupTransaction {
+    return this.store(this.identityPrefix).beginCleanup(generation);
   }
 
   beginLoadComputer(computerId: string): MigrationLoadTransaction<unknown> {
@@ -74,10 +89,16 @@ export class DynamicPropertyStorageMigrationRepository implements ComputerStorag
           }
           return value;
         },
-        keys: (prefixValue): readonly string[] =>
-          this.owner
-            .getDynamicPropertyIds?.()
-            .filter((key) => key.startsWith(prefixValue)) ?? [],
+        keys: (prefixValue): readonly string[] => {
+          if (this.owner.getDynamicPropertyIds === undefined) {
+            throw new Error(
+              "Storage migration cleanup requires Dynamic Property ID enumeration.",
+            );
+          }
+          return this.owner
+            .getDynamicPropertyIds()
+            .filter((key) => key.startsWith(prefixValue));
+        },
         set: (key, value): void => {
           this.owner.setDynamicProperty(key, value);
         },

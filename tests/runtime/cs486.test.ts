@@ -154,4 +154,89 @@ describe("CS486DX execution core", (): void => {
       ),
     ).toThrow(/executable data exceeds available RAM/u);
   });
+
+  it("faults before the downward-growing stack overwrites static data", (): void => {
+    const executable = {
+      ...assembleCs486("push eax\npush eax\nhalt"),
+      dataBytes: 65_532,
+    };
+
+    expect(() => runCs486(executable, { memoryBytes: 65_536 })).toThrowError(
+      expect.objectContaining({
+        typeName: "StackOverflowError",
+        message: "stack overflow",
+      }),
+    );
+  });
+
+  it("rejects forged stack pointers and return addresses", (): void => {
+    expect(() =>
+      runCs486(assembleCs486("pop eax\nhalt"), { memoryBytes: 65_536 }),
+    ).toThrowError(
+      expect.objectContaining({
+        typeName: "StackUnderflowError",
+        message: "stack underflow",
+      }),
+    );
+    expect(() =>
+      runCs486(
+        { ...assembleCs486("mov esp, 0\npop eax\nhalt"), dataBytes: 4 },
+        { memoryBytes: 65_536 },
+      ),
+    ).toThrowError(
+      expect.objectContaining({
+        typeName: "StackOverflowError",
+        message: "stack overflow",
+      }),
+    );
+    expect(() =>
+      runCs486(assembleCs486("push -1\nret"), { memoryBytes: 65_536 }),
+    ).toThrowError(/instruction pointer -1 is outside/u);
+    expect(() =>
+      runCs486(assembleCs486("push 2\nret"), { memoryBytes: 65_536 }),
+    ).toThrowError(/instruction pointer 2 is outside/u);
+    expect(() =>
+      runCs486(assembleCs486("push 200\nret"), { memoryBytes: 65_536 }),
+    ).toThrowError(/instruction pointer 200 is outside/u);
+  });
+
+  it("keeps valid CALL/RET balanced while reserving one-past-end for fallthrough", (): void => {
+    const called = runCs486(
+      assembleCs486("call answer\nhalt\nanswer:\nmov eax, 42\nret"),
+      { memoryBytes: 65_536 },
+    );
+    const fellThrough = runCs486(assembleCs486("mov eax, 42"), {
+      memoryBytes: 65_536,
+    });
+
+    expect(called).toMatchObject({
+      executedInstructions: 4,
+      registers: { eax: 42, esp: 65_536 },
+      state: "halted",
+    });
+    expect(fellThrough).toMatchObject({
+      executedInstructions: 1,
+      registers: { eax: 42, esp: 65_536 },
+      state: "halted",
+    });
+
+    expect(() =>
+      runCs486(
+        assembleCs486("jmp caller\ncallee:\nret\ncaller:\ncall callee"),
+        { memoryBytes: 65_536 },
+      ),
+    ).toThrowError(
+      /instruction pointer 3 is outside executable instruction range 0\.\.2/u,
+    );
+  });
+
+  it("treats in-range ESP as a raw pointer without tracking PUSH provenance", (): void => {
+    const result = runCs486(
+      assembleCs486("mov esp, 65532\npop eax\nprint eax\nhalt"),
+      { memoryBytes: 65_536 },
+    );
+
+    expect(result.output).toBe("0");
+    expect(result.registers.esp).toBe(65_536);
+  });
 });

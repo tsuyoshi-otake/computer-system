@@ -22,12 +22,14 @@ export class DosShellFrontend implements ShellFrontend {
     commands: ShellCommandRuntime,
     context: ShellLineContext,
   ): PreparedShellLine {
-    const expanded = commands.expandDosVariables(
-      line,
-      context.scriptName,
-      context.arguments,
-      context.lastExitCode,
-    );
+    const expanded = context.variablesExpanded
+      ? line
+      : commands.expandDosVariables(
+          line,
+          context.scriptName,
+          context.arguments,
+          context.lastExitCode,
+        );
     const control = commands.executeDosControlLine(expanded);
     if (control !== undefined)
       return { kind: "command-result", result: control };

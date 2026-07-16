@@ -36,6 +36,35 @@ const legacyDefaultClockHz = 20_000;
 
 export type ComputerOsProfile = "dos" | "linux";
 
+/** Application-owned OS state persisted as a cold, bounded schema-1 DTO. */
+export interface PersistedOsRuntimeStateSnapshot {
+  readonly computerId: string;
+  readonly devices: readonly unknown[];
+  readonly jobs: readonly unknown[];
+  readonly journal: readonly unknown[];
+  readonly journalBytes: number;
+  readonly lastLogins: readonly unknown[];
+  readonly lifecycle: unknown;
+  readonly loginSessions: readonly unknown[];
+  readonly mountDefinitions: readonly unknown[];
+  readonly mounts: readonly unknown[];
+  readonly nextJobId: number;
+  readonly nextJournalSequence: number;
+  readonly nextPid: number;
+  readonly processes: readonly unknown[];
+  readonly revision: number;
+  readonly schema: 1;
+  readonly services: readonly unknown[];
+}
+
+/** Application-owned DOS drive/FAT state persisted as a cold schema-1 DTO. */
+export interface PersistedDosRuntimeStateSnapshot {
+  readonly drives: unknown;
+  readonly fatMetadata: readonly unknown[];
+  readonly revision: number;
+  readonly schema: 1;
+}
+
 export interface ComputerSnapshot {
   readonly schema: 2;
   readonly computerId: string;
@@ -47,6 +76,8 @@ export interface ComputerSnapshot {
   readonly osProfile?: ComputerOsProfile;
   readonly hardware?: ComputerHardwareSnapshot;
   readonly displayProfileId?: DisplayProfileId;
+  readonly osRuntime?: PersistedOsRuntimeStateSnapshot;
+  readonly dosRuntime?: PersistedDosRuntimeStateSnapshot;
 }
 
 export interface ComputerRecordOptions {
@@ -57,6 +88,8 @@ export interface ComputerRecordOptions {
   readonly osProfile?: ComputerOsProfile;
   readonly hardware?: ComputerHardwareProfile;
   readonly displayProfileId?: DisplayProfileId;
+  readonly osRuntime?: PersistedOsRuntimeStateSnapshot;
+  readonly dosRuntime?: PersistedDosRuntimeStateSnapshot;
 }
 
 export class ComputerRecord {
@@ -70,6 +103,8 @@ export class ComputerRecord {
   private displayProfileIdValue: DisplayProfileId;
   private displayValue: DisplayDevice;
   private labelValue: string | undefined;
+  private osRuntimeValue: PersistedOsRuntimeStateSnapshot | undefined;
+  private dosRuntimeValue: PersistedDosRuntimeStateSnapshot | undefined;
   private metadataRevision = 0;
 
   constructor(
@@ -101,6 +136,8 @@ export class ComputerRecord {
       options.displayProfileId ?? defaultDisplayProfileForFamily(family),
     );
     this.displayValue = new DisplayDevice(this.displayProfileIdValue);
+    this.osRuntimeValue = options.osRuntime;
+    this.dosRuntimeValue = options.dosRuntime;
     this.setLabel(options.label);
   }
 
@@ -128,6 +165,14 @@ export class ComputerRecord {
     return this.displayProfileIdValue;
   }
 
+  get osRuntimeSnapshot(): PersistedOsRuntimeStateSnapshot | undefined {
+    return this.osRuntimeValue;
+  }
+
+  get dosRuntimeSnapshot(): PersistedDosRuntimeStateSnapshot | undefined {
+    return this.dosRuntimeValue;
+  }
+
   get persistenceRevision(): string {
     return `${this.metadataRevision}:${this.filesystem.revision}:${this.terminal.revision}:${this.redstone.revision}`;
   }
@@ -148,6 +193,30 @@ export class ComputerRecord {
       );
     }
     this.redstone.setOutputMask(mask);
+  }
+
+  setOsRuntimeSnapshot(snapshot: PersistedOsRuntimeStateSnapshot): void {
+    if (snapshot.schema !== 1 || snapshot.computerId !== this.computerId) {
+      throw new Error("OS runtime snapshot does not belong to this Computer");
+    }
+    if (!Number.isSafeInteger(snapshot.revision) || snapshot.revision < 0) {
+      throw new Error("OS runtime snapshot revision is invalid");
+    }
+    if (this.osRuntimeValue?.revision === snapshot.revision) return;
+    this.osRuntimeValue = snapshot;
+    this.metadataRevision += 1;
+  }
+
+  setDosRuntimeSnapshot(snapshot: PersistedDosRuntimeStateSnapshot): void {
+    if (snapshot.schema !== 1) {
+      throw new Error("Unsupported DOS runtime snapshot schema");
+    }
+    if (!Number.isSafeInteger(snapshot.revision) || snapshot.revision < 0) {
+      throw new Error("DOS runtime snapshot revision is invalid");
+    }
+    if (this.dosRuntimeValue?.revision === snapshot.revision) return;
+    this.dosRuntimeValue = snapshot;
+    this.metadataRevision += 1;
   }
 
   configureHardware(hardware: ComputerHardwareProfile): void {
@@ -205,6 +274,12 @@ export class ComputerRecord {
       osProfile: this.osProfileValue,
       hardware: this.hardwareValue,
       displayProfileId: this.displayProfileIdValue,
+      ...(this.osRuntimeValue === undefined
+        ? {}
+        : { osRuntime: this.osRuntimeValue }),
+      ...(this.dosRuntimeValue === undefined
+        ? {}
+        : { dosRuntime: this.dosRuntimeValue }),
     };
   }
 
@@ -224,6 +299,8 @@ export class ComputerRecord {
       displayProfileId:
         snapshot.displayProfileId ??
         legacyDisplayProfile(snapshot, snapshot.family),
+      osRuntime: snapshot.osRuntime,
+      dosRuntime: snapshot.dosRuntime,
     });
     record.filesystem.restore(snapshot.filesystem);
     record.terminal.restore(snapshot.terminal);

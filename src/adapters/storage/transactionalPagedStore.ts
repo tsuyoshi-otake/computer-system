@@ -65,6 +65,12 @@ export type PagedSaveStage =
   | "pages"
   | "commit"
   | "obsolete_cleanup"
+  | "orphan_scan"
+  | "orphan_cleanup"
+  | "indexed_page_scan"
+  | "indexed_page_cleanup"
+  | "orphan_manifest_scan"
+  | "orphan_manifest_cleanup"
   | "complete";
 
 export type PagedSaveStepResult =
@@ -76,6 +82,33 @@ export interface PagedSaveTransaction {
   readonly generation: number;
   readonly stage: PagedSaveStage;
   step(maxOperations?: number): PagedSaveStepResult;
+}
+
+export type PagedCleanupStage =
+  | "head"
+  | "current_manifest"
+  | "previous_manifest"
+  | "previous_repair"
+  | "previous_cleanup"
+  | "obsolete_manifest"
+  | "obsolete_cleanup"
+  | "orphan_scan"
+  | "orphan_cleanup"
+  | "indexed_page_scan"
+  | "indexed_page_cleanup"
+  | "orphan_manifest_scan"
+  | "orphan_manifest_cleanup"
+  | "complete";
+
+export type PagedCleanupStepResult =
+  | { readonly outcome: "pending"; readonly stage: PagedCleanupStage }
+  | { readonly outcome: "complete"; readonly generation: number };
+
+/** Resumes bounded post-commit cleanup without rewriting the committed value. */
+export interface PagedCleanupTransaction {
+  readonly generation: number;
+  readonly stage: PagedCleanupStage;
+  step(maxOperations?: number): PagedCleanupStepResult;
 }
 
 export class TransactionalPagedStore {
@@ -157,6 +190,15 @@ export class TransactionalPagedStore {
         "The supplied value exceeds the paged storage limit.",
       );
     }
+    const pageCount = Math.max(
+      1,
+      Math.ceil(json.length / this.#pageCharacterLimit),
+    );
+    if (pageCount > maximumGenerationPageCount) {
+      throw new RangeError(
+        "The supplied value exceeds the generation page limit.",
+      );
+    }
 
     const pages = this.#splitPages(json);
     const pageIds = pages.map(pageBlobId);
@@ -169,6 +211,15 @@ export class TransactionalPagedStore {
       checksum(json),
       sourceGeneration,
     );
+  }
+
+  public beginCleanup(generation: number): PagedCleanupTransaction {
+    if (!Number.isSafeInteger(generation) || generation <= 0) {
+      throw new RangeError(
+        "The cleanup generation must be a positive integer.",
+      );
+    }
+    return new IncrementalPagedCleanup(this.#store, this.#prefix, generation);
   }
 
   #splitPages(value: string): string[] {
@@ -257,6 +308,12 @@ class IncrementalPagedLoad<T> implements PagedLoadTransaction<T> {
           if (text === undefined) {
             this.#rejectGeneration(
               new Error(`Generation ${generation} has no manifest.`),
+            );
+            break;
+          }
+          if (text.length > maximumPropertyPageCharacterLength) {
+            this.#rejectGeneration(
+              new Error(`Generation ${generation} has an oversized manifest.`),
             );
             break;
           }
@@ -462,7 +519,7 @@ class IncrementalPagedSave implements PagedSaveTransaction {
   readonly #sourceGeneration: number | undefined;
   #stage: PagedSaveStage = "head";
   #generation: number | undefined;
-  #manifest: ContentAddressedGenerationManifest | undefined;
+  #serializedManifest: string | undefined;
   #targetCleanupIndex = 0;
   #targetManifestDeleted = false;
   #targetManifest: GenerationManifest | undefined;
@@ -473,7 +530,17 @@ class IncrementalPagedSave implements PagedSaveTransaction {
   #targetLegacyPageCount = 0;
   #obsoleteGeneration = 0;
   #obsoleteManifest: GenerationManifest | undefined;
+  #previousManifest: GenerationManifest | undefined;
   #retainedPageIds: ReadonlySet<string> = new Set();
+  #retainedIndexedPageKeys: ReadonlySet<string> = new Set();
+  #retainedManifestKeys: ReadonlySet<string> = new Set();
+  #orphanBlobKeys: readonly string[] = [];
+  #orphanCleanupIndex = 0;
+  #orphanIndexedPageKeys: readonly string[] = [];
+  #orphanIndexedPageCleanupIndex = 0;
+  #orphanManifestKeys: readonly string[] = [];
+  #orphanManifestCleanupIndex = 0;
+  #repairingRecoveredHead = false;
 
   constructor(
     store: StringPropertyStore,
@@ -520,6 +587,9 @@ class IncrementalPagedSave implements PagedSaveTransaction {
             currentHeadText === undefined
               ? 0
               : parseStorageHead(currentHeadText, true);
+          this.#repairingRecoveredHead =
+            this.#sourceGeneration !== undefined &&
+            currentHead === this.#sourceGeneration + 1;
           if (
             this.#sourceGeneration !== undefined &&
             currentHead !== this.#sourceGeneration &&
@@ -539,7 +609,7 @@ class IncrementalPagedSave implements PagedSaveTransaction {
           }
           this.#generation = generation;
           this.#obsoleteGeneration = generation - 2;
-          this.#manifest = {
+          const manifest: ContentAddressedGenerationManifest = {
             characterLength: this.#characterLength,
             checksum: this.#checksum,
             generation,
@@ -547,6 +617,13 @@ class IncrementalPagedSave implements PagedSaveTransaction {
             pageIds: this.#pageIds,
             schema: 2,
           };
+          const serializedManifest = JSON.stringify(manifest);
+          if (serializedManifest.length > maximumPropertyPageCharacterLength) {
+            throw new RangeError(
+              `The generation manifest limit of ${String(maximumPropertyPageCharacterLength)} Dynamic Property characters was exceeded.`,
+            );
+          }
+          this.#serializedManifest = serializedManifest;
           this.#stage = "target_manifest";
           break;
         }
@@ -570,16 +647,27 @@ class IncrementalPagedSave implements PagedSaveTransaction {
           break;
         case "previous_manifest": {
           const previousGeneration = this.generation - 1;
-          const previousManifest =
+          this.#previousManifest =
             previousGeneration > 0
               ? this.#readManifest(previousGeneration)
               : undefined;
           if (previousGeneration > 0) operations += 1;
           const previousPageIds =
-            previousManifest?.schema === 2 ? previousManifest.pageIds : [];
+            this.#previousManifest?.schema === 2
+              ? this.#previousManifest.pageIds
+              : [];
           this.#retainedPageIds = new Set([
             ...this.#pageIds,
             ...previousPageIds,
+          ]);
+          this.#retainedIndexedPageKeys = new Set(
+            indexedPageKeys(this.#prefix, this.#previousManifest),
+          );
+          this.#retainedManifestKeys = new Set([
+            this.manifestKey(this.generation),
+            ...(this.#previousManifest === undefined
+              ? []
+              : [this.manifestKey(previousGeneration)]),
           ]);
           this.#stage = "target_cleanup";
           break;
@@ -614,7 +702,7 @@ class IncrementalPagedSave implements PagedSaveTransaction {
         case "manifest":
           this.#store.set(
             this.manifestKey(this.generation),
-            JSON.stringify(this.requireManifest()),
+            this.requireSerializedManifest(),
           );
           this.#stage = "pages";
           operations += 1;
@@ -650,7 +738,7 @@ class IncrementalPagedSave implements PagedSaveTransaction {
           break;
         case "obsolete_cleanup":
           if (this.#obsoleteGeneration <= 0) {
-            this.#stage = "complete";
+            this.#advancePastKnownCleanup();
           } else if (
             this.#obsoleteManifest?.schema === 1 &&
             this.#obsoleteCleanupIndex < this.#obsoleteManifest.pageCount
@@ -677,9 +765,74 @@ class IncrementalPagedSave implements PagedSaveTransaction {
             this.#obsoleteManifestDeleted = true;
             operations += 1;
           } else {
-            this.#stage = "complete";
+            this.#advancePastKnownCleanup();
           }
           break;
+        case "orphan_scan":
+          this.#orphanBlobKeys = listPropertyKeys(
+            this.#store,
+            this.blobPrefix(),
+          );
+          this.#stage = "orphan_cleanup";
+          operations += 1;
+          break;
+        case "orphan_cleanup": {
+          const key = this.#orphanBlobKeys[this.#orphanCleanupIndex];
+          if (key === undefined) {
+            this.#stage = "indexed_page_scan";
+            break;
+          }
+          this.#orphanCleanupIndex += 1;
+          if (!this.#retainedPageIds.has(key.slice(this.blobPrefix().length))) {
+            this.#store.delete(key);
+          }
+          operations += 1;
+          break;
+        }
+        case "indexed_page_scan":
+          this.#orphanIndexedPageKeys = listPropertyKeys(
+            this.#store,
+            this.indexedPagePrefix(),
+          );
+          this.#stage = "indexed_page_cleanup";
+          operations += 1;
+          break;
+        case "indexed_page_cleanup": {
+          const key =
+            this.#orphanIndexedPageKeys[this.#orphanIndexedPageCleanupIndex];
+          if (key === undefined) {
+            this.#stage = "orphan_manifest_scan";
+            break;
+          }
+          this.#orphanIndexedPageCleanupIndex += 1;
+          if (!this.#retainedIndexedPageKeys.has(key)) {
+            this.#store.delete(key);
+          }
+          operations += 1;
+          break;
+        }
+        case "orphan_manifest_scan":
+          this.#orphanManifestKeys = listPropertyKeys(
+            this.#store,
+            this.manifestPrefix(),
+          );
+          this.#stage = "orphan_manifest_cleanup";
+          operations += 1;
+          break;
+        case "orphan_manifest_cleanup": {
+          const key =
+            this.#orphanManifestKeys[this.#orphanManifestCleanupIndex];
+          if (key === undefined) {
+            this.#stage = "complete";
+            break;
+          }
+          this.#orphanManifestCleanupIndex += 1;
+          if (!this.#retainedManifestKeys.has(key)) {
+            this.#store.delete(key);
+          }
+          operations += 1;
+          break;
+        }
       }
     }
     return this.#stage === "complete"
@@ -689,13 +842,7 @@ class IncrementalPagedSave implements PagedSaveTransaction {
 
   #readManifest(generation: number): GenerationManifest | undefined {
     const text = this.#store.get(this.manifestKey(generation));
-    if (text === undefined) return undefined;
-    try {
-      const value: unknown = JSON.parse(text);
-      return isGenerationManifest(value, generation) ? value : undefined;
-    } catch {
-      return undefined;
-    }
+    return parseGenerationManifest(text, generation);
   }
 
   #advancePage(): void {
@@ -703,11 +850,15 @@ class IncrementalPagedSave implements PagedSaveTransaction {
     if (this.#pageIndex >= this.#pages.length) this.#stage = "commit";
   }
 
-  private requireManifest(): ContentAddressedGenerationManifest {
-    if (this.#manifest === undefined) {
-      throw new Error("Paged save manifest is not initialized.");
+  #advancePastKnownCleanup(): void {
+    this.#stage = this.#repairingRecoveredHead ? "orphan_scan" : "complete";
+  }
+
+  private requireSerializedManifest(): string {
+    if (this.#serializedManifest === undefined) {
+      throw new Error("Paged save manifest encoding is not initialized.");
     }
-    return this.#manifest;
+    return this.#serializedManifest;
   }
 
   private headKey(): string {
@@ -725,11 +876,310 @@ class IncrementalPagedSave implements PagedSaveTransaction {
   private blobKey(pageId: string): string {
     return `${this.#prefix}:blob:${pageId}`;
   }
+
+  private blobPrefix(): string {
+    return `${this.#prefix}:blob:`;
+  }
+
+  private indexedPagePrefix(): string {
+    return `${this.#prefix}:page:`;
+  }
+
+  private manifestPrefix(): string {
+    return `${this.#prefix}:manifest:`;
+  }
+}
+
+class IncrementalPagedCleanup implements PagedCleanupTransaction {
+  readonly #store: StringPropertyStore;
+  readonly #prefix: string;
+  readonly #generation: number;
+  #stage: PagedCleanupStage = "head";
+  #currentManifest: GenerationManifest | undefined;
+  #previousManifest: GenerationManifest | undefined;
+  #obsoleteManifest: GenerationManifest | undefined;
+  #obsoleteManifestPresent = false;
+  #obsoleteCleanupIndex = 0;
+  #obsoleteManifestDeleted = false;
+  #retainedPageIds: ReadonlySet<string> = new Set();
+  #retainedIndexedPageKeys: ReadonlySet<string> = new Set();
+  #retainedManifestKeys: ReadonlySet<string> = new Set();
+  #orphanBlobKeys: readonly string[] = [];
+  #orphanCleanupIndex = 0;
+  #orphanIndexedPageKeys: readonly string[] = [];
+  #orphanIndexedPageCleanupIndex = 0;
+  #orphanManifestKeys: readonly string[] = [];
+  #orphanManifestCleanupIndex = 0;
+
+  constructor(store: StringPropertyStore, prefix: string, generation: number) {
+    this.#store = store;
+    this.#prefix = prefix;
+    this.#generation = generation;
+  }
+
+  get generation(): number {
+    return this.#generation;
+  }
+
+  get stage(): PagedCleanupStage {
+    return this.#stage;
+  }
+
+  step(maxOperations = 1): PagedCleanupStepResult {
+    if (!Number.isSafeInteger(maxOperations) || maxOperations <= 0) {
+      throw new RangeError("Paged cleanup operations must be positive.");
+    }
+    let operations = 0;
+    while (operations < maxOperations && this.#stage !== "complete") {
+      switch (this.#stage) {
+        case "head": {
+          const currentHeadText = this.#store.get(this.headKey());
+          operations += 1;
+          if (
+            currentHeadText === undefined ||
+            parseStorageHead(currentHeadText, false) !== this.#generation
+          ) {
+            throw new Error(
+              "Paged storage changed after the cleanup generation was loaded.",
+            );
+          }
+          this.#stage = "current_manifest";
+          break;
+        }
+        case "current_manifest": {
+          const text = this.#store.get(this.manifestKey(this.#generation));
+          operations += 1;
+          this.#currentManifest = parseGenerationManifest(
+            text,
+            this.#generation,
+          );
+          if (this.#currentManifest === undefined) {
+            throw new Error(
+              `Current generation ${String(this.#generation)} has no valid manifest.`,
+            );
+          }
+          this.#stage = "previous_manifest";
+          break;
+        }
+        case "previous_manifest": {
+          const previousGeneration = this.#generation - 1;
+          if (previousGeneration <= 0) {
+            this.#refreshRetainedPageIds();
+            this.#advancePastPrevious();
+            break;
+          }
+          const text = this.#store.get(this.manifestKey(previousGeneration));
+          operations += 1;
+          this.#previousManifest = parseGenerationManifest(
+            text,
+            previousGeneration,
+          );
+          if (this.#previousManifest !== undefined) {
+            this.#refreshRetainedPageIds();
+            this.#advancePastPrevious();
+            break;
+          }
+          if (this.#currentManifest?.schema === 2) {
+            this.#previousManifest = {
+              ...this.#currentManifest,
+              generation: previousGeneration,
+            };
+            this.#refreshRetainedPageIds();
+            this.#stage = "previous_repair";
+            break;
+          }
+          this.#refreshRetainedPageIds();
+          if (text === undefined) this.#advancePastPrevious();
+          else this.#stage = "previous_cleanup";
+          break;
+        }
+        case "previous_repair":
+          this.#store.set(
+            this.manifestKey(this.#generation - 1),
+            JSON.stringify(this.#previousManifest),
+          );
+          operations += 1;
+          this.#advancePastPrevious();
+          break;
+        case "previous_cleanup":
+          this.#store.delete(this.manifestKey(this.#generation - 1));
+          operations += 1;
+          this.#advancePastPrevious();
+          break;
+        case "obsolete_manifest": {
+          const obsoleteGeneration = this.#generation - 2;
+          const text = this.#store.get(this.manifestKey(obsoleteGeneration));
+          operations += 1;
+          this.#obsoleteManifestPresent = text !== undefined;
+          this.#obsoleteManifest = parseGenerationManifest(
+            text,
+            obsoleteGeneration,
+          );
+          this.#stage = this.#obsoleteManifestPresent
+            ? "obsolete_cleanup"
+            : "orphan_scan";
+          break;
+        }
+        case "obsolete_cleanup":
+          this.#advanceObsoleteCleanup();
+          operations += 1;
+          break;
+        case "orphan_scan":
+          this.#orphanBlobKeys = listPropertyKeys(
+            this.#store,
+            this.blobPrefix(),
+          );
+          this.#stage = "orphan_cleanup";
+          operations += 1;
+          break;
+        case "orphan_cleanup": {
+          const key = this.#orphanBlobKeys[this.#orphanCleanupIndex];
+          if (key === undefined) {
+            this.#stage = "indexed_page_scan";
+            break;
+          }
+          this.#orphanCleanupIndex += 1;
+          if (!this.#retainedPageIds.has(key.slice(this.blobPrefix().length))) {
+            this.#store.delete(key);
+          }
+          operations += 1;
+          break;
+        }
+        case "indexed_page_scan":
+          this.#orphanIndexedPageKeys = listPropertyKeys(
+            this.#store,
+            this.indexedPagePrefix(),
+          );
+          this.#stage = "indexed_page_cleanup";
+          operations += 1;
+          break;
+        case "indexed_page_cleanup": {
+          const key =
+            this.#orphanIndexedPageKeys[this.#orphanIndexedPageCleanupIndex];
+          if (key === undefined) {
+            this.#stage = "orphan_manifest_scan";
+            break;
+          }
+          this.#orphanIndexedPageCleanupIndex += 1;
+          if (!this.#retainedIndexedPageKeys.has(key)) {
+            this.#store.delete(key);
+          }
+          operations += 1;
+          break;
+        }
+        case "orphan_manifest_scan":
+          this.#orphanManifestKeys = listPropertyKeys(
+            this.#store,
+            this.manifestPrefix(),
+          );
+          this.#stage = "orphan_manifest_cleanup";
+          operations += 1;
+          break;
+        case "orphan_manifest_cleanup": {
+          const key =
+            this.#orphanManifestKeys[this.#orphanManifestCleanupIndex];
+          if (key === undefined) {
+            this.#stage = "complete";
+            break;
+          }
+          this.#orphanManifestCleanupIndex += 1;
+          if (!this.#retainedManifestKeys.has(key)) {
+            this.#store.delete(key);
+          }
+          operations += 1;
+          break;
+        }
+      }
+    }
+    return this.#stage === "complete"
+      ? { outcome: "complete", generation: this.#generation }
+      : { outcome: "pending", stage: this.#stage };
+  }
+
+  #advanceObsoleteCleanup(): void {
+    const obsoleteGeneration = this.#generation - 2;
+    if (
+      this.#obsoleteManifest?.schema === 1 &&
+      this.#obsoleteCleanupIndex < this.#obsoleteManifest.pageCount
+    ) {
+      this.#store.delete(
+        this.pageKey(obsoleteGeneration, this.#obsoleteCleanupIndex++),
+      );
+      return;
+    }
+    if (
+      this.#obsoleteManifest?.schema === 2 &&
+      this.#obsoleteCleanupIndex < this.#obsoleteManifest.pageIds.length
+    ) {
+      const pageId =
+        this.#obsoleteManifest.pageIds[this.#obsoleteCleanupIndex++]!;
+      if (!this.#retainedPageIds.has(pageId)) {
+        this.#store.delete(this.blobKey(pageId));
+      }
+      return;
+    }
+    if (!this.#obsoleteManifestDeleted) {
+      this.#store.delete(this.manifestKey(obsoleteGeneration));
+      this.#obsoleteManifestDeleted = true;
+      return;
+    }
+    this.#stage = "orphan_scan";
+  }
+
+  #refreshRetainedPageIds(): void {
+    this.#retainedPageIds = new Set([
+      ...pageIds(this.#currentManifest),
+      ...pageIds(this.#previousManifest),
+    ]);
+    this.#retainedIndexedPageKeys = new Set([
+      ...indexedPageKeys(this.#prefix, this.#currentManifest),
+      ...indexedPageKeys(this.#prefix, this.#previousManifest),
+    ]);
+    this.#retainedManifestKeys = new Set([
+      this.manifestKey(this.#generation),
+      ...(this.#previousManifest === undefined
+        ? []
+        : [this.manifestKey(this.#generation - 1)]),
+    ]);
+  }
+
+  #advancePastPrevious(): void {
+    this.#stage = this.#generation > 2 ? "obsolete_manifest" : "orphan_scan";
+  }
+
+  private headKey(): string {
+    return `${this.#prefix}:head`;
+  }
+
+  private manifestKey(generation: number): string {
+    return `${this.#prefix}:manifest:${String(generation)}`;
+  }
+
+  private pageKey(generation: number, index: number): string {
+    return `${this.#prefix}:page:${String(generation)}:${String(index)}`;
+  }
+
+  private blobKey(pageId: string): string {
+    return `${this.#prefix}:blob:${pageId}`;
+  }
+
+  private blobPrefix(): string {
+    return `${this.#prefix}:blob:`;
+  }
+
+  private indexedPagePrefix(): string {
+    return `${this.#prefix}:page:`;
+  }
+
+  private manifestPrefix(): string {
+    return `${this.#prefix}:manifest:`;
+  }
 }
 
 const maximumPropertyPageCharacterLength = 32_767;
 const maximumGenerationPageCount = 32_768;
 const maximumSerializedCharacterLength = 512 * 1_048_576;
+const maximumEnumeratedStoragePropertyCount = maximumGenerationPageCount * 3;
 
 function checksum(value: string): string {
   let hash = 0x81_1c_9d_c5;
@@ -742,6 +1192,51 @@ function checksum(value: string): string {
 
 function pageBlobId(value: string): string {
   return `${value.length.toString(36)}-${checksum(value)}`;
+}
+
+function parseGenerationManifest(
+  text: string | undefined,
+  expectedGeneration: number,
+): GenerationManifest | undefined {
+  if (text === undefined || text.length > maximumPropertyPageCharacterLength) {
+    return undefined;
+  }
+  try {
+    const value: unknown = JSON.parse(text);
+    return isGenerationManifest(value, expectedGeneration) ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function pageIds(manifest: GenerationManifest | undefined): readonly string[] {
+  return manifest?.schema === 2 ? manifest.pageIds : [];
+}
+
+function indexedPageKeys(
+  prefix: string,
+  manifest: GenerationManifest | undefined,
+): readonly string[] {
+  if (manifest?.schema !== 1) return [];
+  return Array.from(
+    { length: manifest.pageCount },
+    (_, index) =>
+      `${prefix}:page:${String(manifest.generation)}:${String(index)}`,
+  );
+}
+
+function listPropertyKeys(
+  store: StringPropertyStore,
+  prefix: string,
+): readonly string[] {
+  if (store.keys === undefined) {
+    throw new Error("Paged storage cleanup requires property-key enumeration.");
+  }
+  const keys = store.keys(prefix);
+  if (keys.length > maximumEnumeratedStoragePropertyCount) {
+    throw new RangeError("Paged storage cleanup exceeds its key limit.");
+  }
+  return keys.filter((key) => key.startsWith(prefix));
 }
 
 function isGenerationManifest(

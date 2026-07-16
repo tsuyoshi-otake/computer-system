@@ -810,7 +810,11 @@ export class WebCompanionServer {
           409,
         );
       }
-      if (body?.action !== "power_on" && body?.action !== "shutdown") {
+      if (
+        body?.action !== "power_on" &&
+        body?.action !== "safe_boot" &&
+        body?.action !== "shutdown"
+      ) {
         throw new WebSessionError("input", "Invalid power action.");
       }
       if (this.pendingPowerRequests.size >= maximumPendingPowerRequests) {

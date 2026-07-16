@@ -20,10 +20,10 @@ describe("CS-Linux fidelity", (): void => {
     });
 
     expect(shell.submit("id").stdout).toBe(
-      "uid=1000(computer) gid=1000(computer) groups=1000(computer)\n",
+      "uid=1000(cs) gid=1000(cs) groups=1000(cs),27(sudo)\n",
     );
     expect(shell.submit("id -u").stdout).toBe("1000\n");
-    expect(shell.submit("groups").stdout).toBe("computer\n");
+    expect(shell.submit("groups").stdout).toBe("cs sudo\n");
     expect(shell.submit("uname -snrmo").stdout).toBe(
       "Linux c-linux1 1.0.0-cs i486 GNU/Linux\n",
     );
@@ -35,10 +35,10 @@ describe("CS-Linux fidelity", (): void => {
       "Linux version 1.0.0-cs",
     );
     expect(shell.submit("cat /proc/loadavg").stdout).toBe(
-      "0.00 0.00 0.00 1/1 1\n",
+      "0.00 0.00 0.00 2/3 3\n",
     );
     expect(shell.submit("cat /proc/mounts").stdout).toContain(
-      "csfs / csfs rw,nosuid,nodev 0 0\n",
+      "computer-system / csfs rw,nosuid,nodev 0 0\n",
     );
     expect(shell.submit("df -h").stdout).toContain("Mounted on\n");
     expect(shell.submit("du -sh /etc").stdout).toMatch(
@@ -60,7 +60,7 @@ describe("CS-Linux fidelity", (): void => {
     expect(shell.submit("cat work/symbolic").stdout).toBe("changed\n");
     expect(shell.submit("readlink work/symbolic").stdout).toBe("source\n");
     expect(shell.submit("realpath work/symbolic").stdout).toBe(
-      "/home/computer/work/source\n",
+      "/home/cs/work/source\n",
     );
     expect(shell.submit("stat work/source").stdout).toContain("Links: 2\n");
     expect(shell.submit("ls -l work").stdout).toContain("-rw-r-----");
@@ -96,7 +96,7 @@ describe("CS-Linux fidelity", (): void => {
     expect(shell.submit("mktemp").stdout).toMatch(
       /^\/tmp\/tmp\.[a-z0-9]{6}\n$/u,
     );
-    expect(shell.submit("printenv HOME").stdout).toBe("/home/computer\n");
+    expect(shell.submit("printenv HOME").stdout).toBe("/home/cs\n");
     expect(shell.submit("printf 'one two' | xargs echo").stdout).toBe(
       "one two\n",
     );

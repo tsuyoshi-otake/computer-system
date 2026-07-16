@@ -33,6 +33,8 @@ npm install
 npm run format
 npm run validate
 npm run deploy
+npm run build:pages
+npm run test:pages
 ```
 
 `npm run build` creates development Behavior and Resource Packs under `dist/`.
@@ -40,6 +42,55 @@ npm run deploy
 directories in the locally installed Bedrock GDK client. The deployment root is
 `%APPDATA%\Minecraft Bedrock\users\shared\games\com.mojang`, which is the
 current Windows creator-content location following the UWP-to-GDK migration.
+
+### GitHub Pages static publication
+
+`web/manual.js` is the single authored source for both the Web Terminal Manual
+dialog and the public 16-chapter reference. Do not maintain a second Markdown,
+JSON, or HTML copy of the chapter prose. `npm run build:pages` imports that
+module, validates its stable chapter and section IDs, and pre-renders the full
+publication under `dist/pages/` with the landing page. The generated artifact is
+disposable and must not be committed.
+
+The Pages artifact is deliberately narrower than `web/`. Its builder uses an
+explicit allowlist for the static site CSS/JavaScript and `web/assets/`; do not
+replace that with a recursive copy. In particular, it must not publish the live
+Terminal's `web/index.html`, `web/app.js`, four-digit connection form,
+bearer-token/session storage, or `/api/*` client. GitHub Pages cannot connect to
+BDS or act as the Web Terminal. The local companion started with
+`npm run dev:bds:web` remains the only browser-to-BDS interaction path.
+
+All navigation and assets must remain valid when GitHub serves the project below
+an arbitrary repository base path. Use generated relative URLs rather than a
+hard-coded `/computer-system/` prefix. Stable manual deep links use fragments,
+for example `manual/#terminal-editor-static-github-pages-reference`, because a
+fragment survives reload without a server-side routing fallback. The complete
+manual, table of contents, reading paths, and Previous/Next links are static
+HTML; JavaScript enhances search but is not allowed to own the only readable
+copy.
+
+Run the focused gate with:
+
+```powershell
+npm run build:pages
+npm run test:pages
+```
+
+`Expect:` `dist/pages` contains only the allowlisted landing/manual presentation
+and referenced assets; the manual has all 16 canonical chapters and stable
+section targets; every local link resolves below a simulated repository base;
+search remains bounded to 24 results; the no-JavaScript fallback contains the
+whole publication; and no Terminal input, connection, token, session, or API
+surface is present.
+
+`.github/workflows/pages.yml` runs on pushes to `main`, pushes to the initial
+publication branch `phase-2/computer-vertical-slice`, and manual dispatch. The
+release-branch trigger can be removed after integration into `main`. The
+workflow uses Node.js 24, obtains the deployed base URL from GitHub Pages
+configuration, builds and tests the static site, uploads only `dist/pages`, and
+deploys with the minimum `contents: read`, `pages: write`, and `id-token: write`
+permissions. Repository Pages settings and the account plan still determine
+whether a private repository can expose the resulting site.
 
 When changing JSON UI under the Resource Pack, increment both the Resource Pack
 header/module version and the Behavior Pack dependency version. Bedrock caches
@@ -93,7 +144,12 @@ interrupts are rejected by both the HTTP companion and the Bedrock bridge.
 Input, close, and **Take control** transitions share one bounded per-Computer
 operation queue, so a successful takeover demotes the prior writer before later
 input can pass. Closing one view leaves the terminal open; only the final detach
-emits `terminal_closed`. Different Computers have independent writer leases.
+emits `terminal_closed`. `ComputerRuntime`, not user Python, synchronously
+clears the login/elevation state and cancels foreground, compile, and queued MCP
+work that captured its credentials before delivering the bounded guest
+resume/close event. If delivery fails, the machine shuts down explicitly rather
+than retaining an unreachable privileged session. Different Computers have
+independent writer leases.
 
 The Web Terminal sends `terminal_line`; DOS `EDIT` and cross-profile `vi`
 additionally use bounded `terminal_keys` batches. Writer-only `web-complete`
@@ -102,20 +158,118 @@ accepts only 80x25 and normalizes that fixed hardware text mode once per writer
 session; later browser resizes change CSS scale, never guest cell geometry.
 CS-Linux 1.0 parses a bounded Computer System Bash language with pipelines,
 redirects, control operators, quoting, variables, positional parameters,
-conditionals, loops, and functions. Production first boot requires password
-setup twice and later boots require login; the salted record is stored in
-`/etc/shadow`, while secret Web input is masked and excluded from history and
-completion. The Linux profile owns `/etc`, `/dev`, volatile `/tmp`, `/usr`,
-`/var`, `/home/computer`, identity/time applets, and `/dev/null`. The shared OS
-profile boundary owns path dialects, boot images, environment, and virtual
+conditionals, loops, and functions. Production first boot sets the initial `cs`
+password twice; later boots ask for a username and that account's password. The
+salted record is stored in root-readable `/etc/shadow`, while secret Web input
+is masked and excluded from history and completion. `cs` owns UID/GID 1000 and
+`/home/cs`, belongs to `sudo`, and may add bounded users and groups through
+authenticated elevation. UID/GID 0 root starts password-locked. UID 1000 is the
+protected boot-service account: its name and home may change only while it is
+inactive, but it cannot be deleted. Desktop boot creates the existing-file
+boundary `/startup.py` as mode 0644 and owned by that account, without making
+the root directory writable. A blank file runs the built-in shell program;
+non-empty saved source runs on later boots with the account database's current
+UID 1000 groups.
+
+The legacy `computer` name is permanently reserved in both user and group
+namespaces; current account creation and rename paths may never recreate it.
+Credential snapshots accept at most 32 supplementary groups per user. Account
+mutations validate that ceiling before committing any of the three account
+files. Default `useradd` home creation recursively provisions missing ancestors
+inside the same rollback boundary: if an entry, capacity, or filesystem check
+fails, neither the account nor any partial home tree may remain.
+
+The Linux profile owns `/etc`, `/dev`, volatile `/tmp`, `/usr`, `/var`,
+`/home/cs`, identity/time applets, and `/dev/null`. Guest commands, editors,
+Python/native modules, compilers, foreground jobs, startup scripts, and MCP
+execution receive a process-scoped `GuestFilesystem`; owner/group/other DAC,
+ancestor search, sticky deletion, protected hard links, ownership rules, and
+`umask` are enforced at that boundary. Raw `InMemoryFilesystem` access remains
+limited to trusted boot, account-transaction, and persistence code. The shared
+OS profile boundary owns path dialects, boot images, environment, and virtual
 devices. Closed-by-default Linux and DOS registries own command names, help, and
 completion; separate frontends own syntax, expansion, and error formatting. DOS
-adapters call shared filesystem and toolchain services without mapping names
-such as `DIR` or `COPY` to Linux applets. The DOS contract fixture proves drive
-paths, case-insensitive strict 8.3 names, the root `C:\>` startup directory,
-CRLF, `DIR`/`TYPE`, and `NUL` without changing Linux semantics. Commands operate
-only on `InMemoryFilesystem`; they must never spawn a host shell. Focused
-verification is:
+adapters call an explicitly unrestricted guest view without mapping names such
+as `DIR` or `COPY` to Linux applets. No guest path may spawn a host shell.
+
+### OS runtime ownership and lifecycle
+
+Issue #20 is specified in [the OS Presence design](os-presence.md). Every
+ComputerRuntime entry owns one bounded `OsRuntimeState`; Linux command, proc,
+login, service, mount, device, and journal views must be rendered from that
+instance. A command adapter must not cache a second process or service table.
+Process start, state change, cycle accounting, signal, exit, job completion, and
+reaping each need an explicit transition. PID 1 is protected, and a completed
+job owns its zombie until `wait` or `fg` consumes it.
+
+The normal scheduler is also the process execution owner. STOP removes a process
+from CPU service in O(1) while timers and event delivery continue to advance;
+CONT restores runnable service without rewriting guest elapsed time. Background
+admission is limited to one interactive `sleep`, Python, or `run` command and
+must complete all parse, credential, job-table, scheduler, and capacity checks
+before creating a process or side effect.
+
+Shutdown and reboot use the fixed stopping-entry set, not an O(N) per-tick scan.
+The phase order is signal, owned-work drain, accepted block-I/O drain, data
+sync, unmount, service/device stop, final sync, and termination. Each phase has
+a 200-tick deadline and every failure calls the one fault finalizer. The final
+sync request and intent-prepared journal records are appended before the one
+final callback and included in its cold snapshot; do not append an unsaved
+success record afterward. On marker or callback failure, identity-remove those
+provisional journal objects before the fault finalizer and resynchronize the
+record. Preserve unrelated callback diagnostics, and verify that the later
+dirty-record retry persists the fault but neither provisional marker. A shell
+`sync` request must reach `ComputerHost.flush`; never restore a success-only
+stub. `ComputerRuntime.safeBoot()` is the one-shot recovery owner: it preserves
+and bypasses `/startup.py`. Keep the production adapters state-gated. The Web
+power action may become `safe_boot` only while lifecycle is `crashed`; Bedrock
+may invoke it only when a player sneaks while opening a crashed Computer. A
+normal interaction must leave the crash intact and explain that gesture. Do not
+add a guest-shell or MCP safe-boot command, and do not implement recovery by
+resetting or mutating the startup file.
+
+Snapshot schema 2 stores the cold Linux runtime projection and the DOS runtime
+aggregate as optional versioned fields. Legacy absence is valid. Cold Linux
+state retains journal, last-login, service/mount definitions, and offline device
+identity but clears processes, jobs, sessions, active mounts, and transient
+cursors. Cold DOS state preserves C: and its FAT metadata while detaching A: and
+discarding metadata for that media generation. Restore and migration must be
+strict, idempotent, and complete before the identity-last activation boundary.
+
+`OsRuntimeState.network` is an optional, empty-by-default future-adapter
+boundary. Keep interface/address/socket/listener identity in its Map-backed
+indexes and respect the defaults of 8 interfaces, 32 addresses, and 64 sockets.
+Mutations must validate capacity and references before changing the outer OS
+revision. Cold projection retains interface/address definitions while forcing
+links down and counters to zero, and drops process-owned sockets/listeners. When
+unused, omit the nested key so a legacy snapshot and a new empty snapshot remain
+canonical. This boundary does not authorize a default `lo`/`eth0`, packet
+routing, a route/DNS table, or guest `ip`/`ping`/`ss` output.
+
+`Verify:` Run:
+
+```powershell
+npx vitest run tests/os/osRuntimeState.test.ts tests/os/osNetworkState.test.ts tests/os/dosRuntimeState.test.ts tests/os/dosPresence.test.ts tests/os/dosBatch.test.ts tests/computer/osRuntimeOwnership.test.ts tests/computer/osRuntimeProcessOwnership.test.ts tests/computer/backgroundJobs.test.ts tests/computer/gracefulLifecycle.test.ts tests/runtime/schedulerPause.test.ts tests/computer/snapshotMigration.test.ts
+```
+
+`Expect:` Ownership, OS/network/DOS capacity rollback, STOP/CONT, cold
+projection, stale-media rejection, bounded BAT control flow, lifecycle ordering,
+durability failure, safe boot, and optional-field migration all pass without
+partial state inside each tested transaction boundary or fabricated network
+behavior. DOS capacity rejection and post-mutation failures in single writes,
+`MD`/`RD`, wildcard `COPY`/`REN`/`DEL`, `MOVE`, `ATTRIB`, FAT updates, and the
+cold-state observer restore exact filesystem/FAT snapshots, inode/link identity,
+revisions, free-space accounting, and blob-pool metrics. Observer rejection also
+restores and republishes drive selection, per-drive current directories, the
+shell prompt, labels, and lazily created FAT entries. A multi-operand `MD` uses
+one outer transaction. Explicit async callbacks execute nothing; disguised
+Promise/thenable callbacks restore their owner-scoped pre-await mutations and
+enter one shared settlement quarantine. Every managed filesystem and DOS
+aggregate rejects mutation during that window, so an async continuation cannot
+escape through a second owner or across the filesystem/DOS boundary after the
+original stack frame has unwound.
+
+Focused verification is:
 
 ```powershell
 npx vitest run tests/os tests/editor
@@ -124,9 +278,9 @@ npx vitest run tests/os tests/editor
 `Verify:` Run `printf 'alpha\nbeta\nalpha\n' | grep alpha | wc -l > count`
 through a `terminal_line` event, then run `cat count`.
 
-`Expect:` `/home/computer/count` contains `      2\n`, the terminal shows `2`,
-the runtime returns to explicit unfiltered `waiting_event` ownership for line or
-key input, and no host process is created.
+`Expect:` `/home/cs/count` contains `      2\n`, the terminal shows `2`, the
+runtime returns to explicit unfiltered `waiting_event` ownership for line or key
+input, and no host process is created.
 
 Computer state is stored through World Dynamic Properties; on BDS this is
 physically part of `worlds/<level-name>/db` LevelDB, not SQLite or individual
@@ -140,8 +294,9 @@ corruption. SQLite may be implemented later behind `ComputerSnapshotRepository`
 for a non-Bedrock host, but cannot be the Bedrock add-on's direct store because
 Script API has no SQLite/filesystem access. The default capacity is 1,000,000
 UTF-8 bytes, with 256,000 bytes per file and 4,096 entries. Every write enforces
-those limits before commit. `quota` exposes them, while `du` walks one bounded
-snapshot rather than performing repeated recursive directory scans.
+those limits before commit. `quota` exposes them, while `du` walks only the
+requested bounded subtree rather than materializing or repeatedly scanning an
+unrelated whole-filesystem snapshot.
 
 ### Preserved-world storage migration
 
@@ -153,17 +308,36 @@ the manifest, page bounds, checksum, JSON, and payload type, and falls back only
 to the immediately previous generation when the current generation is not
 complete. A valid previous generation may use either storage format.
 
-A legacy-format identity store is the migration trigger and remains the
-activation marker until the end. The coordinator validates its schema-2 registry
-payload and processes at most 4,096 observations. For each referenced Computer,
-it loads with the same current-first/fallback rule, converts a schema-1
-Computer/filesystem payload into the inode/content-blob schema, writes one
-content-addressed generation, and reads it back for verification. Only after all
-Computer work terminates does it save and verify the identity registry in the
-current format. It preserves IDs, families, block/item observations, OS and
-hardware profiles, display profile, terminal state, filesystem metadata,
-symbolic links, and hard-link sharing; it does not renumber `computer-N`
-identities or accept an unsupported identity payload.
+Every valid identity store triggers a scan of its referenced Computer payloads;
+payload migration versioning is independent from the identity page format. The
+coordinator validates the schema-2 registry and processes at most 4,096
+observations. For each referenced Computer, it loads with the same
+current-first/fallback rule, cold-normalizes current payloads and converts
+schema-1 Computer/filesystem payloads into the inode/content-blob schema. A
+changed payload is written as one content-addressed generation and read back for
+verification. A legacy identity head remains the activation marker until all
+Computer work terminates, then is saved and verified in current format. An
+already-current healthy identity head is not rewritten merely for the scan. If
+the loader recovered either a Computer or identity from the immediately previous
+current-format generation, that fallback is saved into the invalid head slot and
+must reload with `recovered: false` before completion. The process preserves
+IDs, families, block/item observations, OS and hardware profiles, display
+profile, terminal state, filesystem metadata, symbolic links, and hard-link
+sharing; it does not renumber `computer-N` identities or accept an unsupported
+identity payload.
+
+After selecting a valid canonical head, startup also validates the immediately
+previous manifest. A corrupt previous manifest cannot invalidate or rewrite the
+head: the store repairs a representable fallback or removes the invalid previous
+metadata. Recovered-head work owns a bounded orphan sweep for target-generation
+content blobs, schema-1 indexed pages, and stray manifests that corrupt metadata
+can no longer name. It enumerates only those relevant prefixes during repair and
+then deletes at most one candidate per step. The ordinary periodic-save path
+performs no prefix-wide key enumeration, so its cost stays proportional to the
+bounded generation being written rather than total historical storage. The
+writer preflights its page count before splitting and checks the actual
+generation's serialized manifest before target cleanup; either reader/property
+limit therefore fails before a storage mutation.
 
 `ComputerHost` advances this state machine with a budget of one Dynamic Property
 read/write/delete per host tick in the persistence WorkMonitor lane. Progress,
@@ -190,8 +364,11 @@ Before deploying a migration-capable pack into a preserved world:
 `Verify:` Run
 `npx vitest run tests/phase0/transactionalPagedStore.test.ts tests/computer/snapshotMigration.test.ts tests/computer/storageMigration.test.ts`.
 
-`Expect:` Current-head and previous-generation loading, strict schema-1
-conversion, one-property-operation steps, identity-last failure safety, restart
+`Expect:` Current-head and previous-generation loading, current-format fallback
+head repair, corrupt-previous repair, recovery-only orphan
+blob/indexed-page/manifest cleanup, writer/reader page and manifest limit
+symmetry, strict schema-1 conversion, one-property-operation steps,
+ordinary-save zero-prefix-scan behavior, identity-last failure safety, restart
 idempotence, and fresh-world no-op behavior all pass.
 
 ## Headless Bedrock verification
@@ -357,26 +534,56 @@ Host-load admission and remaining scale risks are specified in
 host time; WorkMonitor guards may defer a bounded atom but must never alter its
 modeled CPU cycles or device-wire timing.
 
-Relocatable objects are versioned JSON preceded by `CS486OBJ\n`. They contain
-normalized assembly, object-relative data size, local/global/undefined text
-symbols, and text-target relocations. The static linker prefixes local symbols,
-lays out data at four-byte boundaries, resolves globals through a `Map`, and
-produces the existing executable format in O(instructions + symbols +
-relocations) work. The current ABI supports zero-argument functions returning an
-integer in EAX. Inline C/C++ assembly is a statement-boundary escape hatch and
-rejects labels, branches, calls, stack operations, and ESP/EBP access. Dynamic
-loading remains deliberately unsupported until this ABI has stable field
-evidence.
+Relocatable objects are versioned JSON preceded by `CS486OBJ\n`. The assembler
+pipeline is a dedicated tokenizer, bounded preprocessor, parser,
+constant-expression evaluator, and semantic assembler. Semicolons begin comments
+only outside strings; LF and CRLF normalize to the same token stream. Includes
+resolve relative to the canonical source path through the process's credentialed
+guest filesystem. Before allocation grows, preprocessing permits at most
+1,000,000 aggregate source characters, 100,000 lexical tokens, 64 include files
+at depth 8, 256 macros at expansion depth 16, 32 parameters per macro, and
+100,000 expanded tokens.
+
+New writers emit `CS486OBJ` v2 with `.text`, `.rodata`, `.data`, and `.bss`
+sections, initialized little-endian bytes, alignment, local/global/undefined
+typed symbols, optional `()->i32`/`()->void` function signatures, and structured
+`text-target`, `data-address`, and `absolute32` relocations. ASM may declare a
+known zero-argument return with `signature name, i32|void`; omitting it retains
+untyped compatibility. Readers retain v1 compatibility. The static linker
+resolves both global and object-local definitions through precomputed maps,
+computes each data layout once, and produces a validated executable in
+O(instructions + initialized bytes + symbols + relocations) work. It never
+reparses or regex-rewrites assembly text. Object counts, instructions,
+initialized bytes, total static data, alignment, symbol types, and relocation
+targets are bounded and fail explicitly. The stack grows down from the top of
+process RAM and faults before it crosses the aligned `.rodata`/`.data`/`.bss`
+boundary. `.rodata` is a layout category, not an MMU-enforced read-only page.
+
+The current ABI supports zero-argument functions returning an integer in EAX or
+returning no value. C/C++ definitions and declarations serialize that
+distinction; the linker rejects conflicting known signatures, while one untyped
+v1/ASM side remains intentionally compatible. Inline C/C++ assembly is a
+statement-boundary escape hatch and rejects labels, branches, calls, stack
+operations, and ESP/EBP access. `CS486OBJ` is not ELF or OMF; `CS486` is not DOS
+COM/EXE or native x86. Dynamic loading remains deliberately unsupported until
+this ABI has stable field evidence.
 
 Computer System Python no longer uses a bytecode VM. `pythonCs486.ts` resolves a
 bounded module graph, compiles Python control flow to CS486 instructions, and
 uses the allowlisted `python` syscall for managed values and native modules.
 Same-directory `.py` files and the Linux/DOS Python library paths initialize at
 most once. A valid `CS486OBJ` `.o` file can be imported as a static extension;
-its global zero-argument functions execute in the caller's CS486 process and
-return an integer in EAX. Module discovery and linking are linear in source,
-modules, symbols, and relocations; missing, circular, oversized, corrupt, and
-ABI-incompatible imports terminate explicitly.
+its global zero-argument integer functions execute in the caller's CS486 process
+and return through EAX. A known `()->void` export is not exposed as a Python
+attribute; untyped legacy functions remain compatible. Module discovery and
+linking are linear in source, modules, symbols, and relocations; missing,
+circular, oversized, corrupt, and ABI-incompatible imports terminate explicitly.
+
+The native `shell` module is deliberately execution-role scoped. Only the
+built-in shell program selected by an empty `/startup.py` receives it. A
+user-authored `/startup.py`, a foreground Python process, and an MCP Python
+probe must all reject `import shell`; never pass a live `ShellSession` into
+those contexts.
 
 `Verify:` Run the scheduler, runtime-limit, shell, DOS-profile, and persistence
 tests.

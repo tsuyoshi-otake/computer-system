@@ -6,7 +6,7 @@ import { InMemoryFilesystem } from "../../src/domain/filesystem/inMemoryFilesyst
 
 describe("ViSession", (): void => {
   it("moves through normal, insert, and command modes and saves explicitly", (): void => {
-    const vi = new ViSession("/home/computer/demo.py", "print('old')");
+    const vi = new ViSession("/home/cs/demo.py", "print('old')");
 
     expect(vi.mode).toBe("normal");
     vi.key("i");
@@ -114,7 +114,7 @@ describe("ViSession", (): void => {
     shell.keys(["i", "p", "a", "s", "s", "Escape"]);
     const saved = shell.keys([":", "w", "q", "Enter"]);
     expect(saved.resetTerminal).toBe(true);
-    expect(filesystem.readFile("/home/computer/demo.py")).toBe("pass");
+    expect(filesystem.readFile("/home/cs/demo.py")).toBe("pass");
 
     expect(shell.submit("vi demo.py").terminalScreen).toBeDefined();
     expect(
@@ -158,7 +158,7 @@ describe("ViSession", (): void => {
       "Enter",
     ]);
     expect(saved.resetTerminal).toBe(true);
-    expect(filesystem.readFile("/home/computer/note.txt")).toBe("hello");
+    expect(filesystem.readFile("/home/cs/note.txt")).toBe("hello");
   });
 
   it("supports common normal-mode entry, navigation, discard, and insert line joining", (): void => {

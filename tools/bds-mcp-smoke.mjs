@@ -4,6 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const preserveWorld = process.argv.includes("--preserve-world");
 const child = spawn(
   process.execPath,
   [path.join(root, "tools", "bds-mcp-server.mjs")],
@@ -51,7 +52,7 @@ try {
     clientInfo: { name: "computer-system-smoke", version: "1.0.0" },
   });
   notify("notifications/initialized", {});
-  const started = await call("bds_start", { resetWorld: true });
+  const started = await call("bds_start", { resetWorld: !preserveWorld });
   const probe = await call("bds_run_probe", {
     probe: "headless",
     target: "server",
@@ -72,6 +73,7 @@ try {
     limit: 2_000,
   });
   const stopped = await call("bds_stop", {});
+  const authentication = requireLinuxAuthenticationRecord(probeLogs);
   if (started.state !== "running") {
     throw new Error(`Expected running, received ${String(started.state)}.`);
   }
@@ -98,6 +100,7 @@ try {
         terminal: JSON.parse(
           terminal.line.slice(terminal.line.indexOf("CS_PROBE_RESULT ") + 16),
         ),
+        authentication: authentication.details,
         diagnostics: diagnostics.length,
         finalState: stopped.state,
       },
@@ -107,6 +110,40 @@ try {
   );
 } finally {
   if (child.exitCode === null) child.stdin.end();
+}
+
+function requireLinuxAuthenticationRecord(logs) {
+  const marker = "CS_PROBE_RESULT ";
+  const entry = logs.find((candidate) =>
+    candidate.line.includes('"probe":"linux_authentication"'),
+  );
+  if (entry === undefined) {
+    throw new Error(
+      "Headless suite omitted the CS-Linux authentication probe.",
+    );
+  }
+  const markerIndex = entry.line.indexOf(marker);
+  if (markerIndex < 0) {
+    throw new Error("CS-Linux authentication probe record was malformed.");
+  }
+  const record = JSON.parse(entry.line.slice(markerIndex + marker.length));
+  if (
+    record.probe !== "linux_authentication" ||
+    record.status !== "PASS" ||
+    record.details?.authenticatedUser !== "cs" ||
+    record.details?.laterLoginRequired !== true ||
+    record.details?.passwordMasked !== true ||
+    record.details?.preLoginRejected !== true ||
+    record.details?.setupCompleted !== true ||
+    !Number.isInteger(record.details?.ticks) ||
+    record.details.ticks < 8 ||
+    record.details.ticks > 64
+  ) {
+    throw new Error(
+      `CS-Linux authentication probe did not pass its contract: ${JSON.stringify(record)}`,
+    );
+  }
+  return record;
 }
 
 function request(method, params) {

@@ -140,6 +140,8 @@ describe("Web terminal UI", () => {
     expect(css).toContain(".power-button:active:not(:disabled)");
     expect(script).toContain('api("/api/power"');
     expect(script).toContain("JSON.stringify({ action })");
+    expect(script).toContain('return "safe_boot"');
+    expect(script).toContain("/startup.py was not changed");
     expect(script).toContain("payload?.storage?.hdd?.state");
     expect(script).toContain("payload?.storage?.fdd?.state");
     expect(script).toContain("machineAcceptsInput(machineLifecycle)");

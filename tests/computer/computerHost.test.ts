@@ -4,7 +4,10 @@ import {
   ComputerRuntime,
   type DebugShellCommandCompletion,
 } from "../../src/application/computer/computerRuntime.js";
-import { ComputerRecord } from "../../src/domain/computer/computer.js";
+import {
+  ComputerRecord,
+  type ComputerSnapshot,
+} from "../../src/domain/computer/computer.js";
 import {
   advancedComputerHardware,
   portableComputerHardware,
@@ -21,7 +24,7 @@ describe("ComputerRuntime", (): void => {
       outcome: "accepted",
       state: "running",
     });
-    runTicks(runtime, 2);
+    runTicks(runtime, 12);
     expect(record.lifecycle.state).toEqual({ kind: "off" });
     expect(record.terminal.line(1)).toMatch(/^booted/u);
   });
@@ -124,7 +127,7 @@ describe("ComputerRuntime", (): void => {
     expect(output).toMatch(
       /Python\/CS486DX2: \d+ machine instructions, \d+ CPU cycles, \d+\.\d{3} us at 66 M\s*Hz, completed/u,
     );
-    expect(output).toContain("~$ ");
+    expect(output).toContain("cs@c-000010:~$ ");
     expect(runtime.vmState(record.computerId)).toMatchObject({
       kind: "waiting_event",
     });
@@ -155,7 +158,7 @@ describe("ComputerRuntime", (): void => {
     expect(output).toMatch(
       /Python\/CS486DX: \d+ machine instructions, \d+ CPU cycles,[\s\S]*terminated/u,
     );
-    expect(output).toContain("~$ ");
+    expect(output).toContain("cs@c-000011:~$ ");
     expect(record.lifecycle.state.kind).not.toBe("off");
   });
 
@@ -232,7 +235,7 @@ describe("ComputerRuntime", (): void => {
 
     const output = record.terminal.snapshot().rows.join("\n");
     expect(output).toContain("42");
-    expect(output).toContain("~$ ");
+    expect(output).toContain("cs@c-000012:~$ ");
     expect(runtime.vmState(record.computerId)).toMatchObject({
       kind: "waiting_event",
     });
@@ -254,7 +257,7 @@ describe("ComputerRuntime", (): void => {
 
     const output = record.terminal.snapshot().rows.join("\n");
     expect(output).toContain("python:");
-    expect(output).toContain("~$ ");
+    expect(output).toContain("cs@c-000013:~$ ");
     expect(record.lifecycle.state.kind).not.toBe("off");
   });
 
@@ -413,7 +416,7 @@ describe("ComputerRuntime", (): void => {
     const shutdown = computer("computer-3", "import os\nos.shutdown()\n");
     const shutdownRuntime = runtimeWith(shutdown);
     shutdownRuntime.powerOn(shutdown.computerId);
-    shutdownRuntime.runTick();
+    runTicks(shutdownRuntime, 12);
     expect(shutdown.lifecycle.state).toEqual({ kind: "off" });
     expect(shutdownRuntime.shutdown(shutdown.computerId)).toMatchObject({
       outcome: "ignored",
@@ -427,7 +430,7 @@ describe("ComputerRuntime", (): void => {
       outcome: "accepted",
       state: "stopping",
     });
-    terminateRuntime.runTick();
+    runTicks(terminateRuntime, 12);
     expect(terminated.lifecycle.state).toEqual({ kind: "off" });
 
     const rebooted = computer(
@@ -438,7 +441,15 @@ describe("ComputerRuntime", (): void => {
     rebootRuntime.powerOn(rebooted.computerId);
     rebootRuntime.runTick();
     rebootRuntime.queueEvent(rebooted.computerId, "reboot");
-    rebootRuntime.runTick();
+    for (let tick = 0; tick < 100; tick += 1) {
+      if (
+        rebooted.lifecycle.state.kind === "running" &&
+        rebooted.display.state.kind === "post"
+      ) {
+        break;
+      }
+      rebootRuntime.runTick();
+    }
     expect(rebooted.lifecycle.state.kind).toBe("running");
     expect(rebooted.terminal.line(2)).toContain("CSBIOS System Configuration");
     expect(rebooted.display.state.kind).toBe("post");
@@ -467,6 +478,7 @@ describe("ComputerRuntime", (): void => {
       },
     });
     runtime.register(record);
+    configureInMemoryPersistence(runtime, record);
     runtime.powerOn(record.computerId);
 
     runtime.runTick();
@@ -509,7 +521,28 @@ function runtimeWith(record: ComputerRecord): ComputerRuntime {
     },
   });
   runtime.register(record);
+  configureInMemoryPersistence(runtime, record);
   return runtime;
+}
+
+function configureInMemoryPersistence(
+  runtime: ComputerRuntime,
+  record: ComputerRecord,
+): void {
+  let generation = 0;
+  const snapshots = new Map<string, ComputerSnapshot>();
+  runtime.configureLifecycleBoundaries({
+    pendingFilesystemIo: (): number => 0,
+    stopDevices: (): void => undefined,
+    syncPersistence: (computerId) => {
+      if (computerId !== record.computerId) {
+        return { outcome: "missing" as const, computerId };
+      }
+      snapshots.set(computerId, structuredClone(record.snapshot()));
+      generation += 1;
+      return { outcome: "saved" as const, generation };
+    },
+  });
 }
 
 function runTicks(runtime: ComputerRuntime, count: number): void {

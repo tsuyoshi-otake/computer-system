@@ -6,11 +6,15 @@ import {
   Cs486LinkError,
   linkCs486Objects,
 } from "../../src/application/toolchain/cs486Linker.js";
-import { runCs486 } from "../../src/domain/cpu/cs486.js";
+import {
+  runCs486,
+  validateCs486Executable,
+} from "../../src/domain/cpu/cs486.js";
 import { validateCs486Object } from "../../src/domain/cpu/cs486Object.js";
+import type { Cs486Object } from "../../src/domain/cpu/cs486Object.js";
 
 describe("CS486 static linker", (): void => {
-  it("links C translation units and relocates object-relative data", (): void => {
+  it("links typed C functions with independent stack-framed locals", (): void => {
     const main = compileCs486Object(
       "c",
       [
@@ -33,23 +37,110 @@ describe("CS486 static linker", (): void => {
     );
 
     const executable = linkCs486Objects([main, helper]);
+    const decodedExecutable: unknown = JSON.parse(JSON.stringify(executable));
+    validateCs486Executable(decodedExecutable);
     const result = runCs486(executable, { memoryBytes: 65_536 });
 
     expect(result.output).toBe("42\n");
-    expect(executable.dataBytes).toBe(8);
+    expect(result.registers.esp).toBe(65_536);
+    expect(executable.dataBytes).toBe(0);
     expect(executable.symbols?.map(({ name }) => name)).toEqual([
       "main",
       "helper",
     ]);
+    expect(decodedExecutable.symbols).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          functionSignature: "()->i32",
+          name: "main",
+        }),
+        expect.objectContaining({
+          functionSignature: "()->i32",
+          name: "helper",
+        }),
+      ]),
+    );
+    expect(() =>
+      validateCs486Executable({
+        ...executable,
+        symbols: executable.symbols?.map((symbol) => ({
+          ...symbol,
+          functionSignature: "()->i64",
+        })),
+      }),
+    ).toThrow(/symbol table/u);
+    expect(main.symbols).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          binding: "global",
+          functionSignature: "()->i32",
+          name: "main",
+          section: "text",
+          type: "function",
+        }),
+        expect.objectContaining({
+          binding: "undefined",
+          functionSignature: "()->i32",
+          name: "helper",
+          section: "text",
+          type: "function",
+        }),
+      ]),
+    );
+    expect(
+      main.sections?.find((section) => section.name === "bss"),
+    ).toMatchObject({ alignment: 4, size: 0 });
     const stores = executable.instructions.filter(
       (instruction) => instruction.op === "store",
     );
+    expect(stores.length).toBeGreaterThanOrEqual(2);
     expect(stores).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ address: { kind: "immediate", value: 0 } }),
-        expect.objectContaining({ address: { kind: "immediate", value: 4 } }),
+        expect.objectContaining({
+          address: { kind: "register", register: "ecx" },
+        }),
       ]),
     );
+  });
+
+  it("rejects conflicting known C function signatures deterministically", (): void => {
+    const caller = compileCs486Object(
+      "c",
+      "extern int helper(); int main() { return helper(); }",
+    );
+    const provider = compileCs486Object("c", "void helper() { return; }");
+
+    expect(() => linkCs486Objects([caller, provider])).toThrow(
+      "function signature mismatch helper: expected ()->i32, found ()->void",
+    );
+
+    const voidCaller = compileCs486Object(
+      "c",
+      "extern void helper(); int main() { helper(); return 0; }",
+    );
+    const integerProvider = compileCs486Object(
+      "c",
+      "int helper() { return 42; }",
+    );
+    expect(() => linkCs486Objects([voidCaller, integerProvider])).toThrow(
+      "function signature mismatch helper: expected ()->void, found ()->i32",
+    );
+  });
+
+  it("accepts an untyped ASM definition for backward-compatible C linkage", (): void => {
+    const caller = compileCs486Object(
+      "c",
+      "extern int helper(); int main() { return helper(); }",
+    );
+    const provider = assembleCs486Object(
+      "global helper\nhelper:\nmov eax, 42\nret",
+    );
+
+    expect(
+      runCs486(linkCs486Objects([caller, provider]), {
+        memoryBytes: 65_536,
+      }).registers.eax,
+    ).toBe(42);
   });
 
   it("keeps same-named local labels private to each object", (): void => {
@@ -80,6 +171,34 @@ describe("CS486 static linker", (): void => {
     expect(result.output).toBe("42");
   });
 
+  it("continues to read and execute legacy v1 objects", (): void => {
+    const legacy: Cs486Object = {
+      assembly: "main:\nmov eax, 42\nprint eax\nret",
+      dataBytes: 0,
+      format: "cs486-object",
+      language: "asm",
+      relocations: [],
+      symbols: [
+        { binding: "global", name: "main", offset: 0, section: "text" },
+      ],
+      version: 1,
+    };
+
+    validateCs486Object(legacy);
+    expect(
+      runCs486(linkCs486Objects([legacy]), { memoryBytes: 65_536 }).output,
+    ).toBe("42");
+    expect(() =>
+      validateCs486Object({
+        ...legacy,
+        symbols: legacy.symbols.map((symbol) => ({
+          ...symbol,
+          functionSignature: "()->i32",
+        })),
+      }),
+    ).toThrow(/symbol/u);
+  });
+
   it("bounds and validates objects before linking", (): void => {
     expect(() =>
       validateCs486Object({
@@ -104,6 +223,16 @@ describe("CS486 static linker", (): void => {
     const valid = assembleCs486Object(
       "global _start\n_start:\nstore [0], eax\nhalt",
     );
+    const typed = compileCs486Object("c", "int main() { return 0; }");
+    expect(() =>
+      validateCs486Object({
+        ...typed,
+        symbols: typed.symbols.map((symbol) => ({
+          ...symbol,
+          functionSignature: "()->i64",
+        })),
+      }),
+    ).toThrow(/object symbol/u);
     expect(() => linkCs486Objects([{ ...valid, dataBytes: 0 }])).toThrow(
       /invalid object metadata/u,
     );
@@ -117,5 +246,24 @@ describe("CS486 static linker", (): void => {
         },
       ]),
     ).toThrow(/invalid object metadata/u);
+
+    const relocatable = assembleCs486Object(
+      "global main\nextern helper\nmain:\ncall helper\nhalt",
+    );
+    expect(() =>
+      validateCs486Object({
+        ...relocatable,
+        relocations: relocatable.relocations.map((relocation) => ({
+          ...relocation,
+          offset: 999,
+        })),
+      }),
+    ).toThrow(/relocation offset/u);
+    expect(() =>
+      validateCs486Object({
+        ...relocatable,
+        sections: [...relocatable.sections!].reverse(),
+      }),
+    ).toThrow(/section/u);
   });
 });

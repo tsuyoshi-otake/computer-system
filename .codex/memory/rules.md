@@ -149,3 +149,57 @@
   admission may defer delivery, but must never rewrite the modeled completion
   deadline or convert host elapsed time into guest CPU, RAM, or device timing. —
   Evidence: block-I/O scheduler tests preserve deadlines across host deferral.
+- Final terminal detachment is a host-owned security boundary, not merely a
+  guest event. Revoke the live shell synchronously, clear secret/elevated state,
+  cancel every job that captured its credentials, and then deliver one bounded
+  completion/close event; if that event cannot be delivered, fail safe to an
+  explicit shutdown. — Evidence: runtime credential tests cancel root
+  foreground, compiler, and MCP work on close and prevent every post-close side
+  effect before a new login.
+- When login can be disabled for development, reconnect must rebuild the whole
+  session from the authoritative service UID, not only replace numeric
+  credentials. Reset cwd, HOME/USER/LOGNAME, aliases, history, sudo timestamps,
+  and umask; if the current home is unavailable, fall back to `/` with an
+  observable warning. — Evidence: multi-user tests remove `sudo` membership
+  while a root login shell is active and observe a clean UID-1000 session after
+  an idempotent disconnect.
+- A persisted base-image overlay may replace an immutable entry with a different
+  kind. Tombstones, metadata elision, and live image-upgrade suppression must
+  all compare entry kind as well as existence/content; otherwise
+  file↔directory↔link replacements either fail restore or silently lose
+  metadata. Grandfather valid older limits during restore, charge any capacity
+  debt, and reject only new growth until deletion/shrinkage recovers it. —
+  Evidence: filesystem tests preserve same-metadata symlink and directory/file
+  replacements through fresh restore, live base upgrade, a second
+  snapshot/restart, and legacy over-capacity symlink recovery.
+- A final persistence-boundary journal record is provisional in both durable and
+  live state until its callback succeeds. On failure, remove exactly that
+  attempt's records before publishing the fault, so a later dirty retry cannot
+  persist a false successful boundary. — Evidence: lifecycle cold-restore tests
+  retain one fault and neither provisional marker after an automatic retry.
+- A synchronous transaction that rejects a Promise/thenable needs one settlement
+  quarantine shared by every managed state owner. Explicitly joined owners
+  define pre-await rollback; the shared quarantine prevents any filesystem or
+  DOS owner from accepting its post-await continuation until settlement. —
+  Evidence: cross-instance and cross-subsystem tests preserve all snapshots and
+  reject the delayed mutations.
+- Current identity-page format does not prove that referenced Computer payloads
+  are current. Scan every reference, treat a previous-generation load only as
+  recovery input, rebuild and reload-verify the canonical head, and activate the
+  identity registry last. — Evidence: current-registry and recovered-head
+  migration tests are idempotent and do not renumber identities.
+- Recovery cleanup must handle storage that an invalid manifest can no longer
+  name: blobs, legacy indexed pages, and stray manifests. Keep prefix
+  enumeration on startup/recovery paths, delete at most one candidate per step,
+  and never put an O(total storage) scan on ordinary periodic saves. — Evidence:
+  cleanup tests cover more than 80 orphans, interruption/restart,
+  current/previous retention, and zero normal-save key scans.
+- Persistence writers and readers must enforce the same structural limits before
+  mutation, including nested metadata such as a manifest that must itself fit
+  one Dynamic Property. — Evidence: page-count and manifest-length
+  capacity-plus-one tests fail without writes/deletes, and oversized manifests
+  are rejected by the reader too.
+- Bedrock production probes must not depend on Node-only globals. Run their host
+  tests with suspect globals removed, then execute the probe through the real
+  BDS MCP boundary. — Evidence: the authentication/reboot probe passes without
+  `structuredClone` and in two isolated stdio MCP runs.

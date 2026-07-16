@@ -42,6 +42,10 @@ export class CommandRegistry {
     return this.publicNames;
   }
 
+  executableNames(): readonly string[] {
+    return [...new Set(this.commands.values())].sort();
+  }
+
   private normalize(name: string): string {
     return this.caseInsensitive ? name.toLowerCase() : name;
   }
@@ -61,6 +65,7 @@ const sharedToolchainCommands = [
 
 const linuxCommands = [
   "basename",
+  "bg",
   "bash",
   "cat",
   "cd",
@@ -75,15 +80,22 @@ const linuxCommands = [
   "export",
   "false",
   "find",
+  "fg",
   "grep",
   "head",
   "help",
   "hostname",
   "id",
   "ls",
+  "jobs",
+  "kill",
+  "last",
+  "man",
+  "apropos",
   "mkdir",
   "mv",
   "printf",
+  "ps",
   "python",
   "micropython",
   "pwd",
@@ -93,25 +105,32 @@ const linuxCommands = [
   "sh",
   "shutdown",
   "sort",
+  "service",
   "sleep",
   "seq",
   "stat",
   "source",
   "tail",
+  "top",
   "touch",
   "tr",
   "true",
+  "tty",
   "uname",
   "type",
   "uptime",
   "uniq",
   "unset",
   "wc",
+  "w",
+  "wait",
   "which",
+  "who",
   "whoami",
   "vi",
   "cut",
   "cpuinfo",
+  "csdb",
   "df",
   "free",
   "test",
@@ -128,6 +147,9 @@ const linuxCommands = [
   "dmesg",
   "file",
   "groups",
+  "groupadd",
+  "groupdel",
+  "getent",
   "hexdump",
   "ln",
   "mktemp",
@@ -138,6 +160,11 @@ const linuxCommands = [
   "realpath",
   "rmdir",
   "sha256sum",
+  "login",
+  "logout",
+  "passwd",
+  "su",
+  "sudo",
   "sync",
   "tee",
   "xargs",
@@ -149,11 +176,17 @@ const linuxCommands = [
   "read",
   "shift",
   "unalias",
+  "umask",
+  "useradd",
+  "userdel",
+  "usermod",
   ...sharedToolchainCommands,
 ] as const;
 
 const dosCommands: readonly CommandRegistration[] = [
+  "attrib",
   "cd",
+  "chkdsk",
   "chdir",
   "cls",
   "copy",
@@ -166,6 +199,7 @@ const dosCommands: readonly CommandRegistration[] = [
   "erase",
   "exit",
   "help",
+  "label",
   "md",
   "mem",
   "mkdir",
@@ -189,6 +223,9 @@ const dosCommands: readonly CommandRegistration[] = [
   "systeminfo",
   "i2c",
   "spi",
+  ["asm", "as"],
+  ["debug", "csdb"],
+  ["link", "ld"],
   ...sharedToolchainCommands,
 ];
 
@@ -205,4 +242,10 @@ export function commandRegistryFor(
 
 export function commandNamesFor(profile: ComputerOsProfile): readonly string[] {
   return registries[profile].allNames();
+}
+
+export function commandExecutableNamesFor(
+  profile: ComputerOsProfile,
+): readonly string[] {
+  return registries[profile].executableNames();
 }

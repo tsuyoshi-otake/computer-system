@@ -1,3 +1,8 @@
+import {
+  quarantineRejectedAsyncTransaction,
+  rejectedAsyncTransactionCount,
+} from "../runtime/transactionQuarantine.js";
+
 export interface FilesystemLimits {
   readonly capacityBytes: number;
   readonly maxEntries: number;
@@ -60,6 +65,9 @@ export interface FilesystemMetadata {
   readonly modifiedAtMilliseconds: number;
   readonly uid: number;
 }
+
+export type SynchronousTransactionOperation<Result> =
+  () => Result extends PromiseLike<unknown> ? never : Result;
 
 export function isInMemoryFilesystemSnapshot(
   value: unknown,
@@ -210,6 +218,14 @@ export function migrateLegacyInMemoryFilesystemSnapshot(
 const baseImages = new Map<string, FilesystemBaseImage>();
 const contentBlobs = new Map<string, string>();
 
+interface ActiveFilesystemTransaction {
+  readonly createdBaseImageStateIds: Set<string>;
+  readonly createdBlobIds: Set<string>;
+  readonly owner: InMemoryFilesystem;
+}
+
+const activeFilesystemTransactions: ActiveFilesystemTransaction[] = [];
+
 export function registerFilesystemBaseImage(image: FilesystemBaseImage): void {
   if (!/^[a-z0-9][a-z0-9._-]{0,63}$/u.test(image.id)) {
     throw new Error("Filesystem base-image ID is invalid");
@@ -260,14 +276,199 @@ export class InMemoryFilesystem {
     return this.baseImage?.id;
   }
 
+  /**
+   * Runs one bounded synchronous filesystem mutation atomically.
+   *
+   * The filesystem has a fixed entry ceiling, so capturing every mutable index
+   * is bounded O(N). Restoring the internal indexes directly preserves inode
+   * identities, hard-link groups, metadata, byte accounting, and the revision;
+   * replaying a persistence snapshot would not preserve those identities.
+   */
+  transaction<Result>(
+    operation: SynchronousTransactionOperation<Result>,
+  ): Result {
+    this.assertTransactionMutationAllowed();
+    if (isExplicitAsyncFunction(operation)) {
+      throw new FilesystemError(
+        "transaction_async",
+        "Filesystem transactions require a synchronous callback",
+      );
+    }
+    const rejectedAsyncTransactions = rejectedAsyncTransactionCount();
+    const before = {
+      baseImage: this.baseImage,
+      children: new Map(
+        [...this.children].map(
+          ([path, names]) => [path, new Set(names)] as const,
+        ),
+      ),
+      directories: new Set(this.directories),
+      files: new Map(this.files),
+      hardLinkCounts: new Map(this.hardLinkCounts),
+      hardLinkIds: new Map(this.hardLinkIds),
+      metadata: new Map(
+        [...this.metadata].map(
+          ([path, metadata]) => [path, { ...metadata }] as const,
+        ),
+      ),
+      nextHardLinkId,
+      revision: this.revisionValue,
+      symbolicLinks: new Map(this.symbolicLinks),
+      usedBytes: this.usedBytesValue,
+    };
+    const frame: ActiveFilesystemTransaction = {
+      createdBaseImageStateIds: new Set(),
+      createdBlobIds: new Set(),
+      owner: this,
+    };
+    activeFilesystemTransactions.push(frame);
+    try {
+      const result = operation();
+      if (isThenable(result)) this.rejectThenableTransaction(result);
+      if (rejectedAsyncTransactionCount() !== rejectedAsyncTransactions) {
+        throw new FilesystemError(
+          "transaction_async",
+          "Filesystem transaction contains a rejected asynchronous transaction",
+        );
+      }
+      return result;
+    } catch (error: unknown) {
+      try {
+        this.files.clear();
+        this.directories.clear();
+        this.children.clear();
+        this.metadata.clear();
+        this.symbolicLinks.clear();
+        this.hardLinkIds.clear();
+        this.hardLinkCounts.clear();
+        for (const [path, blobId] of before.files) this.files.set(path, blobId);
+        for (const path of before.directories) this.directories.add(path);
+        for (const [path, names] of before.children)
+          this.children.set(path, new Set(names));
+        for (const [path, metadata] of before.metadata)
+          this.metadata.set(path, { ...metadata });
+        for (const [path, target] of before.symbolicLinks)
+          this.symbolicLinks.set(path, target);
+        for (const [path, inodeId] of before.hardLinkIds)
+          this.hardLinkIds.set(path, inodeId);
+        for (const [inodeId, count] of before.hardLinkCounts)
+          this.hardLinkCounts.set(inodeId, count);
+        this.usedBytesValue = before.usedBytes;
+        this.baseImage = before.baseImage;
+        nextHardLinkId = before.nextHardLinkId;
+        this.revisionValue = before.revision;
+        for (const id of frame.createdBaseImageStateIds)
+          baseImageStates.delete(id);
+        for (const id of frame.createdBlobIds) contentBlobs.delete(id);
+      } catch (rollbackError: unknown) {
+        throw new AggregateError(
+          [error, rollbackError],
+          "Filesystem transaction rollback failed",
+        );
+      }
+      throw error;
+    } finally {
+      activeFilesystemTransactions.pop();
+    }
+  }
+
   attachBaseImage(image: FilesystemBaseImage): void {
+    this.assertTransactionMutationAllowed();
     if (this.baseImage?.id === image.id) return;
+    const previousBase =
+      this.baseImage === undefined ? undefined : baseImageState(this.baseImage);
+    const previousTombstones = new Set(
+      previousBase === undefined
+        ? []
+        : [...previousBase.paths].filter(
+            (path) => !this.hasCompatibleBaseEntry(path, previousBase),
+          ),
+    );
+    const remainsDeleted = (path: string): boolean => {
+      let candidate = path;
+      while (candidate !== "/") {
+        if (previousTombstones.has(candidate)) return true;
+        candidate = parentPath(candidate);
+      }
+      return previousTombstones.has("/");
+    };
+    const imageDirectories = [...image.directories]
+      .map((path) => this.normalize(path))
+      .sort(
+        (left, right) =>
+          left.length - right.length || left.localeCompare(right),
+      );
+    const imageFiles = image.files.map((file) => ({
+      ...file,
+      path: this.normalize(file.path),
+    }));
+    const availableDirectories = new Set(this.directories);
+    const addedDirectories = new Set<string>();
+    for (const path of imageDirectories) {
+      if (remainsDeleted(path)) continue;
+      for (const candidate of ancestors(path)) {
+        if (this.files.has(candidate)) {
+          throw new FilesystemError("not_directory", `${candidate} is a file`);
+        }
+        if (this.symbolicLinks.has(candidate)) {
+          throw new FilesystemError(
+            "not_directory",
+            `${candidate} is a symbolic link`,
+          );
+        }
+        if (!availableDirectories.has(candidate)) {
+          availableDirectories.add(candidate);
+          addedDirectories.add(candidate);
+        }
+      }
+    }
+    let addedFiles = 0;
+    let addedBytes = 0;
+    const plannedFilePaths = new Set<string>();
+    for (const file of imageFiles) {
+      if (remainsDeleted(file.path)) continue;
+      // An exact existing entry is a per-Computer overlay, including a
+      // deliberate type replacement of an older base entry. Ancestor
+      // conflicts and contradictions inside the new image still fail below.
+      if (this.exists(file.path)) continue;
+      if (availableDirectories.has(file.path)) {
+        throw new FilesystemError(
+          "not_directory",
+          `${file.path} is not a regular file`,
+        );
+      }
+      if (plannedFilePaths.has(file.path)) {
+        throw new FilesystemError(
+          "exists",
+          `${file.path} appears more than once in the base image`,
+        );
+      }
+      const parent = parentPath(file.path);
+      if (!availableDirectories.has(parent)) {
+        throw new FilesystemError(
+          "not_found",
+          `Parent directory ${parent} does not exist`,
+        );
+      }
+      const size = utf8Size(file.contents);
+      if (size > this.limits.maxFileBytes)
+        throw new FilesystemError("file_limit", "File is too large");
+      plannedFilePaths.add(file.path);
+      addedFiles += 1;
+      addedBytes += size;
+    }
+    this.checkEntryCount(addedDirectories.size + addedFiles);
+    if (
+      addedBytes > 0 &&
+      this.usedBytesValue + addedBytes > this.limits.capacityBytes
+    ) {
+      throw new FilesystemError("capacity", "Filesystem capacity exceeded");
+    }
+
     registerFilesystemBaseImage(image);
     const imageState = baseImageState(image);
-    for (const directory of [...image.directories].sort(
-      (left, right) => left.length - right.length || left.localeCompare(right),
-    )) {
-      const path = this.normalize(directory);
+    for (const path of imageDirectories) {
+      if (remainsDeleted(path)) continue;
       const existed = this.exists(path);
       this.makeDirectory(path);
       if (!existed) {
@@ -277,13 +478,14 @@ export class InMemoryFilesystem {
         });
       }
     }
-    for (const file of image.files) {
-      const path = this.normalize(file.path);
+    for (const file of imageFiles) {
+      const path = file.path;
+      if (remainsDeleted(path)) continue;
       if (!this.exists(path)) {
         const size = imageState.sizes.get(path)!;
         if (size > this.limits.maxFileBytes)
           throw new FilesystemError("file_limit", "File is too large");
-        if (this.usedBytesValue + size > this.limits.capacityBytes)
+        if (size > 0 && this.usedBytesValue + size > this.limits.capacityBytes)
           throw new FilesystemError("capacity", "Filesystem capacity exceeded");
         this.requireParent(path);
         this.checkEntryCount(1);
@@ -298,6 +500,9 @@ export class InMemoryFilesystem {
       }
     }
     this.baseImage = image;
+    // The selected immutable base is persisted state even when every new base
+    // path is shadowed by an overlay and no directory or file was materialized.
+    this.revisionValue += 1;
   }
 
   exists(path: string): boolean {
@@ -329,20 +534,41 @@ export class InMemoryFilesystem {
   }
 
   createSymbolicLink(target: string, path: string): void {
+    this.assertTransactionMutationAllowed();
+    this.commitSymbolicLink(target, path, true);
+  }
+
+  private commitSymbolicLink(
+    target: string,
+    path: string,
+    enforceCurrentLimits: boolean,
+  ): void {
     const normalized = this.normalize(path);
     if (this.exists(normalized))
       throw new FilesystemError("exists", `${path} already exists`);
     this.requireParent(normalized);
-    this.checkEntryCount(1);
     if (target.includes("\0"))
       throw new FilesystemError("invalid_path", "Link target contains NUL");
-    this.symbolicLinks.set(normalized, target.replaceAll("\\", "/"));
+    const storedTarget = target.replaceAll("\\", "/");
+    const targetBytes = utf8Size(storedTarget);
+    if (enforceCurrentLimits && targetBytes > this.limits.maxPathLength)
+      throw new FilesystemError("path_limit", "Link target is too long");
+    if (enforceCurrentLimits) this.checkEntryCount(1);
+    if (
+      enforceCurrentLimits &&
+      this.usedBytesValue + targetBytes > this.limits.capacityBytes
+    ) {
+      throw new FilesystemError("capacity", "Filesystem capacity exceeded");
+    }
+    this.symbolicLinks.set(normalized, storedTarget);
     this.metadata.set(normalized, defaultMetadata(false, 0o777));
     this.addChild(normalized);
+    this.usedBytesValue += targetBytes;
     this.revisionValue += 1;
   }
 
   createHardLink(existing: string, path: string): void {
+    this.assertTransactionMutationAllowed();
     const source = this.resolveSymbolicLinks(existing);
     if (!this.files.has(source))
       throw new FilesystemError("not_found", `${existing} is not a file`);
@@ -401,17 +627,30 @@ export class InMemoryFilesystem {
   }
 
   makeDirectory(path: string): void {
+    this.assertTransactionMutationAllowed();
     const normalized = this.normalize(path);
     if (this.files.has(normalized))
       throw new FilesystemError("not_directory", `${path} is a file`);
-    const additions = ancestors(normalized).filter(
+    if (this.symbolicLinks.has(normalized))
+      throw new FilesystemError("exists", `${path} is a symbolic link`);
+    const pathAncestors = ancestors(normalized);
+    const additions = pathAncestors.filter(
       (candidate) => !this.directories.has(candidate),
     );
-    const fileAncestor = additions.find((candidate) =>
+    const fileAncestor = pathAncestors.find((candidate) =>
       this.files.has(candidate),
     );
     if (fileAncestor !== undefined) {
       throw new FilesystemError("not_directory", `${fileAncestor} is a file`);
+    }
+    const symbolicLinkAncestor = pathAncestors.find((candidate) =>
+      this.symbolicLinks.has(candidate),
+    );
+    if (symbolicLinkAncestor !== undefined) {
+      throw new FilesystemError(
+        "not_directory",
+        `${symbolicLinkAncestor} is a symbolic link`,
+      );
     }
     this.checkEntryCount(additions.length);
     for (const addition of additions) {
@@ -432,6 +671,7 @@ export class InMemoryFilesystem {
   }
 
   writeFile(path: string, contents: string): void {
+    this.assertTransactionMutationAllowed();
     const original = this.normalize(path);
     const normalized = this.symbolicLinks.has(original)
       ? this.resolveSymbolicLinks(original)
@@ -450,12 +690,14 @@ export class InMemoryFilesystem {
   }
 
   delete(path: string): void {
+    this.assertTransactionMutationAllowed();
     const normalized = this.normalize(path);
     if (normalized === "/")
       throw new FilesystemError("protected", "Cannot delete root");
     if (!this.exists(normalized))
       throw new FilesystemError("not_found", `${path} does not exist`);
     if (this.symbolicLinks.has(normalized)) {
+      this.usedBytesValue -= utf8Size(this.symbolicLinks.get(normalized)!);
       this.symbolicLinks.delete(normalized);
       this.metadata.delete(normalized);
       this.removeChild(normalized);
@@ -482,6 +724,7 @@ export class InMemoryFilesystem {
     }
     for (const candidate of [...this.symbolicLinks.keys()]) {
       if (candidate.startsWith(prefix)) {
+        this.usedBytesValue -= utf8Size(this.symbolicLinks.get(candidate)!);
         this.symbolicLinks.delete(candidate);
         this.metadata.delete(candidate);
         this.removeChild(candidate);
@@ -502,22 +745,23 @@ export class InMemoryFilesystem {
   }
 
   copy(from: string, to: string): void {
+    this.assertTransactionMutationAllowed();
     const source = this.normalize(from);
     const destination = this.normalize(to);
     const snapshot = this.subtreeSnapshot(source, from);
     this.validateTransfer(source, destination, snapshot, false);
-    this.commitSnapshot(source, destination, snapshot, false);
+    this.commitSnapshot(source, destination, snapshot);
   }
 
   move(from: string, to: string): void {
+    this.assertTransactionMutationAllowed();
     const source = this.normalize(from);
     const destination = this.normalize(to);
     if (source === "/")
       throw new FilesystemError("protected", "Cannot move root");
     const snapshot = this.subtreeSnapshot(source, from);
     this.validateTransfer(source, destination, snapshot, true);
-    this.delete(source);
-    this.commitSnapshot(source, destination, snapshot, true);
+    this.commitMove(source, destination, snapshot);
   }
 
   getSize(path: string): number {
@@ -529,7 +773,7 @@ export class InMemoryFilesystem {
   }
 
   getFreeSpace(): number {
-    return this.limits.capacityBytes - this.usedBytesValue;
+    return Math.max(0, this.limits.capacityBytes - this.usedBytesValue);
   }
 
   getMetadata(path: string, followLinks = true): FilesystemMetadata {
@@ -545,9 +789,13 @@ export class InMemoryFilesystem {
   setMetadata(
     path: string,
     update: Partial<Pick<FilesystemMetadata, "gid" | "mode" | "uid">>,
+    followLinks = true,
   ): void {
-    const normalized = this.resolveSymbolicLinks(path);
-    const current = this.getMetadata(normalized);
+    this.assertTransactionMutationAllowed();
+    const normalized = followLinks
+      ? this.resolveSymbolicLinks(path)
+      : this.normalize(path);
+    const current = this.getMetadata(normalized, false);
     const next = {
       ...current,
       ...update,
@@ -565,11 +813,18 @@ export class InMemoryFilesystem {
     this.revisionValue += 1;
   }
 
-  setModifiedTime(path: string, milliseconds: number): void {
+  setModifiedTime(
+    path: string,
+    milliseconds: number,
+    followLinks = true,
+  ): void {
+    this.assertTransactionMutationAllowed();
     if (!Number.isFinite(milliseconds))
       throw new FilesystemError("invalid_path", "Invalid modification time");
-    const normalized = this.resolveSymbolicLinks(path);
-    const current = this.getMetadata(normalized);
+    const normalized = followLinks
+      ? this.resolveSymbolicLinks(path)
+      : this.normalize(path);
+    const current = this.getMetadata(normalized, false);
     if (current.modifiedAtMilliseconds === milliseconds) return;
     const id = this.hardLinkIds.get(normalized);
     const paths =
@@ -580,7 +835,7 @@ export class InMemoryFilesystem {
             .map(([candidate]) => candidate);
     for (const candidate of paths) {
       this.metadata.set(candidate, {
-        ...this.getMetadata(candidate),
+        ...this.getMetadata(candidate, false),
         modifiedAtMilliseconds: milliseconds,
       });
     }
@@ -601,7 +856,7 @@ export class InMemoryFilesystem {
       base === undefined
         ? []
         : [...base.paths]
-            .filter((path) => !this.exists(path))
+            .filter((path) => !this.hasCompatibleBaseEntry(path, base))
             .sort(
               (left, right) =>
                 right.length - left.length || left.localeCompare(right),
@@ -615,7 +870,10 @@ export class InMemoryFilesystem {
       metadata: [...this.metadata]
         .filter(
           ([path, metadata]) =>
-            path !== "/" && !metadataEquals(base?.metadata.get(path), metadata),
+            path !== "/" &&
+            (!metadataEquals(base?.metadata.get(path), metadata) ||
+              (base?.paths.has(path) === true &&
+                !this.hasCompatibleBaseEntry(path, base))),
         )
         .sort(([left], [right]) => left.localeCompare(right)),
       symbolicLinks: [...this.symbolicLinks]
@@ -627,6 +885,13 @@ export class InMemoryFilesystem {
   }
 
   restore(snapshot: InMemoryFilesystemSnapshot): void {
+    this.assertTransactionMutationAllowed();
+    if (activeFilesystemTransactions.length > 0) {
+      throw new FilesystemError(
+        "transaction_scope",
+        "Filesystem restore cannot run inside a transaction",
+      );
+    }
     if (snapshot.schema !== 2) {
       throw new Error("Unsupported filesystem snapshot schema");
     }
@@ -643,17 +908,64 @@ export class InMemoryFilesystem {
     for (const path of snapshot.tombstones ?? []) {
       if (restored.exists(path)) restored.delete(path);
     }
-    for (const [id, contents] of snapshot.blobs) registerBlob(id, contents);
     for (const directory of [...snapshot.directories].sort(
       (left, right) => left.length - right.length || left.localeCompare(right),
     )) {
       restored.makeDirectory(directory);
     }
-    for (const [path, blobId] of snapshot.files) {
-      restored.writeFile(path, requireBlob(blobId));
+    const intendedFiles = new Map(restored.files);
+    for (const [path, blobId] of snapshot.files)
+      intendedFiles.set(path, blobId);
+    const intendedNonFiles = new Set<string>([
+      ...restored.directories,
+      ...restored.symbolicLinks.keys(),
+      ...snapshot.directories,
+      ...(snapshot.symbolicLinks ?? []).map(([path]) => path),
+    ]);
+    const seenHardLinkPaths = new Set<string>();
+    for (const paths of snapshot.hardLinks ?? []) {
+      if (paths.length < 2) {
+        throw new Error(
+          "Invalid filesystem hard-link group: at least two paths are required",
+        );
+      }
+      let expectedBlobId: string | undefined;
+      for (const path of paths) {
+        if (seenHardLinkPaths.has(path)) {
+          throw new Error(
+            `Invalid filesystem hard-link group: ${path} appears more than once`,
+          );
+        }
+        seenHardLinkPaths.add(path);
+        const blobId = intendedNonFiles.has(path)
+          ? undefined
+          : intendedFiles.get(path);
+        if (blobId === undefined) {
+          throw new Error(
+            `Invalid filesystem hard-link group: ${path} is not a regular file`,
+          );
+        }
+        expectedBlobId ??= blobId;
+        if (blobId !== expectedBlobId) {
+          throw new Error(
+            `Invalid filesystem hard-link group: ${paths.join(", ")} do not share one blob`,
+          );
+        }
+      }
     }
-    for (const [path, target] of snapshot.symbolicLinks ?? []) {
-      restored.createSymbolicLink(target, path);
+    for (const [id, contents] of snapshot.blobs) registerBlob(id, contents);
+    const hardLinkPeers = new Map<string, readonly string[]>();
+    for (const paths of snapshot.hardLinks ?? []) {
+      for (const path of paths) hardLinkPeers.set(path, paths);
+    }
+    for (const [path, blobId] of snapshot.files) {
+      if (!restored.exists(path)) {
+        const peer = hardLinkPeers
+          .get(path)
+          ?.find((candidate) => restored.files.has(candidate));
+        if (peer !== undefined) restored.createHardLink(peer, path);
+      }
+      restored.writeFile(path, requireBlob(blobId));
     }
     for (const paths of snapshot.hardLinks ?? []) {
       if (paths.length < 2) continue;
@@ -669,6 +981,13 @@ export class InMemoryFilesystem {
     }
     restored.rebuildHardLinkCounts();
     restored.rebuildUsedBytes();
+    for (const [path, target] of snapshot.symbolicLinks ?? []) {
+      // Schema 1 and all previously written schema-2 snapshots allowed link
+      // targets beyond current creation limits and did not reserve their disk
+      // bytes or entry slots. Restore them exactly, account their bytes, and
+      // retain any resulting capacity debt; only new guest creation is bounded.
+      restored.commitSymbolicLink(target, path, false);
+    }
     for (const [path, metadata] of snapshot.metadata ?? []) {
       if (restored.exists(path)) restored.metadata.set(path, { ...metadata });
     }
@@ -752,7 +1071,7 @@ export class InMemoryFilesystem {
             .filter(([, candidate]) => candidate === linkId)
             .map(([candidate]) => candidate);
     const delta = size - previousSize;
-    if (this.usedBytesValue + delta > this.limits.capacityBytes) {
+    if (delta > 0 && this.usedBytesValue + delta > this.limits.capacityBytes) {
       throw new FilesystemError("capacity", "Filesystem capacity exceeded");
     }
     if (!this.files.has(path)) {
@@ -858,10 +1177,21 @@ export class InMemoryFilesystem {
     }
     if (!moving) {
       this.checkEntryCount(mapped.length);
-      const addedBytes = snapshot.files.reduce(
-        (total, [, contents]) => total + utf8Size(contents),
-        0,
-      );
+      const inodeIds = new Map(snapshot.hardLinkIds);
+      const copiedInodes = new Set<number>();
+      const addedBytes =
+        snapshot.files.reduce((total, [path, contents]) => {
+          const inodeId = inodeIds.get(path);
+          if (inodeId !== undefined) {
+            if (copiedInodes.has(inodeId)) return total;
+            copiedInodes.add(inodeId);
+          }
+          return total + utf8Size(contents);
+        }, 0) +
+        snapshot.symbolicLinks.reduce(
+          (total, [, target]) => total + utf8Size(target),
+          0,
+        );
       if (this.usedBytesValue + addedBytes > this.limits.capacityBytes) {
         throw new FilesystemError("capacity", "Filesystem capacity exceeded");
       }
@@ -872,14 +1202,24 @@ export class InMemoryFilesystem {
     source: string,
     destination: string,
     snapshot: FilesystemSnapshot,
-    moving: boolean,
   ): void {
     for (const path of [...snapshot.directories].sort(
       (left, right) => left.length - right.length,
     ))
       this.makeDirectory(this.transferPath(source, destination, path));
+    const inodeIds = new Map(snapshot.hardLinkIds);
+    const copiedInodes = new Map<number, string>();
     for (const [path, contents] of snapshot.files) {
-      this.writeFile(this.transferPath(source, destination, path), contents);
+      const destinationPath = this.transferPath(source, destination, path);
+      const inodeId = inodeIds.get(path);
+      const copiedPeer =
+        inodeId === undefined ? undefined : copiedInodes.get(inodeId);
+      if (copiedPeer === undefined) {
+        this.writeFile(destinationPath, contents);
+        if (inodeId !== undefined) copiedInodes.set(inodeId, destinationPath);
+      } else {
+        this.createHardLink(copiedPeer, destinationPath);
+      }
     }
     for (const [path, target] of snapshot.symbolicLinks) {
       this.createSymbolicLink(
@@ -892,24 +1232,93 @@ export class InMemoryFilesystem {
       if (this.exists(destinationPath))
         this.metadata.set(destinationPath, { ...metadata });
     }
-    if (moving) {
-      for (const [path, id] of snapshot.hardLinkIds) {
-        this.hardLinkIds.set(this.transferPath(source, destination, path), id);
-      }
-    } else {
-      const copiedGroups = new Map<number, string[]>();
-      for (const [path, id] of snapshot.hardLinkIds) {
-        const paths = copiedGroups.get(id) ?? [];
-        paths.push(this.transferPath(source, destination, path));
-        copiedGroups.set(id, paths);
-      }
-      for (const paths of copiedGroups.values()) {
-        if (paths.length < 2) continue;
-        const id = nextHardLinkId++;
-        for (const path of paths) this.hardLinkIds.set(path, id);
-      }
-    }
     this.rebuildHardLinkCounts();
+  }
+
+  /**
+   * Renames a validated subtree without unlinking and recreating its inodes.
+   *
+   * In particular, a moved file may share an inode with another path either
+   * inside or outside the subtree. Replaying the move through delete/write
+   * would temporarily release or duplicate that inode's bytes and could fail
+   * after deleting the source on a full filesystem. Capture every value that
+   * can fail validation first, then replace only path keys. The inode IDs,
+   * link counts, content blobs, and used-byte total therefore stay unchanged.
+   */
+  private commitMove(
+    source: string,
+    destination: string,
+    snapshot: FilesystemSnapshot,
+  ): void {
+    const sourceSiblings = this.children.get(parentPath(source));
+    const destinationSiblings = this.children.get(parentPath(destination));
+    if (sourceSiblings === undefined || destinationSiblings === undefined) {
+      throw new Error("Filesystem child index is missing for move");
+    }
+
+    const directories = snapshot.directories.map((path) => {
+      const children = this.children.get(path);
+      if (!this.directories.has(path) || children === undefined) {
+        throw new Error(`Filesystem directory is missing for ${path}`);
+      }
+      return {
+        children,
+        destination: this.transferPath(source, destination, path),
+        source: path,
+      };
+    });
+    const files = snapshot.files.map(([path]) => {
+      const blobId = this.files.get(path);
+      const inodeId = this.hardLinkIds.get(path);
+      if (blobId === undefined || inodeId === undefined) {
+        throw new Error(`Filesystem inode is missing for ${path}`);
+      }
+      return {
+        blobId,
+        destination: this.transferPath(source, destination, path),
+        inodeId,
+        source: path,
+      };
+    });
+    const symbolicLinks = snapshot.symbolicLinks.map(([path, target]) => ({
+      destination: this.transferPath(source, destination, path),
+      source: path,
+      target,
+    }));
+    const metadata = snapshot.metadata.map(([path, value]) => ({
+      destination: this.transferPath(source, destination, path),
+      source: path,
+      value,
+    }));
+
+    // No validation or capacity-changing operation occurs beyond this point.
+    for (const entry of directories) {
+      this.directories.delete(entry.source);
+      this.children.delete(entry.source);
+    }
+    for (const entry of files) {
+      this.files.delete(entry.source);
+      this.hardLinkIds.delete(entry.source);
+    }
+    for (const entry of symbolicLinks) this.symbolicLinks.delete(entry.source);
+    for (const entry of metadata) this.metadata.delete(entry.source);
+
+    for (const entry of directories) {
+      this.directories.add(entry.destination);
+      this.children.set(entry.destination, entry.children);
+    }
+    for (const entry of files) {
+      this.files.set(entry.destination, entry.blobId);
+      this.hardLinkIds.set(entry.destination, entry.inodeId);
+    }
+    for (const entry of symbolicLinks)
+      this.symbolicLinks.set(entry.destination, entry.target);
+    for (const entry of metadata)
+      this.metadata.set(entry.destination, { ...entry.value });
+
+    sourceSiblings.delete(baseName(source));
+    destinationSiblings.add(baseName(destination));
+    this.revisionValue += 1;
   }
 
   private rebuildHardLinkCounts(): void {
@@ -930,6 +1339,9 @@ export class InMemoryFilesystem {
       if (seen.has(inodeId)) continue;
       seen.add(inodeId);
       usedBytes += utf8Size(requireBlob(blobId));
+    }
+    for (const target of this.symbolicLinks.values()) {
+      usedBytes += utf8Size(target);
     }
     this.usedBytesValue = usedBytes;
   }
@@ -954,14 +1366,47 @@ export class InMemoryFilesystem {
 
   private checkEntryCount(additions: number): void {
     if (
-      this.files.size + this.directories.size - 1 + additions >
-      this.limits.maxEntries
+      additions > 0 &&
+      this.files.size +
+        this.symbolicLinks.size +
+        this.directories.size -
+        1 +
+        additions >
+        this.limits.maxEntries
     ) {
       throw new FilesystemError(
         "entry_limit",
         "Filesystem entry limit exceeded",
       );
     }
+  }
+
+  private hasCompatibleBaseEntry(
+    path: string,
+    base: FilesystemBaseImageState,
+  ): boolean {
+    if (base.files.has(path)) {
+      return (
+        this.files.has(path) &&
+        !this.directories.has(path) &&
+        !this.symbolicLinks.has(path)
+      );
+    }
+    if (base.directories.has(path)) {
+      return (
+        this.directories.has(path) &&
+        !this.files.has(path) &&
+        !this.symbolicLinks.has(path)
+      );
+    }
+    if (base.symbolicLinks.has(path)) {
+      return (
+        this.symbolicLinks.has(path) &&
+        !this.files.has(path) &&
+        !this.directories.has(path)
+      );
+    }
+    return false;
   }
 
   private addChild(path: string): void {
@@ -979,6 +1424,30 @@ export class InMemoryFilesystem {
   private removeChild(path: string): void {
     if (path === "/") return;
     this.children.get(parentPath(path))?.delete(baseName(path));
+  }
+
+  private assertTransactionMutationAllowed(): void {
+    if (rejectedAsyncTransactionCount() > 0) {
+      throw new FilesystemError(
+        "transaction_async",
+        "Cannot mutate a filesystem while a rejected asynchronous transaction is pending",
+      );
+    }
+    const active = activeFilesystemTransactions.at(-1);
+    if (active !== undefined && active.owner !== this) {
+      throw new FilesystemError(
+        "transaction_scope",
+        "Cannot mutate another filesystem inside an active transaction",
+      );
+    }
+  }
+
+  private rejectThenableTransaction(value: PromiseLike<unknown>): never {
+    quarantineRejectedAsyncTransaction(value);
+    throw new FilesystemError(
+      "transaction_async",
+      "Filesystem transactions require a synchronous callback",
+    );
   }
 }
 
@@ -1090,6 +1559,8 @@ function baseImageState(image: FilesystemBaseImage): FilesystemBaseImageState {
     symbolicLinks: new Map(),
   };
   baseImageStates.set(image.id, state);
+  for (const transaction of activeFilesystemTransactions)
+    transaction.createdBaseImageStateIds.add(image.id);
   return state;
 }
 
@@ -1128,6 +1599,10 @@ function registerBlob(id: string, contents: string): void {
     throw new Error(`Filesystem blob collision for ${id}`);
   }
   contentBlobs.set(id, contents);
+  if (existing === undefined) {
+    for (const transaction of activeFilesystemTransactions)
+      transaction.createdBlobIds.add(id);
+  }
 }
 
 function requireBlob(id: string): string {
@@ -1149,6 +1624,23 @@ function contentBlobId(contents: string): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isExplicitAsyncFunction(
+  value: unknown,
+): value is () => Promise<unknown> {
+  return (
+    typeof value === "function" &&
+    Object.prototype.toString.call(value) === "[object AsyncFunction]"
+  );
+}
+
+function isThenable(value: unknown): value is PromiseLike<unknown> {
+  return (
+    ((typeof value === "object" && value !== null) ||
+      typeof value === "function") &&
+    typeof Reflect.get(value, "then") === "function"
+  );
 }
 
 function hasOnlyKeys(

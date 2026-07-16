@@ -107,6 +107,7 @@ export class RoundRobinScheduler {
       cpuCycles: 0,
       executedInstructions: 0,
       cpuCyclesPerTick,
+      paused: false,
     });
     this.orderIndices.set(id, this.order.length);
     this.order.push(id);
@@ -130,6 +131,23 @@ export class RoundRobinScheduler {
     if (this.order.length === 0) this.cursor = 0;
     else this.cursor %= this.order.length;
     return true;
+  }
+
+  /**
+   * Pauses only CPU dispatch. Tick advancement, due timers, and event delivery
+   * remain prepared through the normal bounded round-robin pass.
+   */
+  setPaused(id: number, paused: boolean): boolean {
+    if (typeof paused !== "boolean")
+      throw new TypeError("Scheduler paused state must be boolean");
+    const computer = this.requireComputer(id);
+    if (computer.paused === paused) return false;
+    computer.paused = paused;
+    return true;
+  }
+
+  isPaused(id: number): boolean {
+    return this.requireComputer(id).paused;
   }
 
   queueEvent(
@@ -161,7 +179,7 @@ export class RoundRobinScheduler {
     let remaining = this.limits.cpuCyclesPerTick;
     let remainingInstructions = this.instructionsPerTick;
     let executedInstructions = 0;
-    let executedComputers = 0;
+    let cpuCursorAdvance = 0;
     const scheduledCount = this.order.length;
     const count = Math.min(scheduledCount, this.computersPerTick);
     const visited: ScheduledComputer[] = [];
@@ -185,6 +203,7 @@ export class RoundRobinScheduler {
     ) {
       const computer = visited[offset];
       if (computer === undefined) continue;
+      if (computer.paused) continue;
       if (
         computer.process.state.kind !== "ready" &&
         !computer.process.hasPendingCpuCycles
@@ -204,7 +223,7 @@ export class RoundRobinScheduler {
       if (result === undefined) break;
       computer.cpuCycles += result.cpuCycles;
       computer.executedInstructions += result.executedInstructions;
-      executedComputers += 1;
+      cpuCursorAdvance = offset + 1;
       executedInstructions += result.executedInstructions;
       remaining -= result.cpuCycles;
       remainingInstructions -= result.executedInstructions;
@@ -213,8 +232,8 @@ export class RoundRobinScheduler {
       const advance =
         scheduledCount <= this.computersPerTick
           ? 1
-          : executedComputers > 0
-            ? executedComputers
+          : cpuCursorAdvance > 0
+            ? cpuCursorAdvance
             : visited.length;
       this.cursor = (this.cursor + advance) % scheduledCount;
     }
@@ -280,6 +299,7 @@ interface ScheduledComputer {
   readonly timers: BoundedTimerQueue;
   executedInstructions: number;
   readonly cpuCyclesPerTick: number;
+  paused: boolean;
 }
 
 function requirePositiveInteger(value: number, name: string): void {

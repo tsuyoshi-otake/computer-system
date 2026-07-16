@@ -1,0 +1,46 @@
+import { describe, expect, it } from "vitest";
+
+import { commandRegistryFor } from "../../src/application/os/commandRegistry.js";
+import { ShellSession } from "../../src/application/os/shellSession.js";
+import { InMemoryFilesystem } from "../../src/domain/filesystem/inMemoryFilesystem.js";
+import {
+  linuxManualPage,
+  linuxManualPages,
+  renderLinuxManualPage,
+} from "../../src/application/os/linuxManual.js";
+
+describe("CS-Linux manual metadata", (): void => {
+  it("keeps every command page attached to an installed command", (): void => {
+    const registry = commandRegistryFor("linux");
+    for (const entry of linuxManualPages()) {
+      if (entry.name !== "cs-linux")
+        expect(registry.has(entry.name)).toBe(true);
+      expect(linuxManualPage(entry.name.toUpperCase())).toBe(entry);
+    }
+  });
+
+  it("renders bounded deterministic man-page text", (): void => {
+    const entry = linuxManualPage("ps");
+    expect(entry).toBeDefined();
+    const rendered = renderLinuxManualPage(entry!);
+    expect(rendered).toContain(
+      "PS(1)\n\nNAME\n    ps - report guest process state",
+    );
+    expect(rendered).toContain("bounded OS process table");
+    expect(rendered.length).toBeLessThan(4_096);
+  });
+
+  it("serves man and apropos through installed sandbox utilities", (): void => {
+    const shell = new ShellSession(new InMemoryFilesystem());
+    const man = shell.submit("man ps");
+    expect(man.exitCode).toBe(0);
+    expect(man.stdout).toContain("PS(1)");
+    const apropos = shell.submit("apropos process");
+    expect(apropos.exitCode).toBe(0);
+    expect(apropos.stdout).toContain("ps (1)");
+    expect(shell.submit("man absent")).toMatchObject({
+      exitCode: 1,
+      stderr: "man: no manual entry for absent\n",
+    });
+  });
+});

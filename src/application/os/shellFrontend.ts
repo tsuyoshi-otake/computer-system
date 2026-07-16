@@ -7,6 +7,7 @@ export interface ShellLineContext {
   readonly arguments: readonly string[];
   readonly lastExitCode: number;
   readonly scriptName: string;
+  readonly variablesExpanded?: boolean;
 }
 
 export type PreparedShellLine =

@@ -167,14 +167,30 @@ one VM event, and every close path produces exactly one VM-visible result.
 ## July 2026 OS profile, persistence, and vi update
 
 The default Linux profile now bootstraps `/etc`, `/dev`, volatile `/tmp`,
-`/usr`, `/var`, and `/home/computer` without overwriting existing configuration.
-Sandbox identity/time and bounded utility applets include `whoami`, `id`,
-`hostname`, `uname`, `date`, `uptime`, `time`, `history`, `sleep`, `test`,
-`seq`, `cut`, `stat`, and `df`. OS-specific paths, aliases, environment, boot
-files, and virtual devices live behind an application profile boundary. A
-minimal DOS fixture proves drive letters, case-insensitive canonical paths, CRLF
-boot files, `DIR`/`TYPE`, and `NUL` without importing DOS behavior into the
-domain core.
+`/usr`, `/var`, and `/home/cs` without overwriting existing configuration. The
+initial `cs` account is UID/GID 1000 and a `sudo` member; UID/GID 0 root starts
+password-locked. `/etc/passwd`, `/etc/group`, and `/etc/shadow` back bounded
+login, password, user, group, `sudo`, and `su` behavior. Every guest filesystem
+operation crosses a process-credential boundary with DAC and `umask`; DOS uses
+an explicit unrestricted profile view. A recognized former `computer` account
+and `/home/computer` are completely renamed to `cs` and `/home/cs` with the
+password payload, IDs, data, metadata, links, and tombstones preserved and no
+compatibility alias. The legacy `computer` name remains permanently reserved in
+both user and group namespaces. Account updates cap each user at 32
+supplementary groups and reject overflow without partial account-file changes;
+recursive `useradd` home provisioning rolls back the account and every new home
+ancestor on failure. Sandbox identity/time and bounded utility applets include
+`whoami`, `id`, `groups`, `getent`, `hostname`, `uname`, `date`, `uptime`,
+`time`, `history`, `sleep`, `test`, `seq`, `cut`, `stat`, and `df`. OS-specific
+paths, aliases, environment, boot files, and virtual devices live behind an
+application profile boundary. A minimal DOS fixture proves drive letters,
+case-insensitive canonical paths, CRLF boot files, `DIR`/`TYPE`, and `NUL`
+without importing DOS behavior into the domain core.
+
+The native Python `shell` module is available only to the built-in shell program
+selected by an empty `/startup.py`. User-authored startup source, foreground
+Python, and MCP Python reject it so none can acquire the authenticated live
+shell session as a native object.
 
 `vi` is a bounded Normal/Insert/Command state machine with cursor movement,
 character/line deletion, bounded line-local undo, `:w`, `:q`, `:wq`, and `:q!`.
@@ -267,6 +283,24 @@ four-byte object-relative data layout, C/C++ external zero-argument functions,
 and restricted statement-boundary inline assembly. Local symbol rewriting and
 Map-backed global resolution keep linking linear in instructions, symbols, and
 relocations. Dynamic libraries remain a later increment after ABI validation.
+
+## July 2026 assembler v2 and stack-boundary update
+
+Follow-up Issue #18 upgrades only the shared CS486 format and sandboxed guest
+toolchain; it does not add a native x86 execution path. ASM now flows through a
+dedicated tokenizer, bounded include/macro preprocessor, parser, expression
+evaluator, and source-span diagnostics. New ASM writers emit `CS486OBJ` v2 with
+`.text`, `.rodata`, `.data`, and `.bss`, initialized little-endian bytes,
+alignment, typed symbols, and structured relocations. The linker reads those
+records directly, preserves legacy v1 objects, and keeps global and local lookup
+Map-backed.
+
+CS-Linux keeps `as`/`ld` forms while CS-DOS adds case-insensitive `ASM`/`LINK`
+aliases, slash-style options, DOS macro/include spellings, strict 8.3 paths, and
+CRLF diagnostics over the same implementation. `CS486OBJ`/`CS486` remain custom
+validated formats, not ELF, OMF, COM/EXE, or native machine code. At runtime the
+stack begins at the top of process RAM and PUSH/CALL/POP/RET fault before
+crossing the aligned static-data/BSS floor.
 
 ## July 2026 authored machine artwork and display topology update
 

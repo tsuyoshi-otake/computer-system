@@ -1,5 +1,5 @@
-import type { InMemoryFilesystem } from "../../domain/filesystem/inMemoryFilesystem.js";
 import { utf8ByteLength } from "../../domain/text/utf8.js";
+import type { SynchronousTransactionOperation } from "../../domain/filesystem/inMemoryFilesystem.js";
 import { DosPathError, type OsProfile } from "./osProfile.js";
 import type { ShellClockSource } from "./clock.js";
 import type { ComputerHardwareProfile } from "../../domain/computer/hardware.js";
@@ -16,6 +16,8 @@ import { cpuCyclesToMicroseconds } from "../../domain/cpu/timing.js";
 import {
   assembleCs486,
   assembleCs486Object,
+  Cs486CompileError,
+  type Cs486AssemblerOptions,
 } from "../toolchain/cs486Assembler.js";
 import {
   validateCs486Object,
@@ -26,7 +28,11 @@ import {
   compileCs486Source,
   type Cs486SourceLanguage,
 } from "../toolchain/highLevelCompilers.js";
-import { linkCs486Objects } from "../toolchain/cs486Linker.js";
+import { Cs486LinkError, linkCs486Objects } from "../toolchain/cs486Linker.js";
+import {
+  Cs486Debugger,
+  type Cs486DebuggerOutcome,
+} from "../toolchain/cs486Debugger.js";
 import { sha256Hex } from "./passwordHash.js";
 import { commandRegistryFor, type CommandRegistry } from "./commandRegistry.js";
 import {
@@ -34,10 +40,9 @@ import {
   decodeSystemUtility,
 } from "./osFilesystemImages.js";
 import { DosCommandAdapter } from "./dosCommands.js";
-import {
-  shellAccessPolicyFor,
-  type ShellAccessPolicy,
-} from "./shellAccessPolicy.js";
+import { filesystemExecute, type GuestFilesystem } from "./guestFilesystem.js";
+import type { LinuxAccountDatabase, LinuxUserRecord } from "./linuxAccounts.js";
+import type { ProcessCredentials } from "./linuxCredentials.js";
 import { shellTextPolicyFor, type ShellTextPolicy } from "./shellTextPolicy.js";
 import type {
   ShellAction,
@@ -49,20 +54,46 @@ import {
   machineFaceAt,
   type MachineFace,
 } from "../../domain/computer/machineFace.js";
+import {
+  linuxManualPage,
+  linuxManualPages,
+  renderLinuxManualPage,
+} from "./linuxManual.js";
+import type {
+  OsJobRecord,
+  OsProcessRecord,
+  OsProcessSignal,
+  OsRuntimeState,
+} from "./osRuntimeState.js";
+import {
+  DosDriveError,
+  DosRuntimeState,
+  DosRuntimeStateError,
+  dosFatAttribute,
+  expandDosFileSpec,
+  hasDosFatAttribute,
+  migrateDosFatMetadata,
+  truncateToDosFatTimestamp,
+  type DosFatMetadataSnapshotV1,
+} from "./dosRuntimeState.js";
 
 export type {
   ShellAction,
+  ShellBackgroundRequest,
   ShellCommandResult,
   ShellCompletionResult,
   ShellForegroundRequest,
   ShellForegroundPython,
+  ShellJobControlRequest,
 } from "./shellTypes.js";
 
 export interface ShellCommandRuntimeOptions {
+  readonly accounts?: LinuxAccountDatabase;
   readonly clock: ShellClockSource;
   readonly computerId: number;
   readonly computerName: string;
   readonly currentTick: () => number;
+  readonly credentials: () => ProcessCredentials;
   readonly profile: OsProfile;
   readonly ticksPerSecond: number;
   readonly hardware: ComputerHardwareProfile;
@@ -74,6 +105,19 @@ export interface ShellCommandRuntimeOptions {
     operation: "read" | "write",
     bytes: number,
   ) => string | undefined;
+  readonly syncFilesystem?: () => void;
+  readonly osRuntime?: OsRuntimeState;
+  readonly sessionId?: () => string | undefined;
+  readonly selfPid?: () => number | undefined;
+  readonly signalProcess?: (pid: number, signal: OsProcessSignal) => void;
+  readonly dosRuntime?: DosRuntimeState;
+  readonly onDosRuntimeChanged?: (state: DosRuntimeState) => void;
+}
+
+export interface ShellRuntimeIdentityState {
+  readonly currentDirectory: string;
+  readonly environment: readonly (readonly [string, string])[];
+  readonly previousDirectory: string;
 }
 
 interface MemoryRegion {
@@ -97,10 +141,15 @@ interface DosMemoryLayout {
   readonly xms: boolean;
 }
 
+interface DosDirectoryGroup {
+  readonly directory: string;
+  readonly targets: readonly string[];
+}
+
 const maximumOutputLength = 256_000;
+const maximumEnvironmentVariables = 256;
 
 export class ShellCommandRuntime {
-  private readonly accessPolicy: ShellAccessPolicy;
   private readonly bootTick: number;
   private readonly dosCommands: DosCommandAdapter | undefined;
   private readonly registry: CommandRegistry;
@@ -113,12 +162,16 @@ export class ShellCommandRuntime {
   private xargsDepth = 0;
   private ioReadBytes = 0;
   private ioWriteBytes = 0;
+  private cs486Debugger: Cs486Debugger | undefined;
+  private readonly cs486DebuggerSymbols = new Map<string, number>();
+  private cs486DebuggerOutputCursor = 0;
+  private readonly dosRuntime: DosRuntimeState | undefined;
+  private dosTransactionDepth = 0;
 
   constructor(
-    private readonly filesystem: InMemoryFilesystem,
+    private readonly filesystem: GuestFilesystem,
     private readonly options: ShellCommandRuntimeOptions,
   ) {
-    this.accessPolicy = shellAccessPolicyFor(options.profile.id, filesystem);
     this.bootTick = options.currentTick();
     this.currentDirectory = options.profile.initialDirectory;
     this.previousDirectory = options.profile.initialDirectory;
@@ -127,10 +180,261 @@ export class ShellCommandRuntime {
     this.textPolicy = shellTextPolicyFor(options.profile.id);
     this.dosCommands =
       options.profile.id === "dos" ? new DosCommandAdapter(this) : undefined;
+    this.dosRuntime =
+      options.profile.id === "dos"
+        ? (options.dosRuntime ?? DosRuntimeState.create())
+        : undefined;
   }
 
   get cwd(): string {
     return this.currentDirectory;
+  }
+
+  /**
+   * Commits a DOS-only aggregate mutation and its shell-facing directory state
+   * as one observer-visible unit. An observer rejection restores both views and
+   * republishes the restored aggregate so persistence cannot retain the failed
+   * candidate state.
+   */
+  private runDosRuntimeTransaction<Result>(
+    operation: SynchronousTransactionOperation<Result>,
+  ): Result {
+    const dosRuntime = this.dosRuntime;
+    if (dosRuntime === undefined || this.dosTransactionDepth > 0)
+      return operation();
+    const beforeRevision = dosRuntime.revision;
+    const beforeCurrentDirectory = this.currentDirectory;
+    const beforePreviousDirectory = this.previousDirectory;
+    const observer = this.options.onDosRuntimeChanged;
+    let observerAttempted = false;
+    this.dosTransactionDepth += 1;
+    try {
+      return dosRuntime.transaction<Result>(() => {
+        const result = operation();
+        if (observer !== undefined && dosRuntime.revision !== beforeRevision) {
+          observerAttempted = true;
+          observer(dosRuntime);
+        }
+        return result;
+      });
+    } catch (error: unknown) {
+      this.currentDirectory = beforeCurrentDirectory;
+      this.previousDirectory = beforePreviousDirectory;
+      if (observerAttempted && observer !== undefined) {
+        try {
+          observer(dosRuntime);
+        } catch (observerRollbackError: unknown) {
+          throw new AggregateError(
+            [error, observerRollbackError],
+            "DOS transaction observer rollback failed",
+          );
+        }
+      }
+      throw error;
+    } finally {
+      this.dosTransactionDepth -= 1;
+    }
+  }
+
+  /**
+   * Commits filesystem and FAT state as one bounded synchronous mutation.
+   * Nested single-file helpers reuse the outer undo boundary, and observers see
+   * only the final committed aggregate rather than intermediate wildcard rows.
+   */
+  private runDosFilesystemTransaction<Result>(
+    operation: SynchronousTransactionOperation<Result>,
+  ): Result {
+    const dosRuntime = this.dosRuntime;
+    if (dosRuntime === undefined) return this.filesystem.transaction(operation);
+    if (this.dosTransactionDepth > 0) return operation();
+    const beforeIoWriteBytes = this.ioWriteBytes;
+    try {
+      return this.filesystem.transaction(
+        () =>
+          this.runDosRuntimeTransaction(operation) as ReturnType<
+            SynchronousTransactionOperation<Result>
+          >,
+      );
+    } catch (error: unknown) {
+      this.ioWriteBytes = beforeIoWriteBytes;
+      throw error;
+    }
+  }
+
+  private dosMediaForPath(
+    path: string,
+    state = this.dosRuntime,
+  ): { readonly generation: number; readonly letter: string } | undefined {
+    const match = /^\/drives\/([a-z])(?:\/|$)/u.exec(path);
+    if (match === null || state === undefined) return undefined;
+    const media = state.requireMedia(match[1]!.toUpperCase());
+    return { generation: media.mediaGeneration, letter: media.letter };
+  }
+
+  private ensureDosFatMetadata(
+    path: string,
+  ): Readonly<DosFatMetadataSnapshotV1> | undefined {
+    if (this.dosRuntime === undefined) return undefined;
+    return this.runDosRuntimeTransaction(() =>
+      this.ensureDosFatMetadataIn(this.dosRuntime!, path),
+    );
+  }
+
+  private ensureDosFatMetadataIn(
+    state: DosRuntimeState,
+    path: string,
+  ): Readonly<DosFatMetadataSnapshotV1> | undefined {
+    const media = this.dosMediaForPath(path, state);
+    if (media === undefined) return undefined;
+    const match = /^\/drives\/[a-z](?:\/(.*))?$/u.exec(path);
+    if (match === null || !this.filesystem.exists(path)) return undefined;
+    const root = `/drives/${media.letter.toLowerCase()}`;
+    const segments = match[1]?.split("/").filter(Boolean) ?? [];
+    const candidates = [root];
+    let candidate = root;
+    for (const segment of segments) {
+      candidate = `${candidate}/${segment}`;
+      candidates.push(candidate);
+    }
+    for (const current of candidates) {
+      if (state.fatMetadata(current, media.generation) !== undefined) continue;
+      const metadata = this.filesystem.getMetadata(current);
+      state.setFatMetadata(
+        current,
+        metadata,
+        {
+          kind: this.filesystem.isDirectory(current) ? "directory" : "file",
+          modifiedAtMilliseconds: metadata.modifiedAtMilliseconds,
+        },
+        media.generation,
+      );
+    }
+    return state.fatMetadata(path, media.generation);
+  }
+
+  private assertDosPathWritable(path: string): void {
+    if (this.dosRuntime === undefined) return;
+    this.runDosRuntimeTransaction(() => {
+      this.assertDosPathWritableIn(this.dosRuntime!, path);
+    });
+  }
+
+  private assertDosPathWritableIn(state: DosRuntimeState, path: string): void {
+    const media = this.dosMediaForPath(path, state);
+    if (media === undefined) return;
+    state.assertWritable(media.letter, media.generation);
+    if (
+      this.filesystem.exists(path) &&
+      hasDosFatAttribute(
+        this.ensureDosFatMetadataIn(state, path)!.attributes,
+        dosFatAttribute.readOnly,
+      )
+    ) {
+      throw new Error("Access is denied.");
+    }
+  }
+
+  private markDosFileWritten(path: string): void {
+    this.runDosRuntimeTransaction(() => {
+      const media = this.dosMediaForPath(path);
+      if (media === undefined || this.dosRuntime === undefined) return;
+      const current = this.dosRuntime.fatMetadata(path, media.generation);
+      if (current === undefined) this.ensureDosFatMetadata(parentPath(path));
+      const modifiedAtMilliseconds = truncateToDosFatTimestamp(
+        this.options.clock.currentWallTimeMilliseconds(),
+      );
+      this.dosRuntime.setFatMetadata(
+        path,
+        {
+          attributes:
+            (current?.attributes ?? dosFatAttribute.archive) |
+            dosFatAttribute.archive,
+          modifiedAtMilliseconds,
+          schema: 1,
+        },
+        {
+          kind: this.filesystem.isDirectory(path) ? "directory" : "file",
+          modifiedAtMilliseconds,
+        },
+        media.generation,
+      );
+    });
+  }
+
+  private preflightDosFileWrite(path: string): void {
+    const media = this.dosMediaForPath(path);
+    if (media === undefined || this.dosRuntime === undefined) return;
+    if (this.filesystem.exists(path)) {
+      this.ensureDosFatMetadata(path);
+      return;
+    }
+    const trial = DosRuntimeState.restore(
+      this.dosRuntime.snapshot(),
+      this.dosRuntime.limits,
+    );
+    this.ensureDosFatMetadataIn(trial, parentPath(path));
+    trial.setFatMetadata(
+      path,
+      undefined,
+      {
+        kind: "file",
+        modifiedAtMilliseconds:
+          this.options.clock.currentWallTimeMilliseconds(),
+      },
+      media.generation,
+    );
+  }
+
+  private deleteDosFatMetadata(path: string): void {
+    this.runDosRuntimeTransaction(() => {
+      const media = this.dosMediaForPath(path);
+      if (media === undefined || this.dosRuntime === undefined) return;
+      this.dosRuntime.deleteFatMetadata(path, media.generation);
+    });
+  }
+
+  private copyDosFatMetadata(source: string, destination: string): void {
+    this.runDosRuntimeTransaction(() => {
+      const sourceMedia = this.dosMediaForPath(source);
+      const destinationMedia = this.dosMediaForPath(destination);
+      if (
+        sourceMedia === undefined ||
+        destinationMedia === undefined ||
+        this.dosRuntime === undefined
+      ) {
+        return;
+      }
+      const sourceMetadata = this.ensureDosFatMetadata(source)!;
+      this.dosRuntime.setFatMetadata(
+        destination,
+        sourceMetadata,
+        {
+          kind: this.filesystem.isDirectory(destination) ? "directory" : "file",
+          modifiedAtMilliseconds: sourceMetadata.modifiedAtMilliseconds,
+        },
+        destinationMedia.generation,
+      );
+    });
+  }
+
+  private moveDosFatMetadata(source: string, destination: string): void {
+    this.runDosRuntimeTransaction(() => {
+      const sourceMedia = this.dosMediaForPath(source);
+      const destinationMedia = this.dosMediaForPath(destination);
+      if (
+        sourceMedia === undefined ||
+        destinationMedia === undefined ||
+        this.dosRuntime === undefined
+      ) {
+        return;
+      }
+      this.dosRuntime.moveFatMetadata(
+        source,
+        destination,
+        sourceMedia.generation,
+        destinationMedia.generation,
+      );
+    });
   }
 
   complete(line: string, cursor: number): ShellCompletionResult {
@@ -171,15 +475,112 @@ export class ShellCommandRuntime {
     return this.options.profile;
   }
 
+  get credentials(): ProcessCredentials {
+    return this.options.credentials();
+  }
+
+  activateUser(user: LinuxUserRecord): string | undefined {
+    this.closeDebugger();
+    const homeProblem = this.loginDirectoryProblem(user.home);
+    this.environment.clear();
+    for (const [name, value] of this.options.profile.environment)
+      this.setEnvironmentEntry(name, value);
+    this.setEnvironmentEntry("HOME", user.home);
+    this.setEnvironmentEntry("USER", user.name);
+    this.setEnvironmentEntry("LOGNAME", user.name);
+    this.setEnvironmentEntry("SHELL", user.shell);
+    this.previousDirectory = this.currentDirectory;
+    this.currentDirectory = homeProblem === undefined ? user.home : "/";
+    return homeProblem === undefined
+      ? undefined
+      : `Could not chdir to home directory ${user.home}: ${homeProblem}`;
+  }
+
+  deactivateUser(): void {
+    this.closeDebugger();
+    this.environment.clear();
+    for (const [name, value] of this.options.profile.environment) {
+      if (name === "HOME" || name === "LOGNAME" || name === "USER") continue;
+      this.setEnvironmentEntry(name, value);
+    }
+    this.previousDirectory = this.currentDirectory;
+    this.currentDirectory = "/";
+  }
+
+  switchUser(user: LinuxUserRecord, login: boolean): void {
+    this.closeDebugger();
+    this.setEnvironmentEntry("USER", user.name);
+    this.setEnvironmentEntry("LOGNAME", user.name);
+    this.setEnvironmentEntry("SHELL", user.shell);
+    if (login) {
+      this.setEnvironmentEntry("HOME", user.home);
+      this.previousDirectory = this.currentDirectory;
+      this.currentDirectory = user.home;
+    }
+  }
+
+  closeDebugger(): void {
+    this.cs486Debugger = undefined;
+    this.cs486DebuggerSymbols.clear();
+    this.cs486DebuggerOutputCursor = 0;
+  }
+
+  private loginDirectoryProblem(home: string): string | undefined {
+    try {
+      if (!this.filesystem.exists(home)) return "No such file or directory";
+      if (!this.filesystem.isDirectory(home)) return "Not a directory";
+      if (!this.filesystem.hasAccess(home, filesystemExecute))
+        return "Permission denied";
+      return undefined;
+    } catch (error: unknown) {
+      return message(error);
+    }
+  }
+
+  restoreDirectory(path: string): void {
+    this.previousDirectory = this.currentDirectory;
+    this.currentDirectory = path;
+  }
+
+  captureIdentityState(): ShellRuntimeIdentityState {
+    if (this.environment.size > maximumEnvironmentVariables)
+      throw new Error("shell environment variable limit exceeded");
+    return Object.freeze({
+      currentDirectory: this.currentDirectory,
+      environment: Object.freeze(
+        [...this.environment].map(([name, value]) =>
+          Object.freeze([name, value] as const),
+        ),
+      ),
+      previousDirectory: this.previousDirectory,
+    });
+  }
+
+  restoreIdentityState(state: ShellRuntimeIdentityState): void {
+    if (state.environment.length > maximumEnvironmentVariables)
+      throw new Error("shell environment variable limit exceeded");
+    this.environment.clear();
+    for (const [name, value] of state.environment)
+      this.setEnvironmentEntry(name, value);
+    this.currentDirectory = state.currentDirectory;
+    this.previousDirectory = state.previousDirectory;
+  }
+
+  getUmask(): number {
+    return this.filesystem.getUmask();
+  }
+
   prompt(): string {
     if (this.options.profile.id === "dos") {
       return this.renderDosPrompt(this.environment.get("PROMPT") ?? "$P$G");
     }
     const display =
-      this.currentDirectory === this.options.profile.home
+      this.currentDirectory ===
+      (this.environment.get("HOME") ?? this.options.profile.home)
         ? "~"
         : this.options.profile.pathDialect.display(this.currentDirectory);
-    return `${display}$ `;
+    const credentials = this.options.credentials();
+    return `${credentials.loginName}@${this.options.computerName}:${display}${credentials.effectiveUserId === 0 ? "#" : "$"} `;
   }
 
   resolveVariable(name: string, lastExitCode: number): string | undefined {
@@ -193,7 +594,7 @@ export class ShellCommandRuntime {
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/u.test(name)) {
       throw new Error(`${name}: invalid variable name`);
     }
-    this.environment.set(this.environmentName(name), value);
+    this.setEnvironmentEntry(this.environmentName(name), value);
   }
 
   isBuiltInCommand(name: string): boolean {
@@ -202,6 +603,10 @@ export class ShellCommandRuntime {
 
   get dosEchoEnabled(): boolean {
     return this.dosEcho;
+  }
+
+  setDosEchoEnabled(enabled: boolean): void {
+    this.dosEcho = enabled;
   }
 
   expandDosVariables(
@@ -226,6 +631,8 @@ export class ShellCommandRuntime {
 
   executeDosControlLine(line: string): ShellCommandResult | undefined {
     const normalized = line.trim().replace(/^@/u, "").trimStart();
+    const driveSelection = /^([A-Za-z]):$/u.exec(normalized);
+    if (driveSelection !== null) return this.selectDosDrive(driveSelection[1]!);
     const match = /^([A-Za-z]+)(?:\s+(.*))?$/su.exec(normalized);
     if (match === null) return undefined;
     const command = match[1]!.toLowerCase();
@@ -294,7 +701,7 @@ export class ShellCommandRuntime {
       const count = assignments < 0 ? words.length : assignments;
       for (const assignment of words.slice(0, count)) {
         const separator = assignment.indexOf("=");
-        this.environment.set(
+        this.setEnvironmentEntry(
           this.environmentName(assignment.slice(0, separator)),
           assignment.slice(separator + 1),
         );
@@ -339,8 +746,26 @@ export class ShellCommandRuntime {
       }
       return result;
     } catch (error: unknown) {
+      if (error instanceof Cs486CompileError) {
+        return status(1, "", this.formatCompileError(error, requestedCommand));
+      }
+      if (error instanceof Cs486LinkError) {
+        const commandName =
+          this.options.profile.id === "dos" ? "LINK" : command || "ld";
+        return status(
+          1,
+          "",
+          `${commandName}: error CSLINK001: ${error.message}${this.textPolicy.newline}`,
+        );
+      }
       if (this.options.profile.id === "dos" && error instanceof DosPathError) {
         return status(1, "", "Invalid filename or extension.\r\n");
+      }
+      if (
+        this.options.profile.id === "dos" &&
+        error instanceof DosRuntimeStateError
+      ) {
+        return status(1, "", `${error.message}\r\n`);
       }
       if (this.dosCommands !== undefined) {
         return status(
@@ -353,10 +778,88 @@ export class ShellCommandRuntime {
     }
   }
 
+  private formatCompileError(
+    error: Cs486CompileError,
+    requestedCommand: string,
+  ): string {
+    const newline = this.textPolicy.newline;
+    if (this.options.profile.id === "dos") {
+      const source =
+        error.source === undefined
+          ? requestedCommand.toUpperCase()
+          : this.options.profile.pathDialect.display(error.source);
+      return `${source}(${String(error.line ?? 1)},${String(error.column ?? 1)}): error ${error.code}: ${error.detail}${newline}`;
+    }
+    const location =
+      error.source === undefined
+        ? requestedCommand || "as"
+        : `${error.source}:${String(error.line ?? 1)}:${String(error.column ?? 1)}`;
+    return `${location}: error ${error.code}: ${error.detail}${newline}`;
+  }
+
   resolvePath(path: string): string {
+    if (this.dosRuntime !== undefined) return this.resolveDosDrivePath(path);
     return this.filesystem.normalize(
       this.options.profile.pathDialect.resolve(
         path,
+        this.currentDirectory,
+        this.environment.get("HOME") ?? this.options.profile.home,
+      ),
+    );
+  }
+
+  private selectDosDrive(letter: string): ShellCommandResult {
+    const drives = this.dosRuntime;
+    if (drives === undefined) return failure(letter, "drive table unavailable");
+    try {
+      this.runDosRuntimeTransaction(() => {
+        drives.selectDrive(letter);
+        const state = drives.requireMedia(drives.activeDrive);
+        this.previousDirectory = this.currentDirectory;
+        this.currentDirectory = this.filesystem.normalize(
+          `/drives/${state.letter.toLowerCase()}${state.currentDirectory === "\\" ? "" : state.currentDirectory.replaceAll("\\", "/")}`,
+        );
+      });
+      return success();
+    } catch (error: unknown) {
+      if (error instanceof DosDriveError) {
+        if (error.code === "no_media") {
+          return status(1, "", `Not ready reading drive ${error.drive}\r\n`);
+        }
+        return status(1, "", "Invalid drive specification\r\n");
+      }
+      return status(1, "", `Drive error: ${message(error)}\r\n`);
+    }
+  }
+
+  private resolveDosDrivePath(path: string): string {
+    const drives = this.dosRuntime;
+    if (drives === undefined) throw new Error("DOS drive table is unavailable");
+    const expanded = path === "~" ? this.options.profile.home : path;
+    const slashPath = expanded.replaceAll("\\", "/");
+    if (
+      slashPath.startsWith("/drives/") ||
+      /^(?:nul|con|(?:com|spi|i2c)[1-6])$/iu.test(slashPath)
+    ) {
+      return this.filesystem.normalize(
+        this.options.profile.pathDialect.resolve(
+          slashPath,
+          this.currentDirectory,
+          this.environment.get("HOME") ?? this.options.profile.home,
+        ),
+      );
+    }
+    const explicit = /^([A-Za-z]):(.*)$/u.exec(slashPath);
+    const letter = explicit?.[1] ?? drives.activeDrive;
+    const state = drives.requireMedia(letter);
+    const tail = explicit?.[2] ?? slashPath;
+    const root = `/drives/${state.letter.toLowerCase()}`;
+    const base = tail.startsWith("/")
+      ? root
+      : `${root}${state.currentDirectory === "\\" ? "" : state.currentDirectory.replaceAll("\\", "/")}`;
+    return this.filesystem.normalize(
+      this.options.profile.pathDialect.resolve(
+        `${base}/${tail.replace(/^\/+|\/+$/gu, "")}`,
         this.currentDirectory,
         this.environment.get("HOME") ?? this.options.profile.home,
       ),
@@ -382,62 +885,361 @@ export class ShellCommandRuntime {
         "Invalid path, not directory, or directory not empty.\r\n",
       );
     }
-    this.filesystem.delete(path);
+    try {
+      const trial = DosRuntimeState.restore(
+        this.dosRuntime!.snapshot(),
+        this.dosRuntime!.limits,
+      );
+      this.assertDosPathWritableIn(trial, path);
+      const trialMedia = this.dosMediaForPath(path, trial)!;
+      trial.deleteFatMetadata(path, trialMedia.generation);
+      this.runDosFilesystemTransaction(() => {
+        this.assertDosPathWritable(path);
+        this.filesystem.delete(path);
+        this.deleteDosFatMetadata(path);
+      });
+    } catch (error: unknown) {
+      return status(1, "", `${message(error)}\r\n`);
+    }
     return success();
+  }
+
+  dosDelete(arguments_: readonly string[]): ShellCommandResult {
+    if (arguments_.length === 0)
+      return status(2, "", "Required parameter missing.\r\n");
+    if (arguments_.some((argument) => argument.startsWith("/")))
+      return status(2, "", "Invalid switch.\r\n");
+    try {
+      const targets = this.dosMutationTargets(arguments_);
+      if (targets.length === 0) return status(1, "", "File not found.\r\n");
+      if (targets.some((target) => this.filesystem.isDirectory(target)))
+        return status(1, "", "Access is denied.\r\n");
+      const trial = DosRuntimeState.restore(
+        this.dosRuntime!.snapshot(),
+        this.dosRuntime!.limits,
+      );
+      for (const target of targets) {
+        this.assertDosPathWritableIn(trial, target);
+        const media = this.dosMediaForPath(target, trial)!;
+        trial.deleteFatMetadata(target, media.generation);
+      }
+      this.runDosFilesystemTransaction(() => {
+        for (const target of targets) this.assertDosPathWritable(target);
+        for (const target of targets) {
+          this.filesystem.delete(target);
+          this.deleteDosFatMetadata(target);
+        }
+      });
+      return success();
+    } catch (error: unknown) {
+      return status(1, "", `${message(error)}\r\n`);
+    }
+  }
+
+  dosCopy(arguments_: readonly string[]): ShellCommandResult {
+    if (arguments_.length !== 2)
+      return status(2, "", "Required parameter missing.\r\n");
+    try {
+      const sources = this.dosMutationTargets([arguments_[0]!]);
+      if (sources.length === 0) return status(1, "", "File not found.\r\n");
+      if (sources.some((source) => this.filesystem.isDirectory(source)))
+        return status(1, "", "Access is denied.\r\n");
+      const destination = this.resolvePath(arguments_[1]!);
+      const destinationIsDirectory =
+        this.filesystem.exists(destination) &&
+        this.filesystem.isDirectory(destination);
+      if (sources.length > 1 && !destinationIsDirectory) {
+        return status(
+          1,
+          "",
+          "Multiple source files require an existing destination directory.\r\n",
+        );
+      }
+      const copies = sources.map((source) => ({
+        contents: this.readFile(source),
+        destination: destinationIsDirectory
+          ? joinPath(destination, baseName(source))
+          : destination,
+        source,
+      }));
+      const destinations = new Set<string>();
+      let requiredBytes = 0;
+      for (const copy of copies) {
+        if (copy.source === copy.destination)
+          return status(1, "", "File cannot be copied onto itself.\r\n");
+        if (destinations.has(copy.destination))
+          return status(1, "", "Duplicate destination filename.\r\n");
+        destinations.add(copy.destination);
+        requiredBytes += Math.max(
+          0,
+          utf8ByteLength(copy.contents) -
+            (this.filesystem.exists(copy.destination)
+              ? this.filesystem.getSize(copy.destination)
+              : 0),
+        );
+      }
+      if (requiredBytes > this.filesystem.getFreeSpace())
+        return status(1, "", "Insufficient disk space.\r\n");
+      const trial = DosRuntimeState.restore(
+        this.dosRuntime!.snapshot(),
+        this.dosRuntime!.limits,
+      );
+      for (const copy of copies) {
+        const sourceMetadata = this.ensureDosFatMetadataIn(trial, copy.source)!;
+        this.assertDosPathWritableIn(trial, copy.destination);
+        this.ensureDosFatMetadataIn(trial, parentPath(copy.destination));
+        const destinationMedia = this.dosMediaForPath(copy.destination, trial)!;
+        trial.setFatMetadata(
+          copy.destination,
+          sourceMetadata,
+          {
+            kind: "file",
+            modifiedAtMilliseconds: sourceMetadata.modifiedAtMilliseconds,
+          },
+          destinationMedia.generation,
+        );
+      }
+      this.runDosFilesystemTransaction(() => {
+        for (const copy of copies) {
+          this.writeFile(copy.destination, copy.contents);
+          this.copyDosFatMetadata(copy.source, copy.destination);
+        }
+      });
+      return success(
+        `${String(copies.length).padStart(9)} file(s) copied.\r\n`,
+      );
+    } catch (error: unknown) {
+      return status(1, "", `${message(error)}\r\n`);
+    }
+  }
+
+  dosRename(arguments_: readonly string[]): ShellCommandResult {
+    if (arguments_.length !== 2)
+      return status(2, "", "Required parameter missing.\r\n");
+    try {
+      const sources = this.dosMutationTargets([arguments_[0]!]);
+      if (sources.length === 0) return status(1, "", "File not found.\r\n");
+      if (sources.some((source) => this.filesystem.isDirectory(source)))
+        return status(1, "", "Access is denied.\r\n");
+      const templateSource = arguments_[1]!.replaceAll("\\", "/");
+      if (sources.length > 1 && /[/:]/u.test(templateSource)) {
+        return status(
+          1,
+          "",
+          "Wildcard rename destination must be a filename template.\r\n",
+        );
+      }
+      const pairs = sources.map((source) => {
+        const destination = /[/:]/u.test(templateSource)
+          ? this.resolvePath(arguments_[1]!)
+          : this.resolvePath(
+              joinPath(
+                parentPath(source),
+                applyDosRenameTemplate(baseName(source), templateSource),
+              ),
+            );
+        return { destination, source };
+      });
+      const sourceSet = new Set(sources);
+      const destinationSet = new Set<string>();
+      for (const pair of pairs) {
+        if (parentPath(pair.destination) !== parentPath(pair.source))
+          return status(
+            1,
+            "",
+            "REN cannot move files between directories.\r\n",
+          );
+        if (
+          destinationSet.has(pair.destination) ||
+          (this.filesystem.exists(pair.destination) &&
+            pair.destination !== pair.source) ||
+          (sourceSet.has(pair.destination) && pair.destination !== pair.source)
+        ) {
+          return status(1, "", "Duplicate filename or file not found.\r\n");
+        }
+        destinationSet.add(pair.destination);
+      }
+      const trial = DosRuntimeState.restore(
+        this.dosRuntime!.snapshot(),
+        this.dosRuntime!.limits,
+      );
+      for (const pair of pairs) {
+        this.assertDosPathWritableIn(trial, pair.source);
+        this.assertDosPathWritableIn(trial, pair.destination);
+        if (pair.source === pair.destination) continue;
+        const sourceMedia = this.dosMediaForPath(pair.source, trial)!;
+        const destinationMedia = this.dosMediaForPath(pair.destination, trial)!;
+        trial.moveFatMetadata(
+          pair.source,
+          pair.destination,
+          sourceMedia.generation,
+          destinationMedia.generation,
+        );
+      }
+      this.runDosFilesystemTransaction(() => {
+        for (const pair of pairs) {
+          this.assertDosPathWritable(pair.source);
+          this.ensureDosFatMetadata(pair.source);
+          this.assertDosPathWritable(pair.destination);
+          if (pair.source !== pair.destination)
+            this.filesystem.move(pair.source, pair.destination);
+          if (pair.source !== pair.destination)
+            this.moveDosFatMetadata(pair.source, pair.destination);
+        }
+      });
+      return success();
+    } catch (error: unknown) {
+      return status(1, "", `${message(error)}\r\n`);
+    }
+  }
+
+  private dosMutationTargets(sources: readonly string[]): readonly string[] {
+    const targets = new Map<string, string>();
+    for (const source of sources) {
+      if (/[*?]/u.test(source)) {
+        for (const group of this.dosDirectoryGroups(source, false)) {
+          for (const target of group.targets) targets.set(target, target);
+        }
+      } else {
+        const target = this.resolvePath(source);
+        if (!this.filesystem.exists(target)) throw new Error("File not found.");
+        targets.set(target, target);
+      }
+      if (targets.size > 512) throw new Error("File match limit exceeded.");
+    }
+    return [...targets.values()].sort((left, right) =>
+      left.localeCompare(right),
+    );
   }
 
   dosDirectory(arguments_: readonly string[]): ShellCommandResult {
     let bare = false;
+    let wide = false;
+    let recursive = false;
     let path = ".";
+    let attributeFilters: readonly (readonly [number, boolean])[] = [
+      [dosFatAttribute.hidden, false],
+      [dosFatAttribute.system, false],
+    ];
     for (const argument of arguments_) {
-      if (argument.toUpperCase() === "/B") bare = true;
-      else if (argument.startsWith("/")) {
+      const option = argument.toUpperCase();
+      if (option === "/B") bare = true;
+      else if (option === "/W") wide = true;
+      else if (option === "/S") recursive = true;
+      else if (option === "/A") attributeFilters = [];
+      else if (option.startsWith("/A:")) {
+        const parsed = parseDosAttributeFilter(option.slice(3));
+        if (parsed === undefined)
+          return status(2, "", `Invalid switch - ${argument}\r\n`);
+        attributeFilters = parsed;
+      } else if (argument.startsWith("/")) {
         return status(2, "", `Invalid switch - ${argument}\r\n`);
       } else if (path === ".") path = argument;
       else return status(2, "", "Too many parameters.\r\n");
     }
-    const resolved = this.resolvePath(path);
-    if (!this.filesystem.exists(resolved)) {
-      return status(1, "", "File not found.\r\n");
+    let groups: readonly DosDirectoryGroup[];
+    try {
+      groups = this.dosDirectoryGroups(path, recursive);
+      groups = groups.map((group) => ({
+        ...group,
+        targets: group.targets.filter((target) =>
+          this.matchesDosAttributeFilters(target, attributeFilters),
+        ),
+      }));
+    } catch (error: unknown) {
+      return status(1, "", `${message(error)}\r\n`);
     }
-    const names = this.filesystem.isDirectory(resolved)
-      ? this.filesystem.list(resolved)
-      : [baseName(resolved)];
+    const targets = groups.flatMap(({ targets: entries }) => entries);
+    if (targets.length === 0) return status(1, "", "File not found.\r\n");
     if (bare) {
       return success(
-        `${names.map((name) => name.toUpperCase()).join("\r\n")}${names.length > 0 ? "\r\n" : ""}`,
+        `${targets
+          .map((target) =>
+            recursive
+              ? this.options.profile.pathDialect.display(target)
+              : baseName(target).toUpperCase(),
+          )
+          .join("\r\n")}\r\n`,
       );
     }
-    const directory = this.filesystem.isDirectory(resolved)
-      ? resolved
-      : parentPath(resolved);
     const rows: string[] = [];
     let fileCount = 0;
     let fileBytes = 0;
     let directoryCount = 0;
-    const timestamp = this.dosDirectoryTimestamp();
-    for (const name of names) {
-      const target = this.filesystem.isDirectory(resolved)
-        ? joinPath(resolved, name)
-        : resolved;
-      if (this.filesystem.isDirectory(target)) {
-        directoryCount += 1;
-        rows.push(`${timestamp}    <DIR>          ${name.toUpperCase()}`);
-      } else {
-        const size = this.filesystem.getSize(target);
-        fileCount += 1;
-        fileBytes += size;
+    for (const group of groups) {
+      if (groups.length > 1) {
+        if (rows.length > 0) rows.push("");
         rows.push(
-          `${timestamp}       ${String(size).padStart(10)} ${name.toUpperCase()}`,
+          ` Directory of ${this.options.profile.pathDialect.display(group.directory)}`,
+          "",
         );
       }
+      if (wide) {
+        const cells: string[] = [];
+        for (const target of group.targets) {
+          const directoryEntry = this.filesystem.isDirectory(target);
+          if (directoryEntry) directoryCount += 1;
+          else {
+            fileCount += 1;
+            fileBytes += this.filesystem.getSize(target);
+          }
+          cells.push(
+            `${directoryEntry ? `[${baseName(target).toUpperCase()}]` : baseName(target).toUpperCase()}`.padEnd(
+              16,
+            ),
+          );
+        }
+        for (let index = 0; index < cells.length; index += 5) {
+          rows.push(
+            cells
+              .slice(index, index + 5)
+              .join("")
+              .trimEnd(),
+          );
+        }
+        continue;
+      }
+      for (const target of group.targets) {
+        const name = baseName(target);
+        const directoryEntry = this.filesystem.isDirectory(target);
+        const metadata = this.filesystem.getMetadata(target);
+        const fatMetadata =
+          this.ensureDosFatMetadata(target) ??
+          migrateDosFatMetadata(metadata, {
+            kind: directoryEntry ? "directory" : "file",
+            modifiedAtMilliseconds: metadata.modifiedAtMilliseconds,
+          });
+        const timestamp = this.dosDirectoryTimestamp(
+          fatMetadata.modifiedAtMilliseconds,
+        );
+        if (directoryEntry) {
+          directoryCount += 1;
+          rows.push(`${timestamp}    <DIR>          ${name.toUpperCase()}`);
+        } else {
+          const size = this.filesystem.getSize(target);
+          fileCount += 1;
+          fileBytes += size;
+          rows.push(
+            `${timestamp}       ${String(size).padStart(10)} ${name.toUpperCase()}`,
+          );
+        }
+      }
     }
-    const volume = this.dosVolumeLines();
+    const firstDirectory = groups[0]!.directory;
+    const driveLetter =
+      /^\/drives\/([a-z])(?:\/|$)/u.exec(firstDirectory)?.[1]?.toUpperCase() ??
+      "C";
+    const drive = this.dosRuntime?.driveState(driveLetter);
+    const volume = this.dosVolumeLines(driveLetter, drive?.volumeLabel);
     return success(
       [
         ...volume,
-        ` Directory of ${this.options.profile.pathDialect.display(directory)}`,
-        "",
+        ...(groups.length === 1
+          ? [
+              ` Directory of ${this.options.profile.pathDialect.display(firstDirectory)}`,
+              "",
+            ]
+          : []),
         ...rows,
         `${String(fileCount).padStart(9)} File(s) ${String(fileBytes).padStart(14)} bytes`,
         `${String(directoryCount).padStart(9)} Dir(s)  ${String(this.filesystem.getFreeSpace()).padStart(14)} bytes free`,
@@ -446,8 +1248,96 @@ export class ShellCommandRuntime {
     );
   }
 
-  private dosDirectoryTimestamp(): string {
-    const date = new Date(this.options.clock.currentWallTimeMilliseconds());
+  private matchesDosAttributeFilters(
+    path: string,
+    filters: readonly (readonly [number, boolean])[],
+  ): boolean {
+    const metadata = this.ensureDosFatMetadata(path);
+    if (metadata === undefined) return true;
+    return filters.every(
+      ([attribute, expected]) =>
+        hasDosFatAttribute(metadata.attributes, attribute) === expected,
+    );
+  }
+
+  private dosDirectoryGroups(
+    source: string,
+    recursive: boolean,
+  ): readonly DosDirectoryGroup[] {
+    const slashSource = source.replaceAll("\\", "/");
+    const wildcard = /[*?]/u.test(slashSource);
+    let root: string;
+    let pattern: string;
+    if (wildcard) {
+      const slash = slashSource.lastIndexOf("/");
+      const driveRelative =
+        slash < 0 ? /^([A-Za-z]:)(.*)$/u.exec(slashSource) : null;
+      const directorySource =
+        slash >= 0
+          ? slashSource.slice(0, slash) || "/"
+          : (driveRelative?.[1] ?? ".");
+      pattern =
+        slash >= 0
+          ? slashSource.slice(slash + 1)
+          : (driveRelative?.[2] ?? slashSource);
+      if (/[*?]/u.test(directorySource))
+        throw new Error("Wildcards are not allowed in directory names.");
+      root = this.resolvePath(directorySource);
+      if (!this.filesystem.isDirectory(root))
+        throw new Error("The system cannot find the path specified.");
+    } else {
+      const resolved = this.resolvePath(source);
+      if (!this.filesystem.exists(resolved)) throw new Error("File not found.");
+      if (!this.filesystem.isDirectory(resolved)) {
+        return [{ directory: parentPath(resolved), targets: [resolved] }];
+      }
+      root = resolved;
+      pattern = "*.*";
+    }
+
+    const groups: DosDirectoryGroup[] = [];
+    const pending: { readonly depth: number; readonly directory: string }[] = [
+      { depth: 0, directory: root },
+    ];
+    let scanned = 0;
+    while (pending.length > 0) {
+      const current = pending.pop()!;
+      if (current.depth > 32)
+        throw new Error("Directory depth limit exceeded.");
+      const names = this.filesystem.list(current.directory);
+      scanned += names.length;
+      if (scanned > 512) throw new Error("Directory entry limit exceeded.");
+      const matches = expandDosFileSpec(names, pattern, {
+        maximumEntries: 512,
+        maximumMatches: 512,
+      });
+      const actual = new Map(names.map((name) => [name.toUpperCase(), name]));
+      groups.push({
+        directory: current.directory,
+        targets: matches.map((name) =>
+          joinPath(current.directory, actual.get(name) ?? name.toLowerCase()),
+        ),
+      });
+      if (!recursive) continue;
+      const directories = names
+        .map((name) => joinPath(current.directory, name))
+        .filter(
+          (target) =>
+            this.filesystem.isDirectory(target) &&
+            !this.filesystem.isSymbolicLink(target),
+        );
+      for (let index = directories.length - 1; index >= 0; index -= 1) {
+        pending.push({
+          depth: current.depth + 1,
+          directory: directories[index]!,
+        });
+      }
+    }
+    return groups;
+  }
+
+  private dosDirectoryTimestamp(milliseconds: number): string {
+    const date = new Date(milliseconds);
     const hour = date.getUTCHours();
     const hour12 = hour % 12 || 12;
     return `${String(date.getUTCMonth() + 1).padStart(2, "0")}-${String(date.getUTCDate()).padStart(2, "0")}-${String(date.getUTCFullYear()).slice(-2)}  ${String(hour12).padStart(2, "0")}:${String(date.getUTCMinutes()).padStart(2, "0")}${hour < 12 ? "a" : "p"}`;
@@ -474,11 +1364,14 @@ export class ShellCommandRuntime {
             "text: echo printf head tail wc grep sort uniq tr",
             "text+: tee cmp diff sha256sum od hexdump xargs",
             "shell: sh bash source env printenv export unset alias unalias command read local shift getopts",
-            "system: clear vi shutdown reboot exit true false",
-            "info: whoami id hostname uname date uptime stat df du quota",
+            "system: clear vi shutdown reboot exit login logout passwd su sudo true false",
+            "accounts: useradd userdel usermod groupadd groupdel getent groups umask",
+            "process: ps top kill jobs fg bg wait service",
+            "sessions: tty who w last",
+            "info: whoami id hostname uname date uptime stat df du quota man apropos",
             "hardware: cpuinfo free mount dmesg spi i2c /proc/cpuinfo /proc/meminfo",
             "utility: history time sleep seq cut test [",
-            "toolchain: as cc c++ basic basicc ld nm run objdump",
+            "toolchain: as cc c++ basic basicc ld nm run objdump csdb",
             "syntax: |  >  >>  <  &&  ||  ;  '...'  \"...\"  $VAR  $?",
           ].join("\n") + "\n",
         );
@@ -534,7 +1427,7 @@ export class ShellCommandRuntime {
           : usage("dirname <path>");
       case "whoami":
         return arguments_.length === 0
-          ? success(`${this.options.profile.username}\n`)
+          ? success(`${this.options.credentials().loginName}\n`)
           : usage("whoami");
       case "id":
         return this.linuxId(arguments_);
@@ -544,6 +1437,34 @@ export class ShellCommandRuntime {
           : usage("hostname");
       case "uname":
         return this.uname(arguments_);
+      case "ps":
+        return this.linuxProcesses(arguments_);
+      case "top":
+        return this.linuxTop(arguments_);
+      case "kill":
+        return this.linuxKill(arguments_);
+      case "jobs":
+        return this.linuxJobs(arguments_);
+      case "fg":
+        return this.linuxForegroundJob(arguments_);
+      case "bg":
+        return this.linuxBackgroundJob(arguments_);
+      case "wait":
+        return this.linuxWait(arguments_);
+      case "tty":
+        return this.linuxTty(arguments_);
+      case "who":
+        return this.linuxWho(arguments_);
+      case "w":
+        return this.linuxW(arguments_);
+      case "last":
+        return this.linuxLast(arguments_);
+      case "service":
+        return this.linuxService(arguments_);
+      case "man":
+        return this.linuxMan(arguments_);
+      case "apropos":
+        return this.linuxApropos(arguments_);
       case "date":
         return this.date(arguments_);
       case "time":
@@ -578,6 +1499,8 @@ export class ShellCommandRuntime {
         return this.linuxFile(arguments_);
       case "groups":
         return this.linuxGroups(arguments_);
+      case "umask":
+        return this.linuxUmask(arguments_);
       case "hexdump":
       case "od":
         return this.linuxHexDump(command, arguments_, stdin);
@@ -598,7 +1521,11 @@ export class ShellCommandRuntime {
       case "sha256sum":
         return this.linuxSha256Sum(arguments_, stdin);
       case "sync":
-        return arguments_.length === 0 ? success() : usage("sync");
+        if (arguments_.length !== 0) return usage("sync");
+        if (this.options.syncFilesystem === undefined)
+          return failure("sync", "persistence boundary is unavailable", 1);
+        this.options.syncFilesystem();
+        return success();
       case "tee":
         return this.linuxTee(arguments_, stdin);
       case "xargs":
@@ -617,6 +1544,8 @@ export class ShellCommandRuntime {
         return this.runBasic(arguments_);
       case "run":
         return this.runExecutable(arguments_);
+      case "csdb":
+        return this.debugExecutable(arguments_);
       case "objdump":
         return this.objectDump(arguments_);
       case "ld":
@@ -699,6 +1628,29 @@ export class ShellCommandRuntime {
     if (!this.filesystem.isDirectory(destination)) {
       return failure("cd", `${requested}: not a directory`);
     }
+    if (!this.filesystem.hasAccess(destination, filesystemExecute))
+      return failure("cd", `${requested}: Permission denied`);
+    if (this.dosRuntime !== undefined) {
+      const match = /^\/drives\/([a-z])(?:\/(.*))?$/u.exec(destination);
+      if (match === null)
+        return failure("cd", `${requested}: invalid drive path`);
+      const letter = match[1]!.toUpperCase();
+      const directory =
+        match[2] === undefined || match[2].length === 0
+          ? "\\"
+          : `\\${match[2].replaceAll("/", "\\")}`;
+      const activeDrive = this.dosRuntime.activeDrive;
+      this.runDosRuntimeTransaction(() => {
+        this.dosRuntime!.setCurrentDirectory(letter, directory);
+        if (letter === activeDrive) {
+          this.previousDirectory = this.currentDirectory;
+          this.currentDirectory = destination;
+        }
+      });
+      return success(
+        letter === activeDrive && requested === "-" ? `${destination}\n` : "",
+      );
+    }
     this.previousDirectory = this.currentDirectory;
     this.currentDirectory = destination;
     return success(requested === "-" ? `${destination}\n` : "");
@@ -734,7 +1686,7 @@ export class ShellCommandRuntime {
       }
       const listDirectory =
         this.filesystem.isDirectory(resolved) && !directoryEntry;
-      if (listDirectory && !this.accessPolicy.hasAccess(resolved, 0b101))
+      if (listDirectory && !this.filesystem.hasAccess(resolved, 0b101))
         return failure(
           "ls",
           `cannot open directory '${path}': Permission denied`,
@@ -787,7 +1739,7 @@ export class ShellCommandRuntime {
               const renderedName = symbolic
                 ? `${name} -> ${this.filesystem.readLink(target)}`
                 : name;
-              return `${linuxModeString(device ? "device" : symbolic ? "link" : directory ? "directory" : "file", metadata.mode)} ${String(device || symbolic ? 1 : this.filesystem.getLinkCount(target)).padStart(2)} ${linuxIdentityName(metadata.uid).padEnd(8)} ${linuxIdentityName(metadata.gid).padEnd(8)} ${formatLinuxSize(size, human).padStart(8)} ${formatLinuxTimestamp(metadata.modifiedAtMilliseconds)} ${renderedName}`;
+              return `${linuxModeString(device ? "device" : symbolic ? "link" : directory ? "directory" : "file", metadata.mode)} ${String(device || symbolic ? 1 : this.filesystem.getLinkCount(target)).padStart(2)} ${this.linuxIdentityName(metadata.uid, "user").padEnd(8)} ${this.linuxIdentityName(metadata.gid, "group").padEnd(8)} ${formatLinuxSize(size, human).padStart(8)} ${formatLinuxTimestamp(metadata.modifiedAtMilliseconds)} ${renderedName}`;
             })
             .join("\n")
         : names.map((name) => this.displayName(name)).join("  ");
@@ -1034,10 +1986,58 @@ export class ShellCommandRuntime {
     const recursive = arguments_.includes("-p");
     const paths = arguments_.filter((argument) => argument !== "-p");
     if (paths.length === 0) return usage("mkdir [-p] <directory ...>");
+    if (this.options.profile.id === "dos") {
+      const plans = paths.map((path) => ({
+        path,
+        resolved: this.resolvePath(path),
+      }));
+      const plannedDirectories = new Set<string>();
+      const trial = DosRuntimeState.restore(
+        this.dosRuntime!.snapshot(),
+        this.dosRuntime!.limits,
+      );
+      for (const { path, resolved } of plans) {
+        if (
+          !this.filesystem.hasAccess(
+            this.closestExistingDirectory(resolved),
+            0b011,
+          )
+        ) {
+          return failure(
+            "mkdir",
+            `cannot create directory '${path}': Permission denied`,
+          );
+        }
+        const parent = parentPath(resolved);
+        if (
+          !recursive &&
+          !this.filesystem.isDirectory(parent) &&
+          !plannedDirectories.has(parent)
+        ) {
+          return failure("mkdir", `${path}: parent directory does not exist`);
+        }
+        if (
+          !recursive &&
+          (this.filesystem.exists(resolved) || plannedDirectories.has(resolved))
+        ) {
+          return failure("mkdir", `${path}: already exists`);
+        }
+        this.assertDosPathWritableIn(trial, resolved);
+        plannedDirectories.add(resolved);
+      }
+      this.runDosFilesystemTransaction(() => {
+        for (const { resolved } of plans) {
+          this.assertDosPathWritable(resolved);
+          this.filesystem.makeDirectory(resolved);
+          this.ensureDosFatMetadata(resolved);
+        }
+      });
+      return success();
+    }
     for (const path of paths) {
       const resolved = this.resolvePath(path);
       if (
-        !this.accessPolicy.hasAccess(
+        !this.filesystem.hasAccess(
           this.closestExistingDirectory(resolved),
           0b011,
         )
@@ -1065,7 +2065,7 @@ export class ShellCommandRuntime {
         return failure("touch", `${path}: is a directory`);
       }
       if (!this.filesystem.exists(resolved)) this.writeFile(path, "");
-      else if (!this.accessPolicy.hasAccess(resolved, 0b010))
+      else if (!this.filesystem.hasAccess(resolved, 0b010))
         return failure("touch", `cannot touch '${path}': Permission denied`);
       this.filesystem.setModifiedTime(
         resolved,
@@ -1098,7 +2098,7 @@ export class ShellCommandRuntime {
       if (this.filesystem.isDirectory(resolved) && !recursive) {
         return failure("rm", `${path}: is a directory`);
       }
-      if (!this.accessPolicy.hasAccess(parentPath(resolved), 0b011))
+      if (!this.filesystem.hasAccess(parentPath(resolved), 0b011))
         return failure("rm", `cannot remove '${path}': Permission denied`);
       this.filesystem.delete(resolved);
     }
@@ -1115,10 +2115,10 @@ export class ShellCommandRuntime {
     if (this.filesystem.isDirectory(source) && !recursive) {
       return failure("cp", `${paths[0]}: omitting directory`);
     }
-    if (!this.accessPolicy.hasAccess(source, 0b100))
+    if (!this.filesystem.hasAccess(source, 0b100))
       return failure("cp", `cannot open '${paths[0]}': Permission denied`);
     const destination = this.transferDestination(source, paths[1]!);
-    if (!this.accessPolicy.hasAccess(parentPath(destination), 0b011))
+    if (!this.filesystem.hasAccess(parentPath(destination), 0b011))
       return failure("cp", `cannot create '${paths[1]}': Permission denied`);
     this.filesystem.copy(source, destination);
     return success();
@@ -1129,10 +2129,33 @@ export class ShellCommandRuntime {
     const source = this.resolvePath(arguments_[0]!);
     const destination = this.transferDestination(source, arguments_[1]!);
     if (
-      !this.accessPolicy.hasAccess(parentPath(source), 0b011) ||
-      !this.accessPolicy.hasAccess(parentPath(destination), 0b011)
+      !this.filesystem.hasAccess(parentPath(source), 0b011) ||
+      !this.filesystem.hasAccess(parentPath(destination), 0b011)
     )
       return failure("mv", "cannot move: Permission denied");
+    if (this.options.profile.id === "dos") {
+      const trial = DosRuntimeState.restore(
+        this.dosRuntime!.snapshot(),
+        this.dosRuntime!.limits,
+      );
+      this.assertDosPathWritableIn(trial, source);
+      this.assertDosPathWritableIn(trial, destination);
+      const sourceMedia = this.dosMediaForPath(source, trial)!;
+      const destinationMedia = this.dosMediaForPath(destination, trial)!;
+      trial.moveFatMetadata(
+        source,
+        destination,
+        sourceMedia.generation,
+        destinationMedia.generation,
+      );
+      this.runDosFilesystemTransaction(() => {
+        this.assertDosPathWritable(source);
+        this.assertDosPathWritable(destination);
+        this.filesystem.move(source, destination);
+        this.moveDosFatMetadata(source, destination);
+      });
+      return success();
+    }
     this.filesystem.move(source, destination);
     return success();
   }
@@ -1329,21 +2352,21 @@ export class ShellCommandRuntime {
       }
       namePattern = arguments_[2];
     }
-    const snapshot = this.filesystem.snapshot();
-    const prefix = root === "/" ? "/" : `${root}/`;
-    const paths = [
-      ...(this.filesystem.exists(root) ? [root] : []),
-      ...snapshot.directories.filter((path) => path.startsWith(prefix)),
-      ...snapshot.files
-        .map(([path]) => path)
-        .filter((path) => path.startsWith(prefix)),
-    ]
-      .filter((path, index, values) => values.indexOf(path) === index)
-      .filter(
-        (path) =>
-          namePattern === undefined || globMatches(baseName(path), namePattern),
-      )
-      .sort();
+    const paths: string[] = [];
+    const pending = [root];
+    while (pending.length > 0) {
+      const path = pending.pop()!;
+      if (namePattern === undefined || globMatches(baseName(path), namePattern))
+        paths.push(path);
+      if (
+        this.filesystem.isDirectory(path) &&
+        !this.filesystem.isSymbolicLink(path)
+      ) {
+        const children = this.filesystem.list(path);
+        for (let index = children.length - 1; index >= 0; index -= 1)
+          pending.push(joinPath(path, children[index]!));
+      }
+    }
     return success(`${paths.join("\n")}\n`);
   }
 
@@ -1391,7 +2414,7 @@ export class ShellCommandRuntime {
     const canonical = this.environmentName(name);
     const contents = assignment.slice(separator + 1);
     if (contents.length === 0) this.environment.delete(canonical);
-    else this.environment.set(canonical, contents);
+    else this.setEnvironmentEntry(canonical, contents);
     return success();
   }
 
@@ -1399,7 +2422,7 @@ export class ShellCommandRuntime {
     const requested = value.trim();
     if (requested.length === 0)
       return success(`PATH=${this.environment.get("PATH") ?? ""}\r\n`);
-    this.environment.set("PATH", requested === ";" ? "" : requested);
+    this.setEnvironmentEntry("PATH", requested === ";" ? "" : requested);
     return success();
   }
 
@@ -1407,7 +2430,10 @@ export class ShellCommandRuntime {
     const requested = value.trim();
     if (requested.length > 64)
       return failure("prompt", "prompt template limit exceeded", 2);
-    this.environment.set("PROMPT", requested.length === 0 ? "$P$G" : requested);
+    this.setEnvironmentEntry(
+      "PROMPT",
+      requested.length === 0 ? "$P$G" : requested,
+    );
     return success();
   }
 
@@ -1453,7 +2479,7 @@ export class ShellCommandRuntime {
     for (const argument of arguments_) {
       if (!isAssignment(argument)) return usage(`${command} [NAME=value ...]`);
       const separator = argument.indexOf("=");
-      this.environment.set(
+      this.setEnvironmentEntry(
         this.environmentName(argument.slice(0, separator)),
         argument.slice(separator + 1),
       );
@@ -1510,13 +2536,25 @@ export class ShellCommandRuntime {
   readFile(path: string): string {
     const resolved = this.resolvePath(path);
     const device = this.virtualDevice(resolved);
-    if (device === undefined && !this.accessPolicy.hasAccess(resolved, 0b100)) {
+    if (device === undefined && !this.filesystem.hasAccess(resolved, 0b100)) {
       throw new Error(`${path}: Permission denied`);
     }
     const contents =
       device === undefined ? this.filesystem.readFile(resolved) : device.read();
     if (device === undefined) this.ioReadBytes += utf8ByteLength(contents);
     return contents;
+  }
+
+  pathExists(path: string): boolean {
+    try {
+      const resolved = this.resolvePath(path);
+      return (
+        this.filesystem.exists(resolved) ||
+        this.virtualDevice(resolved) !== undefined
+      );
+    } catch {
+      return false;
+    }
   }
 
   writeFile(path: string, contents: string, append = false): void {
@@ -1530,8 +2568,25 @@ export class ShellCommandRuntime {
       ? resolved
       : parentPath(resolved);
     const required = this.filesystem.exists(resolved) ? 0b010 : 0b011;
-    if (!this.accessPolicy.hasAccess(accessPath, required))
+    if (!this.filesystem.hasAccess(accessPath, required))
       throw new Error(`${path}: Permission denied`);
+    if (this.options.profile.id === "dos") {
+      this.runDosFilesystemTransaction(() => {
+        this.assertDosPathWritable(resolved);
+        this.preflightDosFileWrite(resolved);
+        if (append) this.filesystem.appendFile(resolved, contents);
+        else this.filesystem.writeFile(resolved, contents);
+        this.filesystem.setModifiedTime(
+          resolved,
+          truncateToDosFatTimestamp(
+            this.options.clock.currentWallTimeMilliseconds(),
+          ),
+        );
+        this.markDosFileWritten(resolved);
+        this.ioWriteBytes += utf8ByteLength(contents);
+      });
+      return;
+    }
     if (append) this.filesystem.appendFile(resolved, contents);
     else this.filesystem.writeFile(resolved, contents);
     this.ioWriteBytes += utf8ByteLength(contents);
@@ -1546,11 +2601,21 @@ export class ShellCommandRuntime {
   }
 
   setEnvironmentValue(name: string, value: string): void {
-    this.environment.set(this.environmentName(name), value);
+    this.setEnvironmentEntry(this.environmentName(name), value);
   }
 
   unsetEnvironmentValue(name: string): void {
     this.environment.delete(this.environmentName(name));
+  }
+
+  private setEnvironmentEntry(name: string, value: string): void {
+    if (
+      !this.environment.has(name) &&
+      this.environment.size >= maximumEnvironmentVariables
+    ) {
+      throw new Error("shell environment variable limit exceeded");
+    }
+    this.environment.set(name, value);
   }
 
   private closestExistingDirectory(path: string): string {
@@ -1597,8 +2662,7 @@ export class ShellCommandRuntime {
     if (!this.filesystem.exists(path) || this.filesystem.isDirectory(path)) {
       return undefined;
     }
-    if ((this.filesystem.getMetadata(path).mode & 0o111) === 0)
-      return undefined;
+    if (!this.filesystem.hasAccess(path, filesystemExecute)) return undefined;
     return decodeSystemUtility(this.filesystem.readFile(path));
   }
 
@@ -1655,6 +2719,26 @@ export class ShellCommandRuntime {
     const configured = this.options.profile.virtualDevices.get(path);
     if (configured !== undefined) return configured;
     if (this.options.profile.id !== "linux") return undefined;
+    if (path === "/var/log/messages" && this.options.osRuntime !== undefined) {
+      return this.readOnlyDevice(path, () =>
+        this.options.osRuntime!.renderMessagesLog(),
+      );
+    }
+    if (path === "/var/log/auth.log" && this.options.osRuntime !== undefined) {
+      return this.readOnlyDevice(path, () =>
+        this.options.osRuntime!.renderAuthLog(),
+      );
+    }
+    const selfPid = this.options.selfPid?.();
+    const runtimePath =
+      selfPid !== undefined && path.startsWith("/proc/self/")
+        ? `/proc/${String(selfPid)}/${path.slice("/proc/self/".length)}`
+        : path;
+    const runtimeProc = this.options.osRuntime?.readProc(runtimePath);
+    if (runtimeProc !== undefined)
+      return this.readOnlyDevice(path, () =>
+        this.options.osRuntime!.readProc(runtimePath)!,
+      );
     if (path === "/proc/cpuinfo")
       return this.readOnlyDevice(path, () => this.linuxCpuInfo());
     if (path === "/proc/meminfo")
@@ -1663,7 +2747,7 @@ export class ShellCommandRuntime {
       return this.readOnlyDevice(
         path,
         () =>
-          "Linux version 1.0.0-cs (computer@cs-linux) #1 CS-Linux SMP i486 GNU/Linux\n",
+          "Linux version 1.0.0-cs (cs@cs-linux) #1 CS-Linux SMP i486 GNU/Linux\n",
       );
     if (path === "/proc/uptime")
       return this.readOnlyDevice(
@@ -1684,19 +2768,31 @@ export class ShellCommandRuntime {
 
   private virtualDevicePaths(): readonly string[] {
     return [
-      ...(this.options.virtualDevices?.keys() ?? []),
-      ...this.options.profile.virtualDevices.keys(),
-      ...(this.options.profile.id === "linux"
-        ? [
-            "/proc/cpuinfo",
-            "/proc/loadavg",
-            "/proc/meminfo",
-            "/proc/mounts",
-            "/proc/uptime",
-            "/proc/version",
-          ]
-        : []),
-    ];
+      ...new Set([
+        ...(this.options.virtualDevices?.keys() ?? []),
+        ...this.options.profile.virtualDevices.keys(),
+        ...(this.options.osRuntime?.procDevicePaths() ?? []),
+        ...(this.options.profile.id === "linux"
+          ? [
+              "/var/log/auth.log",
+              "/var/log/messages",
+              "/proc/cpuinfo",
+              "/proc/loadavg",
+              "/proc/meminfo",
+              "/proc/mounts",
+              "/proc/uptime",
+              "/proc/version",
+              ...(this.options.selfPid?.() === undefined
+                ? []
+                : [
+                    "/proc/self/cmdline",
+                    "/proc/self/stat",
+                    "/proc/self/status",
+                  ]),
+            ]
+          : []),
+      ]),
+    ].sort();
   }
 
   private readOnlyDevice(path: string, read: () => string): VirtualDevice {
@@ -1814,16 +2910,35 @@ export class ShellCommandRuntime {
   }
 
   private linuxId(arguments_: readonly string[]): ShellCommandResult {
-    if (arguments_.length === 0)
-      return success(
-        "uid=1000(computer) gid=1000(computer) groups=1000(computer)\n",
-      );
+    const option = arguments_[0]?.startsWith("-") ? arguments_[0] : undefined;
+    const username = arguments_[option === undefined ? 0 : 1];
     if (
-      arguments_.length !== 1 ||
-      !["-u", "-g", "-G", "-un", "-gn"].includes(arguments_[0]!)
+      arguments_.length > (option === undefined ? 1 : 2) ||
+      (option !== undefined &&
+        !["-u", "-g", "-G", "-un", "-gn"].includes(option))
     )
-      return usage("id [-u|-g|-G|-un|-gn]");
-    return success(arguments_[0]!.includes("n") ? "computer\n" : "1000\n");
+      return usage("id [-u|-g|-G|-un|-gn] [user]");
+    const current = this.options.credentials();
+    const user =
+      username === undefined
+        ? this.options.accounts?.getUserByUid(current.effectiveUserId)
+        : this.options.accounts?.getUser(username);
+    if (user === undefined)
+      return failure("id", `${username ?? current.loginName}: no such user`, 1);
+    const groups = this.options.accounts?.groupsForUser(user.name) ?? [];
+    const groupIds = [...new Set([user.gid, ...groups.map(({ gid }) => gid)])];
+    if (option === "-u") return success(`${String(user.uid)}\n`);
+    if (option === "-un") return success(`${user.name}\n`);
+    if (option === "-g") return success(`${String(user.gid)}\n`);
+    if (option === "-gn")
+      return success(`${this.linuxIdentityName(user.gid, "group")}\n`);
+    if (option === "-G") return success(`${groupIds.join(" ")}\n`);
+    const renderedGroups = groupIds
+      .map((gid) => `${String(gid)}(${this.linuxIdentityName(gid, "group")})`)
+      .join(",");
+    return success(
+      `uid=${String(user.uid)}(${user.name}) gid=${String(user.gid)}(${this.linuxIdentityName(user.gid, "group")}) groups=${renderedGroups}\n`,
+    );
   }
 
   private linuxUptime(arguments_: readonly string[]): ShellCommandResult {
@@ -1991,7 +3106,7 @@ export class ShellCommandRuntime {
         "MD MEM MKDIR MOVE PATH PROMPT RD REN RENAME RMDIR SET TIME",
         "I2C SPI TIMER TREE TYPE VER VOL",
         "",
-        "Development extensions: AS CC C++ BASIC BASICC LD NM OBJDUMP RUN VI",
+        "Development extensions: AS CC C++ BASIC BASICC LD NM OBJDUMP RUN DEBUG VI",
         "Type HELP command for a short availability summary.",
         "",
       ].join("\r\n"),
@@ -2094,7 +3209,7 @@ export class ShellCommandRuntime {
       `  File: ${arguments_[0]}${symbolic ? ` -> ${this.filesystem.readLink(resolved)}` : ""}\n` +
         `  Size: ${String(symbolic ? utf8ByteLength(this.filesystem.readLink(resolved)) : this.filesystem.getSize(resolved))}\tBlocks: 1\tIO Block: 1 ${kind}\n` +
         `Device: csfs\tInode: ${String(stablePathInode(resolved))}\tLinks: ${String(symbolic ? 1 : this.filesystem.getLinkCount(resolved))}\n` +
-        `Access: (${metadata.mode.toString(8).padStart(4, "0")}/${mode})  Uid: (${String(metadata.uid).padStart(5)}/${linuxIdentityName(metadata.uid).padStart(8)})   Gid: (${String(metadata.gid).padStart(5)}/${linuxIdentityName(metadata.gid).padStart(8)})\n` +
+        `Access: (${metadata.mode.toString(8).padStart(4, "0")}/${mode})  Uid: (${String(metadata.uid).padStart(5)}/${this.linuxIdentityName(metadata.uid, "user").padStart(8)})   Gid: (${String(metadata.gid).padStart(5)}/${this.linuxIdentityName(metadata.gid, "group").padStart(8)})\n` +
         `Modify: ${modified}\n`,
     );
   }
@@ -2125,11 +3240,15 @@ export class ShellCommandRuntime {
     arguments_: readonly string[],
   ): ShellCommandResult {
     const name = language === "asm" ? "as" : language;
-    arguments_ = arguments_.map((argument) => this.dosOption(argument));
+    const usageText =
+      this.options.profile.id === "dos"
+        ? `${language === "asm" ? "ASM" : name.toUpperCase()} [/C] <source> [/OUT:output]`
+        : `${name} [-c] <source> [-o output]`;
+    arguments_ = this.normalizeCompileOptions(arguments_);
     const compileOnly = arguments_.filter(
       (argument) => argument === "-c",
     ).length;
-    if (compileOnly > 1) return usage(`${name} [-c] <source> [-o output]`);
+    if (compileOnly > 1) return this.toolchainUsage(usageText);
     const filtered = arguments_.filter((argument) => argument !== "-c");
     const outputIndex = filtered.indexOf("-o");
     if (
@@ -2138,13 +3257,15 @@ export class ShellCommandRuntime {
       (outputIndex >= 0 && (outputIndex !== 1 || filtered.length !== 3)) ||
       (outputIndex < 0 && filtered.length !== 1)
     )
-      return usage(`${name} [-c] <source> [-o output]`);
+      return this.toolchainUsage(usageText);
     const sourcePath = filtered[0]!;
-    const outputPath =
-      outputIndex < 0 ? (compileOnly === 1 ? "a.o" : "a.out") : filtered[2]!;
-    const source = this.readFile(sourcePath);
+    const sourceName = this.resolvePath(sourcePath);
+    const outputPath = this.resolvePath(
+      outputIndex < 0 ? (compileOnly === 1 ? "a.o" : "a.out") : filtered[2]!,
+    );
+    const source = this.readFile(sourceName);
     if (source.length > 128_000)
-      return failure(language, "source limit exceeded");
+      return this.toolchainFailure(language, "source limit exceeded");
     if (this.options.deferGuestExecution === true) {
       return {
         exitCode: 0,
@@ -2157,6 +3278,7 @@ export class ShellCommandRuntime {
                 : language === "basic"
                   ? "basicc"
                   : "c",
+          credentials: this.options.credentials(),
           kind: "compile",
           task: {
             compileOnly: compileOnly === 1,
@@ -2165,7 +3287,16 @@ export class ShellCommandRuntime {
             outputPath,
             runAfterCompile: false,
             source,
+            sourceName,
+            ...(language === "asm"
+              ? {
+                  assemblerDialect: this.options.profile.id,
+                  assemblerHome:
+                    this.environment.get("HOME") ?? this.options.profile.home,
+                }
+              : {}),
           },
+          umask: this.filesystem.getUmask(),
         },
         stderr: "",
         stdout: "",
@@ -2174,11 +3305,11 @@ export class ShellCommandRuntime {
     const output =
       compileOnly === 1
         ? language === "asm"
-          ? assembleCs486Object(source)
-          : compileCs486Object(language, source)
+          ? assembleCs486Object(source, this.assemblerOptions(sourceName))
+          : compileCs486Object(language, source, { sourceName })
         : language === "asm"
-          ? assembleCs486(source)
-          : compileCs486Source(language, source);
+          ? assembleCs486(source, this.assemblerOptions(sourceName))
+          : compileCs486Source(language, source, { sourceName });
     const object = output.format === "cs486-object";
     this.writeFile(
       outputPath,
@@ -2199,37 +3330,48 @@ export class ShellCommandRuntime {
   }
 
   private linkObjects(arguments_: readonly string[]): ShellCommandResult {
-    arguments_ = arguments_.map((argument) => this.dosOption(argument));
+    const usageText =
+      this.options.profile.id === "dos"
+        ? "LINK <objects...> [/OUT:output] [/ENTRY:symbol]"
+        : "ld <objects...> [-o output] [-e symbol]";
+    arguments_ = this.normalizeLinkOptions(arguments_);
     const outputIndex = arguments_.indexOf("-o");
-    const entryIndex = arguments_.indexOf("--entry");
+    const entryLongIndex = arguments_.indexOf("--entry");
+    const entryShortIndex = arguments_.indexOf("-e");
+    if (entryLongIndex >= 0 && entryShortIndex >= 0)
+      return this.toolchainUsage(usageText);
+    const entryIndex = Math.max(entryLongIndex, entryShortIndex);
     const consumed = new Set<number>();
     let outputPath = "a.out";
     let entry: string | undefined;
     if (outputIndex >= 0) {
       if (arguments_[outputIndex + 1] === undefined)
-        return usage("ld <objects...> [-o output] [--entry symbol]");
+        return this.toolchainUsage(usageText);
       outputPath = arguments_[outputIndex + 1]!;
       consumed.add(outputIndex);
       consumed.add(outputIndex + 1);
     }
     if (entryIndex >= 0) {
       if (arguments_[entryIndex + 1] === undefined)
-        return usage("ld <objects...> [-o output] [--entry symbol]");
+        return this.toolchainUsage(usageText);
       entry = arguments_[entryIndex + 1]!;
       consumed.add(entryIndex);
       consumed.add(entryIndex + 1);
     }
     const paths = arguments_.filter((_argument, index) => !consumed.has(index));
     if (paths.length === 0 || paths.length > 64)
-      return usage("ld <objects...> [-o output] [--entry symbol]");
+      return this.toolchainUsage(usageText);
     const objects = paths.map((path) => this.readCs486Object(path));
+    outputPath = this.resolvePath(outputPath);
     if (this.options.deferGuestExecution === true) {
       return {
         exitCode: 0,
         foreground: {
           command: "ld",
+          credentials: this.options.credentials(),
           kind: "compile",
           task: { entry, kind: "link", objects, outputPath },
+          umask: this.filesystem.getUmask(),
         },
         stderr: "",
         stdout: "",
@@ -2253,15 +3395,17 @@ export class ShellCommandRuntime {
   }
 
   private runBasic(arguments_: readonly string[]): ShellCommandResult {
-    if (arguments_.length !== 1) return usage("basic <source.bas>");
+    if (arguments_.length !== 1)
+      return this.toolchainUsage("basic <source.bas>");
     const source = this.readFile(arguments_[0]!);
     if (source.length > 128_000)
-      return failure("basic", "source limit exceeded");
+      return this.toolchainFailure("basic", "source limit exceeded");
     if (this.options.deferGuestExecution === true) {
       return {
         exitCode: 0,
         foreground: {
           command: "basic",
+          credentials: this.options.credentials(),
           kind: "compile",
           task: {
             compileOnly: false,
@@ -2270,6 +3414,7 @@ export class ShellCommandRuntime {
             runAfterCompile: true,
             source,
           },
+          umask: this.filesystem.getUmask(),
         },
         stderr: "",
         stdout: "",
@@ -2280,10 +3425,21 @@ export class ShellCommandRuntime {
   }
 
   private runExecutable(arguments_: readonly string[]): ShellCommandResult {
-    arguments_ = arguments_.map((argument) => this.dosOption(argument));
-    const stats = arguments_[0] === "--stats" || arguments_[0] === "-v";
-    const path = arguments_[stats ? 1 : 0];
-    if (path === undefined) return usage("run [--stats] <executable>");
+    arguments_ = arguments_.map((argument) =>
+      this.options.profile.id === "dos" && /^\/stats$/iu.test(argument)
+        ? "--stats"
+        : this.dosOption(argument),
+    );
+    const statsOptions = arguments_.filter(
+      (argument) => argument === "--stats" || argument === "-v",
+    );
+    const stats = statsOptions.length === 1;
+    const paths = arguments_.filter(
+      (argument) => argument !== "--stats" && argument !== "-v",
+    );
+    const path = paths[0];
+    if (path === undefined)
+      return this.toolchainUsage("run [--stats] <executable>");
     const encoded = this.readFile(path);
     const utility = decodeSystemUtility(encoded);
     if (utility !== undefined) {
@@ -2291,8 +3447,8 @@ export class ShellCommandRuntime {
         return failure(path, "system utilities do not accept run --stats");
       return this.dispatch(utility, arguments_.slice(1), "");
     }
-    if (arguments_.length !== (stats ? 2 : 1)) {
-      return usage("run [--stats] <executable>");
+    if (statsOptions.length > 1 || paths.length !== 1) {
+      return this.toolchainUsage("run [--stats] <executable>");
     }
     if (!encoded.startsWith("CS486\n"))
       return failure(path, "not a CS486 executable");
@@ -2317,9 +3473,11 @@ export class ShellCommandRuntime {
         foreground: {
           command: compileCycles > 0 ? "basic" : "run",
           compileCycles,
+          credentials: this.options.credentials(),
           executable,
           kind: "cs486",
           stats,
+          umask: this.filesystem.getUmask(),
         },
         stderr: "",
         stdout: "",
@@ -2340,35 +3498,403 @@ export class ShellCommandRuntime {
     const stderr = stats
       ? `${runtimeName}: ${result.executedInstructions} instructions, ${result.cycles} CPU cycles, ${cpuCyclesToMicroseconds(result.cycles, this.options.hardware.clockHz).toFixed(3)} us at ${formatClock(this.options.hardware.clockHz)}, ${result.state}${newline}${formatMicroarchitectureStats(result.microarchitecture)}${newline}`
       : result.state === "yielded"
-        ? `${runtimeName}: execution limit reached\n`
+        ? `${runtimeName}: execution limit reached${newline}`
         : "";
     return {
       exitCode: result.state === "halted" ? 0 : 124,
       stderr,
-      stdout: result.output,
+      stdout: normalizeGuestProgramOutput(result.output, newline),
       cpuCycles: Math.min(1_000_000, compileCycles + result.cycles),
     };
   }
 
+  private debugExecutable(arguments_: readonly string[]): ShellCommandResult {
+    const newline = this.textPolicy.newline;
+    const dos = this.options.profile.id === "dos";
+    const usageText = dos
+      ? "DEBUG <program>|LOAD <program>|R|U [address] [count]|D <address> [length]|BP <address>|BC <address|*>|T|G [limit]|STATUS|Q"
+      : "csdb <program>|load <program>|regs|disasm [address] [count]|memory <address> [length]|break <address>|clear <address|all>|step|continue [limit]|status|quit";
+    if (arguments_.length === 0) return this.toolchainUsage(usageText);
+
+    const aliases = dos
+      ? new Map<string, string>([
+          ["load", "load"],
+          ["r", "regs"],
+          ["regs", "regs"],
+          ["u", "disasm"],
+          ["disasm", "disasm"],
+          ["d", "memory"],
+          ["memory", "memory"],
+          ["bp", "break"],
+          ["break", "break"],
+          ["bc", "clear"],
+          ["clear", "clear"],
+          ["t", "step"],
+          ["step", "step"],
+          ["g", "continue"],
+          ["continue", "continue"],
+          ["status", "status"],
+          ["q", "quit"],
+          ["quit", "quit"],
+          ["?", "help"],
+          ["help", "help"],
+        ])
+      : new Map<string, string>([
+          ["load", "load"],
+          ["regs", "regs"],
+          ["disasm", "disasm"],
+          ["memory", "memory"],
+          ["break", "break"],
+          ["clear", "clear"],
+          ["step", "step"],
+          ["continue", "continue"],
+          ["status", "status"],
+          ["quit", "quit"],
+          ["help", "help"],
+        ]);
+    const requested = arguments_[0]!;
+    const operation = aliases.get(requested.toLowerCase()) ?? "load";
+    const operands = aliases.has(requested.toLowerCase())
+      ? arguments_.slice(1)
+      : arguments_;
+
+    try {
+      if (operation === "help") return success(`${usageText}${newline}`);
+      if (operation === "quit") {
+        if (operands.length !== 0) return this.toolchainUsage(usageText);
+        this.closeDebugger();
+        return success(
+          dos ? `Program terminated.${newline}` : `debugger closed${newline}`,
+        );
+      }
+      if (operation === "load") {
+        if (operands.length !== 1) return this.toolchainUsage(usageText);
+        const path = operands[0]!;
+        const encoded = this.readFile(path);
+        if (!encoded.startsWith("CS486\n"))
+          return this.debuggerFailure("not a CS486 executable");
+        let executable: unknown;
+        try {
+          executable = JSON.parse(encoded.slice(6));
+        } catch {
+          return this.debuggerFailure("invalid executable encoding");
+        }
+        validateCs486Executable(executable);
+        this.cs486Debugger = Cs486Debugger.load(executable, {
+          cpuModel: this.options.hardware.cpuModel,
+          memoryBytes: this.options.hardware.memoryBytes,
+        });
+        this.cs486DebuggerOutputCursor = 0;
+        this.cs486DebuggerSymbols.clear();
+        for (const symbol of executable.symbols ?? []) {
+          if ((symbol.section ?? "text") === "text")
+            this.cs486DebuggerSymbols.set(symbol.name, symbol.address);
+        }
+        const first = this.cs486Debugger.disassemble(0, 1)[0];
+        const displayPath = dos
+          ? this.options.profile.pathDialect.display(this.resolvePath(path))
+          : this.resolvePath(path);
+        return success(
+          `${dos ? "Loaded" : "loaded"} ${displayPath}: ${String(executable.instructions.length)} instructions${newline}${
+            first === undefined
+              ? ""
+              : `${this.formatDebuggerInstruction(first)}${newline}`
+          }`,
+        );
+      }
+
+      const debugger_ = this.cs486Debugger;
+      if (debugger_ === undefined)
+        return this.debuggerFailure(
+          dos ? "No program loaded." : "no program loaded",
+        );
+      if (operation === "status") {
+        if (operands.length !== 0) return this.toolchainUsage(usageText);
+        return success(
+          `${this.formatDebuggerOutcome(debugger_.state)}${newline}`,
+        );
+      }
+      if (operation === "regs") {
+        if (operands.length !== 0) return this.toolchainUsage(usageText);
+        const snapshot = debugger_.registerSnapshot();
+        const names = [
+          "eax",
+          "ebx",
+          "ecx",
+          "edx",
+          "esi",
+          "edi",
+          "esp",
+          "ebp",
+        ] as const;
+        const body = dos
+          ? [
+              `EIP=${this.formatDebuggerAddress(snapshot.instructionAddress)} ${names
+                .slice(0, 4)
+                .map(
+                  (name) =>
+                    `${name.toUpperCase()}=${this.formatDebuggerWord(snapshot.registers[name])}`,
+                )
+                .join(" ")}`,
+              names
+                .slice(4)
+                .map(
+                  (name) =>
+                    `${name.toUpperCase()}=${this.formatDebuggerWord(snapshot.registers[name])}`,
+                )
+                .join(" "),
+            ]
+          : [
+              `ip ${this.formatDebuggerAddress(snapshot.instructionAddress)}`,
+              ...names.map(
+                (name) =>
+                  `${name} ${this.formatDebuggerWord(snapshot.registers[name])} (${String(snapshot.registers[name])})`,
+              ),
+            ];
+        return success(`${body.join(newline)}${newline}`);
+      }
+      if (operation === "disasm") {
+        if (operands.length > 2) return this.toolchainUsage(usageText);
+        const address =
+          operands[0] === undefined
+            ? debugger_.registerSnapshot().instructionAddress
+            : this.parseDebuggerAddress(operands[0]);
+        const count =
+          operands[1] === undefined ? 8 : this.parseDebuggerCount(operands[1]);
+        const listing = debugger_.disassemble(address, count);
+        return success(
+          `${listing.map((instruction) => this.formatDebuggerInstruction(instruction)).join(newline)}${listing.length === 0 ? "" : newline}`,
+        );
+      }
+      if (operation === "memory") {
+        if (operands.length < 1 || operands.length > 2)
+          return this.toolchainUsage(usageText);
+        const address = this.parseDebuggerAddress(operands[0]!);
+        const length =
+          operands[1] === undefined ? 16 : this.parseDebuggerCount(operands[1]);
+        const bytes = debugger_.readMemory(address, length);
+        const rows: string[] = [];
+        for (let offset = 0; offset < bytes.length; offset += 16) {
+          const row = bytes.slice(offset, Math.min(bytes.length, offset + 16));
+          rows.push(
+            `${this.formatDebuggerAddress(address + offset)}  ${[...row]
+              .map((byte) => byte.toString(16).padStart(2, "0"))
+              .join(" ")}`,
+          );
+        }
+        return success(`${rows.join(newline)}${newline}`);
+      }
+      if (operation === "break") {
+        if (operands.length !== 1) return this.toolchainUsage(usageText);
+        const address = this.parseDebuggerAddress(operands[0]!);
+        const added = debugger_.setBreakpoint(address);
+        return success(
+          `${added ? "breakpoint set" : "breakpoint already set"} at ${this.formatDebuggerAddress(address)}${newline}`,
+        );
+      }
+      if (operation === "clear") {
+        if (operands.length !== 1) return this.toolchainUsage(usageText);
+        if (operands[0]!.toLowerCase() === "all" || operands[0] === "*") {
+          debugger_.clearBreakpoints();
+          return success(
+            `${dos ? "All breakpoints cleared." : "all breakpoints cleared"}${newline}`,
+          );
+        }
+        const address = this.parseDebuggerAddress(operands[0]!);
+        const removed = debugger_.clearBreakpoint(address);
+        return success(
+          `${removed ? "breakpoint cleared" : "breakpoint was not set"} at ${this.formatDebuggerAddress(address)}${newline}`,
+        );
+      }
+      if (operation === "step") {
+        if (operands.length !== 0) return this.toolchainUsage(usageText);
+        if (this.options.deferGuestExecution === true)
+          return {
+            exitCode: 0,
+            foreground: {
+              command: dos ? "debug" : "csdb",
+              complete: () => this.debuggerExecutionResult(debugger_.state),
+              credentials: this.options.credentials(),
+              kind: "debugger",
+              start: () => debugger_.startStepExecution(),
+              umask: this.filesystem.getUmask(),
+            },
+            stderr: "",
+            stdout: "",
+          };
+        return this.debuggerExecutionResult(debugger_.step());
+      }
+      if (operation === "continue") {
+        if (operands.length > 1) return this.toolchainUsage(usageText);
+        const limit =
+          operands[0] === undefined
+            ? 10_000
+            : this.parseDebuggerCount(operands[0]);
+        if (this.options.deferGuestExecution === true)
+          return {
+            exitCode: 0,
+            foreground: {
+              command: dos ? "debug" : "csdb",
+              complete: () => this.debuggerExecutionResult(debugger_.state),
+              credentials: this.options.credentials(),
+              kind: "debugger",
+              start: () => debugger_.startContinueExecution(limit),
+              umask: this.filesystem.getUmask(),
+            },
+            stderr: "",
+            stdout: "",
+          };
+        return this.debuggerExecutionResult(debugger_.continue(limit));
+      }
+      return this.toolchainUsage(usageText);
+    } catch (error: unknown) {
+      return this.debuggerFailure(message(error));
+    }
+  }
+
+  private debuggerExecutionResult(
+    outcome: Cs486DebuggerOutcome,
+  ): ShellCommandResult {
+    const newline = this.textPolicy.newline;
+    const output = this.takeDebuggerOutput();
+    const state = `${this.formatDebuggerOutcome(outcome)}${newline}`;
+    if (outcome.kind === "faulted")
+      return status(
+        1,
+        output,
+        `${outcome.fault.typeName}: ${outcome.fault.message}${newline}`,
+      );
+    if (outcome.kind === "paused" && outcome.reason === "interrupted")
+      return status(
+        130,
+        this.joinDebuggerOutput(output, `^C${newline}${state}`),
+        "",
+      );
+    if (outcome.kind === "limit")
+      return status(124, this.joinDebuggerOutput(output, state), "");
+    return success(this.joinDebuggerOutput(output, state));
+  }
+
+  private takeDebuggerOutput(): string {
+    const debugger_ = this.cs486Debugger;
+    if (debugger_ === undefined) return "";
+    const output = debugger_.output.slice(this.cs486DebuggerOutputCursor);
+    this.cs486DebuggerOutputCursor = debugger_.output.length;
+    return normalizeGuestProgramOutput(output, this.textPolicy.newline);
+  }
+
+  private joinDebuggerOutput(output: string, state: string): string {
+    if (output.length === 0) return state;
+    return output.endsWith(this.textPolicy.newline)
+      ? `${output}${state}`
+      : `${output}${this.textPolicy.newline}${state}`;
+  }
+
+  private formatDebuggerOutcome(outcome: Cs486DebuggerOutcome): string {
+    const address = this.formatDebuggerAddress(outcome.address);
+    const work = `${String(outcome.executedInstructions)} instruction(s), ${String(outcome.cpuCycles)} cycles`;
+    if (outcome.kind === "paused")
+      return `${this.options.profile.id === "dos" ? "Paused" : "paused"} at ${address} (${outcome.reason}; ${work})`;
+    if (outcome.kind === "halted")
+      return `${this.options.profile.id === "dos" ? "Halted" : "halted"} at ${address} (${work})`;
+    if (outcome.kind === "limit")
+      return `${this.options.profile.id === "dos" ? "Continue limit reached" : "continue limit reached"} at ${address} (${work})`;
+    return `${this.options.profile.id === "dos" ? "Faulted" : "faulted"} at ${address} (${work})`;
+  }
+
+  private formatDebuggerInstruction(
+    instruction: ReturnType<Cs486Debugger["disassemble"]>[number],
+  ): string {
+    const labels =
+      instruction.labels.length === 0
+        ? ""
+        : `${instruction.labels.join(",")}: `;
+    return `${this.formatDebuggerAddress(instruction.address)}  ${labels}${instruction.text}`;
+  }
+
+  private parseDebuggerAddress(value: string): number {
+    const symbol = this.cs486DebuggerSymbols.get(value);
+    if (symbol !== undefined) return symbol;
+    if (this.options.profile.id === "dos") {
+      const matches = [...this.cs486DebuggerSymbols].filter(
+        ([name]) => name.toLowerCase() === value.toLowerCase(),
+      );
+      if (matches.length === 1) return matches[0]![1];
+    }
+    const parsed = this.parseDebuggerNumber(
+      value,
+      this.options.profile.id === "dos" ? 16 : 10,
+    );
+    if (parsed === undefined)
+      throw new RangeError(`invalid debug address ${value}`);
+    return parsed;
+  }
+
+  private parseDebuggerCount(value: string): number {
+    const parsed = this.parseDebuggerNumber(value, 10);
+    if (parsed === undefined || parsed <= 0)
+      throw new RangeError(`invalid debug count ${value}`);
+    return parsed;
+  }
+
+  private parseDebuggerNumber(
+    value: string,
+    defaultRadix: 10 | 16,
+  ): number | undefined {
+    const radix = /^0x/iu.test(value) ? 16 : defaultRadix;
+    const digits = /^0x/iu.test(value) ? value.slice(2) : value;
+    if (
+      digits.length === 0 ||
+      !(radix === 16 ? /^[0-9a-f]+$/iu : /^\d+$/u).test(digits)
+    )
+      return undefined;
+    const parsed = Number.parseInt(digits, radix);
+    return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : undefined;
+  }
+
+  private formatDebuggerAddress(address: number): string {
+    return this.options.profile.id === "dos"
+      ? address.toString(16).toUpperCase().padStart(8, "0")
+      : `0x${address.toString(16).padStart(8, "0")}`;
+  }
+
+  private formatDebuggerWord(value: number): string {
+    return (value >>> 0).toString(16).toUpperCase().padStart(8, "0");
+  }
+
+  private debuggerFailure(detail: string): ShellCommandResult {
+    const command = this.options.profile.id === "dos" ? "DEBUG" : "csdb";
+    return status(1, "", `${command}: ${detail}${this.textPolicy.newline}`);
+  }
+
   private objectDump(arguments_: readonly string[]): ShellCommandResult {
-    if (arguments_.length !== 1) return usage("objdump <object|executable>");
+    if (arguments_.length !== 1)
+      return this.toolchainUsage("objdump <object|executable>");
     const encoded = this.readFile(arguments_[0]!);
+    const newline = this.textPolicy.newline;
     if (encoded.startsWith("CS486OBJ\n")) {
       const object = this.parseCs486Object(encoded, arguments_[0]!);
       return success(
         [
           `format ${object.format} v${String(object.version)} ${object.language}`,
           `data ${String(object.dataBytes)} bytes`,
+          ...(object.sections ?? []).map((section) =>
+            section.name === "text"
+              ? `section text align 1 size ${String(section.instructions.length)} instructions`
+              : section.name === "bss"
+                ? `section bss align ${String(section.alignment)} size ${String(section.size)} bytes`
+                : `section ${section.name} align ${String(section.alignment)} size ${String(section.bytes.length)} bytes`,
+          ),
           ...object.symbols.map(
             (symbol) =>
-              `symbol ${symbol.binding.padEnd(9)} ${symbol.name}${symbol.offset === undefined ? "" : ` @${String(symbol.offset)}`}`,
+              `symbol ${symbol.binding.padEnd(9)} ${symbol.section.padEnd(6)} ${(symbol.type ?? "notype").padEnd(8)} ${symbol.name}${symbol.offset === undefined ? "" : ` @${String(symbol.offset)}`}`,
           ),
           ...object.relocations.map(
             (relocation) =>
-              `reloc ${relocation.type} @${String(relocation.instructionOffset)} -> ${relocation.symbol}`,
+              `reloc ${relocation.type} ${(relocation.section ?? "text").padEnd(6)} @${String(relocation.offset ?? relocation.instructionOffset)}${relocation.field === undefined ? "" : `.${relocation.field}`} -> ${relocation.symbol}${relocation.addend === undefined || relocation.addend === 0 ? "" : ` ${relocation.addend > 0 ? "+" : ""}${String(relocation.addend)}`}`,
           ),
-          object.assembly,
-        ].join("\n") + "\n",
+          object.assembly.replaceAll("\n", newline),
+        ].join(newline) + newline,
       );
     }
     if (!encoded.startsWith("CS486\n"))
@@ -2381,22 +3907,24 @@ export class ShellCommandRuntime {
           (instruction, index) =>
             `${index.toString(16).padStart(4, "0")} ${JSON.stringify(instruction)}`,
         )
-        .join("\n") + "\n",
+        .join(newline) + newline,
     );
   }
 
   private listSymbols(arguments_: readonly string[]): ShellCommandResult {
-    if (arguments_.length !== 1) return usage("nm <object|executable>");
+    if (arguments_.length !== 1)
+      return this.toolchainUsage("nm <object|executable>");
     const encoded = this.readFile(arguments_[0]!);
+    const newline = this.textPolicy.newline;
     if (encoded.startsWith("CS486OBJ\n")) {
       const object = this.parseCs486Object(encoded, arguments_[0]!);
       return success(
         object.symbols
           .map(
             (symbol) =>
-              `${symbol.offset?.toString(16).padStart(8, "0") ?? "        "} ${symbol.binding === "global" ? "T" : symbol.binding === "local" ? "t" : "U"} ${symbol.name}`,
+              `${symbol.offset?.toString(16).padStart(8, "0") ?? "        "} ${nmSymbolCode(symbol.section, symbol.binding)} ${symbol.name}`,
           )
-          .join("\n") + "\n",
+          .join(newline) + newline,
       );
     }
     if (!encoded.startsWith("CS486\n"))
@@ -2407,9 +3935,9 @@ export class ShellCommandRuntime {
       (executable.symbols ?? [])
         .map(
           (symbol) =>
-            `${symbol.address.toString(16).padStart(8, "0")} T ${symbol.name}`,
+            `${symbol.address.toString(16).padStart(8, "0")} ${nmSymbolCode(symbol.section ?? "text", "global")} ${symbol.name}`,
         )
-        .join("\n") + "\n",
+        .join(newline) + newline,
     );
   }
 
@@ -2540,24 +4068,237 @@ export class ShellCommandRuntime {
     return success(`${lines.join("\r\n")}\r\n`);
   }
 
+  dosAttrib(arguments_: readonly string[]): ShellCommandResult {
+    const updates: (readonly [number, boolean])[] = [];
+    let recursive = false;
+    let path = "*.*";
+    let pathSeen = false;
+    for (const argument of arguments_) {
+      const option = argument.toUpperCase();
+      if (option === "/S") {
+        recursive = true;
+        continue;
+      }
+      if (/^[+-][RHSA]+$/u.test(option)) {
+        const enabled = option[0] === "+";
+        for (const token of option.slice(1)) {
+          updates.push([dosAttributeForToken(token)!, enabled]);
+        }
+        continue;
+      }
+      if (argument.startsWith("/") || pathSeen)
+        return status(2, "", "Invalid number of parameters.\r\n");
+      path = argument;
+      pathSeen = true;
+    }
+    try {
+      const targets =
+        /[*?]/u.test(path) || recursive
+          ? this.dosDirectoryGroups(path, recursive).flatMap(
+              ({ targets: entries }) => entries,
+            )
+          : this.dosMutationTargets([path]);
+      const unique = [...new Set(targets)].sort((left, right) =>
+        left.localeCompare(right),
+      );
+      if (unique.length === 0) return status(1, "", "File not found.\r\n");
+      if (updates.length === 0) {
+        const current = unique.map((target) => ({
+          metadata: this.ensureDosFatMetadata(target)!,
+          target,
+        }));
+        return success(
+          `${current
+            .map(({ metadata, target }) => {
+              const flags = [
+                [dosFatAttribute.readOnly, "R"],
+                [dosFatAttribute.hidden, "H"],
+                [dosFatAttribute.system, "S"],
+                [dosFatAttribute.archive, "A"],
+              ] as const;
+              const rendered = flags
+                .map(([attribute, flag]) =>
+                  hasDosFatAttribute(metadata.attributes, attribute)
+                    ? flag
+                    : " ",
+                )
+                .join("   ");
+              return `${rendered}     ${this.options.profile.pathDialect.display(target)}`;
+            })
+            .join("\r\n")}\r\n`,
+        );
+      }
+      const trial = DosRuntimeState.restore(
+        this.dosRuntime!.snapshot(),
+        this.dosRuntime!.limits,
+      );
+      for (const target of unique) {
+        const media = this.dosMediaForPath(target, trial)!;
+        const metadata = this.ensureDosFatMetadataIn(trial, target)!;
+        trial.assertWritable(media.letter, media.generation);
+        let attributes = metadata.attributes;
+        for (const [attribute, enabled] of updates) {
+          attributes = enabled
+            ? attributes | attribute
+            : attributes & ~attribute;
+        }
+        trial.setFatAttributes(target, attributes, media.generation);
+      }
+      this.runDosFilesystemTransaction(() => {
+        for (const target of unique) {
+          const media = this.dosMediaForPath(target)!;
+          const metadata = this.ensureDosFatMetadata(target)!;
+          let attributes = metadata.attributes;
+          for (const [attribute, enabled] of updates) {
+            attributes = enabled
+              ? attributes | attribute
+              : attributes & ~attribute;
+          }
+          this.dosRuntime!.setFatAttributes(
+            target,
+            attributes,
+            media.generation,
+          );
+        }
+      });
+      return success();
+    } catch (error: unknown) {
+      return status(1, "", `${message(error)}\r\n`);
+    }
+  }
+
+  dosLabel(arguments_: readonly string[]): ShellCommandResult {
+    if (arguments_.length > 2)
+      return status(2, "", "Invalid number of parameters.\r\n");
+    let letter = this.dosRuntime?.activeDrive ?? "C";
+    let label: string | undefined;
+    if (arguments_[0] !== undefined && /^[A-Za-z]:?$/u.test(arguments_[0])) {
+      letter = arguments_[0][0]!;
+      label = arguments_[1];
+    } else if (arguments_[0] !== undefined) {
+      label = arguments_[0];
+    }
+    try {
+      const media = this.dosRuntime?.requireMedia(letter);
+      if (media === undefined)
+        return status(1, "", "Invalid drive specification\r\n");
+      if (label === undefined) {
+        return success(
+          `${this.dosVolumeLines(media.letter, media.volumeLabel).join("\r\n")}\r\n`,
+        );
+      }
+      this.runDosRuntimeTransaction(() => {
+        this.dosRuntime!.setVolumeLabel(
+          media.letter,
+          label,
+          media.mediaGeneration,
+        );
+      });
+      return success();
+    } catch (error: unknown) {
+      if (error instanceof DosDriveError && error.code === "no_media")
+        return status(1, "", `Not ready reading drive ${error.drive}\r\n`);
+      return status(1, "", `${message(error)}\r\n`);
+    }
+  }
+
+  dosCheckDisk(arguments_: readonly string[]): ShellCommandResult {
+    if (
+      arguments_.length > 1 ||
+      (arguments_[0] !== undefined && !/^[A-Za-z]:?$/u.test(arguments_[0]))
+    ) {
+      return status(2, "", "CHKDSK is read-only; usage: CHKDSK [drive:]\r\n");
+    }
+    const letter = arguments_[0]?.[0] ?? this.dosRuntime?.activeDrive ?? "C";
+    try {
+      const media = this.dosRuntime?.requireMedia(letter);
+      if (media === undefined)
+        return status(1, "", "Invalid drive specification\r\n");
+      const root = `/drives/${media.letter.toLowerCase()}`;
+      const entries = this.collectDosDiskEntries(root);
+      let files = 0;
+      let directories = 0;
+      let fileBytes = 0;
+      for (const entry of entries) {
+        this.ensureDosFatMetadata(entry);
+        if (this.filesystem.isDirectory(entry)) directories += 1;
+        else {
+          files += 1;
+          fileBytes += this.filesystem.getSize(entry);
+        }
+      }
+      const freeBytes = this.filesystem.getFreeSpace();
+      return success(
+        [
+          ...this.dosVolumeLines(media.letter, media.volumeLabel),
+          "",
+          `${String(fileBytes + freeBytes).padStart(14)} bytes total disk space`,
+          `${String(fileBytes).padStart(14)} bytes in ${String(files)} file(s)`,
+          `${String(freeBytes).padStart(14)} bytes available on disk`,
+          `${String(directories).padStart(14)} directorie(s) checked`,
+          "",
+          "CHKDSK found no filesystem metadata errors.",
+          "Read-only check complete; no repairs were attempted.",
+          "",
+        ].join("\r\n"),
+      );
+    } catch (error: unknown) {
+      if (error instanceof DosDriveError && error.code === "no_media")
+        return status(1, "", `Not ready reading drive ${error.drive}\r\n`);
+      return status(1, "", `${message(error)}\r\n`);
+    }
+  }
+
+  private collectDosDiskEntries(root: string): readonly string[] {
+    const entries: string[] = [];
+    const pending: { readonly depth: number; readonly path: string }[] = [
+      { depth: 0, path: root },
+    ];
+    while (pending.length > 0) {
+      const current = pending.pop()!;
+      if (current.depth > 32)
+        throw new Error("Directory depth limit exceeded.");
+      for (const name of [...this.filesystem.list(current.path)]
+        .sort()
+        .reverse()) {
+        const path = joinPath(current.path, name);
+        entries.push(path);
+        if (entries.length > 4_096)
+          throw new Error("Filesystem entry limit exceeded.");
+        if (this.filesystem.isDirectory(path))
+          pending.push({ depth: current.depth + 1, path });
+      }
+    }
+    return entries;
+  }
+
   dosVolume(arguments_: readonly string[]): ShellCommandResult {
     if (
       arguments_.length > 1 ||
-      (arguments_[0] !== undefined && !/^C:?$/iu.test(arguments_[0]))
-    ) {
-      return usage("VOL [C:]");
+      (arguments_[0] !== undefined && !/^[A-Za-z]:?$/u.test(arguments_[0]))
+    )
+      return usage("VOL [drive:]");
+    const letter = arguments_[0]?.[0] ?? this.dosRuntime?.activeDrive ?? "C";
+    try {
+      const drive = this.dosRuntime?.requireMedia(letter);
+      return success(
+        `${this.dosVolumeLines(drive?.letter, drive?.volumeLabel).join("\r\n")}\r\n`,
+      );
+    } catch (error: unknown) {
+      if (error instanceof DosDriveError && error.code === "no_media")
+        return status(1, "", `Not ready reading drive ${error.drive}\r\n`);
+      return status(1, "", "Invalid drive specification\r\n");
     }
-    return success(`${this.dosVolumeLines().join("\r\n")}\r\n`);
   }
 
-  private dosVolumeLines(): readonly string[] {
+  private dosVolumeLines(letter = "C", label = "CS-DOS"): readonly string[] {
     const serial = Math.max(0, this.options.computerId)
       .toString(16)
       .toUpperCase()
       .padStart(8, "0")
       .slice(-8);
     return [
-      " Volume in drive C is CS-DOS",
+      ` Volume in drive ${letter} is ${label.length === 0 ? "unlabeled" : label}`,
       ` Volume Serial Number is ${serial.slice(0, 4)}-${serial.slice(4)}`,
     ];
   }
@@ -2679,6 +4420,98 @@ export class ShellCommandRuntime {
     return this.textPolicy.option(argument);
   }
 
+  private toolchainUsage(usageText: string): ShellCommandResult {
+    return status(2, "", `Usage: ${usageText}${this.textPolicy.newline}`);
+  }
+
+  private toolchainFailure(
+    command: string,
+    detail: string,
+    exitCode = 1,
+  ): ShellCommandResult {
+    return status(
+      exitCode,
+      "",
+      `${this.displayName(command)}: ${detail}${this.textPolicy.newline}`,
+    );
+  }
+
+  private normalizeCompileOptions(
+    arguments_: readonly string[],
+  ): readonly string[] {
+    if (this.options.profile.id !== "dos") return arguments_;
+    const normalized: string[] = [];
+    for (const argument of arguments_) {
+      if (/^\/c$/iu.test(argument)) {
+        normalized.push("-c");
+        continue;
+      }
+      const output = /^\/out:(.+)$/iu.exec(argument);
+      if (output !== null) {
+        normalized.push("-o", output[1]!);
+        continue;
+      }
+      normalized.push(this.dosOption(argument));
+    }
+    return normalized;
+  }
+
+  private normalizeLinkOptions(
+    arguments_: readonly string[],
+  ): readonly string[] {
+    if (this.options.profile.id !== "dos")
+      return arguments_.map((argument) => this.dosOption(argument));
+    const normalized: string[] = [];
+    for (const argument of arguments_) {
+      const output = /^\/out:(.+)$/iu.exec(argument);
+      if (output !== null) {
+        normalized.push("-o", output[1]!);
+        continue;
+      }
+      const entry = /^\/entry:(.+)$/iu.exec(argument);
+      if (entry !== null) {
+        normalized.push("-e", entry[1]!);
+        continue;
+      }
+      normalized.push(this.dosOption(argument));
+    }
+    return normalized;
+  }
+
+  private assemblerOptions(sourceName: string): Cs486AssemblerOptions {
+    return {
+      dialect: this.options.profile.id,
+      include: (
+        request,
+        fromSource,
+      ): ReturnType<NonNullable<Cs486AssemblerOptions["include"]>> => {
+        let resolved: string;
+        try {
+          resolved = this.filesystem.normalize(
+            this.options.profile.pathDialect.resolve(
+              request,
+              parentPath(fromSource),
+              this.environment.get("HOME") ?? this.options.profile.home,
+            ),
+          );
+        } catch {
+          return undefined;
+        }
+        if (
+          !this.filesystem.exists(resolved) ||
+          this.filesystem.isDirectory(resolved) ||
+          !this.filesystem.hasAccess(resolved, 0b100)
+        ) {
+          return undefined;
+        }
+        const source = this.filesystem.readFile(resolved);
+        this.ioReadBytes += utf8ByteLength(source);
+        return { source, sourceName: resolved };
+      },
+      sourceName,
+    };
+  }
+
   dosSystemInfo(arguments_: readonly string[]): ShellCommandResult {
     if (arguments_.length !== 0) return usage("SYSTEMINFO");
     const cpu = cpuModelSpecification(this.options.hardware.cpuModel);
@@ -2720,47 +4553,43 @@ export class ShellCommandRuntime {
     if (requested.length > 32) return failure("du", "too many paths", 2);
 
     const paths = requested.length === 0 ? ["."] : requested;
-    const snapshot = this.filesystem.snapshot();
-    const sizes = new Map<string, number>();
-    for (const [file, contents] of snapshot.files) {
-      const bytes = utf8ByteLength(contents);
-      sizes.set(file, bytes);
-      let directory = parentPath(file);
-      for (;;) {
-        sizes.set(directory, (sizes.get(directory) ?? 0) + bytes);
-        if (directory === "/") break;
-        directory = parentPath(directory);
-      }
-    }
-
     const output: string[] = [];
     for (const requestedPath of paths) {
       const resolved = this.resolvePath(requestedPath);
       if (!this.filesystem.exists(resolved)) {
         return failure("du", `${requestedPath}: no such file or directory`);
       }
-      if (!summarize && this.filesystem.isDirectory(resolved)) {
-        const prefix = resolved === "/" ? "/" : `${resolved}/`;
-        const descendants = snapshot.directories
-          .filter((path) => path.startsWith(prefix))
-          .sort();
-        if (includeFiles) {
-          for (const [file] of snapshot.files) {
-            if (file.startsWith(prefix))
-              output.push(
-                `${formatDuSize(sizes.get(file) ?? 0, human)}\t${file}`,
-              );
-          }
+      const entries: {
+        readonly directory: boolean;
+        readonly path: string;
+        readonly size: number;
+      }[] = [];
+      const measure = (path: string): number => {
+        if (
+          !this.filesystem.isDirectory(path) ||
+          this.filesystem.isSymbolicLink(path)
+        ) {
+          const size = this.filesystem.isSymbolicLink(path)
+            ? utf8ByteLength(this.filesystem.readLink(path))
+            : this.filesystem.getSize(path);
+          entries.push({ directory: false, path, size });
+          return size;
         }
-        for (const directory of descendants) {
-          output.push(
-            `${formatDuSize(sizes.get(directory) ?? 0, human)}\t${directory}`,
-          );
+        let size = 0;
+        for (const name of this.filesystem.list(path))
+          size += measure(joinPath(path, name));
+        entries.push({ directory: true, path, size });
+        return size;
+      };
+      const total = measure(resolved);
+      if (!summarize && this.filesystem.isDirectory(resolved)) {
+        for (const entry of entries) {
+          if (entry.path === resolved || (!includeFiles && !entry.directory))
+            continue;
+          output.push(`${formatDuSize(entry.size, human)}\t${entry.path}`);
         }
       }
-      output.push(
-        `${formatDuSize(sizes.get(resolved) ?? 0, human)}\t${requestedPath}`,
-      );
+      output.push(`${formatDuSize(total, human)}\t${requestedPath}`);
     }
     return success(`${output.join("\n")}\n`);
   }
@@ -2790,12 +4619,14 @@ export class ShellCommandRuntime {
           "chmod",
           `cannot access '${path}': No such file or directory`,
         );
-      if (this.filesystem.getMetadata(resolved).uid !== 1_000)
+      try {
+        this.filesystem.chmod(resolved, mode);
+      } catch {
         return failure(
           "chmod",
           `changing permissions of '${path}': Operation not permitted`,
         );
-      this.filesystem.setMetadata(resolved, { mode });
+      }
     }
     return success();
   }
@@ -2813,9 +4644,13 @@ export class ShellCommandRuntime {
     const [ownerName = "", groupName] = includeOwner
       ? identity.split(":", 2)
       : ["", identity];
-    const uid = includeOwner ? linuxIdentityNumber(ownerName) : undefined;
+    const uid = includeOwner
+      ? this.linuxIdentityNumber(ownerName, "user")
+      : undefined;
     const gid =
-      groupName === undefined ? undefined : linuxIdentityNumber(groupName);
+      groupName === undefined
+        ? undefined
+        : this.linuxIdentityNumber(groupName, "group");
     if (
       (includeOwner && uid === undefined) ||
       (groupName !== undefined && gid === undefined)
@@ -2828,20 +4663,15 @@ export class ShellCommandRuntime {
           command,
           `cannot access '${path}': No such file or directory`,
         );
-      const current = this.filesystem.getMetadata(resolved);
-      if (
-        current.uid !== 1_000 ||
-        (includeOwner && uid !== undefined && uid !== current.uid) ||
-        (gid !== undefined && gid !== 1_000)
-      )
+      try {
+        if (includeOwner) this.filesystem.chown(resolved, uid!, gid);
+        else this.filesystem.chgrp(resolved, gid!);
+      } catch {
         return failure(
           command,
           `changing ownership of '${path}': Operation not permitted`,
         );
-      this.filesystem.setMetadata(resolved, {
-        ...(gid === undefined ? {} : { gid }),
-        ...(uid === undefined ? {} : { uid }),
-      });
+      }
     }
     return success();
   }
@@ -2858,7 +4688,7 @@ export class ShellCommandRuntime {
     if (paths.length !== 2) return usage("ln [-s] <target> <link-name>");
     const target = symbolic ? paths[0]! : this.resolvePath(paths[0]!);
     const link = this.resolvePath(paths[1]!);
-    if (!this.accessPolicy.hasAccess(parentPath(link), 0b011))
+    if (!this.filesystem.hasAccess(parentPath(link), 0b011))
       return failure(
         "ln",
         `failed to create link '${paths[1]}': Permission denied`,
@@ -2903,7 +4733,7 @@ export class ShellCommandRuntime {
           "rmdir",
           `failed to remove '${path}': Directory not empty`,
         );
-      if (!this.accessPolicy.hasAccess(parentPath(resolved), 0b011))
+      if (!this.filesystem.hasAccess(parentPath(resolved), 0b011))
         return failure(
           "rmdir",
           `failed to remove '${path}': Permission denied`,
@@ -2914,12 +4744,51 @@ export class ShellCommandRuntime {
   }
 
   private linuxGroups(arguments_: readonly string[]): ShellCommandResult {
-    if (
-      arguments_.length > 1 ||
-      (arguments_[0] !== undefined && arguments_[0] !== "computer")
-    )
-      return failure("groups", `${arguments_[0] ?? ""}: no such user`, 1);
-    return success("computer\n");
+    if (arguments_.length > 1) return usage("groups [user]");
+    const username = arguments_[0] ?? this.options.credentials().loginName;
+    const user = this.options.accounts?.getUser(username);
+    if (user === undefined)
+      return failure("groups", `${username}: no such user`, 1);
+    const names = this.options
+      .accounts!.groupsForUser(user.name)
+      .map(({ name }) => name);
+    return success(`${names.join(" ")}\n`);
+  }
+
+  private linuxUmask(arguments_: readonly string[]): ShellCommandResult {
+    if (arguments_.length === 0) {
+      return success(
+        `${this.filesystem.getUmask().toString(8).padStart(4, "0")}\n`,
+      );
+    }
+    if (arguments_.length !== 1 || !/^[0-7]{1,4}$/u.test(arguments_[0]!)) {
+      return usage("umask [000-777]");
+    }
+    const mask = Number.parseInt(arguments_[0]!, 8);
+    if (mask > 0o777) return usage("umask [000-777]");
+    this.filesystem.setUmask(mask);
+    return success();
+  }
+
+  private linuxIdentityName(value: number, kind: "group" | "user"): string {
+    const record =
+      kind === "user"
+        ? this.options.accounts?.getUserByUid(value)
+        : this.options.accounts?.getGroupByGid(value);
+    return record?.name ?? String(value);
+  }
+
+  private linuxIdentityNumber(
+    value: string,
+    kind: "group" | "user",
+  ): number | undefined {
+    if (/^(?:0|[1-9][0-9]{0,4})$/u.test(value)) {
+      const parsed = Number(value);
+      return parsed <= 65_535 ? parsed : undefined;
+    }
+    return kind === "user"
+      ? this.options.accounts?.getUser(value)?.uid
+      : this.options.accounts?.getGroup(value)?.gid;
   }
 
   private linuxPrintEnvironment(
@@ -3106,6 +4975,22 @@ export class ShellCommandRuntime {
 
   private linuxMount(arguments_: readonly string[]): ShellCommandResult {
     if (arguments_.length !== 0) return usage("mount");
+    if (this.options.osRuntime !== undefined) {
+      return success(
+        this.options.osRuntime
+          .mounts()
+          .map(
+            ({ filesystemType, options, readOnly, source, target }) =>
+              `${source} on ${target} type ${filesystemType} (${[
+                readOnly ? "ro" : "rw",
+                ...options.filter(
+                  (option) => option !== "ro" && option !== "rw",
+                ),
+              ].join(",")})\n`,
+          )
+          .join(""),
+      );
+    }
     return success(
       [
         "computer-system on / type csfs (rw,nosuid,nodev)",
@@ -3119,17 +5004,360 @@ export class ShellCommandRuntime {
 
   private linuxDmesg(arguments_: readonly string[]): ShellCommandResult {
     if (arguments_.length !== 0) return usage("dmesg");
-    const cpu = cpuModelSpecification(this.options.hardware.cpuModel);
+    if (this.options.osRuntime === undefined)
+      return failure("dmesg", "OS runtime state is unavailable", 1);
+    return success(this.options.osRuntime.renderJournal("boot"));
+  }
+
+  private linuxProcesses(arguments_: readonly string[]): ShellCommandResult {
+    const full = arguments_.some(
+      (argument) => argument === "-f" || argument === "-ef",
+    );
+    if (
+      arguments_.some(
+        (argument) => !["-e", "-f", "-ef", "-A"].includes(argument),
+      )
+    ) {
+      return usage("ps [-e|-A] [-f]");
+    }
+    const state = this.options.osRuntime;
+    if (state === undefined)
+      return failure("ps", "OS process table is unavailable", 1);
+    const processes = state.processes();
+    const rows = full
+      ? [
+          "UID        PID  PPID S      CYCLES START COMMAND",
+          ...processes.map(
+            (process) =>
+              `${String(process.uid).padEnd(10)} ${String(process.pid).padStart(5)} ${String(process.parentPid).padStart(5)} ${processStateCode(process)} ${String(process.cpuCycles).padStart(11)} ${String(process.startTick).padStart(5)} ${process.command}`,
+          ),
+        ]
+      : [
+          "  PID S      CYCLES COMMAND",
+          ...processes.map(
+            (process) =>
+              `${String(process.pid).padStart(5)} ${processStateCode(process)} ${String(process.cpuCycles).padStart(11)} ${process.command}`,
+          ),
+        ];
+    return success(`${rows.join("\n")}\n`);
+  }
+
+  private linuxTop(arguments_: readonly string[]): ShellCommandResult {
+    if (arguments_.length !== 0) return usage("top");
+    const state = this.options.osRuntime;
+    if (state === undefined)
+      return failure("top", "OS process table is unavailable", 1);
+    const processes = state.processes();
+    const states = new Map<string, number>();
+    for (const process of processes)
+      states.set(process.state, (states.get(process.state) ?? 0) + 1);
+    const summary = [...states]
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([name, count]) => `${String(count)} ${name}`)
+      .join(", ");
     return success(
       [
-        "[    0.000000] CS-Linux 1.0 sandbox kernel starting",
-        `[    0.000001] CPU: ${cpu.displayName} at ${formatClock(this.options.hardware.clockHz)}`,
-        `[    0.000002] Memory: ${String(this.options.hardware.memoryBytes)} bytes available`,
-        "[    0.000003] csfs: mounted root filesystem",
-        "[    0.000004] Run /bin/bash as uid 1000",
+        `top - up ${this.uptimeSeconds().toFixed(0)}s, load average: ${state.renderProcLoadAverage().trim().split(" ").slice(0, 3).join(", ")}`,
+        `Tasks: ${String(processes.length)} total${summary.length === 0 ? "" : `, ${summary}`}`,
+        "  PID UID   S      CYCLES COMMAND",
+        ...processes.map(
+          (process) =>
+            `${String(process.pid).padStart(5)} ${String(process.uid).padStart(5)} ${processStateCode(process)} ${String(process.cpuCycles).padStart(11)} ${process.command}`,
+        ),
         "",
       ].join("\n"),
     );
+  }
+
+  private linuxKill(arguments_: readonly string[]): ShellCommandResult {
+    const state = this.options.osRuntime;
+    if (state === undefined)
+      return failure("kill", "OS process table is unavailable", 1);
+    const parsed = parseSignalArguments(arguments_);
+    if ("error" in parsed) return failure("kill", parsed.error, 2);
+    if (parsed.pids.length > 16)
+      return failure("kill", "at most 16 process IDs may be signalled", 2);
+    const caller = this.options.credentials();
+    const failures: string[] = [];
+    for (const pid of parsed.pids) {
+      const process = state.process(pid);
+      if (process === undefined) {
+        failures.push(`${String(pid)}: no such process`);
+        continue;
+      }
+      if (pid === 1) {
+        failures.push("1: refusing to signal cs-init");
+        continue;
+      }
+      if (
+        caller.effectiveUserId !== 0 &&
+        caller.effectiveUserId !== process.uid
+      ) {
+        failures.push(`${String(pid)}: operation not permitted`);
+        continue;
+      }
+      try {
+        if (this.options.signalProcess === undefined) {
+          state.signalProcess(pid, parsed.signal, this.options.currentTick());
+        } else {
+          this.options.signalProcess(pid, parsed.signal);
+        }
+      } catch (error: unknown) {
+        failures.push(`${String(pid)}: ${message(error)}`);
+      }
+    }
+    return failures.length === 0
+      ? success()
+      : status(
+          1,
+          "",
+          `${failures.map((detail) => `kill: ${detail}`).join("\n")}\n`,
+        );
+  }
+
+  private linuxJobs(arguments_: readonly string[]): ShellCommandResult {
+    if (arguments_.length !== 0) return usage("jobs");
+    const state = this.options.osRuntime;
+    if (state === undefined)
+      return failure("jobs", "job table is unavailable", 1);
+    const jobs = state.jobs(this.options.credentials().effectiveUserId);
+    return success(
+      jobs.length === 0 ? "" : `${jobs.map(renderJob).join("\n")}\n`,
+    );
+  }
+
+  private linuxForegroundJob(
+    arguments_: readonly string[],
+  ): ShellCommandResult {
+    if (arguments_.length > 1) return usage("fg [job]");
+    const state = this.options.osRuntime;
+    if (state === undefined)
+      return failure("fg", "job table is unavailable", 1);
+    const selected = selectJob(
+      state.jobs(this.options.credentials().effectiveUserId),
+      arguments_[0],
+    );
+    if ("error" in selected) return failure("fg", selected.error, 1);
+    if (selected.job.state === "done")
+      return this.consumeCompletedJob("fg", state, selected.job);
+    return {
+      ...success(),
+      jobControl: { jobId: selected.job.jobId, kind: "foreground" },
+    };
+  }
+
+  private linuxBackgroundJob(
+    arguments_: readonly string[],
+  ): ShellCommandResult {
+    if (arguments_.length > 1) return usage("bg [job]");
+    const state = this.options.osRuntime;
+    if (state === undefined)
+      return failure("bg", "job table is unavailable", 1);
+    const selected = selectJob(
+      state.jobs(this.options.credentials().effectiveUserId),
+      arguments_[0],
+    );
+    if ("error" in selected) return failure("bg", selected.error, 1);
+    if (selected.job.state === "done")
+      return failure("bg", "job has already completed", 1);
+    if (selected.job.state === "stopped") {
+      try {
+        if (this.options.signalProcess === undefined) {
+          state.transitionJob(selected.job.jobId, {
+            kind: "continue",
+            tick: this.options.currentTick(),
+          });
+        } else {
+          this.options.signalProcess(selected.job.pid, "SIGCONT");
+        }
+      } catch (error: unknown) {
+        return failure("bg", message(error), 1);
+      }
+    }
+    return success(`${renderJob(state.job(selected.job.jobId)!)}\n`);
+  }
+
+  private linuxWait(arguments_: readonly string[]): ShellCommandResult {
+    if (arguments_.length > 1) return usage("wait [job|pid]");
+    const state = this.options.osRuntime;
+    if (state === undefined)
+      return failure("wait", "job table is unavailable", 1);
+    const jobs = state.jobs(this.options.credentials().effectiveUserId);
+    if (arguments_.length === 0) {
+      if (jobs.some((job) => job.state !== "done")) {
+        return {
+          ...success(),
+          jobControl: {
+            jobIds: Object.freeze(jobs.map(({ jobId }) => jobId)),
+            kind: "wait",
+          },
+        };
+      }
+      let exitCode = 0;
+      for (const job of jobs) {
+        exitCode = job.exitStatus ?? exitCode;
+        state.removeJob(job.jobId);
+        state.reapProcess(job.pid);
+      }
+      return status(exitCode);
+    }
+    const selected = selectJob(jobs, arguments_[0]);
+    if ("error" in selected) return failure("wait", selected.error, 1);
+    if (selected.job.state !== "done") {
+      return {
+        ...success(),
+        jobControl: {
+          jobIds: Object.freeze([selected.job.jobId]),
+          kind: "wait",
+        },
+      };
+    }
+    return this.consumeCompletedJob("wait", state, selected.job);
+  }
+
+  private consumeCompletedJob(
+    command: "fg" | "wait",
+    state: OsRuntimeState,
+    job: OsJobRecord,
+  ): ShellCommandResult {
+    try {
+      const exitCode = job.exitStatus ?? 0;
+      state.removeJob(job.jobId);
+      state.reapProcess(job.pid);
+      return status(exitCode);
+    } catch (error: unknown) {
+      return failure(command, message(error), 1);
+    }
+  }
+
+  private linuxTty(arguments_: readonly string[]): ShellCommandResult {
+    if (arguments_.length !== 0) return usage("tty");
+    const state = this.options.osRuntime;
+    const sessionId = this.options.sessionId?.();
+    const session =
+      state === undefined || sessionId === undefined
+        ? undefined
+        : state.loginSession(sessionId);
+    return session === undefined
+      ? status(1, "not a tty\n")
+      : success(`/dev/${session.terminal}\n`);
+  }
+
+  private linuxWho(arguments_: readonly string[]): ShellCommandResult {
+    if (arguments_.length !== 0) return usage("who");
+    const state = this.options.osRuntime;
+    if (state === undefined)
+      return failure("who", "login-session table is unavailable", 1);
+    return success(
+      state
+        .loginSessions()
+        .map(
+          (session) =>
+            `${session.username.padEnd(12)} ${session.terminal.padEnd(8)} tick ${String(session.loginTick)}${session.remote === undefined ? "" : ` (${session.remote})`}\n`,
+        )
+        .join(""),
+    );
+  }
+
+  private linuxW(arguments_: readonly string[]): ShellCommandResult {
+    if (arguments_.length !== 0) return usage("w");
+    const state = this.options.osRuntime;
+    if (state === undefined)
+      return failure("w", "login-session table is unavailable", 1);
+    const sessions = state.loginSessions();
+    return success(
+      [
+        `up ${this.uptimeSeconds().toFixed(0)}s, ${String(sessions.length)} user${sessions.length === 1 ? "" : "s"}, load average: ${state.renderProcLoadAverage().trim().split(" ").slice(0, 3).join(", ")}`,
+        "USER         TTY      LOGIN@ IDLE",
+        ...sessions.map(
+          (session) =>
+            `${session.username.padEnd(12)} ${session.terminal.padEnd(8)} ${String(session.loginTick).padStart(6)} ${String(Math.max(0, this.options.currentTick() - session.lastActivityTick)).padStart(4)}t`,
+        ),
+        "",
+      ].join("\n"),
+    );
+  }
+
+  private linuxLast(arguments_: readonly string[]): ShellCommandResult {
+    if (arguments_.length !== 0) return usage("last");
+    const state = this.options.osRuntime;
+    if (state === undefined)
+      return failure("last", "login history is unavailable", 1);
+    const records = [...state.snapshot().lastLogins].sort(
+      (left, right) => right.loginTick - left.loginTick,
+    );
+    return success(
+      records
+        .map(
+          (record) =>
+            `${record.username.padEnd(12)} ${record.terminal.padEnd(8)} tick ${String(record.loginTick)} - ${record.logoutTick === undefined ? "still logged in" : `tick ${String(record.logoutTick)} (${record.logoutReason ?? "logout"})`}\n`,
+        )
+        .join(""),
+    );
+  }
+
+  private linuxService(arguments_: readonly string[]): ShellCommandResult {
+    const state = this.options.osRuntime;
+    if (state === undefined)
+      return failure("service", "service table is unavailable", 1);
+    if (arguments_.length === 1 && arguments_[0] === "--status-all") {
+      return success(
+        state
+          .services()
+          .map(
+            (service) =>
+              `[ ${service.state === "running" ? "+" : service.state === "failed" ? "!" : "-"} ] ${service.name}\n`,
+          )
+          .join(""),
+      );
+    }
+    if (arguments_.length !== 2)
+      return usage("service --status-all | service <name> status");
+    const [name = "", action = ""] = arguments_;
+    const service = state.services().find((entry) => entry.name === name);
+    if (service === undefined)
+      return failure("service", `${name}: unrecognized service`, 1);
+    if (action !== "status") {
+      return failure(
+        "service",
+        `${name}: managed by cs-init; only status is available in this release`,
+        1,
+      );
+    }
+    return status(
+      service.state === "running" ? 0 : 3,
+      `${name} is ${service.state}${service.pid === undefined ? "" : ` (pid ${String(service.pid)})`}\n`,
+    );
+  }
+
+  private linuxMan(arguments_: readonly string[]): ShellCommandResult {
+    if (arguments_.length !== 1) return usage("man <topic>");
+    const topic = arguments_[0] ?? "";
+    if (topic.length > 64)
+      return failure("man", "topic exceeds the 64-character limit", 2);
+    const entry = linuxManualPage(topic);
+    return entry === undefined
+      ? failure("man", `no manual entry for ${topic}`, 1)
+      : success(renderLinuxManualPage(entry));
+  }
+
+  private linuxApropos(arguments_: readonly string[]): ShellCommandResult {
+    if (arguments_.length !== 1) return usage("apropos <word>");
+    const query = (arguments_[0] ?? "").trim().toLowerCase();
+    if (query.length === 0 || query.length > 64)
+      return failure("apropos", "word must contain 1..64 characters", 2);
+    const matches = linuxManualPages()
+      .filter(
+        (entry) =>
+          entry.name.includes(query) ||
+          entry.summary.toLowerCase().includes(query),
+      )
+      .slice(0, 64);
+    return matches.length === 0
+      ? status(1)
+      : success(
+          `${matches.map((entry) => `${entry.name} (${String(entry.section)}) - ${entry.summary}`).join("\n")}\n`,
+        );
   }
 
   private linuxYes(arguments_: readonly string[]): ShellCommandResult {
@@ -3223,18 +5451,6 @@ export class ShellCommandRuntime {
 }
 
 type DateMode = "game" | "real" | "virtual";
-
-function linuxIdentityNumber(value: string): number | undefined {
-  if (value === "computer" || value === "1000") return 1_000;
-  if (value === "root" || value === "0") return 0;
-  return undefined;
-}
-
-function linuxIdentityName(value: number): string {
-  if (value === 1_000) return "computer";
-  if (value === 0) return "root";
-  return String(value);
-}
 
 function linuxModeString(
   kind: "device" | "directory" | "file" | "link",
@@ -3440,6 +5656,22 @@ function baseName(path: string): string {
   return path === "/" ? "/" : path.slice(path.lastIndexOf("/") + 1);
 }
 
+function nmSymbolCode(
+  section: "bss" | "data" | "rodata" | "text",
+  binding: "global" | "local" | "undefined",
+): string {
+  if (binding === "undefined") return "U";
+  const code =
+    section === "text"
+      ? "T"
+      : section === "rodata"
+        ? "R"
+        : section === "data"
+          ? "D"
+          : "B";
+  return binding === "global" ? code : code.toLowerCase();
+}
+
 function joinPath(parent: string, child: string): string {
   return parent === "/" ? `/${child}` : `${parent}/${child}`;
 }
@@ -3585,12 +5817,160 @@ function memoryRegion(total: number, used: number): MemoryRegion {
   };
 }
 
+function normalizeGuestProgramOutput(
+  output: string,
+  newline: "\n" | "\r\n",
+): string {
+  const normalized = output.replaceAll("\r\n", "\n").replaceAll("\r", "\n");
+  return newline === "\n" ? normalized : normalized.replaceAll("\n", "\r\n");
+}
+
 function formatClock(clockHz: number): string {
   if (clockHz >= 1_000_000)
     return `${(clockHz / 1_000_000).toFixed(2).replace(/\.00$/u, "")} MHz`;
   if (clockHz >= 1_000)
     return `${(clockHz / 1_000).toFixed(2).replace(/\.00$/u, "")} kHz`;
   return `${clockHz} Hz`;
+}
+
+function applyDosRenameTemplate(sourceName: string, template: string): string {
+  const [sourceBase = "", sourceExtension = ""] = sourceName
+    .toUpperCase()
+    .split(".", 2);
+  const [templateBase = "", templateExtension] = template
+    .toUpperCase()
+    .split(".", 2);
+  const applyComponent = (source: string, pattern: string): string => {
+    if (!/[*?]/u.test(pattern)) return pattern;
+    let output = "";
+    let sourceIndex = 0;
+    for (const character of pattern) {
+      if (character === "*") {
+        output += source.slice(sourceIndex);
+        sourceIndex = source.length;
+      } else if (character === "?") {
+        if (sourceIndex < source.length) output += source[sourceIndex];
+        sourceIndex += 1;
+      } else {
+        output += character;
+        sourceIndex += 1;
+      }
+    }
+    return output;
+  };
+  const base = applyComponent(sourceBase, templateBase);
+  const extension =
+    templateExtension === undefined
+      ? ""
+      : applyComponent(sourceExtension, templateExtension);
+  return extension.length === 0 ? base : `${base}.${extension}`;
+}
+
+function processStateCode(process: OsProcessRecord): string {
+  switch (process.state) {
+    case "ready":
+      return "R";
+    case "running":
+      return "R";
+    case "sleeping":
+      return "S";
+    case "waiting":
+      return "W";
+    case "stopped":
+      return "T";
+    case "zombie":
+      return "Z";
+  }
+}
+
+function renderJob(job: OsJobRecord): string {
+  const state =
+    job.state === "done"
+      ? `Done(${String(job.exitStatus ?? 0)})`
+      : job.state === "stopped"
+        ? "Stopped"
+        : "Running";
+  return `[${String(job.jobId)}] ${state.padEnd(10)} ${String(job.pid).padStart(5)} ${job.command}`;
+}
+
+function selectJob(
+  jobs: readonly OsJobRecord[],
+  selector: string | undefined,
+): { readonly job: OsJobRecord } | { readonly error: string } {
+  if (jobs.length === 0) return { error: "no current job" };
+  if (selector === undefined) return { job: jobs.at(-1)! };
+  const jobMatch = /^%([1-9][0-9]*)$/u.exec(selector);
+  const pidMatch = /^([1-9][0-9]*)$/u.exec(selector);
+  if (jobMatch === null && pidMatch === null)
+    return { error: `${selector}: invalid job specification` };
+  const numeric = Number((jobMatch ?? pidMatch)![1]);
+  const job =
+    jobMatch === null
+      ? jobs.find((candidate) => candidate.pid === numeric)
+      : jobs.find((candidate) => candidate.jobId === numeric);
+  return job === undefined ? { error: `${selector}: no such job` } : { job };
+}
+
+function parseSignalArguments(
+  arguments_: readonly string[],
+):
+  | { readonly error: string }
+  | { readonly pids: readonly number[]; readonly signal: OsProcessSignal } {
+  if (arguments_.length === 0) return { error: "missing process ID" };
+  let signal: OsProcessSignal = "SIGTERM";
+  let cursor = 0;
+  const first = arguments_[0] ?? "";
+  if (first === "-s" || first === "--signal") {
+    const requested = arguments_[1];
+    if (requested === undefined) return { error: "missing signal name" };
+    const parsed = parseSignal(requested);
+    if (parsed === undefined) return { error: `${requested}: invalid signal` };
+    signal = parsed;
+    cursor = 2;
+  } else if (first.startsWith("-") && first.length > 1) {
+    const parsed = parseSignal(first.slice(1));
+    if (parsed === undefined) return { error: `${first}: invalid signal` };
+    signal = parsed;
+    cursor = 1;
+  }
+  const values = arguments_.slice(cursor);
+  if (values.length === 0) return { error: "missing process ID" };
+  const pids: number[] = [];
+  for (const value of values) {
+    if (!/^[1-9][0-9]*$/u.test(value))
+      return { error: `${value}: invalid process ID` };
+    const pid = Number(value);
+    if (!Number.isSafeInteger(pid) || pid > 32_767)
+      return { error: `${value}: invalid process ID` };
+    pids.push(pid);
+  }
+  return { pids, signal };
+}
+
+function parseSignal(value: string): OsProcessSignal | undefined {
+  const normalized = value.toUpperCase().replace(/^SIG/u, "");
+  switch (normalized) {
+    case "1":
+    case "HUP":
+      return "SIGHUP";
+    case "2":
+    case "INT":
+      return "SIGINT";
+    case "9":
+    case "KILL":
+      return "SIGKILL";
+    case "15":
+    case "TERM":
+      return "SIGTERM";
+    case "18":
+    case "CONT":
+      return "SIGCONT";
+    case "19":
+    case "STOP":
+      return "SIGSTOP";
+    default:
+      return undefined;
+  }
 }
 
 function formatBinaryBytes(bytes: number): string {
@@ -3615,6 +5995,53 @@ function globMatches(value: string, pattern: string): boolean {
     .replaceAll("*", ".*")
     .replaceAll("?", ".");
   return new RegExp(`^${escaped}$`, "u").test(value);
+}
+
+function parseDosAttributeFilter(
+  value: string,
+): readonly (readonly [number, boolean])[] | undefined {
+  if (value.length === 0 || value.length > 12) return undefined;
+  const filters = new Map<number, boolean>();
+  let negated = false;
+  for (const token of value) {
+    if (token === "-") {
+      if (negated) return undefined;
+      negated = true;
+      continue;
+    }
+    const attribute =
+      token === "R"
+        ? dosFatAttribute.readOnly
+        : token === "H"
+          ? dosFatAttribute.hidden
+          : token === "S"
+            ? dosFatAttribute.system
+            : token === "A"
+              ? dosFatAttribute.archive
+              : token === "D"
+                ? dosFatAttribute.directory
+                : undefined;
+    if (attribute === undefined) return undefined;
+    filters.set(attribute, !negated);
+    negated = false;
+  }
+  if (negated || filters.size === 0) return undefined;
+  return [...filters];
+}
+
+function dosAttributeForToken(token: string): number | undefined {
+  switch (token) {
+    case "R":
+      return dosFatAttribute.readOnly;
+    case "H":
+      return dosFatAttribute.hidden;
+    case "S":
+      return dosFatAttribute.system;
+    case "A":
+      return dosFatAttribute.archive;
+    default:
+      return undefined;
+  }
 }
 
 function message(error: unknown): string {

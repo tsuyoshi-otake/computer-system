@@ -6,6 +6,7 @@
   "type": "module",
   "scripts": {
     "build": "npm run build:vendor-ui && node tools/build.mjs",
+    "build:pages": "node tools/build-pages.mjs",
     "build:vendor-ui": "tsc -p vendor/bedrock-core-ui-0.9.2/tsconfig.build.json",
     "deploy": "node tools/deploy.mjs",
     "dev:bds:web": "node tools/bds-web-companion.mjs",
@@ -20,10 +21,11 @@
     "test:mcp": "vitest run tests/tools/bdsDebugSession.test.mjs tests/tools/bdsMcpServer.test.mjs",
     "test:mcp:bds": "node tools/bds-mcp-smoke.mjs",
     "test:mcp:serial:bds": "node tools/bds-serial-mcp-smoke.mjs",
+    "test:pages": "vitest run tests/tools/pagesBuild.test.mjs tests/tools/pagesUi.test.mjs tests/tools/webManual.test.mjs",
     "test:web": "vitest run tests/tools/webSessionStore.test.mjs tests/tools/webCompanionServer.test.mjs tests/tools/webCompanionAdminConfig.test.mjs",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
-    "validate": "npm run format:check && npm run lint && npm run typecheck && npm run test && npm run build"
+    "validate": "npm run format:check && npm run lint && npm run typecheck && npm run test && npm run build && npm run build:pages"
   },
   "devDependencies": {
     "@minecraft/server": "2.8.0",

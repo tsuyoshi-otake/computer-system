@@ -12,7 +12,7 @@ describe("OS profile boundary", (): void => {
 
     expect(
       profile.pathDialect.resolve("work", profile.home, profile.home),
-    ).toBe("/home/computer/work");
+    ).toBe("/home/cs/work");
     expect(profile.virtualDevices.get("/dev/null")?.read()).toBe("");
     expect(filesystem.readFile("/etc/hostname")).toBe("c-linux1\n");
   });

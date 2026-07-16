@@ -8,7 +8,7 @@ describe("Computer System Linux shell and editor", (): void => {
     const filesystem = new InMemoryFilesystem();
     filesystem.writeFile("/hello.py", "print('hi')");
     const shell = new ShellSession(filesystem);
-    expect(shell.prompt()).toBe("~$ ");
+    expect(shell.prompt()).toBe("cs@c-000000:~$ ");
     expect(shell.submit("ls /").lines[0]).toContain("hello.py");
     expect(shell.submit("cat /hello.py").lines).toEqual(["print('hi')"]);
     expect(shell.submit("wat").lines).toEqual(["bash: wat: command not found"]);
@@ -117,7 +117,7 @@ describe("Computer System Linux shell and editor", (): void => {
       exitCode: 2,
       stderr: "debug: TUI commands are not supported through MCP\n",
     });
-    expect(shell.prompt()).toBe("~$ ");
+    expect(shell.prompt()).toBe("cs@c-000000:~$ ");
     expect(shell.submitDebugCommand("shutdown")).toMatchObject({
       exitCode: 2,
       stderr:
@@ -131,7 +131,7 @@ describe("Computer System Linux shell and editor", (): void => {
 
     expect(shell.submit("mkdir -p work/data").exitCode).toBe(0);
     expect(shell.submit("cd work").exitCode).toBe(0);
-    expect(shell.submit("pwd").lines).toEqual(["/home/computer/work"]);
+    expect(shell.submit("pwd").lines).toEqual(["/home/cs/work"]);
     expect(shell.submit("touch data/empty").exitCode).toBe(0);
     expect(shell.submit("echo hello > data/message").lines).toEqual([]);
     expect(shell.submit("echo world >> data/message").exitCode).toBe(0);
@@ -151,7 +151,7 @@ describe("Computer System Linux shell and editor", (): void => {
     );
     expect(shell.submit("rm data/moved").exitCode).toBe(0);
     expect(shell.submit("find . -name 'm*'").lines).toEqual([
-      "/home/computer/work/data/message",
+      "/home/cs/work/data/message",
     ]);
   });
 
@@ -175,9 +175,9 @@ describe("Computer System Linux shell and editor", (): void => {
   it("completes commands and filesystem paths at the cursor", (): void => {
     const shell = new ShellSession(new InMemoryFilesystem());
     expect(shell.complete("who", 3)).toEqual({
-      candidates: ["whoami"],
-      cursor: 7,
-      value: "whoami ",
+      candidates: ["who", "whoami"],
+      cursor: 3,
+      value: "who",
     });
     expect(shell.complete("cat /et", 7)).toEqual({
       candidates: ["/etc/"],
@@ -200,9 +200,10 @@ describe("Computer System Linux shell and editor", (): void => {
     expect(shell.submit("echo $HISTSIZE:$FAVORITE").lines).toEqual([
       "100:doraemon",
     ]);
-    expect(filesystem.readFile("/home/computer/.bashrc")).toBe(
+    expect(filesystem.readFile("/home/cs/.bashrc")).toBe(
       "export FAVORITE=doraemon\n",
     );
+    expect(filesystem.exists("/home/computer")).toBe(false);
   });
 
   it("supports redirects, quotes, variables, exit status, and control operators", (): void => {
@@ -300,8 +301,8 @@ describe("Computer System Linux shell and editor", (): void => {
       ticksPerSecond: 20,
     });
 
-    expect(shell.submit("whoami").lines).toEqual(["computer"]);
-    expect(shell.submit("id").lines[0]).toContain("uid=1000(computer)");
+    expect(shell.submit("whoami").lines).toEqual(["cs"]);
+    expect(shell.submit("id").lines[0]).toContain("uid=1000(cs)");
     expect(shell.submit("hostname").lines).toEqual(["c-info01"]);
     expect(shell.submit("uname -a").lines[0]).toBe(
       "Linux c-info01 1.0.0-cs #1 CS-Linux SMP i486 GNU/Linux",

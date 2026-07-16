@@ -11,4 +11,7 @@ while True:
     elif event[0] == "terminal_keys":
         shell.keys(event[1])
         shell.prompt()
+    elif event[0] == "terminal_closed":
+        shell.disconnect()
+        shell.prompt()
 `;

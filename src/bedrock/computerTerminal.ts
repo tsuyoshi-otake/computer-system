@@ -15,6 +15,19 @@ export async function openComputerTerminal(
   selectComputerTerminal(player.id, record.computerId);
   if (record.lifecycle.state.kind === "off") {
     computerHost.runtime.powerOn(record.computerId);
+  } else if (record.lifecycle.state.kind === "crashed") {
+    if (player.isSneaking) {
+      const recovered = computerHost.runtime.safeBoot(record.computerId);
+      player.sendMessage(
+        recovered.outcome === "accepted"
+          ? "Safe boot selected. /startup.py was preserved and bypassed once."
+          : `Safe boot failed: ${recovered.outcome === "failed" ? recovered.error.message : recovered.outcome}`,
+      );
+    } else {
+      player.sendMessage(
+        "Computer is crashed. Sneak while opening it to safe boot without changing /startup.py.",
+      );
+    }
   }
   await showTerminalView(
     player,

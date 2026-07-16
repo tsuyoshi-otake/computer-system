@@ -25,6 +25,9 @@ describe("OS command boundary", (): void => {
       "shutdown",
       "reboot",
       "clear",
+      "sudo",
+      "useradd",
+      "passwd",
     ]) {
       expect(shell.submit(command), command).toMatchObject({
         exitCode: 127,
@@ -36,6 +39,7 @@ describe("OS command boundary", (): void => {
     expect(shell.complete("l", 1).candidates).not.toContain("ls");
     expect(shell.complete("ba", 2).candidates).not.toContain("bash");
     expect(shell.complete("gr", 2).candidates).not.toContain("grep");
+    expect(shell.complete("su", 2).candidates).not.toContain("sudo");
     expect(shell.complete("di", 2).candidates).toContain("dir");
     expect(shell.complete("co", 2).candidates).toContain("copy");
 

@@ -33,6 +33,11 @@ timing.
   preparation, CPU slices, and returned views use only that rotating window;
   none enumerates the full scheduled population. Cycle and machine-instruction
   budgets remain separate.
+- An OS job stopped by SIGSTOP remains registered but is removed from CPU
+  service in O(1); timer/event preparation continues, and SIGCONT restores fair
+  service without changing guest elapsed time. The OS process table is a
+  separate per-Computer bounded view and never causes a global scheduled-process
+  scan.
 - Normal Python/CS486 execution and MCP debug execution are scheduler jobs.
   Debug slices use `mcp_debug`, not `guest_cpu`, and every limit, detach,
   interrupt, and completion path has one callback/event owner.
@@ -40,7 +45,15 @@ timing.
   shell invocation cannot compile on its initiating event callback. The job is
   admitted on a later tick in `guest_compile`; BASIC then hands the compiled
   executable to the normal bounded CPU scheduler. Source, object-count, memory,
-  and instruction ceilings still apply.
+  and instruction ceilings still apply. ASM preprocessing is additionally capped
+  at 1,000,000 aggregate source characters, 100,000 lexical tokens, 64 includes,
+  include depth 8, 256 macros, macro depth 16, 32 parameters, and 100,000
+  expanded tokens. Character and token capacity is checked before source,
+  definition, or macro output is appended. Because included text is not
+  represented by the root source length, an ASM job reserves the lane's 256-unit
+  maximum before expansion. The linker caps sections, initialized bytes,
+  symbols, relocations, cumulative static data, and output instructions; symbol
+  resolution is Map-backed and object layouts are computed once.
 - RS-232C uses an intrusive O(1) ready-link deque and admits work only when the
   deque is non-empty. Link, dequeue, and byte budgets are fixed. I2C and SPI
   charge bounded payload/address units and return `deferred` plus `retryTick`
@@ -62,6 +75,11 @@ timing.
   Dynamic Property operation. Pages are content-addressed and unchanged pages
   are reused across generations. The head changes only after all new pages
   exist, and a record changed while saving remains dirty for another generation.
+- Graceful shutdown/reboot maintains a fixed set of stopping Computers and
+  advances at most 16 entries by one phase per tick. New block I/O is rejected
+  after stop admission closes, while requests already admitted continue through
+  the normal deadline heap. Data and final sync cross the real persistence
+  boundary; a failed save faults the Computer instead of becoming a clean stop.
 
 ## MCP observability
 

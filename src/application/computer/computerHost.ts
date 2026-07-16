@@ -109,6 +109,27 @@ export class ComputerHost {
     runtime.configureFilesystemIo((computerId, operation, bytes) =>
       this.requestFilesystemIo(computerId, operation, bytes),
     );
+    runtime.configureLifecycleBoundaries({
+      pendingFilesystemIo: (computerId) => this.pendingBlockIo(computerId),
+      stopDevices: (computerId) => this.stopBlockDevices(computerId),
+      syncPersistence: (computerId) => {
+        const result = this.flush(computerId);
+        if (
+          result.outcome === "saved" ||
+          result.outcome === "unchanged" ||
+          result.outcome === "failed" ||
+          result.outcome === "missing"
+        ) {
+          return result;
+        }
+        return {
+          outcome: "failed" as const,
+          error: new Error(
+            `Unexpected persistence result during sync: ${result.outcome}`,
+          ),
+        };
+      },
+    });
     const budget = options.maxPersistenceChecksPerTick ?? 4;
     if (!Number.isSafeInteger(budget) || budget <= 0) {
       throw new RangeError("Persistence checks per tick must be positive.");
@@ -167,6 +188,9 @@ export class ComputerHost {
     const record = this.records.get(computerId);
     if (record === undefined) {
       return { outcome: "rejected", reason: "unknown_device" };
+    }
+    if (this.runtime.isStopping(computerId)) {
+      return { outcome: "rejected", reason: "stopping" };
     }
     this.ensureBlockDevices(record);
     return this.blockIo.submit(
@@ -307,6 +331,38 @@ export class ComputerHost {
         completion.code,
       );
     }
+  }
+
+  private pendingBlockIo(computerId: string): number {
+    const devices = this.blockDevices.get(computerId);
+    if (devices === undefined) return 0;
+    return (
+      devices.hdd.activity.pendingRequests +
+      devices.fdd.activity.pendingRequests
+    );
+  }
+
+  private stopBlockDevices(computerId: string): void {
+    const devices = this.blockDevices.get(computerId);
+    if (devices === undefined) return;
+    const completions = [
+      ...this.blockIo.unregister(
+        blockDeviceId(computerId, "hdd"),
+        this.guestNanoseconds,
+      ),
+      ...this.blockIo.unregister(
+        blockDeviceId(computerId, "fdd"),
+        this.guestNanoseconds,
+      ),
+    ];
+    this.blockDevices.delete(computerId);
+    this.deliverBlockIo({
+      budgetDeferred: false,
+      bytes: 0,
+      completions,
+      hostDeferred: false,
+      sectors: 0,
+    });
   }
 
   private ensureBlockDevices(record: ComputerRecord): ComputerBlockDevices {

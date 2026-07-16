@@ -8,6 +8,10 @@ import {
 import { nativeFunction } from "../../src/domain/runtime/value.js";
 import { InMemoryFilesystem } from "../../src/domain/filesystem/inMemoryFilesystem.js";
 import { TerminalBuffer } from "../../src/domain/terminal/terminalBuffer.js";
+import type {
+  CpuProcess,
+  CpuProcessState,
+} from "../../src/domain/runtime/cpuProcess.js";
 import { PythonCs486Harness } from "./pythonCs486Harness.js";
 
 const limits: SchedulerLimits = {
@@ -168,7 +172,7 @@ describe("round-robin scheduler", (): void => {
       cpuCyclesPerTick: 7_000,
     });
     for (let id = 0; id < 1_000; id += 1) {
-      scheduler.add(id, vm("while True:\n    pass\n"));
+      scheduler.add(id, alwaysReadyProcess());
     }
 
     const visited = new Set<number>();
@@ -181,6 +185,33 @@ describe("round-robin scheduler", (): void => {
     expect(visited.size).toBe(1_000);
   });
 });
+
+function alwaysReadyProcess(): CpuProcess {
+  let state: CpuProcessState = { kind: "ready" };
+  return {
+    get state(): CpuProcessState {
+      return state;
+    },
+    hasPendingCpuCycles: false,
+    memoryLimitBytes: 1,
+    memoryUsageBytes: 0,
+    advanceTick: (): CpuProcessState => state,
+    deliverEvent: (): boolean => false,
+    fail: (error): CpuProcessState => {
+      state = { error, kind: "crashed" };
+      return state;
+    },
+    runCpuSlice: (cpuCycleBudget, instructionBudget = 1) => ({
+      cpuCycles: Math.min(1_000, cpuCycleBudget),
+      executedInstructions: Math.min(1, instructionBudget),
+      state,
+    }),
+    terminate: (reason = "terminated"): CpuProcessState => {
+      state = { kind: "terminated", reason };
+      return state;
+    },
+  };
+}
 
 function vm(
   source: string,

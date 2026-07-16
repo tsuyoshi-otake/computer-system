@@ -215,6 +215,7 @@ suppressed error may leave a device accidentally marked as running.
 - [Phase 4: Implement networking and portable computers](https://github.com/tsuyoshi-otake/computer-system/issues/6)
 - [Phase 5: Implement turtles and upgrades](https://github.com/tsuyoshi-otake/computer-system/issues/7)
 - [Phase 6: Add command computers, hidden content, and release hardening](https://github.com/tsuyoshi-otake/computer-system/issues/8)
+- [OS Presence v1: connect guest runtime, lifecycle, Linux state, and DOS drive/FAT/BAT behavior](https://github.com/tsuyoshi-otake/computer-system/issues/20)
 
 ### M1: Repository and host-side runtime
 
@@ -243,6 +244,12 @@ suppressed error may leave a device accidentally marked as running.
     multi-session control
 - [x] paged and transactional filesystem persistence
 - [x] `startup.py`, shutdown, reboot, and crash reporting
+- [x] bounded per-Computer OS process/session/service/journal state, graceful
+      sync/stop/reboot phases, and cold persistence migration
+- [x] empty-by-default bounded OS network-state boundary for future M4 adapters,
+      without claiming a guest NIC, packet routing, or network commands
+- [x] DOS A:/C: drive state, wildcard/FAT metadata utilities, and bounded BAT
+      control flow (operator floppy insertion remains M3)
 
 ### M3: Redstone and local peripherals
 

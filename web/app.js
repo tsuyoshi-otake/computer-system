@@ -930,9 +930,10 @@ function machineAcceptsInput(lifecycle) {
 }
 
 function powerAction() {
-  if (machineLifecycle === "off" || machineLifecycle === "crashed") {
+  if (machineLifecycle === "off") {
     return "power_on";
   }
+  if (machineLifecycle === "crashed") return "safe_boot";
   if (
     ["booting", "running", "sleeping", "waiting_event"].includes(
       machineLifecycle,
@@ -963,9 +964,11 @@ function updatePowerButton() {
   elements.powerButton.title =
     action === "power_on"
       ? "Power on Computer"
-      : action === "shutdown"
-        ? "Shut down Computer"
-        : "Power transition in progress";
+      : action === "safe_boot"
+        ? "Safe boot Computer and bypass /startup.py once"
+        : action === "shutdown"
+          ? "Shut down Computer"
+          : "Power transition in progress";
 }
 
 async function requestPower() {
@@ -973,7 +976,11 @@ async function requestPower() {
   if (action === undefined || elements.powerButton.disabled) return;
   powerPending = true;
   elements.powerFeedback.textContent =
-    action === "power_on" ? "Powering on Computer." : "Shutting down Computer.";
+    action === "power_on"
+      ? "Powering on Computer."
+      : action === "safe_boot"
+        ? "Safe booting Computer; /startup.py will be preserved."
+        : "Shutting down Computer.";
   updatePowerButton();
   try {
     const response = await api("/api/power", {
@@ -992,7 +999,9 @@ async function requestPower() {
     elements.powerFeedback.textContent =
       action === "power_on"
         ? "Power-on request accepted."
-        : "Shutdown request accepted.";
+        : action === "safe_boot"
+          ? "Safe-boot request accepted; /startup.py was not changed."
+          : "Shutdown request accepted.";
   } catch (error) {
     elements.powerFeedback.textContent = `Power request failed: ${errorMessage(error)}`;
     showError(errorMessage(error));

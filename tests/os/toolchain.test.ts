@@ -1,34 +1,42 @@
 import { describe, expect, it } from "vitest";
 
 import { ShellSession } from "../../src/application/os/shellSession.js";
+import {
+  compileCs486Object,
+  compileCs486Source,
+} from "../../src/application/toolchain/highLevelCompilers.js";
+import { linkCs486Objects } from "../../src/application/toolchain/cs486Linker.js";
+import { runCs486 } from "../../src/domain/cpu/cs486.js";
 import { InMemoryFilesystem } from "../../src/domain/filesystem/inMemoryFilesystem.js";
 
 describe("CS486DX shell toolchain", (): void => {
   it("assembles, inspects, and executes a CS486 program", (): void => {
     const filesystem = new InMemoryFilesystem();
     const shell = new ShellSession(filesystem);
+    filesystem.makeDirectory("/work");
     filesystem.writeFile(
-      "/sum.asm",
+      "/work/sum.asm",
       "mov eax, 20\nadd eax, 22\nprint eax\nhalt\n",
     );
 
-    expect(shell.submit("as /sum.asm -o /sum").exitCode).toBe(0);
-    expect(shell.submit("/sum").stdout).toBe("42");
-    const measured = shell.submit("run --stats /sum");
+    expect(shell.submit("as /work/sum.asm -o /work/sum").exitCode).toBe(0);
+    expect(shell.submit("/work/sum").stdout).toBe("42");
+    const measured = shell.submit("run --stats /work/sum");
     expect(measured.stderr).toMatch(
       /4 instructions, \d+ CPU cycles, \d+\.\d{3} us at 33 MHz, halted/u,
     );
     expect(measured.stderr).toMatch(
       /memory: L1 \d+ hit\/\d+ miss, L2 \d+ hit\/\d+ miss, \d+ bus transfers, \d+ unaligned, \d+ pipeline flushes/u,
     );
-    expect(shell.submit("objdump /sum").stdout).toContain('"op":"add"');
+    expect(shell.submit("objdump /work/sum").stdout).toContain('"op":"add"');
   });
 
   it("compiles BASIC, C, and C++ subsets to the same executable format", (): void => {
     const filesystem = new InMemoryFilesystem();
     const shell = new ShellSession(filesystem);
+    filesystem.makeDirectory("/work");
     filesystem.writeFile(
-      "/sum.bas",
+      "/work/sum.bas",
       [
         "10 LET TOTAL = 0",
         "20 FOR I = 1 TO 5",
@@ -39,7 +47,7 @@ describe("CS486DX shell toolchain", (): void => {
       ].join("\n"),
     );
     filesystem.writeFile(
-      "/sum.c",
+      "/work/sum.c",
       [
         "int main() {",
         "int total = 0;",
@@ -52,7 +60,7 @@ describe("CS486DX shell toolchain", (): void => {
       ].join("\n"),
     );
     filesystem.writeFile(
-      "/answer.cpp",
+      "/work/answer.cpp",
       [
         "int main() {",
         "int answer = 6 * 7;",
@@ -62,20 +70,101 @@ describe("CS486DX shell toolchain", (): void => {
       ].join("\n"),
     );
 
-    expect(shell.submit("basic /sum.bas").stdout).toBe("15\n");
-    expect(shell.submit("basicc /sum.bas -o /sum-basic").exitCode).toBe(0);
-    expect(shell.submit("cc /sum.c -o /sum-c").exitCode).toBe(0);
-    expect(shell.submit("c++ /answer.cpp -o /answer").exitCode).toBe(0);
-    expect(shell.submit("/sum-basic").stdout).toBe("15\n");
-    expect(shell.submit("/sum-c").stdout).toBe("15\n");
-    expect(shell.submit("/answer").stdout).toBe("42\n");
+    expect(shell.submit("basic /work/sum.bas").stdout).toBe("15\n");
+    expect(
+      shell.submit("basicc /work/sum.bas -o /work/sum-basic").exitCode,
+    ).toBe(0);
+    expect(shell.submit("cc /work/sum.c -o /work/sum-c").exitCode).toBe(0);
+    expect(shell.submit("c++ /work/answer.cpp -o /work/answer").exitCode).toBe(
+      0,
+    );
+    expect(shell.submit("/work/sum-basic").stdout).toBe("15\n");
+    expect(shell.submit("/work/sum-c").stdout).toBe("15\n");
+    expect(shell.submit("/work/answer").stdout).toBe("42\n");
+  });
+
+  it("lowers a C for loop to an explicit CFG with a backward edge", (): void => {
+    const executable = compileCs486Source(
+      "c",
+      [
+        "int main() {",
+        "int total = 0;",
+        "for (int i = 1; i <= 5; i++) {",
+        "total = total + i;",
+        "}",
+        'printf("%d\\n", total);',
+        "return 0;",
+        "}",
+      ].join("\n"),
+    );
+    const result = runCs486(executable, { memoryBytes: 65_536 });
+
+    expect(result.output).toBe("15\n");
+    expect(result.registers.esp).toBe(65_536);
+    expect(
+      executable.instructions.some((instruction) =>
+        ["jg", "jge", "jl", "jle"].includes(instruction.op),
+      ),
+    ).toBe(true);
+    expect(
+      executable.instructions.some(
+        (instruction, index) =>
+          instruction.op === "jmp" && instruction.target < index,
+      ),
+    ).toBe(true);
+  });
+
+  it("spills a high-pressure nested expression while restoring ESP", (): void => {
+    const localNames = [
+      "a",
+      "b",
+      "c",
+      "d",
+      "e",
+      "f",
+      "g",
+      "h",
+      "i",
+      "j",
+      "k",
+      "l",
+    ] as const;
+    const nestedExpression = localNames.reduceRight(
+      (expression, name) =>
+        expression.length === 0 ? name : `${name} + (${expression})`,
+      "",
+    );
+    const object = compileCs486Object(
+      "c",
+      [
+        "int main() {",
+        ...localNames.map(
+          (name, index) => `int ${name} = ${String(index + 1)};`,
+        ),
+        `int answer = ${nestedExpression};`,
+        'printf("%d\\n", answer);',
+        "return answer;",
+        "}",
+      ].join("\n"),
+    );
+    const executable = linkCs486Objects([object]);
+    const result = runCs486(executable, { memoryBytes: 65_536 });
+    const frameOffsets = [
+      ...object.assembly.matchAll(/^sub ecx, (\d+)$/gmu),
+    ].map((match) => Number(match[1]));
+
+    expect(result.output).toBe("78\n");
+    expect(result.registers.esp).toBe(65_536);
+    expect(object.dataBytes).toBe(0);
+    expect(Math.max(...frameOffsets)).toBeGreaterThan(localNames.length * 4);
   });
 
   it("completes a bounded compiled workload larger than 10,000 instructions", (): void => {
     const filesystem = new InMemoryFilesystem();
     const shell = new ShellSession(filesystem);
+    filesystem.makeDirectory("/work");
     filesystem.writeFile(
-      "/strength.asm",
+      "/work/strength.asm",
       [
         "mov eax, 0",
         "mov ecx, 1",
@@ -95,8 +184,10 @@ describe("CS486DX shell toolchain", (): void => {
       ].join("\n"),
     );
 
-    expect(shell.submit("as /strength.asm -o /strength").exitCode).toBe(0);
-    const measured = shell.submit("run --stats /strength");
+    expect(
+      shell.submit("as /work/strength.asm -o /work/strength").exitCode,
+    ).toBe(0);
+    const measured = shell.submit("run --stats /work/strength");
     expect(measured.exitCode).toBe(0);
     expect(measured.stdout).toBe("1129513000");
     expect(measured.stderr).toMatch(/1[0-9]{4} instructions.*halted/u);
@@ -120,8 +211,9 @@ describe("CS486DX shell toolchain", (): void => {
   it("links C and ASM objects through global and external symbols", (): void => {
     const filesystem = new InMemoryFilesystem();
     const shell = new ShellSession(filesystem);
+    filesystem.makeDirectory("/work");
     filesystem.writeFile(
-      "/answer.asm",
+      "/work/answer.asm",
       [
         "global fast_answer",
         "fast_answer:",
@@ -131,7 +223,7 @@ describe("CS486DX shell toolchain", (): void => {
       ].join("\n"),
     );
     filesystem.writeFile(
-      "/main.c",
+      "/work/main.c",
       [
         "extern int fast_answer();",
         "int main() {",
@@ -142,16 +234,20 @@ describe("CS486DX shell toolchain", (): void => {
       ].join("\n"),
     );
 
-    expect(shell.submit("as -c /answer.asm -o /answer.o").exitCode).toBe(0);
-    expect(shell.submit("cc -c /main.c -o /main.o").exitCode).toBe(0);
-    expect(shell.submit("nm /answer.o").stdout).toContain("T fast_answer");
-    expect(shell.submit("nm /main.o").stdout).toContain("U fast_answer");
-    expect(shell.submit("objdump /main.o").stdout).toContain(
+    expect(
+      shell.submit("as -c /work/answer.asm -o /work/answer.o").exitCode,
+    ).toBe(0);
+    expect(shell.submit("cc -c /work/main.c -o /work/main.o").exitCode).toBe(0);
+    expect(shell.submit("nm /work/answer.o").stdout).toContain("T fast_answer");
+    expect(shell.submit("nm /work/main.o").stdout).toContain("U fast_answer");
+    expect(shell.submit("objdump /work/main.o").stdout).toContain(
       "reloc text-target",
     );
-    expect(shell.submit("ld /main.o /answer.o -o /linked").exitCode).toBe(0);
-    expect(shell.submit("nm /linked").stdout).toContain("T main");
-    const result = shell.submit("run --stats /linked");
+    expect(
+      shell.submit("ld /work/main.o /work/answer.o -o /work/linked").exitCode,
+    ).toBe(0);
+    expect(shell.submit("nm /work/linked").stdout).toContain("T main");
+    const result = shell.submit("run --stats /work/linked");
     expect(result).toMatchObject({ exitCode: 0, stdout: "42\n" });
     expect(result.stderr).toContain("CPU cycles");
   });
@@ -159,12 +255,13 @@ describe("CS486DX shell toolchain", (): void => {
   it("compiles BASIC objects and restricted inline assembly", (): void => {
     const filesystem = new InMemoryFilesystem();
     const shell = new ShellSession(filesystem);
+    filesystem.makeDirectory("/work");
     filesystem.writeFile(
-      "/answer.bas",
+      "/work/answer.bas",
       "10 LET ANSWER = 6 * 7\n20 PRINT ANSWER\n30 END\n",
     );
     filesystem.writeFile(
-      "/inline.cpp",
+      "/work/inline.cpp",
       [
         "int main() {",
         "int answer = 0;",
@@ -177,20 +274,24 @@ describe("CS486DX shell toolchain", (): void => {
       ].join("\n"),
     );
 
-    expect(shell.submit("basicc -c /answer.bas -o /answer.o").exitCode).toBe(0);
-    expect(shell.submit("ld /answer.o -o /answer").exitCode).toBe(0);
-    expect(shell.submit("/answer").stdout).toBe("42\n");
-    expect(shell.submit("c++ /inline.cpp -o /inline").exitCode).toBe(0);
-    expect(shell.submit("/inline").stdout).toBe("42\n");
+    expect(
+      shell.submit("basicc -c /work/answer.bas -o /work/answer.o").exitCode,
+    ).toBe(0);
+    expect(shell.submit("ld /work/answer.o -o /work/answer").exitCode).toBe(0);
+    expect(shell.submit("/work/answer").stdout).toBe("42\n");
+    expect(shell.submit("c++ /work/inline.cpp -o /work/inline").exitCode).toBe(
+      0,
+    );
+    expect(shell.submit("/work/inline").stdout).toBe("42\n");
 
     filesystem.writeFile(
-      "/unsafe.c",
+      "/work/unsafe.c",
       'int main() {\nasm("push eax");\nreturn 0;\n}\n',
     );
-    expect(shell.submit("cc /unsafe.c -o /unsafe")).toMatchObject({
+    expect(shell.submit("cc /work/unsafe.c -o /work/unsafe")).toMatchObject({
       exitCode: 1,
     });
-    expect(shell.submit("cc /unsafe.c -o /unsafe").stderr).toContain(
+    expect(shell.submit("cc /work/unsafe.c -o /work/unsafe").stderr).toContain(
       "unsafe inline assembly",
     );
   });
@@ -198,20 +299,260 @@ describe("CS486DX shell toolchain", (): void => {
   it("rejects duplicate and unresolved link symbols explicitly", (): void => {
     const filesystem = new InMemoryFilesystem();
     const shell = new ShellSession(filesystem);
+    filesystem.makeDirectory("/work");
     filesystem.writeFile(
-      "/first.asm",
+      "/work/first.asm",
       "global _start\n_start:\ncall missing\nhalt\nextern missing\n",
     );
-    filesystem.writeFile("/duplicate.asm", "global _start\n_start:\nhalt\n");
-    expect(shell.submit("as -c /first.asm -o /first.o").exitCode).toBe(0);
-    expect(shell.submit("as -c /duplicate.asm -o /duplicate.o").exitCode).toBe(
-      0,
+    filesystem.writeFile(
+      "/work/duplicate.asm",
+      "global _start\n_start:\nhalt\n",
     );
-    expect(shell.submit("ld /first.o -o /missing").stderr).toContain(
+    expect(
+      shell.submit("as -c /work/first.asm -o /work/first.o").exitCode,
+    ).toBe(0);
+    expect(
+      shell.submit("as -c /work/duplicate.asm -o /work/duplicate.o").exitCode,
+    ).toBe(0);
+    expect(shell.submit("ld /work/first.o -o /work/missing").stderr).toContain(
       "unresolved symbol missing",
     );
     expect(
-      shell.submit("ld /first.o /duplicate.o -o /duplicate").stderr,
+      shell.submit("ld /work/first.o /work/duplicate.o -o /work/duplicate")
+        .stderr,
     ).toContain("duplicate symbol _start");
+  });
+
+  it("preserves C and C++ expression, call, and local-scope semantics on Linux and DOS", (): void => {
+    const cSource = [
+      "int helper() {",
+      "int value = 40;",
+      "return value;",
+      "}",
+      "int main() {",
+      "int value = 1;",
+      "int Value = 2;",
+      "int adjustment = -1;",
+      "int answer = helper() + value + Value + adjustment;",
+      'printf("%d\\n", answer);',
+      "return answer;",
+      "}",
+    ].join("\n");
+    const cppSource = [
+      "int helper() {",
+      "int value = 43;",
+      "return value;",
+      "}",
+      "int main() {",
+      "int value = -1;",
+      "int answer = helper() + value;",
+      "std::cout << answer << std::endl;",
+      "return answer;",
+      "}",
+    ].join("\n");
+
+    for (const profile of ["linux", "dos"] as const) {
+      const filesystem = new InMemoryFilesystem();
+      const shell = new ShellSession(filesystem, { osProfile: profile });
+      if (profile === "linux") {
+        filesystem.makeDirectory("/work");
+        filesystem.writeFile("/work/good.c", cSource);
+        filesystem.writeFile("/work/good.cpp", cppSource);
+        expect(
+          shell.submit("cc /work/good.c -o /work/good-c"),
+          `${profile} C compile`,
+        ).toMatchObject({ exitCode: 0, stderr: "" });
+        expect(
+          shell.submit("c++ /work/good.cpp -o /work/good-cpp"),
+          `${profile} C++ compile`,
+        ).toMatchObject({ exitCode: 0, stderr: "" });
+        expect(shell.submit("/work/good-c").stdout).toBe("42\n");
+        expect(shell.submit("/work/good-cpp").stdout).toBe("42\n");
+      } else {
+        filesystem.writeFile("/drives/c/good.c", cSource);
+        filesystem.writeFile("/drives/c/good.cpp", cppSource);
+        expect(
+          shell.submit("CC C:\\GOOD.C /OUT:C:\\GOODC"),
+          `${profile} C compile`,
+        ).toMatchObject({ exitCode: 0, stderr: "" });
+        expect(
+          shell.submit("C++ C:\\GOOD.CPP /OUT:C:\\GOODCPP"),
+          `${profile} C++ compile`,
+        ).toMatchObject({ exitCode: 0, stderr: "" });
+        expect(shell.submit("C:\\GOODC").stdout).toBe("42\r\n");
+        expect(shell.submit("C:\\GOODCPP").stdout).toBe("42\r\n");
+      }
+    }
+  });
+
+  it.each([
+    ["c", "shadow.c"],
+    ["cpp", "shadow.cpp"],
+  ] as const)(
+    "rejects a %s call when a lexical local shadows the function",
+    (language, sourceName): void => {
+      let error: unknown;
+      try {
+        compileCs486Object(
+          language,
+          [
+            "int helper() { return 42; }",
+            "int main() {",
+            "int helper = 7;",
+            "return helper();",
+            "}",
+          ].join("\n"),
+          { sourceName },
+        );
+      } catch (candidate: unknown) {
+        error = candidate;
+      }
+
+      expect(error).toMatchObject({
+        code: "CSC001",
+        column: 8,
+        detail: "called object helper is not a function",
+        line: 4,
+        notes: [
+          {
+            message: "helper was declared as a local variable here",
+            span: { start: { column: 5, line: 3, source: sourceName } },
+          },
+        ],
+        source: sourceName,
+      });
+    },
+  );
+
+  it.each([
+    ["c", "order.c"],
+    ["cpp", "order.cpp"],
+  ] as const)(
+    "requires a %s function declaration before use while accepting a prototype",
+    (language, sourceName): void => {
+      const definition = "int helper() { return 42; }";
+      const main = "int main() { return helper(); }";
+
+      expect(() =>
+        compileCs486Object(language, [main, definition].join("\n"), {
+          sourceName,
+        }),
+      ).toThrow(
+        new RegExp(
+          `${sourceName.replace(".", "\\.")}:1:21: undeclared function helper; functions must be declared before use`,
+          "u",
+        ),
+      );
+
+      const result = runCs486(
+        compileCs486Source(
+          language,
+          ["int helper();", main, definition].join("\n"),
+          { sourceName },
+        ),
+        { memoryBytes: 65_536 },
+      );
+      expect(result.registers.eax).toBe(42);
+      expect(result.registers.esp).toBe(65_536);
+    },
+  );
+
+  it("rejects invalid C and C++ frontend input explicitly on Linux and DOS", (): void => {
+    const cases: readonly {
+      readonly detail: RegExp;
+      readonly extension: "c" | "cpp";
+      readonly name: string;
+      readonly source: string;
+    }[] = [
+      {
+        detail: /undeclared identifier.*missing/iu,
+        extension: "c",
+        name: "undeclared identifier",
+        source: "int main() {\nreturn missing;\n}\n",
+      },
+      {
+        detail: /duplicate declaration.*value/iu,
+        extension: "c",
+        name: "duplicate local declaration",
+        source:
+          "int main() {\nint value = 1;\nint value = 2;\nreturn value;\n}\n",
+      },
+      {
+        detail: /preprocessor|directive/iu,
+        extension: "c",
+        name: "unsupported preprocessor directive",
+        source: "#define ANSWER 42\nint main() {\nreturn ANSWER;\n}\n",
+      },
+      {
+        detail: /top-level|outside (?:of )?(?:a )?function|global/iu,
+        extension: "c",
+        name: "initialized top-level global",
+        source: "int answer = 42;\nint main() {\nreturn answer;\n}\n",
+      },
+      {
+        detail: /expression|operand/iu,
+        extension: "c",
+        name: "missing expression operand",
+        source: "int main() {\nint answer = 1 + ;\nreturn answer;\n}\n",
+      },
+      {
+        detail: /expression|unbalanced|parenthes/iu,
+        extension: "cpp",
+        name: "unbalanced expression",
+        source: "int main() {\nreturn (1 + 2;\n}\n",
+      },
+      {
+        detail: /unsupported|class|C\+\+/iu,
+        extension: "cpp",
+        name: "unsupported C++ class",
+        source:
+          "class Answer {\npublic:\nint value;\n};\nint main() {\nreturn 0;\n}\n",
+      },
+    ];
+
+    for (const profile of ["linux", "dos"] as const) {
+      const filesystem = new InMemoryFilesystem();
+      const shell = new ShellSession(filesystem, { osProfile: profile });
+      if (profile === "linux") filesystem.makeDirectory("/work");
+
+      for (const [index, testCase] of cases.entries()) {
+        const stem = `bad${String(index)}`;
+        const sourcePath =
+          profile === "linux"
+            ? `/work/${stem}.${testCase.extension}`
+            : `/drives/c/${stem}.${testCase.extension}`;
+        const outputPath =
+          profile === "linux"
+            ? `/work/out${String(index)}`
+            : `/drives/c/out${String(index)}`;
+        const command =
+          profile === "linux"
+            ? `${testCase.extension === "c" ? "cc" : "c++"} ${sourcePath} -o ${outputPath}`
+            : `${testCase.extension === "c" ? "CC" : "C++"} C:\\${stem.toUpperCase()}.${testCase.extension.toUpperCase()} /OUT:C:\\OUT${String(index)}`;
+        filesystem.writeFile(sourcePath, testCase.source);
+
+        const result = shell.submit(command);
+        expect(result.exitCode, `${profile}: ${testCase.name} must fail`).toBe(
+          1,
+        );
+        expect(result.stdout, `${profile}: ${testCase.name} stdout`).toBe("");
+        expect(
+          result.stderr,
+          `${profile}: ${testCase.name} diagnostic`,
+        ).toMatch(testCase.detail);
+        expect(
+          result.stderr,
+          `${profile}: ${testCase.name} error code`,
+        ).toMatch(/error [A-Z0-9]+:/u);
+        expect(
+          filesystem.exists(outputPath),
+          `${profile}: ${testCase.name} output file`,
+        ).toBe(false);
+        expect(
+          result.stderr.endsWith(profile === "dos" ? "\r\n" : "\n"),
+          `${profile}: ${testCase.name} newline`,
+        ).toBe(true);
+      }
+    }
   });
 });

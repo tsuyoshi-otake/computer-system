@@ -33,7 +33,16 @@ export interface MigrationSaveTransaction {
   step(maxOperations?: number): MigrationSaveStepResult;
 }
 
+export interface MigrationCleanupTransaction {
+  step(maxOperations?: number): MigrationSaveStepResult;
+}
+
 export interface ComputerStorageMigrationRepository {
+  beginCleanupComputer(
+    computerId: string,
+    generation: number,
+  ): MigrationCleanupTransaction;
+  beginCleanupIdentities(generation: number): MigrationCleanupTransaction;
   beginLoadComputer(computerId: string): MigrationLoadTransaction<unknown>;
   beginLoadIdentities(): MigrationLoadTransaction<unknown>;
   beginSaveComputer(
@@ -51,8 +60,10 @@ export type ComputerStorageMigrationPhase =
   | "computer_load"
   | "computer_save"
   | "computer_verify"
+  | "computer_cleanup"
   | "identity_save"
-  | "identity_verify";
+  | "identity_verify"
+  | "identity_cleanup";
 
 export type ComputerStorageMigrationStatus =
   | {
@@ -85,9 +96,10 @@ export interface ComputerStorageMigrationOptions {
 const currentStorageFormat: MigrationStorageFormat = "content_addressed_blobs";
 
 /**
- * Converts legacy World Dynamic Property snapshots without exposing a partial
- * identity registry. Computer generations are committed and verified first;
- * the identity generation is the final activation point.
+ * Scans every referenced Computer independently from the identity storage
+ * format. Changed Computer generations are committed and verified first; a
+ * legacy identity generation remains the final activation point, while an
+ * already-current identity generation is never rewritten just for scanning.
  */
 export class ComputerStorageMigrationCoordinator {
   private readonly maximumComputers: number;
@@ -96,14 +108,18 @@ export class ComputerStorageMigrationCoordinator {
   private identitySave: MigrationSaveTransaction | undefined;
   private identitySavedGeneration: number | undefined;
   private identityVerify: MigrationLoadTransaction<unknown> | undefined;
+  private identityCleanup: MigrationCleanupTransaction | undefined;
   private identitySnapshot: ComputerIdentitySnapshot | undefined;
   private identitySourceGeneration: number | undefined;
+  private identityRequiresSave = false;
+  private identityRecovered = false;
   private observations: readonly ComputerIdentityObservation[] = [];
   private computerIndex = 0;
   private computerLoad: MigrationLoadTransaction<unknown> | undefined;
   private computerSave: MigrationSaveTransaction | undefined;
   private computerSavedGeneration: number | undefined;
   private computerVerify: MigrationLoadTransaction<unknown> | undefined;
+  private computerCleanup: MigrationCleanupTransaction | undefined;
   private pendingSnapshot: ComputerSnapshot | undefined;
   private computerSourceGeneration: number | undefined;
   private migratedComputers = 0;
@@ -160,7 +176,7 @@ export class ComputerStorageMigrationCoordinator {
             break;
           case "computer_load":
             if (this.computerIndex >= this.observations.length) {
-              this.beginIdentitySave();
+              this.finishComputerScan();
               break;
             }
             this.computerLoad ??= this.repository.beginLoadComputer(
@@ -177,6 +193,10 @@ export class ComputerStorageMigrationCoordinator {
             operations += 1;
             this.advanceComputerVerify(this.computerVerify!.step(1));
             break;
+          case "computer_cleanup":
+            operations += 1;
+            this.advanceComputerCleanup(this.computerCleanup!.step(1));
+            break;
           case "identity_save":
             operations += 1;
             this.advanceIdentitySave(this.identitySave!.step(1));
@@ -184,6 +204,10 @@ export class ComputerStorageMigrationCoordinator {
           case "identity_verify":
             operations += 1;
             this.advanceIdentityVerify(this.identityVerify!.step(1));
+            break;
+          case "identity_cleanup":
+            operations += 1;
+            this.advanceIdentityCleanup(this.identityCleanup!.step(1));
             break;
         }
       }
@@ -216,14 +240,11 @@ export class ComputerStorageMigrationCoordinator {
       this.maximumComputers,
     );
     this.identitySourceGeneration = result.generation;
-    if (result.sourceFormat === currentStorageFormat) {
-      this.identitySnapshot = snapshot;
-      this.observations = snapshot.observations;
-      this.complete();
-      return;
-    }
     this.identitySnapshot = snapshot;
     this.observations = snapshot.observations;
+    this.identityRequiresSave =
+      result.sourceFormat !== currentStorageFormat || result.recovered;
+    this.identityRecovered = result.recovered;
     this.phase = "computer_load";
   }
 
@@ -243,10 +264,20 @@ export class ComputerStorageMigrationCoordinator {
         `Stored Computer ${snapshot.computerId} does not match ${String(this.currentComputerId)}`,
       );
     }
-    if (
-      result.sourceFormat === currentStorageFormat &&
-      snapshot === result.value
-    ) {
+    const requiresSave =
+      result.sourceFormat !== currentStorageFormat ||
+      result.recovered ||
+      snapshot !== result.value;
+    if (result.sourceFormat === currentStorageFormat && !result.recovered) {
+      this.pendingSnapshot = requiresSave ? snapshot : undefined;
+      this.computerCleanup = this.repository.beginCleanupComputer(
+        snapshot.computerId,
+        result.generation,
+      );
+      this.phase = "computer_cleanup";
+      return;
+    }
+    if (!requiresSave) {
       this.skippedComputers += 1;
       this.advanceComputer();
       return;
@@ -268,6 +299,26 @@ export class ComputerStorageMigrationCoordinator {
       this.currentComputerId!,
     );
     this.phase = "computer_verify";
+  }
+
+  private advanceComputerCleanup(result: MigrationSaveStepResult): void {
+    if (result.outcome === "pending") return;
+    if (result.generation !== this.computerSourceGeneration) {
+      throw new Error(
+        `Computer ${String(this.currentComputerId)} cleanup changed generation`,
+      );
+    }
+    this.computerCleanup = undefined;
+    if (this.pendingSnapshot !== undefined) {
+      this.computerSave = this.repository.beginSaveComputer(
+        this.pendingSnapshot,
+        this.computerSourceGeneration,
+      );
+      this.phase = "computer_save";
+      return;
+    }
+    this.skippedComputers += 1;
+    this.advanceComputer();
   }
 
   private advanceComputerVerify(
@@ -312,6 +363,10 @@ export class ComputerStorageMigrationCoordinator {
   private advanceComputer(): void {
     this.computerIndex += 1;
     this.computerLoad = undefined;
+    this.computerCleanup = undefined;
+    this.computerSave = undefined;
+    this.pendingSnapshot = undefined;
+    this.computerSourceGeneration = undefined;
     this.phase = "computer_load";
   }
 
@@ -321,6 +376,27 @@ export class ComputerStorageMigrationCoordinator {
       this.identitySourceGeneration!,
     );
     this.phase = "identity_save";
+  }
+
+  private finishComputerScan(): void {
+    if (this.identityRecovered) {
+      this.beginIdentitySave();
+      return;
+    }
+    this.identityCleanup = this.repository.beginCleanupIdentities(
+      this.identitySourceGeneration!,
+    );
+    this.phase = "identity_cleanup";
+  }
+
+  private advanceIdentityCleanup(result: MigrationSaveStepResult): void {
+    if (result.outcome === "pending") return;
+    if (result.generation !== this.identitySourceGeneration) {
+      throw new Error("Identity cleanup changed generation");
+    }
+    this.identityCleanup = undefined;
+    if (this.identityRequiresSave) this.beginIdentitySave();
+    else this.complete();
   }
 
   private advanceIdentitySave(result: MigrationSaveStepResult): void {

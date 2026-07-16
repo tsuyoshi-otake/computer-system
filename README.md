@@ -70,6 +70,15 @@ reference. Section-level results identify tutorials, how-to material, concepts,
 and reference entries while Previous/Next controls and arrow keys continue to
 follow publication order.
 
+The same publication is available as a static reference from the
+[Computer System GitHub Pages site](https://tsuyoshi-otake.github.io/computer-system/).
+`web/manual.js` remains the only authored source for its 16 chapters, stable
+section IDs, reading paths, and bounded search. The Pages build pre-renders that
+source so the complete manual, table of contents, and hash links remain usable
+without JavaScript. GitHub Pages is documentation only: it cannot connect to
+BDS, accept a four-digit Computer number, obtain a bearer token, display a live
+terminal, or submit guest input. Use the local companion for those operations.
+
 See [the implementation roadmap](docs/roadmap.md) for the planned compatibility
 scope and executable acceptance criteria.
 
@@ -109,8 +118,23 @@ npm run test:bds:disconnect
 npm run test:mcp
 npm run test:mcp:bds
 npm run test:web
+npm run build:pages
+npm run test:pages
 npm run dev:bds:web
 ```
+
+`npm run build:pages` writes the static landing page and manual to
+`dist/pages/`. The builder publishes an explicit allowlist of the site
+presentation files and `web/assets/`; it reads the canonical manual module but
+never copies the Web Terminal entry page, terminal application, session storage,
+or `/api/*` client. `npm run test:pages` checks the 16-chapter projection,
+base-path-safe links and assets, no-JavaScript fallback, search/deep links, SEO
+metadata, and the absence of live-terminal controls.
+`.github/workflows/pages.yml` performs the same build for pushes to `main` or
+the initial publication branch `phase-2/computer-vertical-slice`, and on manual
+dispatch. It deploys only `dist/pages` as the Pages artifact. The release-branch
+trigger can be removed after integration into `main`; generated Pages output is
+not committed.
 
 To accept every reverse-proxy Origin instead of pinning one domain, enable
 explicit wildcard mode:
@@ -138,6 +162,12 @@ that directory as a read-only source and copies it into a managed runtime under
 $env:BDS_HOME = "C:\path\to\bedrock-server"
 npm run test:mcp:bds
 ```
+
+The real-BDS smoke requires a `linux_authentication/PASS` record in addition to
+the overall suite result. That isolated probe rejects MCP work before login,
+sets the initial password through masked terminal input, reboots, authenticates
+as `cs`, confirms `whoami`, and shuts the probe Computer down. Its password is
+never included in the result or BDS log record.
 
 For interactive work, start the MCP-managed server with the debug world
 preserved, connect Minecraft to the reported port, and run player-scoped probes
@@ -353,17 +383,140 @@ password-authenticated terminal. Cloudflare also recommends Full or Full
 Terminal commands execute inside the Computer System sandbox, never in the host
 Windows or BDS process. Computer System Linux 1.0 (`CS-Linux 1.0`) boots a
 non-destructive Linux profile with `/etc`, `/dev`, `/tmp`, `/usr`, `/var`, and
-`/home/computer`. Existing files are preserved while `/tmp` is explicitly
-volatile. On first boot it requires the `computer` administrator password twice;
-later boots stop at `Password:` until it matches. The bounded salted SHA-256
-record is stored in `/etc/shadow`, never the plaintext, and Web input is masked,
-excluded from local history, and excluded from completion. Three failed attempts
-incur a two-second guest delay. Every OS boot resets only the terminal display
-buffer before printing the minimal OS identity and prompt; persisted files and
-`/etc/shadow` remain intact. The interactive account is UID/GID 1000; root owns
-system paths, while mode, UID, GID, modification time, symbolic links, and
-hard-link groups persist with backward-compatible filesystem snapshots. A
-profile boundary separates path syntax, boot layout, environment, and virtual
+`/home/cs`. Existing files are preserved while `/tmp` is explicitly volatile.
+The initial account is `cs` at UID/GID 1000 with `/home/cs` and membership in
+the `sudo` group. Root is UID/GID 0 and starts password-locked. On first boot,
+CS-Linux asks for the `cs` password twice; later boots stop at `login:` and then
+`Password:` so any unlocked account can authenticate. Bounded salted SHA-256
+records are stored in `/etc/shadow`, never plaintext, and secret Web input is
+masked, excluded from local history, and excluded from completion. Three failed
+attempts incur a two-second guest delay. Every OS boot resets only the terminal
+display buffer before printing the minimal OS identity and prompt; persisted
+files and the account database remain intact.
+
+The state model, persistence projection, limits, and verification rubric are
+specified in [`docs/os-presence.md`](docs/os-presence.md).
+
+After authentication, the prompt is `<login>@<computer-id>:<path>$` (or `#` for
+effective UID 0). CS-Linux shows the previous login when one exists, reads the
+real `/etc/motd`, and loads the authenticated user's `.bash_history`. History is
+bounded to 100 entries, 512 UTF-8 bytes per line, and 32 KiB total, and is saved
+as a mode-0600 regular file on logout or disconnect. Passwords and other secret
+conversation input never become history entries.
+
+Each running Computer owns one bounded OS runtime state. PID 1 is
+`/sbin/cs-init`; the `cs-login` service owns a waiting getty, and every login
+shell and admitted Python/CS486/background task has an explicit PID, PPID,
+UID/GID, state, start tick, and modeled CPU-cycle account. `ps`/`ps -f` and the
+single-snapshot `top` inspect that table. `kill` supports HUP, INT, TERM, KILL,
+STOP, and CONT with guest ownership checks, while `jobs`, `fg`, `bg`, and `wait`
+operate only on jobs owned by the current login shell. A trailing `&` is
+admitted only for one interactive `sleep`, `python`/`micropython`, or `run`
+command; pipelines, redirects, scripts, aliases, functions, MCP submissions, and
+other commands are rejected before side effects. The default ceilings are 64
+processes and 32 jobs per Computer.
+
+When the final terminal session disconnects, CS-Linux cancels any secret prompt,
+drops nested `sudo`/`su` identity state and the sudo timestamp, cancels any
+credential-capturing foreground Python/CS486 process, compiler job, or queued
+MCP guest job, and returns to `login:`. The runtime owns this finalization even
+when the guest program ignores `terminal_closed`; reconnecting never inherits an
+unattended root shell or resumes work with stale elevated credentials.
+
+`/etc/passwd`, `/etc/group`, and `/etc/shadow` are the bounded authoritative
+account database. `passwd` changes credentials; `useradd`, `userdel`, and
+`usermod` manage users; `groupadd` and `groupdel` manage groups. Account and
+group mutations require superuser privilege. Raw writes, links, moves, metadata
+changes, and removals of these managed files are rejected even for root; the
+account commands are their only mutation boundary and commit them together. A
+member of `sudo` authenticates with that member's own password to run a command
+with scoped effective root privilege. `su` instead authenticates the target
+account and changes the active login context until that nested session exits.
+The locked root account cannot be used for password login or `su` until an
+administrator deliberately assigns it a password.
+
+The legacy name `computer` is permanently reserved for both users and groups, so
+a current account can never be confused with migration input. One user may have
+at most 32 supplementary groups. An attempt to add a 33rd is rejected
+transactionally without changing any account file. Default `useradd` home
+provisioning recursively creates missing ancestors, but the account records and
+the complete new home tree are one all-or-nothing operation: capacity or
+filesystem failure leaves neither the account nor partial directories.
+
+UID 1000 is also the persisted boot-service identity for `/startup.py` and is
+resolved from the authoritative account database on every boot. Its login name
+and home may be changed only while the account is inactive, but `userdel` cannot
+remove that UID. A fresh desktop boot creates an empty, mode-0644 `/startup.py`
+owned by UID/GID 1000 while keeping `/` root-owned and non-writable. An empty
+file selects the built-in shell boot program; once the user saves source there,
+later boots execute that source with the same current UID 1000 account and
+supplementary groups.
+
+Every guest filesystem entry point enforces Linux owner/group/other permissions,
+directory traversal, ownership rules, sticky-directory deletion, protected hard
+links, and the active `umask` (initially `022`). Newly created entries receive
+the caller's effective UID/GID, root owns system paths, and setuid/setgid bits
+do not grant hidden credentials. Mode, UID, GID, modification time, symbolic
+links, hard-link groups, and deletion tombstones persist in backward-compatible
+filesystem snapshots.
+
+The supported legacy migration is complete rather than an alias. A recognized
+`computer` account is renamed to `cs`, `/home/computer` is moved to `/home/cs`,
+and the old passwd/group/shadow name and home path disappear. No compatibility
+user or symlink is retained. The exact existing password payload, UID/GID, file
+contents, modes, ownership, mtimes, symbolic links, hard-link identities, and
+tombstones are preserved. A conflicting destination fails explicitly instead of
+merging unrelated data, and restarting after a completed migration is
+idempotent. The old `computer` user and group names remain reserved after that
+success; administrators cannot recreate or rename an account or group to them.
+
+Startup scans each Computer referenced by the identity registry even when that
+registry already uses the current paged-store format. A Computer payload that
+needs a cold OS/DOS-state upgrade is saved and reload-verified independently; an
+already-current healthy identity head is left untouched. If a current-format
+head is corrupt or incomplete but its immediately previous generation validates,
+the recovered Computer or identity payload is saved back into that head slot and
+reload-verified with `recovered: false` before startup completes. Interrupted
+work resumes by rescanning, so the same Computer keeps its identity and
+completed payloads are not rewritten.
+
+The same state owns login sessions, the last 64 login records, at most eight
+active sessions, 32 services, 16 mounts, 64 devices, and a bounded journal. Use
+`tty`, `who`, `w`, and `last` for session state; `service --status-all` or
+`service <name> status` for read-only service status; and `man`/`apropos` for
+the installed, versioned guest manual index. Service start/stop/restart is owned
+by `cs-init` and is not an operator command in this release.
+
+`shutdown` and `reboot` are multi-phase state transitions rather than immediate
+power cuts. New guest and block-I/O admission stops first; owned work receives a
+terminal signal, already-admitted block I/O drains, the Computer crosses a real
+data-persistence boundary, unmounts active mounts, stops services and devices,
+crosses a final persistence boundary, and only then powers off or reboots. Each
+phase has a 200-tick deadline. A failed durability or drain boundary faults the
+machine visibly instead of claiming a clean shutdown. Immediately before the
+final callback, the runtime records `final sync requested` and that the shutdown
+or reboot phases are prepared for final persistence. Those neutral records are
+part of the saved cold projection exactly once; no unsaved success message is
+added after the callback. If marker creation or the final callback fails, the
+runtime removes only that attempt's provisional markers before publishing the
+fault. A later automatic dirty-record save therefore cannot turn a failed
+boundary into apparent success. `sync` uses the same real host persistence
+boundary and returns failure when that boundary is unavailable. The runtime also
+exposes a one-shot safe-boot boundary that preserves but bypasses a broken
+`/startup.py`. When a Computer is `crashed`, its Web Terminal power control
+changes to safe boot. In Minecraft, sneak while opening that crashed Computer;
+opening it normally prints the same recovery instruction. Neither path deletes,
+renames, or rewrites the startup file, and safe boot is not available from the
+guest shell or MCP command path.
+
+The same per-Computer state has an empty-by-default integration boundary for a
+future guest NIC: at most eight interfaces, 32 addresses, and 64 sockets. It
+validates loopback/Ethernet identity, IPv4/IPv6 addresses, link transitions,
+nonnegative counters, and TCP/UDP open/bind/listen/close state through
+Map-backed indexes. This is internal state ownership, not a shipped network
+stack or command surface.
+
+A profile boundary separates path syntax, boot layout, environment, and virtual
 devices. Closed-by-default Linux and DOS command registries own public names,
 completion, and help, while separate syntax frontends own expansion and errors.
 The implemented DOS profile shares the same terminal, filesystem, persistence,
@@ -375,20 +528,71 @@ aliases. Invalid long names fail explicitly instead of being silently truncated.
 DOS-facing commands use CRLF and DOS-specific status/error text rather than
 leaking Linux applet output. The implemented compatibility surface includes
 `DIR`, `TYPE`, `COPY`, `DEL`/ `ERASE`, `MD`, `RD`, `MOVE`, `REN`/`RENAME`,
-`TREE`, `VOL`, `VER`, `TIME`, `TIMER`, `DOSKEY /HISTORY`, and `MEM /F`. Computer
-System DOS 6.2 (`CS-DOS 6.2`) reads a bounded `CONFIG.SYS` and runs
-`AUTOEXEC.BAT`; `SET`, `PATH`, `PROMPT`, `REM`, `@ECHO OFF`, `%0`…`%9`, `%VAR%`,
-and `%ERRORLEVEL%` are supported. Unsupported boot directives fail visibly.
+`TREE`, `VOL`, `VER`, `TIME`, `TIMER`, `DOSKEY /HISTORY`, `MEM /F`, `ATTRIB`,
+`LABEL`, and read-only `CHKDSK`. Computer System DOS 6.2 (`CS-DOS 6.2`) reads a
+bounded `CONFIG.SYS` and runs `AUTOEXEC.BAT`; `SET`, `PATH`, `PROMPT`, `REM`,
+`@ECHO OFF`, `%0`…`%9`, `%VAR%`, and `%ERRORLEVEL%` are supported. Unsupported
+boot directives fail visibly. `DEVICE`/`DEVICEHIGH` enables the modeled HIMEM or
+EMM386 state only after the referenced installed guest file begins with the
+expected versioned CS-DOS driver capsule; a missing, deleted, or corrupt file
+fails before changing memory state.
+
+The DOS runtime owns A: and C:, the active drive, a separate current directory
+for each drive, media generations, volume labels, and FAT metadata. Production
+C: is persistent; A: reports not ready until a future Bedrock media adapter
+inserts a floppy, and cold restore always detaches A: before activation. `DIR`,
+`COPY`, `DEL`/`ERASE`, and `REN`/`RENAME` support bounded DOS `*`/`?` file
+specifications and use each file's persisted two-second FAT timestamp. `DIR /A`
+filters read-only, hidden, system, directory, and archive state. `ATTRIB`
+displays or changes R/H/S/A (including bounded `/S`), and read-only state is
+enforced by write, delete, rename, copy, and editor paths. `LABEL` reads or
+changes the generation-bound volume label. `CHKDSK` reports actual
+file/directory/byte/free counts and metadata consistency but never repairs the
+volume. It does not alter guest file contents, labels, or attributes, although
+reading a legacy entry may materialize its missing versioned FAT metadata.
+
+Single-path writes, `MD`/`RD`, the shipped wildcard `COPY`, `REN`/`RENAME`, and
+`DEL`/`ERASE` paths, plus `MOVE` and `ATTRIB`, trial their complete FAT
+aggregate on a clone before commit. Filesystem bytes, inode/link indexes,
+metadata, byte and blob accounting, and FAT state then share one bounded undo
+transaction; nested wildcard writes reuse the outer filesystem snapshot.
+Capacity rejection and injected post-mutation write, delete, rename, move,
+attribute, directory, FAT, and persistence-observer failures prove that both
+aggregates return to their exact pre-command snapshots and revisions. Drive
+selection, per-drive current directories, the displayed prompt, labels, and
+lazily synthesized FAT metadata use that observer-owned boundary too; if
+publication fails, the old aggregate is republished. All operands of one
+multi-path `MD` commit or roll back together. Transaction callbacks are strictly
+synchronous: declared async callbacks are rejected before execution, while a
+callback that disguises a Promise is rolled back and its filesystem/DOS scope is
+quarantined until settlement so post-`await` mutation cannot leak. The shared
+quarantine blocks every managed filesystem and DOS aggregate during that window,
+so a continuation cannot escape through a second owner after its callback stack
+unwinds.
+
+The bounded BAT interpreter supports labels, `GOTO`, `GOTO :EOF`, internal and
+external `CALL`, `SHIFT`, `IF [NOT] ERRORLEVEL`, `IF [NOT] EXIST`, and
+`COMMAND /C` or `/K`. It caps lines and labels at 256, positional arguments at
+nine, call depth at eight, jumps at 1024, executed steps at 4096, loaded
+programs at 64, expanded commands at 4096 characters, and output at 256,000
+characters. This is not native COMMAND.COM or `.COM`/`.EXE` execution. Unquoted
+Unix-style `&&` and `||` chains are rejected inside BAT control flow. Pipes and
+redirections remain documented safe-shell extensions, not claims of native
+COMMAND.COM semantics.
 
 ```text
 files:  pwd cd ls cat mkdir rmdir touch rm cp mv ln readlink realpath find stat
 text:   echo printf head tail wc grep sort uniq tr cut seq tee cmp diff xargs
 inspect: file sha256sum od hexdump df du quota mount dmesg
 shell:  sh bash source env printenv export unset alias unalias command read
-info:   whoami id groups hostname uname date uptime cpuinfo free
-system: clear vi history time sleep test [ shutdown reboot exit true false
-DOS:    EDIT DIR TREE VOL TIME TIMER DOSKEY MEM and path/file aliases
-toolchain: as cc c++ basic basicc ld nm run objdump
+identity: whoami id groups passwd su sudo login logout getent
+accounts: useradd userdel usermod groupadd groupdel
+process: ps top kill jobs fg bg wait tty who w last service
+manual: man apropos
+info:   hostname uname date uptime cpuinfo free
+system: clear vi history time sleep test [ umask sync shutdown reboot exit true false
+DOS:    EDIT DIR ATTRIB LABEL CHKDSK TREE VOL TIME TIMER DOSKEY MEM DEBUG + aliases
+toolchain: as cc c++ basic basicc ld nm run objdump csdb (DEBUG on DOS)
 ```
 
 The parser supports single and double quotes, backslash escapes, environment
@@ -396,20 +600,27 @@ variables, `$?`, pipelines (`|`), input/output redirection (`<`, `>`, `>>`), and
 control operators (`&&`, `||`, `;`). Computer System Bash adds shebangs,
 positional parameters, conditionals, bounded loops, functions,
 `break`/`continue`/`return`, `source`, aliases, `command`, `read`,
-function-local variables, `shift`, and basic `getopts`. It loads
-`/etc/bash.bashrc` and then `~/.bashrc` without replacing existing user files.
-Command length, tokens, pipeline stages, script depth/lines/iterations, and
-intermediate output are limited so shell work cannot become an unbounded server
-load path. This is a sandbox implementation and never invokes host Bash.
+function-local variables, `shift`, and basic `getopts`. After authentication it
+loads `/etc/profile`, `/etc/bash.bashrc`, and then that account's `~/.bashrc`
+without replacing existing user files. Command length, tokens, pipeline stages,
+script depth/lines/iterations, and intermediate output are limited so shell work
+cannot become an unbounded server load path. This is a sandbox implementation
+and never invokes host Bash.
 
 Linux-facing output follows the CS-Linux contract: LF line endings, Linux-style
 `uname`, `date`, `uptime`, `ls -la`, `stat`, `df -h`, `du -h`, `free -h`, and
 coreutils-like errors and exit status. Dynamic read-only files include
 `/proc/cpuinfo`, `/proc/meminfo`, `/proc/version`, `/proc/uptime`,
-`/proc/loadavg`, and `/proc/mounts`. Recursive or materializing operations
-remain bounded; indexed directory and hard-link accounting keeps ordinary
-listings O(N), while `diff`, hashes, dumps, `xargs`, and `yes` have explicit
-input or output ceilings.
+`/proc/loadavg`, `/proc/mounts`, `/proc/devices`, `/proc/services`, and live
+`/proc/<pid>/{cmdline,stat,status}` plus `/proc/self/*`. The runnable/active
+counts and last PID in `loadavg` come from the same process table. `dmesg`,
+`/var/log/messages`, and `/var/log/auth.log` read actual bounded boot, system,
+process, shutdown, and authentication journal entries; the default journal is
+limited to 256 records, 32 KiB total, and 1 KiB per record. These are guest
+records, not host logs. Recursive or materializing operations remain bounded;
+indexed directory and hard-link accounting keeps ordinary listings O(N), while
+`diff`, hashes, dumps, `xargs`, and `yes` have explicit input or output
+ceilings.
 
 `vi [path]` uses Normal, Insert, and Command modes. Bare `vi` opens a real
 `[No Name]` buffer; `:w path` or `:wq path` assigns its first file name, while
@@ -459,6 +670,18 @@ deterministic VM time. Both profiles keep four-digit UTC years without a
 two-digit-year pivot, represent the 2000 leap day correctly, and support
 timestamps beyond the signed 32-bit 2038 boundary.
 
+The Computer snapshot also carries versioned cold OS-runtime state. Linux keeps
+bounded journals, last-login records, service and mount definitions, and offline
+device identities, but never revives stale live processes, jobs, sessions,
+mounted instances, PID cursors, or job cursors after restore. Older snapshots
+without this field receive an empty cold state. DOS similarly persists C: drive
+state and FAT metadata while forcing transient A: media absent on cold restore.
+An unused network omits its optional key for canonical legacy compatibility. If
+a future adapter has registered network definitions, cold restore retains its
+interfaces and addresses but forces links down, zeroes counters, and clears all
+process-owned sockets/listeners. All projections are validated and idempotent
+during preserved-world migration.
+
 Preserved worlds are upgraded automatically at startup. The loader validates the
 current generation first and tries the immediately previous complete generation
 only when the current one is incomplete or corrupt; this rule applies to both
@@ -470,6 +693,17 @@ activation point. The migration advances by at most one Dynamic Property
 read/write/delete per host tick, and normal Computer, Portable, Monitor, and Web
 Terminal startup remains gated until it reaches an explicit `complete` state.
 `CS_STORAGE_MIGRATION` log records expose progress or the terminal failure.
+Fallback is recovery input, not a terminal migration result: a valid previous
+current-format Computer or identity generation repairs and verifies the invalid
+head before adapters activate. A valid canonical head is retained when its
+previous manifest is corrupt; recovery repairs a representable fallback or
+removes the invalid metadata explicitly. Recovery also performs an incremental,
+bounded sweep of target-only content blobs, legacy indexed pages, and stray
+manifests that interrupted or corrupt metadata can no longer name. Whole-prefix
+enumeration is restricted to that recovery path: ordinary periodic saves do not
+scan every stored blob, page, or manifest. Page-count and manifest-size limits
+are checked before a generation mutates storage, so the writer cannot commit a
+generation that its reader or a Dynamic Property cannot accept.
 
 Restarting an interrupted upgrade is idempotent: the legacy identity head still
 selects the old world view, while any already verified Computer generation is
@@ -549,45 +783,98 @@ machines install 2 MiB RAM; the Advanced Desktop installs 8 MiB. Aggregate
 runtime data raises `MemoryError` on overflow, while unreachable values are
 reclaimed during pressure checks. Linux exposes its 32-bit protected flat
 sandbox through `cpuinfo`, `free`, `/proc/cpuinfo`, and `/proc/meminfo`; paging,
-swap, and a process/MMU model are not claimed. Linux memory usage includes a
-bounded resident kernel, system-service, and buffer allowance in addition to
-dynamic guest-runtime bytes. DOS exposes `CPU`, `MEM`, `MEM /C`, `MEM /D`, and
-`SYSTEMINFO`. Its 2 MiB view accounts for 640 KiB conventional memory, bounded
-UMB/reserved regions, and XMS/HMA state configured by the modeled `HIMEM.SYS`,
-`EMM386.EXE NOEMS`, and `DOS=HIGH,UMB` directives. `MEM` and `MEM /C` separate
-DOS system/driver residency from guest runtime use while keeping the region
-totals internally consistent. This is protected sandbox/v86 compatibility
-metadata, not native BIOS/DOS interrupt or `.COM` / `.EXE` emulation. RAM,
-persistent disk quota, collection size, and output bounds are independent
-limits.
+swap, virtual-memory paging, and MMU page emulation are not claimed. Linux
+memory usage includes a bounded resident kernel, system-service, and buffer
+allowance in addition to dynamic guest-runtime bytes. DOS exposes `CPU`, `MEM`,
+`MEM /C`, `MEM /D`, and `SYSTEMINFO`. Its 2 MiB view accounts for 640 KiB
+conventional memory, bounded UMB/reserved regions, and XMS/HMA state configured
+by the modeled `HIMEM.SYS`, `EMM386.EXE NOEMS`, and `DOS=HIGH,UMB` directives.
+`MEM` and `MEM /C` separate DOS system/driver residency from guest runtime use
+while keeping the region totals internally consistent. This is protected
+sandbox/v86 compatibility metadata, not native BIOS/DOS interrupt or `.COM` /
+`.EXE` emulation. RAM, persistent disk quota, collection size, and output bounds
+are independent limits.
 
 The sandboxed CS486 toolchain adds real 32-bit `EAX` through `EBP` registers,
 checked little-endian linear memory, stack/call control flow, terminal CPU
-faults, and model-specific instruction cycle costs. `as`, `cc`, `c++`, and
-`basicc` compile safe initial language subsets to the same validated textual
-executable format. `as`, `cc`, `c++`, and `basicc` accept `-c` to emit a bounded
-`CS486OBJ` relocatable object. Objects carry text symbols, text-target
-relocations, and object-relative data size; `ld` resolves them into the existing
-validated `CS486` executable in O(instructions + symbols + relocations) work.
-`nm` and `objdump` inspect both formats. C and C++ support external and defined
-zero-argument integer functions plus statement-boundary `asm("...")`; inline
-assembly rejects labels, control flow, stack operations, and ESP/EBP access.
+faults, and model-specific instruction cycle costs. The stack starts at the top
+of process RAM and grows downward; PUSH/CALL and POP/RET may not cross the
+aligned static-data/BSS floor. ESP remains a general register, so these are RAM
+boundary checks rather than PUSH-word provenance tracking; RET separately
+validates its popped target against real instruction addresses, so one-past-end
+is valid only for sequential fallthrough and never as a return target. `as`,
+`cc`, `c++`, and `basicc` compile safe initial language subsets to the same
+versioned, validated `CS486` executable. All four accept `-c` to emit a bounded
+`CS486OBJ` relocatable object.
+
+New ASM objects use `CS486OBJ` v2. A dedicated tokenizer, bounded preprocessor,
+parser, constant-expression evaluator, and source-span diagnostics feed `.text`,
+`.rodata`, `.data`, and `.bss` sections. Objects carry initialized little-endian
+data, alignment, local/global/undefined symbols typed as `function`, `object`,
+or `notype`, optional zero-argument function signatures (`()->i32` or
+`()->void`), plus structured `text-target`, `data-address`, and `absolute32`
+relocations. `ld` resolves Map-backed symbols and applies those records in
+O(instructions + initialized bytes + symbols + relocations) work rather than
+rewriting assembly text. Readers retain v1 object compatibility. `nm` and
+`objdump` inspect both versions and the executable. These files are neither
+Linux ELF nor DOS OMF, `.COM`, or `.EXE` files, and no frontend invokes a host
+assembler, compiler, linker, or loader.
+
+C and C++ use a dedicated, bounded tokenizer and parser instead of regular-
+expression source rewriting. The parser builds a typed AST with lexical scopes
+and source spans, requires a function declaration or prototype before each call,
+and rejects calling an in-scope local that shadows a function. It then lowers to
+CSIR. Computed CSIR values have one SSA definition while mutable C locals remain
+explicit `load-local`/`store-local` operations; this is value SSA, not memory
+SSA. A bounded verifier checks types, definitions, dominance, control-flow
+targets, and explicit terminal states. Deterministic, pass-capped optimization
+performs constant folding, copy propagation, unreachable-block cleanup, and
+dead-pure-value elimination.
+
+The backend uses bounded deterministic linear-scan register allocation with
+checked stack spills and EBP-based stack frames. ESP and EBP are reserved, and
+values crossing a call are conservatively spilled under the current ABI. Graph
+coloring is neither required nor implemented. C/C++ objects attach the known
+zero-argument return signature to both defined and undefined function symbols;
+the linker rejects conflicting known signatures while retaining untyped ASM and
+v1 compatibility. Integer-return calls use EAX, while known void functions
+cannot be exposed through the Python integer-extension ABI. Statement-boundary
+`asm("...")` rejects labels, control flow, stack operations, and ESP/EBP access.
+
+CS-Linux exposes the bounded instruction debugger as `csdb`; CS-DOS exposes the
+same core as `DEBUG` with DOS command spellings and CRLF output. After loading a
+validated CS486 executable, it can pause at an instruction address, set or clear
+breakpoints, single-step, continue with a bounded instruction budget, inspect
+registers, disassemble, and read memory without modifying it. The hard ceilings
+are 256 breakpoints, 100,000 instructions per continue request, 256 instructions
+per disassembly request, and 4,096 bytes per memory read. Debug state is owned
+by the shell session and is discarded on quit, logout, user switch, or terminal
+disconnect. This is not native GDB or DOS DEBUG emulation: source-level debug,
+symbolic local-variable reconstruction, memory writes, PIC/IRQ/IDT execution,
+and native BIOS/DOS interrupts are not implemented.
+
 Desktop Python resolves same-directory modules followed by `/lib/python` and
 `/usr/lib/computer-system/python`. A `.py` module is compiled and initialized
-once; a versioned `.o` `CS486OBJ` module exposes its global zero-argument
-integer functions as Python attributes and executes them in the same CS486
-process with EAX returns. For example, `cc -c fastmath.c -o fastmath.o` beside a
-script enables `import fastmath`. Missing, circular, oversized, corrupt, or
-ABI-incompatible imports fail explicitly. `basic` runs BASIC source directly,
-while `run --stats` reports the active CS486DX, CS486DX2, or CS386SX model,
-instructions, CPU cycles, and virtual microseconds at its persisted clock. No
-frontend invokes a host compiler, linker, or native binary. General
-dynamic/shared libraries remain a follow-up on the versioned object and ABI
-foundation. MCP's `cpuCycles` field uses one unit across ASM, C, C++, BASIC, and
-desktop Python; machine-instruction counts remain diagnostic values, not timing
-units. The portable CS386SX retains ASM, C, C++, BASIC, and batch support, but
-rejects `python`/`micropython` commands with status 127 and does not execute
-`/startup.py`.
+once; a versioned `.o` `CS486OBJ` module exposes only its global `.text`
+zero-argument functions as Python attributes and executes them in the same CS486
+process with EAX returns. Global data symbols are never callable. For example,
+`cc -c fastmath.c -o fastmath.o` beside a script enables `import fastmath`.
+Missing, circular, oversized, corrupt, or ABI-incompatible imports fail
+explicitly. `basic` runs BASIC source directly, while `run --stats` reports the
+active CS486DX, CS486DX2, or CS386SX model, instructions, CPU cycles, and
+virtual microseconds at its persisted clock. No frontend invokes a host
+compiler, linker, or native binary. General dynamic/shared libraries remain a
+follow-up on the versioned object and ABI foundation. MCP's `cpuCycles` field
+uses one unit across ASM, C, C++, BASIC, and desktop Python; machine-instruction
+counts remain diagnostic values, not timing units. The portable CS386SX retains
+ASM, C, C++, BASIC, and batch support, but rejects `python`/`micropython`
+commands with status 127 and does not execute `/startup.py`.
+
+The native Python `shell` module is not a user API. It is enabled only for the
+built-in shell program selected when `/startup.py` is empty. User-authored
+`/startup.py`, foreground `python`/`micropython`, and MCP Python cannot import
+it; each attempt fails explicitly instead of exposing a live terminal shell
+object across an authentication boundary.
 
 The Bedrock pack includes placeable `Computer`, `Advanced Computer`, and
 `Monitor` items (`computer_system:computer_item`,
@@ -623,6 +910,17 @@ transfers up to 256 bytes. `i2c` uses a 100 kHz 7-bit segment with bounded scan
 and combined write/read transactions up to 256 bytes. The controller, conflict,
 NACK, and capability contracts are implemented now for future IoT block
 adapters; no production sensor block is implied by this foundation.
+
+The Web Terminal transport is a host companion and is not a guest network
+interface. The bounded network state above is only the future Issue #6 adapter
+boundary: it does not register a default `lo` or `eth0`, route packets, make a
+host or guest connection, or fabricate routes or DNS. CS-Linux does not
+currently ship IP addressing, `ip`, `ping`, `ss`, package management, or
+Internet access. Likewise, the registered `/dev/fd0` reports absent media until
+a future Bedrock media adapter inserts a floppy, and the modeled VGA framebuffer
+still has no production Web Canvas or guest graphics API. These boundaries fail
+explicitly rather than pretending that host facilities exist inside the guest
+OS.
 
 Examples:
 

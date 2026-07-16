@@ -225,7 +225,7 @@ describe("DOS profile contract", (): void => {
       ].join("\n"),
     );
     expect(shell.submit("C++ C:\\answer.cpp -O C:\\anscpp").exitCode).toBe(0);
-    expect(shell.submit("C:\\anscpp").stdout).toBe("42\n");
+    expect(shell.submit("C:\\anscpp").stdout).toBe("42\r\n");
     expect(shell.submit("RUN --STATS C:\\anscpp").stderr).toContain("CS386SX");
   });
 
@@ -302,6 +302,21 @@ describe("DOS profile contract", (): void => {
     expect(shell.submit("SET RESULT").lines).toEqual(["RESULT=beta"]);
   });
 
+  it("rejects Unix command-chain syntax inside BAT before side effects", (): void => {
+    const filesystem = new InMemoryFilesystem();
+    const shell = new ShellSession(filesystem, { osProfile: "dos" });
+    filesystem.writeFile(
+      "/drives/c/chain.bat",
+      "@ECHO OFF\r\nECHO FIRST && ECHO SECOND\r\nECHO NEVER > C:\\LEAK.TXT\r\n",
+    );
+
+    const result = shell.submit("CHAIN");
+
+    expect(result).toMatchObject({ exitCode: 1 });
+    expect(result.stderr).toContain("Unix && and || command chains");
+    expect(filesystem.exists("/drives/c/leak.txt")).toBe(false);
+  });
+
   it("reports unsupported CONFIG.SYS directives instead of ignoring them", (): void => {
     const filesystem = new InMemoryFilesystem();
     const profile = getOsProfile("dos");
@@ -317,6 +332,27 @@ describe("DOS profile contract", (): void => {
       "CONFIG.SYS line 1: unsupported directive DEVICE=C:\\DOS\\UNKNOWN.SYS",
       "CONFIG.SYS line 2: unsupported directive SHELL=C:\\4DOS.COM",
     ]);
+  });
+
+  it("loads CONFIG.SYS memory drivers only from intact installed capsules", (): void => {
+    const filesystem = new InMemoryFilesystem();
+    const profile = getOsProfile("dos");
+    profile.boot(filesystem, { computerName: "c-dos007" });
+    filesystem.writeFile("/drives/c/dos/himem.sys", "tampered driver\n");
+    filesystem.delete("/drives/c/dos/emm386.exe");
+
+    const shell = new ShellSession(filesystem, { osProfile: "dos" });
+
+    expect(shell.takeStartupLines()).toEqual([
+      "CONFIG.SYS line 1: HIMEM.SYS is missing or invalid",
+      "CONFIG.SYS line 2: EMM386.EXE is missing or invalid",
+    ]);
+    expect(shell.submit("MEM /D").lines).toContain(
+      "XMS driver (HIMEM.SYS): not installed",
+    );
+    expect(shell.submit("MEM /D").lines).toContain(
+      "UMB provider (EMM386.EXE): not installed",
+    );
   });
 
   it("terminates oversized and recursively nested batch work explicitly", (): void => {

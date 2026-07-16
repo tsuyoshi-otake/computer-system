@@ -1,8 +1,12 @@
 import { describe, expect, it } from "vitest";
 
+import { openLinuxAccountDatabase } from "../../src/application/os/linuxAccounts.js";
 import { sha256Hex } from "../../src/application/os/passwordHash.js";
 import { ShellSession } from "../../src/application/os/shellSession.js";
 import { InMemoryFilesystem } from "../../src/domain/filesystem/inMemoryFilesystem.js";
+
+const linuxMotd =
+  "Welcome to CS-Linux 1.0. Type 'help' for commands or 'man cs-linux' for the field guide.";
 
 describe("CS-Linux authentication", (): void => {
   it("implements the standard SHA-256 digest", (): void => {
@@ -26,17 +30,19 @@ describe("CS-Linux authentication", (): void => {
 
     expect(shell.submit("correct-horse").exitCode).toBe(0);
     expect(shell.prompt()).toBe("Retype new password: ");
-    expect(filesystem.exists("/etc/shadow")).toBe(false);
+    expect(filesystem.readFile("/etc/shadow")).toContain("cs:!!");
     expect(shell.submit("different-password").stderr).toContain("do not match");
     expect(shell.prompt()).toBe("New password: ");
 
     shell.submit("correct-horse");
-    expect(shell.submit("correct-horse").stdout).toBe("Password configured.\n");
+    expect(shell.submit("correct-horse").stdout).toBe(
+      `Password configured.\n${linuxMotd}\n`,
+    );
     expect(shell.isSecretInput()).toBe(false);
-    expect(shell.prompt()).toBe("~$ ");
-    expect(shell.submit("whoami").stdout).toBe("computer\n");
+    expect(shell.prompt()).toBe("cs@c-000001:~$ ");
+    expect(shell.submit("whoami").stdout).toBe("cs\n");
     const shadow = filesystem.readFile("/etc/shadow");
-    expect(shadow).toMatch(/^computer:cs-sha256-v1:512:/u);
+    expect(shadow).toMatch(/(?:^|\n)cs:cs-sha256-v1:512:/u);
     expect(shadow).not.toContain("correct-horse");
     expect(shell.submit("cat /etc/shadow").stderr).toContain(
       "Permission denied",
@@ -51,16 +57,128 @@ describe("CS-Linux authentication", (): void => {
 
     const shell = linuxShell(filesystem);
     expect(shell.takeStartupLines()).toEqual([]);
-    expect(shell.prompt()).toBe("Password: ");
+    expect(shell.prompt()).toBe("login: ");
     expect(shell.submitDebugCommand("whoami").stderr).toContain(
       "login is required",
     );
-    expect(shell.submit("wrong-password").sleepTicks).toBeUndefined();
-    expect(shell.submit("wrong-password").sleepTicks).toBeUndefined();
-    expect(shell.submit("wrong-password").sleepTicks).toBe(40);
+    expect(shell.submit("cs").exitCode).toBe(0);
     expect(shell.prompt()).toBe("Password: ");
-    expect(shell.submit("correct-horse").stdout).toBe("Login successful.\n");
-    expect(shell.submit("whoami").stdout).toBe("computer\n");
+    expect(shell.submit("wrong-password").sleepTicks).toBeUndefined();
+    expect(shell.submit("cs").exitCode).toBe(0);
+    expect(shell.submit("wrong-password").sleepTicks).toBeUndefined();
+    expect(shell.submit("cs").exitCode).toBe(0);
+    expect(shell.submit("wrong-password").sleepTicks).toBe(40);
+    expect(shell.prompt()).toBe("login: ");
+    expect(shell.submit("cs").exitCode).toBe(0);
+    expect(shell.prompt()).toBe("Password: ");
+    expect(shell.submit("correct-horse").stdout).toBe(
+      `Login successful.\n${linuxMotd}\n`,
+    );
+    expect(shell.submit("whoami").stdout).toBe("cs\n");
+  });
+
+  it("returns an interrupted first-boot confirmation to setup-new", (): void => {
+    const filesystem = new InMemoryFilesystem();
+    const shell = linuxShell(filesystem);
+
+    expect(shell.submit("discarded-candidate").exitCode).toBe(0);
+    expect(shell.prompt()).toBe("Retype new password: ");
+    shell.disconnect();
+
+    expect(shell.prompt()).toBe("New password: ");
+    expect(filesystem.readFile("/etc/shadow")).toContain("cs:!!");
+    expect(shell.submit("another-candidate").exitCode).toBe(0);
+    expect(shell.prompt()).toBe("Retype new password: ");
+
+    const restarted = linuxShell(filesystem);
+    expect(restarted.prompt()).toBe("New password: ");
+    expect(restarted.submit("correct-horse").exitCode).toBe(0);
+    expect(restarted.submit("correct-horse").stdout).toBe(
+      `Password configured.\n${linuxMotd}\n`,
+    );
+  });
+
+  it("authenticates a renamed non-root account even when its home is missing", (): void => {
+    const filesystem = new InMemoryFilesystem();
+    const administrator = linuxShell(filesystem);
+    administrator.submit("correct-horse");
+    administrator.submit("correct-horse");
+    filesystem.move("/home/cs", "/home/operator");
+    expect(
+      openLinuxAccountDatabase(filesystem).updateUser("cs", {
+        home: "/home/operator",
+        name: "operator",
+      }),
+    ).toMatchObject({ home: "/home/operator", name: "operator", uid: 1_000 });
+    expect(filesystem.exists("/home/cs")).toBe(false);
+    filesystem.delete("/home/operator");
+
+    const login = linuxShell(filesystem);
+    expect(login.prompt()).toBe("login: ");
+    expect(login.submit("operator").exitCode).toBe(0);
+    expect(login.prompt()).toBe("Password: ");
+    expect(() => login.submit("correct-horse")).not.toThrow();
+    expect(login.submit("whoami").stdout).toBe("operator\n");
+    expect(login.submit("printenv HOME").stdout).toBe("/home/operator\n");
+    expect(filesystem.exists("/home/cs")).toBe(false);
+    expect(filesystem.exists("/home/operator")).toBe(false);
+  });
+
+  it("binds first-boot setup to UID 1000 rather than a reused cs name", (): void => {
+    const filesystem = new InMemoryFilesystem();
+    const administrator = linuxShell(filesystem);
+    administrator.submit("correct-horse");
+    administrator.submit("correct-horse");
+    filesystem.move("/home/cs", "/home/operator");
+
+    const accounts = openLinuxAccountDatabase(filesystem);
+    accounts.updateUser("cs", {
+      home: "/home/operator",
+      name: "operator",
+    });
+    expect(accounts.createUser({ name: "cs" })).toMatchObject({
+      name: "cs",
+      uid: 1_001,
+    });
+
+    const login = linuxShell(filesystem);
+    expect(login.prompt()).toBe("login: ");
+    expect(login.submit("operator").exitCode).toBe(0);
+    expect(login.prompt()).toBe("Password: ");
+    expect(login.submit("correct-horse").stdout).toBe(
+      `Login successful.\n${linuxMotd}\n`,
+    );
+    expect(login.submit("id -u").stdout).toBe("1000\n");
+    expect(
+      openLinuxAccountDatabase(filesystem).getShadowRecord("cs")?.state,
+    ).toBe("unset");
+  });
+
+  it("configures the current UID 1000 name when it was renamed before setup", (): void => {
+    const filesystem = new InMemoryFilesystem();
+    const initialized = linuxShell(filesystem);
+    expect(initialized.prompt()).toBe("New password: ");
+    initialized.disconnect();
+    filesystem.move("/home/cs", "/home/operator");
+
+    const accounts = openLinuxAccountDatabase(filesystem);
+    accounts.updateUser("cs", {
+      home: "/home/operator",
+      name: "operator",
+    });
+    accounts.createUser({ name: "cs" });
+
+    const setup = linuxShell(filesystem);
+    expect(setup.prompt()).toBe("New password: ");
+    expect(setup.submit("correct-horse").exitCode).toBe(0);
+    expect(setup.submit("correct-horse").stdout).toBe(
+      `Password configured.\n${linuxMotd}\n`,
+    );
+    expect(setup.submit("whoami").stdout).toBe("operator\n");
+
+    const reopened = openLinuxAccountDatabase(filesystem);
+    expect(reopened.getShadowRecord("operator")?.state).toBe("hash");
+    expect(reopened.getShadowRecord("cs")?.state).toBe("unset");
   });
 
   it("does not apply the CS-Linux login gate to CS-DOS", (): void => {

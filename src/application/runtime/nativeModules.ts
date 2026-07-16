@@ -19,7 +19,11 @@ import {
 } from "../../domain/redstone/redstoneState.js";
 import { ShellSession } from "../os/shellSession.js";
 import type { ShellResult } from "../os/shellSession.js";
-import type { ShellForegroundRequest } from "../os/shellTypes.js";
+import type {
+  ShellBackgroundRequest,
+  ShellForegroundRequest,
+  ShellJobControlRequest,
+} from "../os/shellTypes.js";
 import type { EditorScreen } from "../editor/editorScreen.js";
 import type { ComputerOsProfile } from "../../domain/computer/computer.js";
 import type { ShellClockSource } from "../os/clock.js";
@@ -38,13 +42,33 @@ import { createPeripheralVirtualDevices } from "../os/peripheralVirtualDevices.j
 import type { VirtualDevice } from "../os/osProfile.js";
 import { decodeUtf8Chunk, encodeUtf8 } from "../../domain/text/utf8.js";
 import type { ComputerWorkLane } from "./computerWorkMonitor.js";
+import {
+  unrestrictedGuestFilesystem,
+  type GuestFilesystem,
+} from "../os/guestFilesystem.js";
+import type { OsProcessSignal, OsRuntimeState } from "../os/osRuntimeState.js";
+import type { DosRuntimeState } from "../os/dosRuntimeState.js";
 
 export interface NativeModuleContext {
   readonly clock?: ShellClockSource;
   readonly computerId: number;
   readonly computerName?: string;
   readonly osProfile?: ComputerOsProfile;
+  /** Per-Computer live OS state shared by every environment for this boot. */
+  readonly osRuntimeState?: OsRuntimeState;
+  readonly onOsRuntimeChanged?: (state: OsRuntimeState) => void;
+  /** Per-Computer DOS drive/FAT state shared by every environment. */
+  readonly dosRuntimeState?: DosRuntimeState;
+  readonly onDosRuntimeChanged?: (state: DosRuntimeState) => void;
+  readonly signalProcess?: (pid: number, signal: OsProcessSignal) => void;
   readonly filesystem: InMemoryFilesystem;
+  /** Disable the session-mutating shell module on non-interactive debug paths. */
+  readonly exposeShellModule?: boolean;
+  /**
+   * Process-scoped guest view. Production Linux callers must provide a
+   * credentialed view; the fallback exists for trusted/DOS and test callers.
+   */
+  readonly guestFilesystem?: GuestFilesystem;
   readonly terminal: TerminalBuffer;
   readonly redstone?: RedstoneState;
   readonly currentTick?: () => number;
@@ -64,12 +88,19 @@ export interface NativeModuleContext {
   readonly startForegroundProcess?: (
     request: ShellForegroundRequest,
   ) => ForegroundProcessStartResult;
+  readonly startBackgroundProcess?: (
+    request: ShellBackgroundRequest,
+  ) => BackgroundProcessStartResult;
+  readonly startJobControl?: (
+    request: ShellJobControlRequest,
+  ) => JobControlStartResult;
   readonly serial?: SerialLinkBroker;
   readonly peripherals?: PeripheralBusBroker;
   readonly requestFilesystemIo?: (
     operation: "read" | "write",
     bytes: number,
   ) => string | undefined;
+  readonly syncFilesystem?: () => void;
   readonly runHostWork?: <T>(
     lane: ComputerWorkLane,
     deterministicUnits: number,
@@ -86,15 +117,51 @@ export type ForegroundProcessStartResult =
       readonly stderr: string;
     };
 
+export type BackgroundProcessStartResult =
+  | {
+      readonly jobId: number;
+      readonly outcome: "started";
+      readonly pid: number;
+    }
+  | {
+      readonly cpuCycles?: number;
+      readonly exitCode: number;
+      readonly outcome: "failed";
+      readonly stderr: string;
+    };
+
+export type JobControlStartResult =
+  | { readonly completionEvent: string; readonly outcome: "started" }
+  | {
+      readonly cpuCycles?: number;
+      readonly exitCode: number;
+      readonly outcome: "failed";
+      readonly stderr: string;
+    };
+
 export interface NativeEnvironment {
+  readonly filesystem: GuestFilesystem;
   readonly modules: ReadonlyMap<string, RuntimeNamespace>;
   readonly globals: ReadonlyMap<string, RuntimeValue>;
+  readonly osRuntimeState?: OsRuntimeState;
+  readonly dosRuntimeState?: DosRuntimeState;
   readonly shell: ShellSession;
 }
 
 export function createNativeEnvironment(
   context: NativeModuleContext,
 ): NativeEnvironment {
+  if (
+    context.requireLinuxLogin === true &&
+    context.osProfile !== "dos" &&
+    context.guestFilesystem === undefined
+  ) {
+    throw new Error(
+      "Authenticated CS-Linux native environments require a guest filesystem",
+    );
+  }
+  const guestFilesystem =
+    context.guestFilesystem ?? unrestrictedGuestFilesystem(context.filesystem);
   const virtualDevices = createVirtualDevices(context);
   const shell =
     context.shell ??
@@ -104,6 +171,11 @@ export function createNativeEnvironment(
       computerName: context.computerName,
       currentTick: context.currentTick,
       osProfile: context.osProfile,
+      osRuntime: context.osRuntimeState,
+      onOsRuntimeChanged: context.onOsRuntimeChanged,
+      dosRuntime: context.dosRuntimeState,
+      onDosRuntimeChanged: context.onDosRuntimeChanged,
+      signalProcess: context.signalProcess,
       ticksPerSecond: context.ticksPerSecond,
       hardware: context.hardware,
       memoryUsageBytes: context.memoryUsageBytes,
@@ -114,15 +186,18 @@ export function createNativeEnvironment(
       peripherals: context.peripherals,
       deferGuestExecution: context.startForegroundProcess !== undefined,
       requestFilesystemIo: context.requestFilesystemIo,
+      syncFilesystem: context.syncFilesystem,
     });
   const modules = new Map<string, RuntimeNamespace>([
     ["os", createOsModule(context)],
     ["term", createTermModule(context)],
-    ["fs", createFsModule(context.filesystem)],
+    ["fs", createFsModule(guestFilesystem)],
     ...(context.redstone === undefined
       ? []
       : ([["redstone", createRedstoneModule(context)]] as const)),
-    ["shell", createShellModule(shell, context)],
+    ...(context.exposeShellModule === false
+      ? []
+      : ([["shell", createShellModule(shell, context)]] as const)),
   ]);
   if ((context.osProfile ?? "linux") === "linux") {
     if (context.serial !== undefined && context.computerName !== undefined) {
@@ -137,8 +212,15 @@ export function createNativeEnvironment(
     }
   }
   return {
+    filesystem: guestFilesystem,
     modules,
     globals: new Map([["print", createPrint(context)]]),
+    ...(context.osRuntimeState === undefined
+      ? {}
+      : { osRuntimeState: context.osRuntimeState }),
+    ...(context.dosRuntimeState === undefined
+      ? {}
+      : { dosRuntimeState: context.dosRuntimeState }),
     shell,
   };
 }
@@ -180,6 +262,47 @@ function createShellModule(
       requireCapability(context.shutdown, "shutdown")();
     } else if (result.action === "reboot") {
       requireCapability(context.reboot, "reboot")();
+    }
+    if (result.background !== undefined) {
+      const started = requireCapability(
+        context.startBackgroundProcess,
+        "background process",
+      )(result.background);
+      if (started.outcome === "failed") {
+        shell.completeForegroundProcess(started.exitCode);
+        writeTerminalLines(
+          context.terminal,
+          started.stderr.replaceAll("\r\n", "\n").trimEnd().split("\n"),
+        );
+        return {
+          kind: "work",
+          cycles: started.cpuCycles ?? 1,
+          value: null,
+        };
+      }
+      writeTerminalLines(context.terminal, [
+        `[${String(started.jobId)}] ${String(started.pid)}`,
+      ]);
+      return { kind: "work", cycles: result.cpuCycles ?? 1, value: null };
+    }
+    if (result.jobControl !== undefined) {
+      const started = requireCapability(
+        context.startJobControl,
+        "job control",
+      )(result.jobControl);
+      if (started.outcome === "failed") {
+        shell.completeForegroundProcess(started.exitCode);
+        writeTerminalLines(
+          context.terminal,
+          started.stderr.replaceAll("\r\n", "\n").trimEnd().split("\n"),
+        );
+        return {
+          kind: "work",
+          cycles: started.cpuCycles ?? 1,
+          value: null,
+        };
+      }
+      return { kind: "wait_event", filter: started.completionEvent };
     }
     if (result.foreground !== undefined) {
       const started = requireCapability(
@@ -288,7 +411,12 @@ function createShellModule(
     }
     return executeShellOperation(() => shell.keys(decoded));
   });
-  return namespace("shell", { banner, prompt, submit, keys });
+  const disconnect = fn("disconnect", (positional, keywords) => {
+    requireArity(positional, keywords, 0, 0);
+    writeTerminalLines(context.terminal, shell.disconnect());
+    return null;
+  });
+  return namespace("shell", { banner, disconnect, prompt, submit, keys });
 }
 
 export function renderTerminalScreen(
@@ -710,7 +838,7 @@ function createTermModule(context: NativeModuleContext): RuntimeNamespace {
   });
 }
 
-function createFsModule(filesystem: InMemoryFilesystem): RuntimeNamespace {
+function createFsModule(filesystem: GuestFilesystem): RuntimeNamespace {
   const exists = filesystemFunction("exists", (positional, keywords) => {
     requireArity(positional, keywords, 1, 1);
     return filesystem.exists(stringArgument(positional[0]));

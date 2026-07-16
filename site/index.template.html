@@ -1,0 +1,403 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="Computer System is a programmable computer add-on for Minecraft Bedrock Edition with persistent CS-Linux and CS-DOS machines."
+    />
+    <meta name="theme-color" content="#171b19" />
+    <meta name="build-revision" content="{{BUILD_REVISION}}" />
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="Computer System for Minecraft Bedrock" />
+    <meta
+      property="og:description"
+      content="Persistent programmable computers, two guest operating profiles, and a measured CS486 toolchain inside Minecraft Bedrock."
+    />
+    <meta property="og:url" content="{{SITE_URL}}" />
+    <meta property="og:image" content="{{OG_IMAGE_URL}}" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <link rel="canonical" href="{{SITE_URL}}" />
+    <link rel="stylesheet" href="./styles.css" />
+    <title>
+      Computer System — Programmable computers for Minecraft Bedrock
+    </title>
+  </head>
+  <body class="landing-page">
+    <a class="skip-link" href="#main-content">Skip to main content</a>
+    <header class="site-header">
+      <a class="site-identity" href="./" aria-label="Computer System home">
+        <span class="site-mark" aria-hidden="true">CS</span>
+        <span><b>Computer System</b><small>Bedrock Add-On</small></span>
+      </a>
+      <nav class="site-nav" aria-label="Primary navigation">
+        <a href="./manual/">Manual</a>
+        <a href="#machines">Machines</a>
+        <a href="#quick-start">Quick start</a>
+        <a href="https://github.com/tsuyoshi-otake/computer-system">GitHub</a>
+      </nav>
+    </header>
+
+    <main id="main-content">
+      <section class="hero" aria-labelledby="hero-title">
+        <div class="hero-copy">
+          <p class="eyebrow">CS technical system · Minecraft Bedrock Edition</p>
+          <h1 id="hero-title">Programmable computers for Minecraft Bedrock.</h1>
+          <p class="hero-lead">
+            Place a persistent machine, sign in to CS-Linux or boot CS-DOS, then
+            write, compile, measure, and connect programs inside a bounded guest
+            computer—not the host operating system.
+          </p>
+          <div class="hero-actions">
+            <a class="button button-primary" href="./manual/"
+              >Read the field manual</a
+            >
+            <a
+              class="button button-secondary"
+              href="https://github.com/tsuyoshi-otake/computer-system"
+              >View source on GitHub</a
+            >
+          </div>
+          <dl class="hero-status" aria-label="Current project status">
+            <div>
+              <dt>Release line</dt>
+              <dd>Minecraft Bedrock 1.26</dd>
+            </div>
+            <div>
+              <dt>Guest profiles</dt>
+              <dd>CS-Linux 1.0 · CS-DOS 6.2</dd>
+            </div>
+            <div>
+              <dt>Validation</dt>
+              <dd>Host tests + real BDS probes</dd>
+            </div>
+          </dl>
+        </div>
+        <figure class="hero-machine">
+          <div class="figure-plate">
+            <img
+              src="./assets/machines/cs-computer.png"
+              width="1920"
+              height="1920"
+              alt="Desktop Computer System single-drive chassis"
+              fetchpriority="high"
+            />
+          </div>
+          <figcaption>
+            <span>Desktop Computer System</span>
+            <b>CS486DX · 33 MHz · 2 MiB RAM</b>
+          </figcaption>
+        </figure>
+      </section>
+
+      <section
+        id="machines"
+        class="publication-section machine-section"
+        aria-labelledby="machines-title"
+      >
+        <header class="section-heading">
+          <p class="section-number">Publication 01 · Machine selection</p>
+          <h2 id="machines-title">Choose the computer that matches the job.</h2>
+          <p>
+            Every identity keeps its hardware profile, guest disk, and terminal
+            state across normal world reloads.
+          </p>
+        </header>
+        <div class="machine-plates" aria-hidden="true">
+          <img
+            src="./assets/machines/cs-computer.png"
+            width="1920"
+            height="1920"
+            alt=""
+            loading="lazy"
+          />
+          <img
+            src="./assets/machines/cs-advanced-computer.png"
+            width="1920"
+            height="1920"
+            alt=""
+            loading="lazy"
+          />
+          <img
+            src="./assets/machines/cs-portable-computer.png"
+            width="1920"
+            height="1920"
+            alt=""
+            loading="lazy"
+          />
+        </div>
+        <div
+          class="table-frame"
+          tabindex="0"
+          role="region"
+          aria-label="Machine comparison"
+          aria-describedby="machine-table-note"
+        >
+          <table class="machine-matrix">
+            <thead>
+              <tr>
+                <th scope="col">Specification</th>
+                <th scope="col">Desktop</th>
+                <th scope="col">Advanced Desktop</th>
+                <th scope="col">Portable</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <th scope="row">Processor</th>
+                <td>CS486DX · 33 MHz</td>
+                <td>CS486DX2 · 66 MHz</td>
+                <td>CS386SX · 16 MHz</td>
+              </tr>
+              <tr>
+                <th scope="row">Memory</th>
+                <td>2 MiB</td>
+                <td>8 MiB</td>
+                <td>2 MiB</td>
+              </tr>
+              <tr>
+                <th scope="row">Fixed disk</th>
+                <td>40 MiB IDE</td>
+                <td>80 MiB IDE</td>
+                <td>20 MiB IDE</td>
+              </tr>
+              <tr>
+                <th scope="row">Default OS</th>
+                <td>CS-Linux 1.0</td>
+                <td>CS-Linux 1.0</td>
+                <td>CS-DOS 6.2</td>
+              </tr>
+              <tr>
+                <th scope="row">Display</th>
+                <td>One adjacent Monitor</td>
+                <td>One adjacent Monitor</td>
+                <td>Built in</td>
+              </tr>
+              <tr>
+                <th scope="row">Languages</th>
+                <td>Python, ASM, BASIC, C, C++</td>
+                <td>Python, ASM, BASIC, C, C++</td>
+                <td>ASM, BASIC, C, C++; no user Python</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p id="machine-table-note" class="table-note">
+          Scroll the comparison horizontally on narrow screens.
+        </p>
+      </section>
+
+      <section class="system-band" aria-labelledby="profiles-title">
+        <div class="section-heading section-heading-dark">
+          <p class="section-number">Publication 02 · Operating profiles</p>
+          <h2 id="profiles-title">
+            Two operating systems. One bounded machine model.
+          </h2>
+        </div>
+        <div class="profile-comparison">
+          <article class="profile-panel">
+            <header>
+              <span>Desktop profile</span>
+              <h3>CS-Linux 1.0</h3>
+            </header>
+            <p>
+              Multi-user accounts, UID/GID permissions, processes, jobs, logs,
+              shell tools, and Computer System Python on the CS486 desktops.
+            </p>
+            <pre aria-label="CS-Linux example"><code>cs@c-xxxxxx:/home/cs$ ps -f
+cs@c-xxxxxx:/home/cs$ python /startup.py
+cs@c-xxxxxx:/home/cs$ run --stats /program</code></pre>
+          </article>
+          <article class="profile-panel">
+            <header>
+              <span>Portable profile</span>
+              <h3>CS-DOS 6.2</h3>
+            </header>
+            <p>
+              Drive-local directories, FAT metadata, bounded batch programs, DOS
+              utilities, and the ASM/BASIC/C/C++ toolchains on the CS386SX
+              portable.
+            </p>
+            <pre aria-label="CS-DOS example"><code>C:\&gt;MEM /F
+C:\&gt;DIR /A
+C:\&gt;BASICC HELLO.BAS</code></pre>
+          </article>
+        </div>
+      </section>
+
+      <section
+        class="publication-section workflow-section"
+        aria-labelledby="workflow-title"
+      >
+        <header class="section-heading">
+          <p class="section-number">Publication 03 · Program cycle</p>
+          <h2 id="workflow-title">Write. Compile. Measure. Connect.</h2>
+          <p>
+            The toolchain and every program stay inside the guest sandbox.
+            Modeled cycles—not browser wall time—describe guest execution cost.
+          </p>
+        </header>
+        <ol class="workflow">
+          <li>
+            <span>01</span>
+            <div>
+              <h3>Write</h3>
+              <code>vi /startup.py</code>
+              <p>Edit in the fixed 80×25 terminal.</p>
+            </div>
+          </li>
+          <li>
+            <span>02</span>
+            <div>
+              <h3>Compile</h3>
+              <code>cc -c /fastmath.c -o /fastmath.o</code>
+              <p>Build validated CS486 objects and executables.</p>
+            </div>
+          </li>
+          <li>
+            <span>03</span>
+            <div>
+              <h3>Measure</h3>
+              <code>run --stats /program</code>
+              <p>Inspect instructions, cycles, cache, and bus activity.</p>
+            </div>
+          </li>
+          <li>
+            <span>04</span>
+            <div>
+              <h3>Connect</h3>
+              <code>i2c 0 scan</code>
+              <p>Use Redstone and bounded face-local peripherals.</p>
+            </div>
+          </li>
+        </ol>
+      </section>
+
+      <section class="manual-promo" aria-labelledby="manual-title">
+        <div class="manual-promo-copy">
+          <p class="section-number">CS technical publication · 16 chapters</p>
+          <h2 id="manual-title">The field manual is part of the machine.</h2>
+          <p>
+            Read the same canonical operator publication used by the Web
+            Terminal, now without needing a running BDS companion or connection
+            code.
+          </p>
+          <a class="button button-paper" href="./manual/"
+            >Open the public manual</a
+          >
+        </div>
+        <div class="manual-index" aria-label="Manual publication structure">
+          <ol>
+            <li>
+              <span>I</span><b>Start and operate</b
+              ><small>Chapters 01–04</small>
+            </li>
+            <li>
+              <span>II</span><b>Build and connect</b
+              ><small>Chapters 05–08</small>
+            </li>
+            <li>
+              <span>III</span><b>Understand and compile</b
+              ><small>Chapters 09–13</small>
+            </li>
+            <li>
+              <span>IV</span><b>Profiles and support</b
+              ><small>Chapters 14–16</small>
+            </li>
+          </ol>
+          <p>
+            <b>Reading paths:</b> First program · Python + Redstone · CS-Linux
+            operator · Native development · Portable / CS-DOS · Diagnose a
+            problem
+          </p>
+        </div>
+      </section>
+
+      <section
+        class="publication-section limits-section"
+        aria-labelledby="limits-title"
+      >
+        <header class="section-heading">
+          <p class="section-number">Publication 04 · Honest boundaries</p>
+          <h2 id="limits-title">
+            A sandbox is useful when its limits are explicit.
+          </h2>
+        </header>
+        <div class="limit-register">
+          <article>
+            <b>No host escape</b>
+            <p>
+              Guest commands never launch PowerShell, cmd.exe, BDS
+              administration, native binaries, or a host compiler.
+            </p>
+          </article>
+          <article>
+            <b>No fictional network</b>
+            <p>
+              Guest IP networking, routes, DNS, package management,
+              <code>ping</code>, and <code>ss</code> are not implemented yet.
+            </p>
+          </article>
+          <article>
+            <b>Floppy media is absent</b>
+            <p>
+              The modeled FDD reports no media until a future Bedrock insertion
+              adapter owns that state.
+            </p>
+          </article>
+          <article>
+            <b>Web Terminal is local</b>
+            <p>
+              This Pages site publishes documentation only. Live machine access
+              still requires the local BDS Web companion and an activated code
+              from Minecraft.
+            </p>
+          </article>
+        </div>
+      </section>
+
+      <section
+        id="quick-start"
+        class="quick-start"
+        aria-labelledby="quick-start-title"
+      >
+        <div>
+          <p class="section-number">Repository procedure · Node.js 24+</p>
+          <h2 id="quick-start-title">Build and validate the add-on.</h2>
+          <p>
+            For Minecraft deployment, BDS verification, Web companion setup, and
+            operator procedures, continue in the repository and field manual.
+          </p>
+          <div class="quick-links">
+            <a
+              href="https://github.com/tsuyoshi-otake/computer-system#quick-start"
+              >Repository instructions</a
+            >
+            <a href="./manual/#chapter-orientation">Operator orientation</a>
+          </div>
+        </div>
+        <pre aria-label="Quick start commands"><code>npm ci
+npm run validate</code></pre>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <div>
+        <span class="site-mark" aria-hidden="true">CS</span>
+        <p>
+          <b>Computer System</b><br />A ComputerCraft-inspired Minecraft Bedrock
+          Add-On.
+        </p>
+      </div>
+      <nav aria-label="Footer navigation">
+        <a href="./manual/">Field manual</a
+        ><a href="https://github.com/tsuyoshi-otake/computer-system">GitHub</a
+        ><a
+          href="https://github.com/tsuyoshi-otake/computer-system/blob/main/docs/roadmap.md"
+          >Roadmap</a
+        >
+      </nav>
+    </footer>
+  </body>
+</html>

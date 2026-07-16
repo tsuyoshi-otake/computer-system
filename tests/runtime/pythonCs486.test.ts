@@ -179,7 +179,7 @@ except NameError:
     });
     const program = createPythonCs486Program({
       environment,
-      filesystem,
+      filesystem: environment.filesystem,
       memoryBytes: 1_048_576,
       path: "/main.py",
       source: 'import os\nos.sleep(0.1)\nevent = os.pull_event("ready")\n',
@@ -243,7 +243,7 @@ function createFixture(
   return {
     program: createPythonCs486Program({
       environment,
-      filesystem,
+      filesystem: environment.filesystem,
       memoryBytes: 1_048_576,
       path,
       source,

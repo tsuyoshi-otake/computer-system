@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  dosShellSyntaxFeatures,
   parseShellProgram,
   ShellSyntaxError,
 } from "../../src/application/os/shellSyntax.js";
@@ -57,6 +58,26 @@ describe("BusyBox shell syntax", (): void => {
     expect(() => parseShellProgram("echo 'missing")).toThrow(ShellSyntaxError);
     expect(() => parseShellProgram("echo ok |")).toThrow(/expected command/u);
     expect(() => parseShellProgram("cat >")).toThrow(/expected path/u);
-    expect(() => parseShellProgram("sleep 1 &")).toThrow(/background jobs/u);
+    expect(parseShellProgram("sleep 1 &")).toEqual({
+      chains: [
+        {
+          pipeline: {
+            background: true,
+            commands: [
+              {
+                redirects: [],
+                words: ["sleep", "1"],
+              },
+            ],
+          },
+        },
+      ],
+    });
+    expect(() => parseShellProgram("sleep 1 & echo late")).toThrow(
+      /must terminate/u,
+    );
+    expect(() =>
+      parseShellProgram("sleep 1 &", () => undefined, dosShellSyntaxFeatures),
+    ).toThrow(/background jobs/u);
   });
 });

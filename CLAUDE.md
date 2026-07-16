@@ -17,7 +17,13 @@ toolchain, Web Terminal, and operator manual expansion. GitHub Issue #13 tracks
 Python-to-CS486 compilation, filesystem imports, and CS486 C/C++ extension
 modules. GitHub Issue #14 tracks the portable CS386SX 16 MHz / 2 MiB hardware
 profile. GitHub Issue #16 tracks tick-sliced guest/MCP execution, runnable-only
-scheduler bookkeeping, and real-BDS multi-user load evidence. Most Phase 2
+scheduler bookkeeping, and real-BDS multi-user load evidence. GitHub Issue #17
+tracks the complete CS-Linux multi-user account, superuser, DAC, and legacy
+`computer`-to-`cs` migration. GitHub Issue #18 tracks the CS486 assembler v2,
+structured relocations, Linux/DOS frontend parity, and stack-boundary hardening.
+GitHub Issue #20 tracks OS Presence v1: authoritative per-Computer process,
+session, service, mount, device, journal, lifecycle, DOS drive, FAT metadata,
+bounded batch state, and the future guest-NIC state boundary. Most Phase 2
 behavior is implemented and verified. Production interaction uses the local Web
 Terminal companion started with `npm run dev:bds:web`; companion failures must
 remain explicit and must not open the native GDK terminal as a fallback.
@@ -33,9 +39,75 @@ Bedrock adapters -> application services -> domain/runtime abstractions
 - Do not import Minecraft APIs into the domain or application core.
 - Keep terminal state in the fixed-cell terminal model; Resource Pack UI is a
   rendering and input adapter, not the source of truth.
+- Keep GitHub Pages separate from the live Web Terminal. `web/manual.js` is the
+  only authored source for the canonical 16-chapter publication; the Pages build
+  may pre-render and bundle that source, but it must publish only the explicit
+  static-site allowlist and `web/assets/`. Never deploy `web/index.html`,
+  `web/app.js`, bearer-token/session code, connection-number forms, `/api/*`
+  calls, or any representation that implies the static site can reach BDS.
 - Keep shell commands inside `InMemoryFilesystem` and application-layer
   abstractions. Never dispatch terminal input to host PowerShell, `cmd.exe`,
   Node child processes, or BDS administration commands.
+- Treat `/etc/passwd`, `/etc/group`, and `/etc/shadow` as the bounded CS-Linux
+  account database. Guest filesystem access must pass through the credentialed
+  filesystem boundary with a process credential snapshot; no shell command,
+  editor, compiler, Python module, startup path, or MCP debug path may bypass
+  DAC by reaching the persistence filesystem directly. Even UID 0 must mutate
+  those three managed files through the account commands, never by raw file I/O,
+  so the validated in-memory indexes cannot diverge from persisted records.
+- Reserve the legacy name `computer` permanently in both the CS-Linux user and
+  group namespaces so current records can never be mistaken for migration input.
+  A user may belong to at most 32 supplementary groups; reject the 33rd before
+  changing any account file. Recursive home provisioning belongs to the
+  `useradd` transaction, so a capacity or filesystem failure must roll back the
+  user, group references, home, and every newly created home ancestor.
+- Keep root and elevation explicit. UID 0 is the only superuser identity, root
+  starts password-locked, `sudo` membership is independently represented, and
+  temporary `sudo`/`su` credentials must terminate or restore their caller on
+  every success, failure, cancellation, exit, and disconnect branch.
+- `ComputerRuntime` owns final `terminal_closed` security finalization; do not
+  delegate it only to the built-in guest shell program. Synchronously disconnect
+  the `ShellSession`, cancel credential-capturing foreground, compile, and MCP
+  debug work, deliver one bounded resume/close event, and fail safe to shutdown
+  if that terminal event cannot be delivered.
+- Keep one bounded `OsRuntimeState` per Computer as the authoritative owner of
+  Linux lifecycle, PID/PPID/UID/GID/cycle records, shell jobs, login sessions,
+  last-login records, service state, active mounts, device state, and journal
+  entries. Derive `ps`, job control, login tools, `/proc`, `dmesg`, and guest
+  log files from that state; never fabricate an independent view for
+  presentation.
+- Persist only the cold OS-runtime projection: journals, last-login records,
+  service definitions, mount definitions, and offline device identities survive,
+  while live processes, jobs, sessions, active mounts, and PID/job cursors
+  restart from a validated cold state. Missing legacy state must migrate
+  idempotently.
+- Keep the future network contract inside `OsRuntimeState.network`: at most 8
+  interfaces, 32 addresses, and 64 sockets, with Map-backed identity and
+  endpoint indexes. An unused network must serialize exactly like a legacy
+  snapshot with no `network` key. Cold persistence keeps interface/address
+  definitions but forces links down, zeroes counters, and removes every
+  process-owned socket/listener. Do not synthesize `lo`, `eth0`, routes,
+  packets, DNS, or `ip`/`ping`/`ss` output until the Issue #6 adapter owns those
+  transitions.
+- Graceful stop owns a bounded, observable phase sequence: stop new admission,
+  signal owned work, drain already-admitted block I/O, save data, unmount, stop
+  services/devices, save the final state, then terminate or reboot. A durability
+  or deadline failure faults explicitly; `sync` must call the real persistence
+  boundary and must not report success when no boundary exists.
+- Keep one bounded `DosRuntimeState` per DOS Computer. Drive selection,
+  per-drive current directories, media generations, labels, FAT attributes and
+  two-second timestamps must mutate transactionally with filesystem operations.
+  The same boundary owns shell current-directory/prompt state and the cold-state
+  observer: an observer failure must restore and republish the previous
+  aggregate. Treat every operand of one DOS command, including multi-path `MD`,
+  as one all-or-nothing operation. Filesystem and DOS transaction callbacks must
+  be synchronous; reject an async function before it runs and quarantine a
+  disguised Promise until it settles so post-`await` work cannot escape
+  rollback. The settlement quarantine is shared across every managed filesystem
+  and DOS aggregate, so a continuation cannot escape through a second owner
+  after its callback stack unwinds. A persisted cold projection always detaches
+  transient A: media while preserving C: and its metadata; stale
+  media-generation operations fail explicitly.
 - Bound scheduler work, redraws, queues, retries, polling, and startup waits.
 - Every stateful branch must reach an explicit observable terminal state.
   Cancel, disconnect, competing form, server close, failure, and retry paths
@@ -44,8 +116,16 @@ Bedrock adapters -> application services -> domain/runtime abstractions
   portable, monitor, reload, and rollback paths.
 - Preserve the startup storage-migration activation boundary: validate the
   current generation before its previous-generation fallback, migrate and verify
-  referenced Computers before committing the identity registry, and advance at
-  no more than one Dynamic Property operation per host tick.
+  referenced Computers even when the identity storage format is already current,
+  repair a recovered fallback into a verified canonical head before completion,
+  repair or remove corrupt previous-generation metadata without discarding a
+  valid canonical head, and commit a legacy identity registry only after those
+  payloads. Recovery may incrementally sweep target-only content blobs, legacy
+  indexed pages, or stray manifests that corrupt/interrupted metadata can no
+  longer name, but normal periodic saves must never enumerate a whole storage
+  prefix. Writer limits must reject a generation before mutation whenever its
+  page count or manifest would violate the reader/Dynamic Property contract.
+  Advance at no more than one Dynamic Property operation per host tick.
 - Mount immutable OS-image bytes from one shared, prevalidated base. Persist
   only per-Computer content-addressed overlays, metadata, hard links, and
   deletion tombstones; never duplicate the base image for every Computer or
@@ -71,11 +151,17 @@ npm run test:mcp
 npm run test:mcp:bds
 npm run test:bds
 npm run test:bds:disconnect
+npm run build:pages
+npm run test:pages
 ```
 
 `npm run validate` is the standard host gate: formatting, lint, TypeScript type
 checking, tests, and the production pack build must all pass. Bedrock-facing
 changes also require the smallest applicable real-BDS or GDK verification.
+`npm run test:mcp:bds` must include a `linux_authentication/PASS` record proving
+pre-login MCP rejection, masked first-boot setup, rebooted `cs`
+username/password login, authenticated `whoami`, and explicit runtime shutdown
+without emitting the probe password.
 
 For each non-trivial acceptance criterion, record an executable `Verify:` step
 and an observable `Expect:` result. Do not treat a successful build as proof of
@@ -214,15 +300,94 @@ The July 2026 live GDK verification established the following:
 - CS-DOS commands return CRLF and DOS-specific text. `TIME` displays the guest
   clock while `TIMER` measures bounded command execution; `DIR`, `COPY`,
   `DEL`/`ERASE`, `MD`/`RD`, `MOVE`, `REN`/`RENAME`, `TYPE`, `TREE`, `VOL`,
-  `VER`, `DOSKEY /HISTORY`, and `MEM /F` must not leak Linux output. `TREE`
-  remains O(N), capped at 512 entries and 32 levels.
-- CS-Linux uses UID/GID 1000 for `computer` and root-owned system paths. Its
-  backward-compatible filesystem snapshot persists mode, UID, GID, mtime,
-  symbolic links, and shared hard-link contents. Linux-facing commands use LF
-  and Linux-style identity, listing, stat, time, memory, disk, mount, and error
-  output. `/proc/version`, `/proc/uptime`, `/proc/loadavg`, and `/proc/mounts`
-  are dynamic read-only devices. Hard-link counts are O(1) so `ls -l` remains
-  O(N); materializing utilities have explicit limits.
+  `VER`, `DOSKEY /HISTORY`, `MEM /F`, `ATTRIB`, `LABEL`, and read-only `CHKDSK`
+  must not leak Linux output. A: and C: keep separate current directories;
+  bounded `*`/`?` expansion, FAT two-second mtimes, R/H/S/A attributes, volume
+  labels, and `DIR /A` use the persisted `DosRuntimeState`. `TREE` remains O(N),
+  capped at 512 entries and 32 levels. Production A: stays absent until a media
+  adapter exists, and cold restore must always detach it. Single-path writes,
+  `MD`/`RD`, wildcard `COPY`/`REN`/`DEL`, `MOVE`, and `ATTRIB` trial their full
+  FAT aggregate clone, then commit filesystem bytes/inodes and FAT state inside
+  one bounded undo transaction. Nested writes reuse the outer boundary.
+  Post-mutation failure injection must restore the exact filesystem snapshot,
+  inode/link identity, metadata, revision, byte/blob accounting, and DOS state.
+- DOS batch execution supports bounded labels, `GOTO`/`GOTO :EOF`, internal and
+  external `CALL`, `SHIFT`, `IF [NOT] ERRORLEVEL`, `IF [NOT] EXIST`, and
+  `COMMAND /C` or `/K`. Default ceilings are 256 lines and labels, nine
+  positional arguments, call depth 8, 1,024 jumps, 4,096 steps, 64 loaded
+  programs, 4,096 expanded-command characters, and 256,000 output characters.
+  This is not native COMMAND.COM or `.COM`/`.EXE` execution.
+- CS-Linux boots real bounded OS state: PID 1 is `/sbin/cs-init`, `cs-login`
+  owns a waiting getty, an authenticated shell becomes their child, and admitted
+  Python/CS486/background work receives a PID, credentials, state, and modeled
+  cycle account. `ps`, snapshot-only `top`, `kill`, `jobs`, `fg`, `bg`, `wait`,
+  `tty`, `who`, `w`, `last`, status-only `service`, `man`, and `apropos` read
+  that state. Only one interactive `sleep`, `python`/`micropython`, or `run`
+  command may use trailing `&`; redirects, pipelines, scripts, aliases,
+  functions, MCP submissions, and unsupported commands fail before side effects.
+- The Linux prompt is `<login>@<computer-id>:<path>$` or `#`. Login displays a
+  previous-session line when available, then the real `/etc/motd`; history is
+  capped at 100 entries, 512 UTF-8 bytes per line, and 32 KiB total and persists
+  in the user's mode-0600 `.bash_history`. Secret input never enters it.
+- `/proc/devices`, `/proc/services`, `/proc/loadavg`, `/proc/mounts`,
+  `/proc/<pid>/{cmdline,stat,status}`, and `/proc/self/*` are dynamic
+  state-backed views. `/var/log/messages`, `/var/log/auth.log`, and `dmesg` read
+  the bounded journal (256 entries and 32 KiB by default). `/dev/null`,
+  `/dev/zero`, `/dev/tty`, `/dev/console`, `/dev/tty1`, `/dev/hda`, and
+  absent-media `/dev/fd0` share the device registry; they do not imply host
+  Linux devices.
+- `OsRuntimeState.network` is an empty-by-default schema-1 boundary for the
+  future Issue #6 guest-NIC adapter. It bounds interfaces/addresses/sockets at
+  8/32/64, uses Map-backed identity/endpoint lookup, propagates successful
+  mutations to the outer revision, and rejects capacity-plus-one without a
+  partial state change. Cold projection retains interface/address definitions
+  but forces links down and counters to zero, removes every socket/listener, and
+  stays omitted entirely when unused. It does not ship `lo`, `eth0`, routes,
+  packets, DNS, `ip`, `ping`, or `ss`.
+- Shutdown and reboot stop admission and advance through signal, owned-work
+  drain, admitted-I/O drain, data sync, unmount, service/device stop, final
+  sync, and termination. Each phase has a 200-tick deadline and at most 16
+  stopping Computers advance per host tick. A sync failure faults instead of
+  claiming a clean stop. Before the one final callback, append only truthful
+  `final sync requested` and intent-prepared records; their presence after cold
+  restore proves that boundary included them. Never append a post-callback
+  success line that would itself be unsaved. If either marker append or the
+  callback fails, remove only that attempt's provisional markers before the
+  shared fault finalizer runs, so a later dirty-record retry cannot persist
+  false final-boundary evidence. The one-shot safe boot preserves but bypasses a
+  broken `/startup.py`. Expose it only while the Computer is `crashed`: the Web
+  power action becomes `safe_boot`, and a Bedrock player must sneak while
+  opening the crashed Computer. A normal interaction prints that recovery
+  instruction. Neither adapter may reset, delete, rename, or rewrite the startup
+  file, and the guest shell and MCP debug path must not gain a safe-boot
+  command.
+- CS-Linux initializes `cs` at UID/GID 1000 with `/home/cs`, `/bin/bash`, and
+  membership in the `sudo` group. Root is UID/GID 0 and initially
+  password-locked. `/etc/passwd`, `/etc/group`, and `/etc/shadow` are the
+  authoritative bounded account database; `passwd`, `useradd`, `userdel`,
+  `usermod`, `groupadd`, and `groupdel` update it transactionally. `sudo` grants
+  scoped effective privilege only to members of `sudo`, while `su` authenticates
+  the target account. Direct mutation of the three account files is rejected,
+  including for root; account commands own their atomic update boundary. The
+  credentialed filesystem enforces owner/group/other access, directory
+  traversal, ownership changes, sticky directories, protected hard links, and
+  per-session `umask`; setuid/setgid bits never create a hidden privilege path.
+  UID 1000 is the protected boot-service account: resolve its current name,
+  primary group, supplementary groups, and home from the account database, never
+  from a static `cs` credential. It may be renamed or moved only while inactive,
+  but guest `userdel` must not remove it. Trusted desktop boot creates only an
+  empty mode-0644 `/startup.py` owned by that account; `/` remains root-owned.
+  An empty startup file selects the built-in shell source, while a non-empty
+  file executes as the authoritative UID 1000 identity. The backward-compatible
+  filesystem snapshot persists mode, UID, GID, mtime, symbolic links, and shared
+  hard-link contents. Linux-facing commands use LF and Linux-style identity,
+  listing, stat, time, memory, disk, mount, and error output. `/proc/version`,
+  `/proc/uptime`, `/proc/loadavg`, and `/proc/mounts` are dynamic read-only
+  devices. Hard-link counts are O(1) so `ls -l` remains O(N); materializing
+  utilities have explicit limits. The legacy name `computer` remains reserved
+  for both users and groups after migration. Account mutations cap each user at
+  32 supplementary groups, and over-limit or failed recursive `useradd` home
+  provisioning is transactional with no partial account or directory tree.
 - `EDIT` is a DOS-profile-only full-screen editor. Its blue viewport, five
   menus, insert/overwrite state, bounded undo/search, save feedback, and dirty
   Save/Discard/Cancel dialog are rendered from the terminal model. Linux rejects
@@ -304,10 +469,26 @@ The July 2026 live GDK verification established the following:
   not the initiating player's IP, and cannot open a remote player's browser;
   Minecraft prints the stable LAN entry page and four-digit number for that
   player instead.
-- Production CS-Linux requires first-boot password setup and later login. The
-  salted bounded SHA-256 record lives in `/etc/shadow`; plaintext is never
-  persisted or echoed. Secret Web input is masked and excluded from browser
-  history/completion. MCP shell execution is rejected before login.
+- Production CS-Linux requires first-boot password setup for `cs`; later boots
+  require both a username and password and may authenticate any unlocked
+  account. Root starts locked and cannot log in until an administrator
+  deliberately sets its password. Salted bounded SHA-256 records live in
+  `/etc/shadow`; plaintext is never persisted or echoed. Secret Web input is
+  masked and excluded from browser history/completion. MCP shell execution is
+  rejected before login.
+- Login-disabled development sessions must refresh the authoritative UID 1000
+  credentials, login environment, and working directory after disconnect; clear
+  elevated environment state and fall back to `/` with an explicit warning when
+  the current home is unavailable. When no account is authenticated, retain only
+  the unprivileged `nobody` filesystem identity; never restore a static `cs` or
+  `sudo` credential.
+- The recognized legacy `computer` account is completely renamed to `cs` during
+  boot migration: `/home/computer` moves to `/home/cs`, the old
+  user/group/shadow keys disappear, and no alias or compatibility symlink
+  remains. Preserve the exact password payload, UID/GID, file contents, modes,
+  ownership, mtimes, symbolic links, hard-link identities, and tombstones.
+  Migration must be idempotent and fail explicitly on an ambiguous/conflicting
+  destination.
 
 Reproduce native Resource Pack UI changes on the real GDK client. For Web
 Terminal changes, run the focused Web tests and verify the connected state,
@@ -324,7 +505,13 @@ first-program, Python-and-Redstone, CS-Linux, native-development,
 Portable-CS-DOS, and diagnostic work. Keep chapter and section IDs, generated
 numbers, search results, Previous/Next navigation, and every goal path
 synchronized. `tests/tools/webManual.test.mjs` locks the publication order and
-chapter/header agreement.
+chapter/header agreement. The GitHub Pages manual is a static, progressively
+enhanced projection of this same module: every chapter and stable hash target
+must remain readable without JavaScript, while enhanced search retains the same
+24-result bound. It is never a Web Terminal endpoint and cannot authenticate,
+connect to BDS, accept a Computer number, or submit guest input. Build it with
+`npm run build:pages`, verify it with `npm run test:pages`, and publish only
+`dist/pages` through `.github/workflows/pages.yml`.
 
 ## Web companion networking
 
@@ -356,13 +543,23 @@ command runtime rather than invoking host tools.
 
 The CS486 toolchain uses versioned `CS486OBJ` relocatable objects and validated
 `CS486` executables. `as`/`cc`/`c++`/`basicc -c`, `ld`, `nm`, and `objdump` must
-remain entirely sandboxed. Linker symbol lookup is Map-backed and bounded;
-duplicate/unresolved symbols, corrupt objects, excessive object counts, and RAM
-overflow fail explicitly. The current ABI exposes zero-argument integer
-functions with EAX returns. Restricted statement-boundary inline assembly may
-not introduce labels, control flow, stack operations, or ESP/EBP access. Dynamic
-linking is not implemented yet; extend the versioned object/ABI boundary rather
-than dispatching to a host linker or loader.
+remain entirely sandboxed. Assembly flows through the dedicated tokenizer,
+bounded preprocessor, parser, constant-expression evaluator, and source-span
+diagnostics. Include reads stay inside the credentialed guest filesystem.
+Character and token budgets must be checked before token arrays, definition
+expansions, or macro output are appended. New writers emit v2 objects with
+`.text`, `.rodata`, `.data`, and `.bss`, typed symbols, initialized data,
+alignment, and structured relocations; readers keep v1 compatibility. Linker
+symbol lookup and local relocation lookup are Map-backed and bounded, layouts
+are computed once, and assembly text must never be regex-rewritten during
+linking. Duplicate/unresolved/type-mismatched symbols, corrupt objects,
+excessive objects, section data, relocations, and RAM overflow fail explicitly.
+Neither `CS486OBJ` nor `CS486` is ELF, OMF, DOS COM/EXE, or native x86. The
+current ABI exposes zero-argument integer functions with EAX returns. Restricted
+statement-boundary inline assembly may not introduce labels, control flow, stack
+operations, or ESP/EBP access. Dynamic linking is not implemented yet; extend
+the versioned object/ABI boundary rather than dispatching to a host linker or
+loader.
 
 CPU identity, clock, and RAM are one persisted hardware profile. Desktop
 Computer Systems default to CS486DX at 33 MHz with 2 MiB RAM. Advanced Desktop
@@ -455,7 +652,9 @@ module lookup is bounded and deterministic: importer directory, `/lib/python`,
 modules must be valid `CS486OBJ` files and expose only the current zero-argument
 EAX-return ABI. Keep module graph resolution O(source + modules), explicitly
 terminate missing/circular/oversized imports, and charge extension instructions
-to the same process.
+to the same process. The native `shell` module is an internal capability of only
+the built-in shell program selected by an empty `/startup.py`; it must be
+unavailable to user-authored `/startup.py`, foreground Python, and MCP Python.
 
 Keep OS-specific behavior behind `osProfile.ts`: path dialect, boot layout,
 environment, aliases, and virtual devices must not leak into the domain
@@ -466,12 +665,13 @@ and do not create a Linux-like `C:\USERS` hierarchy. DOS startup processes at
 most 64 `CONFIG.SYS` lines and 256 lines per batch, with depth 8, explicit
 failure, and a modeled conventional/UMB/XMS layout. Only the built-in
 HIMEM/EMM386 and `DOS=HIGH|LOW,UMB|NOUMB` contract may affect that layout; never
-claim native drivers, paging, BIOS/DOS interrupts, TSRs, or `.COM`/`.EXE`
-execution. DOS `EDIT` and cross-profile `vi` use writer-owned bounded
-`terminal_keys` batches and render only their fixed viewports. Every menu,
-search, save, exit, failure, and resize branch must return an explicit editor
-state. Syntax and indent highlighting must scan no more than the visible
-columns/rows per redraw.
+change memory state from a driver basename alone. Validate the referenced
+installed HIMEM/EMM386 guest file and its versioned capsule first. Never claim
+native drivers, paging, BIOS/DOS interrupts, TSRs, or `.COM`/`.EXE` execution.
+DOS `EDIT` and cross-profile `vi` use writer-owned bounded `terminal_keys`
+batches and render only their fixed viewports. Every menu, search, save, exit,
+failure, and resize branch must return an explicit editor state. Syntax and
+indent highlighting must scan no more than the visible columns/rows per redraw.
 
 World Dynamic Properties remain the Bedrock source of truth (physically the
 world LevelDB). Clean persistence checks use component revision tokens, not
@@ -496,7 +696,10 @@ future non-Bedrock host.
 - Use English commit messages with a useful description and reference Issue #4
   while Phase 2 work remains in scope. Reference Issue #12 for the OS,
   toolchain, Web Terminal, and field-manual work it tracks; reference Issue #15
-  for the full-screen `EDIT` implementation.
+  for the full-screen `EDIT` implementation; reference Issue #17 for CS-Linux
+  users, superuser security, DAC, and account/home migration; reference Issue
+  #18 for assembler v2, CS486OBJ sections/relocations, DOS frontend parity, and
+  stack guards.
 - Keep temporary scripts and work artifacts under `%USERPROFILE%\tmp`, not the
   user home directory root.
 

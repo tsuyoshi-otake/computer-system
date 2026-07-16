@@ -179,10 +179,12 @@ describe("Computer persistence boundary", (): void => {
     expect(loaded.outcome).toBe("loaded");
     if (loaded.outcome !== "loaded") return;
 
-    expect(loaded.record.terminal.line(1).trimEnd()).toBe("~$");
+    expect(loaded.record.terminal.line(1).trimEnd()).toBe("cs@computer-11:~$");
     expect(loaded.record.terminal.cell(1, 1).foreground).toBe(0);
     expect(loaded.record.terminal.cell(1, 2).foreground).toBe(0);
-    expect(loaded.record.terminal.cursorX).toBe(4);
+    expect(loaded.record.terminal.cursorX).toBe(
+      "cs@computer-11:~$ ".length + 1,
+    );
     expect(loaded.record.terminal.cursorY).toBe(1);
   });
 

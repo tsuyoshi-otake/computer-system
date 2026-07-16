@@ -714,6 +714,30 @@ describe("Web companion HTTP server", () => {
       outcome: "accepted",
     });
 
+    const safeBootPending = post(status.origin, "/api/power", connected.token, {
+      action: "safe_boot",
+    });
+    await until(() => bds.commands.at(-1)?.endsWith(" safe_boot"));
+    const [, , safeSessionId, safeRequestId, safeAction] = bds.commands
+      .at(-1)
+      .split(" ");
+    bds.log(
+      `CS_WEB_POWER ${JSON.stringify({
+        action: safeAction,
+        lifecycle: "booting",
+        outcome: "accepted",
+        requestId: safeRequestId,
+        sessionId: safeSessionId,
+      })}`,
+    );
+    expect(await safeBootPending.then((result) => result.json())).toMatchObject(
+      {
+        action: "safe_boot",
+        lifecycle: "booting",
+        outcome: "accepted",
+      },
+    );
+
     expect(
       (
         await post(status.origin, "/api/power", connected.token, {

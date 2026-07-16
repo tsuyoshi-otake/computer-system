@@ -14,12 +14,14 @@ import type {
 } from "../../src/domain/runtime/cpuProcess.js";
 import type { VmRuntimeError } from "../../src/domain/runtime/errors.js";
 import { InMemoryFilesystem } from "../../src/domain/filesystem/inMemoryFilesystem.js";
+import type { GuestFilesystem } from "../../src/application/os/guestFilesystem.js";
 import type { RuntimeValue } from "../../src/domain/runtime/value.js";
 import { TerminalBuffer } from "../../src/domain/terminal/terminalBuffer.js";
 
 export interface PythonCs486HarnessOptions {
   readonly environment?: NativeEnvironment;
   readonly filesystem?: InMemoryFilesystem;
+  readonly guestFilesystem?: GuestFilesystem;
   readonly limits?: PythonRuntimeLimits;
   readonly memoryBytes?: number;
   readonly path?: string;
@@ -41,9 +43,10 @@ export class PythonCs486Harness implements CpuProcess {
         filesystem: this.filesystem,
         terminal: this.terminal,
       });
+    const guestFilesystem = options.guestFilesystem ?? environment.filesystem;
     this.program = createPythonCs486Program({
       environment,
-      filesystem: this.filesystem,
+      filesystem: guestFilesystem,
       limits: options.limits,
       memoryBytes: options.memoryBytes ?? 1_048_576,
       path: options.path ?? "/main.py",

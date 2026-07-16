@@ -1,8 +1,7 @@
 import type { ComputerSnapshotRepository } from "../../application/computer/persistence.js";
+import { isMigratableComputerSnapshot } from "../../application/computer/snapshotMigration.js";
 import type { ComputerSnapshot } from "../../domain/computer/computer.js";
 import { requireComputerId } from "../../domain/computer/identity.js";
-import { isCpuModel } from "../../domain/cpu/models.js";
-import { isDisplayProfileId } from "../../domain/display/displayProfile.js";
 import {
   TransactionalPagedStore,
   type PagedSaveTransaction,
@@ -72,30 +71,5 @@ export class DynamicPropertyComputerRepository implements ComputerSnapshotReposi
 }
 
 function isComputerSnapshot(value: unknown): value is ComputerSnapshot {
-  if (typeof value !== "object" || value === null) return false;
-  const candidate = value as Partial<ComputerSnapshot>;
-  return (
-    candidate.schema === 2 &&
-    typeof candidate.computerId === "string" &&
-    (candidate.family === "standard" || candidate.family === "advanced") &&
-    (candidate.label === undefined || typeof candidate.label === "string") &&
-    typeof candidate.filesystem === "object" &&
-    candidate.filesystem !== null &&
-    candidate.filesystem.schema === 2 &&
-    typeof candidate.terminal === "object" &&
-    candidate.terminal !== null &&
-    typeof candidate.redstoneOutputMask === "number" &&
-    (candidate.hardware === undefined ||
-      (typeof candidate.hardware === "object" &&
-        candidate.hardware !== null &&
-        Number.isSafeInteger(candidate.hardware.clockHz) &&
-        (candidate.hardware.cpuModel === undefined ||
-          isCpuModel(candidate.hardware.cpuModel)) &&
-        Number.isSafeInteger(candidate.hardware.memoryBytes))) &&
-    (candidate.osProfile === undefined ||
-      candidate.osProfile === "linux" ||
-      candidate.osProfile === "dos") &&
-    (candidate.displayProfileId === undefined ||
-      isDisplayProfileId(candidate.displayProfileId))
-  );
+  return isMigratableComputerSnapshot(value) && value.schema === 2;
 }

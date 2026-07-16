@@ -7,7 +7,7 @@ import type {
 import { LanguageSyntaxError } from "../../domain/language/errors.js";
 import { parse } from "../../domain/language/parser.js";
 import type { SourceSpan } from "../../domain/language/source.js";
-import type { InMemoryFilesystem } from "../../domain/filesystem/inMemoryFilesystem.js";
+import type { GuestFilesystem } from "../os/guestFilesystem.js";
 import {
   Cs486Process,
   type Cs486Executable,
@@ -15,7 +15,11 @@ import {
   type Cs486SyscallContext,
   type Cs486SyscallResult,
 } from "../../domain/cpu/cs486.js";
-import type { Cs486Object } from "../../domain/cpu/cs486Object.js";
+import {
+  cs486ObjectDataAlignment,
+  validateCs486Object,
+  type Cs486Object,
+} from "../../domain/cpu/cs486Object.js";
 import {
   VmLimitError,
   VmMemoryError,
@@ -47,7 +51,7 @@ const maximumTotalSourceBytes = 512_000;
 export interface PythonCs486Options {
   readonly cpuModel?: CpuModel;
   readonly environment: NativeEnvironment;
-  readonly filesystem: InMemoryFilesystem;
+  readonly filesystem: GuestFilesystem;
   readonly memoryBytes: number;
   readonly path: string;
   readonly source: string;
@@ -69,6 +73,11 @@ export interface PythonCs486Program {
 export function createPythonCs486Program(
   options: PythonCs486Options,
 ): PythonCs486Program {
+  if (options.filesystem !== options.environment.filesystem) {
+    throw new Error(
+      "Python imports and native modules must share one guest filesystem",
+    );
+  }
   const graph = resolveModules(options);
   const compiler = new PythonCs486Compiler(graph);
   const compiled = compiler.compile();
@@ -271,7 +280,7 @@ function collectImports(statements: readonly Statement[]): string[] {
 }
 
 function findModuleFile(
-  filesystem: InMemoryFilesystem,
+  filesystem: GuestFilesystem,
   name: string,
   importerDirectory: string,
 ):
@@ -305,7 +314,9 @@ function decodeObject(encoded: string, path: string): Cs486Object {
   if (!encoded.startsWith("CS486OBJ\n"))
     throw new VmRuntimeError("ImportError", `${path} is not a CS486 object`);
   try {
-    return JSON.parse(encoded.slice("CS486OBJ\n".length)) as Cs486Object;
+    const decoded: unknown = JSON.parse(encoded.slice("CS486OBJ\n".length));
+    validateCs486Object(decoded);
+    return decoded;
   } catch {
     throw new VmRuntimeError(
       "ImportError",
@@ -1003,17 +1014,30 @@ function appendExtensionObjects(
   readonly extensionModules: readonly ExtensionModuleRuntime[];
 } {
   const instructions = [...compilation.executable.instructions];
+  const initialData = (compilation.executable.initialData ?? []).map(
+    (segment) => ({ bytes: [...segment.bytes], offset: segment.offset }),
+  );
   const extensionModules: ExtensionModuleRuntime[] = [];
-  let dataBytes = 0;
+  let dataBytes = compilation.executable.dataBytes ?? 0;
   for (const extension of extensions) {
-    const globals = extension.object.symbols.filter(
-      (symbol) => symbol.binding === "global",
+    const textFunctions = extension.object.symbols.filter(
+      (symbol) =>
+        symbol.binding === "global" &&
+        symbol.section === "text" &&
+        (symbol.type === undefined ||
+          symbol.type === "function" ||
+          symbol.type === "notype"),
+    );
+    const globals = textFunctions.filter(
+      (symbol) => symbol.functionSignature !== "()->void",
     );
     const entry = globals[0]?.name;
     if (entry === undefined)
       throw new VmRuntimeError(
         "ImportError",
-        `${extension.path} exports no functions`,
+        textFunctions.some((symbol) => symbol.functionSignature === "()->void")
+          ? `${extension.path} exports no zero-argument integer functions`
+          : `${extension.path} exports no functions`,
       );
     let linked: Cs486Executable;
     try {
@@ -1025,27 +1049,49 @@ function appendExtensionObjects(
       );
     }
     const bodyBase = instructions.length;
+    const dataBase = align(
+      dataBytes,
+      cs486ObjectDataAlignment(extension.object),
+    );
     const body = linked.instructions
       .slice(2)
       .map((instruction) =>
-        relocateExtensionInstruction(instruction, bodyBase, dataBytes),
+        relocateExtensionInstruction(instruction, bodyBase, dataBase),
       );
     instructions.push(...body);
+    for (const segment of linked.initialData ?? []) {
+      initialData.push({
+        bytes: [...segment.bytes],
+        offset: dataBase + segment.offset,
+      });
+    }
     const exports = new Map<string, number>();
+    const functionNames = new Set(globals.map((symbol) => symbol.name));
     for (const symbol of linked.symbols ?? []) {
-      if (globals.some(({ name }) => name === symbol.name))
+      if (
+        functionNames.has(symbol.name) &&
+        (symbol.section === undefined || symbol.section === "text") &&
+        (symbol.type === undefined ||
+          symbol.type === "function" ||
+          symbol.type === "notype") &&
+        symbol.functionSignature !== "()->void"
+      )
         exports.set(symbol.name, bodyBase + symbol.address - 2);
     }
     extensionModules.push({ id: extension.id, name: extension.name, exports });
-    dataBytes += align4(linked.dataBytes ?? 0);
+    dataBytes = dataBase + (linked.dataBytes ?? 0);
   }
+  dataBytes = align(dataBytes, 4);
   if (instructions.length > 4_096) throw new VmLimitError("linked instruction");
+  const version =
+    compilation.executable.version === 2 || extensions.length > 0 ? 2 : 1;
   return {
     executable: {
       format: "cs486-executable",
       instructions,
       dataBytes,
-      version: 1,
+      ...(initialData.length > 0 ? { initialData } : {}),
+      version,
     },
     extensionModules,
   };
@@ -1076,8 +1122,8 @@ function relocateExtensionInstruction(
   return instruction;
 }
 
-function align4(value: number): number {
-  return Math.ceil(value / 4) * 4;
+function align(value: number, alignment: number): number {
+  return Math.ceil(value / alignment) * alignment;
 }
 
 interface PythonRuntimeOptions {

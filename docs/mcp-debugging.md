@@ -74,6 +74,12 @@ merely by listening on TCP 443.
    `CS_TERMINAL_CLOSE`, Script API, JSON, and UI diagnostics.
 6. Call `bds_stop` and verify that the returned state is `idle`.
 
+`npm run test:mcp:bds` keeps its clean-world release behavior. Pass
+`-- --preserve-world` when the same MCP headless gate must call
+`bds_start({ resetWorld: false })`; use a dedicated `BDS_MCP_WORKDIR` and free
+BDS/Web ports, and never point a second companion at a work directory that is
+already running.
+
 `bds_run_command` is intentionally restricted to `list`, the server-side
 `headless` probe, and player-scoped Computer System probes. It rejects arbitrary
 administration commands, command separators, newlines, and commands longer than
@@ -106,6 +112,16 @@ and locality benchmarks reproducible through MCP without scraping the Web
 Terminal. CS-Linux authentication remains enforced for ordinary shell commands:
 log in normally before using them. CS-DOS has no login gate.
 
+After login, read-only OS Presence probes such as `ps -f`, `top`,
+`service --status-all`, `who`, `last`, `dmesg`, and `cat /proc/<pid>/status` use
+the same per-Computer runtime state as the Web Terminal. `cat /var/log/messages`
+and `cat /var/log/auth.log` return bounded guest records, not BDS or host logs.
+`sync` crosses the managed host's real persistence boundary. Trailing `&`, `fg`,
+`bg`, `wait`, safe boot, shutdown, and reboot remain interactive/asynchronous
+ownership paths and are not broadened through `bds_execute_computer_command`; an
+unsupported request must terminate explicitly without creating a guest process
+or job.
+
 Only one managed BDS may own a UDP port pair. When a development server is
 already using `19142`/`19143`, set `BDS_MCP_PORT` to a free port whose following
 port is also free; use a distinct `WEB_COMPANION_PORT` as well. Do not start two
@@ -117,10 +133,14 @@ Use `bds_start` with `resetWorld: false` to retain a managed debug world. A
 world whose valid schema-2 identity registry is still encoded with schema-1
 indexed pages is upgraded before Computer components or the Web bridge start.
 Each paged load checks the current head before the immediately previous complete
-generation. Referenced schema-1 Computer/filesystem snapshots are converted,
-committed, and read back first; the identity registry is committed last. The
-host spends at most one Dynamic Property read/write/delete on this migration per
-tick.
+generation. Every referenced Computer is scanned even when the identity pages
+are already current. Changed schema-1 or current payloads are converted or
+cold-normalized, committed, and read back first. A legacy identity registry is
+committed last; a healthy current identity head is left unchanged. A
+current-format Computer or identity recovered from its previous generation is
+written back into the invalid head and reload-verified without fallback before
+completion. The host spends at most one Dynamic Property read/write/delete on
+this migration per tick.
 
 For a deployment or irreplaceable debug world, do not rely on a live filesystem
 copy:
@@ -141,10 +161,12 @@ copy:
    preserved world, and require a complete no-conversion startup.
 
 An interrupted run remains safe because the legacy identity head is not replaced
-until every referenced Computer generation has been verified. Restarting rescans
-the registry and skips any Computer generation already in the current format.
-Corruption of both the current and previous candidates reaches an explicit
-failure instead of activating a partial registry.
+until every referenced Computer generation has been verified. With a current
+identity head, restart still rescans and resumes a partially committed payload
+upgrade without rewriting that identity generation. Already-canonical Computer
+generations are skipped. A recovered current-format fallback repairs its invalid
+head first; corruption of both current and previous candidates reaches an
+explicit failure instead of activating a partial registry.
 
 For a bounded Computer System Python comparison, pass `python <file>`,
 `micropython <file>`, or `python -c <source>` through the same tool. The inline
@@ -263,8 +285,9 @@ limits remain enforced. Do not publish the plain HTTP listener directly.
 - `Verify:` Run
   `npx vitest run tests/phase0/transactionalPagedStore.test.ts tests/computer/snapshotMigration.test.ts tests/computer/storageMigration.test.ts`.
   `Expect:` Schema-1 page and snapshot conversion, current-head-first fallback,
-  one-operation tick slicing, identity-last activation, explicit corruption
-  failure, restart idempotence, and fresh-world no-op behavior pass.
+  recovered current-format head repair, one-operation tick slicing,
+  identity-last activation, explicit corruption failure, restart idempotence,
+  and fresh-world no-op behavior pass.
 - `Verify:` Back up a stopped legacy-format managed world, call `bds_start` with
   `resetWorld: false`, and wait for `CS_STORAGE_MIGRATION` logs. `Expect:` The
   status reaches `complete` before Computer/Web behavior starts, preserved data
@@ -295,4 +318,8 @@ limits remain enforced. Do not publish the plain HTTP listener directly.
   diagnostics remain inspectable through MCP, and `bds_stop` returns `idle`.
 - `Verify:` Run `npm run test:mcp:bds` for the same workflow through a real MCP
   stdio client and the local BDS distribution. `Expect:` The command prints a
-  JSON `PASS` summary with a passing suite record and final state `idle`.
+  JSON `PASS` summary with a passing suite record, a `linux_authentication/PASS`
+  record, and final state `idle`. The authentication details report
+  `preLoginRejected`, `passwordMasked`, `setupCompleted`, and
+  `laterLoginRequired` as true and `authenticatedUser` as `cs`; neither the
+  details nor BDS logs contain the internal probe password.

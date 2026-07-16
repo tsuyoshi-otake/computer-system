@@ -61,6 +61,31 @@ export function runVerticalSliceProbe(
   record.redstone.setInput("left", 15);
 
   const runtime = new ComputerRuntime();
+  runtime.configureLifecycleBoundaries({
+    pendingFilesystemIo: (): number => 0,
+    stopDevices: (): void => undefined,
+    syncPersistence: (computerId) => {
+      if (computerId !== record.computerId) {
+        return { outcome: "missing" as const, computerId };
+      }
+      const result = persistence.saveIfDirty(record);
+      if (result.outcome === "failed") {
+        return { outcome: "failed" as const, error: result.error };
+      }
+      if (result.outcome === "saved") {
+        return { outcome: "saved" as const, generation: result.generation };
+      }
+      if (result.outcome === "unchanged") {
+        return { outcome: "unchanged" as const };
+      }
+      return {
+        outcome: "failed" as const,
+        error: new Error(
+          `probe persistence returned unexpected ${result.outcome} outcome`,
+        ),
+      };
+    },
+  });
   runtime.register(record);
   const power = runtime.powerOn(record.computerId);
   if (power.outcome !== "accepted") {
@@ -74,9 +99,9 @@ export function runVerticalSliceProbe(
   }
   runtime.runTick();
   const outputMask = record.redstone.outputMask;
-  runtime.terminate(record.computerId);
-  runtime.runTick();
-  const terminatedOff = record.lifecycle.state.kind === "off";
+  const termination = runtime.terminate(record.computerId);
+  const terminatedOff =
+    termination.outcome === "accepted" && runUntilOff(runtime, record, 64);
   const saved = persistence.saveIfDirty(record);
   if (saved.outcome === "failed") throw saved.error;
 
@@ -91,4 +116,23 @@ export function runVerticalSliceProbe(
     startupPresent: record.filesystem.exists("/startup.py"),
     terminatedOff,
   };
+}
+
+function runUntilOff(
+  runtime: ComputerRuntime,
+  record: ComputerRecord,
+  maximumTicks: number,
+): boolean {
+  for (let tick = 0; tick < maximumTicks; tick += 1) {
+    if (
+      record.lifecycle.state.kind === "off" &&
+      record.display.state.kind === "off"
+    ) {
+      return true;
+    }
+    runtime.runTick();
+  }
+  return (
+    record.lifecycle.state.kind === "off" && record.display.state.kind === "off"
+  );
 }

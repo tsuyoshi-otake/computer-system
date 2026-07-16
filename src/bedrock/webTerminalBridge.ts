@@ -388,7 +388,7 @@ function handleTakeControl(message: string): void {
 
 function handlePower(message: string): void {
   const match =
-    /^([A-Za-z0-9_-]{12,32}) ([A-Za-z0-9_-]{6,20}) (power_on|shutdown)$/u.exec(
+    /^([A-Za-z0-9_-]{12,32}) ([A-Za-z0-9_-]{6,20}) (power_on|safe_boot|shutdown)$/u.exec(
       message,
     );
   if (match === null) return;
@@ -402,16 +402,15 @@ function handlePower(message: string): void {
   if (record === undefined) {
     result = { outcome: "missing", computerId: session.computerId };
   } else {
-    if (action === "power_on" && record.lifecycle.state.kind === "crashed") {
-      record.lifecycle.transition({ kind: "reset" });
-    }
     result =
       action === "power_on"
         ? computerHost.runtime.powerOn(session.computerId)
-        : computerHost.runtime.shutdown(
-            session.computerId,
-            "web_terminal_power_button",
-          );
+        : action === "safe_boot"
+          ? computerHost.runtime.safeBoot(session.computerId)
+          : computerHost.runtime.shutdown(
+              session.computerId,
+              "web_terminal_power_button",
+            );
   }
   console.warn(
     `${powerMarker}${JSON.stringify({

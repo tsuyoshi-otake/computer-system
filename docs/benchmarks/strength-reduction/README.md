@@ -18,3 +18,9 @@ instructions, modeled CPU cycles, and virtual microseconds from a cold process.
 The captured live-BDS/MCP result set is
 [`results-2026-07-15.json`](./results-2026-07-15.json). Every supported cell
 printed `1129513000`; CS386SX rejected both Python variants with status 127.
+
+This capture predates the dedicated C/C++ tokenizer, typed AST, CSIR optimizer,
+and register allocator. Its C and C++ rows are historical provenance, not
+current compiler measurements. Rerun both variants cold on all three hardware
+profiles before publishing new C/C++ comparisons; do not combine new host-only
+results with the retained live-BDS table.

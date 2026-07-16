@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { ComputerRuntime } from "../../src/application/computer/computerRuntime.js";
-import { ComputerRecord } from "../../src/domain/computer/computer.js";
+import {
+  ComputerRecord,
+  type ComputerSnapshot,
+} from "../../src/domain/computer/computer.js";
 import { ShellSession } from "../../src/application/os/shellSession.js";
 
 describe("default Computer System Linux boot", (): void => {
@@ -72,7 +75,7 @@ describe("default Computer System Linux boot", (): void => {
     });
   });
 
-  it("shows only the Linux identity, blank line, and password prompt on later boots", (): void => {
+  it("shows only the Linux identity, blank line, and username prompt on later boots", (): void => {
     const record = new ComputerRecord("computer-87", "standard");
     const setup = new ShellSession(record.filesystem, {
       osProfile: "linux",
@@ -88,7 +91,7 @@ describe("default Computer System Linux boot", (): void => {
 
     expect(record.terminal.line(1).trimEnd()).toBe("Computer System Linux 1.0");
     expect(record.terminal.line(2).trimEnd()).toBe("");
-    expect(record.terminal.line(3).trimEnd()).toBe("Password:");
+    expect(record.terminal.line(3).trimEnd()).toBe("login:");
     const screen = record.terminal.snapshot().rows.join("\n");
     expect(screen).not.toContain("tty1");
     expect(screen).not.toContain("Computer System Bash");
@@ -108,17 +111,25 @@ describe("default Computer System Linux boot", (): void => {
     runtime.powerOn(record.computerId);
     runtime.runTick();
 
+    runtime.queueEvent(record.computerId, "terminal_line", "cs");
+    runtime.runTick();
+    expect(record.terminal.line(4).trimEnd()).toBe("Password:");
+
     runtime.queueEvent(record.computerId, "terminal_line", "correct-horse");
     runtime.runTick();
-    expect(record.terminal.line(4).trimEnd()).toBe("Login successful.");
-    expect(record.terminal.line(5).trimEnd()).toBe("~$");
+    expect(record.terminal.line(5).trimEnd()).toBe("Login successful.");
+    expect(record.terminal.line(6).trimEnd()).toBe(
+      "Welcome to CS-Linux 1.0. Type 'help' for commands or 'man cs-linux' for the fiel",
+    );
+    expect(record.terminal.line(7).trimEnd()).toBe("d guide.");
+    expect(record.terminal.line(8).trimEnd()).toBe("cs@computer-88:~$");
 
     runtime.queueEvent(record.computerId, "redstone", "left");
     runtime.runTick();
 
     const screen = record.terminal.snapshot().rows.join("\n");
-    expect(screen.match(/~\$ /gu)).toHaveLength(1);
-    expect(record.terminal.line(5).trimEnd()).toBe("~$");
+    expect(screen.match(/cs@computer-88:~\$ /gu)).toHaveLength(1);
+    expect(record.terminal.line(8).trimEnd()).toBe("cs@computer-88:~$");
     expect(record.lifecycle.state).toEqual({
       kind: "waiting_event",
       filter: undefined,
@@ -130,12 +141,22 @@ describe("default Computer System Linux boot", (): void => {
     const runtime = new ComputerRuntime();
     runtime.register(record);
     expect(runtime.powerOn(record.computerId).outcome).toBe("accepted");
+    expect(record.filesystem.readFile("/startup.py")).toBe("");
+    expect(record.filesystem.getMetadata("/startup.py")).toMatchObject({
+      gid: 1_000,
+      mode: 0o644,
+      uid: 1_000,
+    });
     runtime.runTick();
     expect(record.terminal.line(1).trimEnd()).toBe("Computer System Linux 1.0");
     expect(record.terminal.line(2).trimEnd()).toBe("");
-    expect(record.terminal.line(3).trimEnd()).toBe("~$");
+    expect(record.terminal.line(3).trimEnd()).toBe(
+      "Welcome to CS-Linux 1.0. Type 'help' for commands or 'man cs-linux' for the fiel",
+    );
+    expect(record.terminal.line(4).trimEnd()).toBe("d guide.");
+    expect(record.terminal.line(5).trimEnd()).toBe("cs@computer-30:~$");
     expect(record.terminal.cell(1, 1).foreground).toBe(0);
-    expect(record.terminal.cell(1, 3).foreground).toBe(0);
+    expect(record.terminal.cell(1, 5).foreground).toBe(0);
     expect(record.lifecycle.state).toEqual({
       kind: "waiting_event",
       filter: undefined,
@@ -161,6 +182,60 @@ describe("default Computer System Linux boot", (): void => {
     expect(record.lifecycle.state.kind).toBe("waiting_event");
   });
 
+  it("lets the authenticated UID 1000 owner save startup.py and executes it after reboot", (): void => {
+    const record = new ComputerRecord("computer-34", "standard");
+    const runtime = new ComputerRuntime({ requireLinuxLogin: true });
+    let generation = 0;
+    const snapshots = new Map<string, ComputerSnapshot>();
+    runtime.configureLifecycleBoundaries({
+      pendingFilesystemIo: (): number => 0,
+      stopDevices: (): void => undefined,
+      syncPersistence: (computerId) => {
+        if (computerId !== record.computerId) {
+          return { outcome: "missing" as const, computerId };
+        }
+        snapshots.set(computerId, structuredClone(record.snapshot()));
+        generation += 1;
+        return { outcome: "saved" as const, generation };
+      },
+    });
+    runtime.register(record);
+    expect(runtime.powerOn(record.computerId).outcome).toBe("accepted");
+    runtime.runTick();
+    runtime.queueEvent(record.computerId, "terminal_line", "correct-horse");
+    runtime.runTick();
+    runtime.queueEvent(record.computerId, "terminal_line", "correct-horse");
+    runtime.runTick();
+
+    runtime.queueEvent(record.computerId, "terminal_line", "vi /startup.py");
+    runtime.runTick();
+    runtime.queueEvent(
+      record.computerId,
+      "terminal_keys",
+      JSON.stringify([
+        "i",
+        ...'print("rebooted")',
+        "Escape",
+        ":",
+        "w",
+        "q",
+        "Enter",
+      ]),
+    );
+    runtime.runTick();
+    expect(record.filesystem.readFile("/startup.py")).toBe('print("rebooted")');
+
+    expect(runtime.reboot(record.computerId).outcome).toBe("accepted");
+    for (let tick = 0; tick < 14; tick += 1) runtime.runTick();
+
+    expect(record.terminal.snapshot().rows.join("\n")).toContain("rebooted");
+    expect(record.filesystem.getMetadata("/startup.py")).toMatchObject({
+      gid: 1_000,
+      mode: 0o644,
+      uid: 1_000,
+    });
+  });
+
   it("executes a piped BusyBox command delivered as a terminal event", (): void => {
     const record = new ComputerRecord("computer-31", "standard");
     const runtime = new ComputerRuntime();
@@ -175,13 +250,19 @@ describe("default Computer System Linux boot", (): void => {
     runtime.queueEvent(record.computerId, "terminal_line", "cat count");
     runtime.runTick();
 
-    expect(record.filesystem.readFile("/home/computer/count")).toBe(
-      "      2\n",
-    );
+    expect(record.filesystem.readFile("/home/cs/count")).toBe("      2\n");
     const rows = record.terminal.snapshot().rows;
-    expect(`${rows[2]!.slice(3)}${rows[3]!}`.slice(0, command.length)).toBe(
-      command,
-    );
+    const prompt = "cs@computer-31:~$ ";
+    const promptRow = rows.findIndex((row) => row.includes(prompt));
+    expect(promptRow).toBeGreaterThanOrEqual(0);
+    const promptColumn = rows[promptRow]!.indexOf(prompt) + prompt.length;
+    const commandEcho = [
+      rows[promptRow]!.slice(promptColumn),
+      ...rows.slice(promptRow + 1),
+    ]
+      .join("")
+      .slice(0, command.length);
+    expect(commandEcho).toBe(command);
     expect(
       record.terminal.snapshot().rows.some((line) => line.includes("2")),
     ).toBe(true);
@@ -200,7 +281,7 @@ describe("default Computer System Linux boot", (): void => {
 
     runtime.queueEvent(record.computerId, "terminal_line", "vi demo.py");
     runtime.runTick();
-    expect(record.terminal.line(1)).toContain("VI  /home/computer/demo.py");
+    expect(record.terminal.line(1)).toContain("VI  /home/cs/demo.py");
     runtime.queueEvent(
       record.computerId,
       "terminal_keys",
@@ -219,7 +300,7 @@ describe("default Computer System Linux boot", (): void => {
     );
     runtime.runTick();
 
-    expect(record.filesystem.readFile("/home/computer/demo.py")).toBe("pass");
+    expect(record.filesystem.readFile("/home/cs/demo.py")).toBe("pass");
     expect(record.lifecycle.state).toEqual({
       kind: "waiting_event",
       filter: undefined,

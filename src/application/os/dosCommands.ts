@@ -5,15 +5,21 @@ export interface DosCommandHost {
   changeDirectory(arguments_: readonly string[]): ShellCommandResult;
   copy(arguments_: readonly string[]): ShellCommandResult;
   currentDirectoryDisplay(): string;
+  dosAttrib(arguments_: readonly string[]): ShellCommandResult;
+  dosCheckDisk(arguments_: readonly string[]): ShellCommandResult;
   dosCpu(arguments_: readonly string[]): ShellCommandResult;
+  dosCopy(arguments_: readonly string[]): ShellCommandResult;
   dosDate(arguments_: readonly string[]): ShellCommandResult;
+  dosDelete(arguments_: readonly string[]): ShellCommandResult;
   dosDirectory(arguments_: readonly string[]): ShellCommandResult;
   dosEchoCommand(value: string): ShellCommandResult;
   dosHelp(arguments_: readonly string[]): ShellCommandResult;
+  dosLabel(arguments_: readonly string[]): ShellCommandResult;
   dosMemory(arguments_: readonly string[]): ShellCommandResult;
   dosPath(value: string): ShellCommandResult;
   dosPrompt(value: string): ShellCommandResult;
   dosRemoveDirectory(arguments_: readonly string[]): ShellCommandResult;
+  dosRename(arguments_: readonly string[]): ShellCommandResult;
   dosSet(value: string): ShellCommandResult;
   dosSystemInfo(arguments_: readonly string[]): ShellCommandResult;
   dosTime(arguments_: readonly string[]): ShellCommandResult;
@@ -33,6 +39,8 @@ export class DosCommandAdapter {
     stdin: string,
   ): ShellCommandResult | undefined {
     switch (command.toLowerCase()) {
+      case "attrib":
+        return this.host.dosAttrib(arguments_);
       case "cd":
       case "chdir":
         if (arguments_.length === 0)
@@ -45,19 +53,17 @@ export class DosCommandAdapter {
         return arguments_.length === 0
           ? dosSuccess("", { action: "clear" })
           : dosStatus(2, "Invalid number of parameters.\r\n");
+      case "chkdsk":
+        return this.host.dosCheckDisk(arguments_);
       case "copy":
         if (arguments_.some((value) => value.startsWith("/")))
           return dosStatus(2, "Invalid switch.\r\n");
-        return dosResult(
-          "File not found.",
-          this.host.copy(arguments_),
-          "        1 file(s) copied.\r\n",
-        );
+        return this.host.dosCopy(arguments_);
       case "date":
         return this.host.dosDate(arguments_);
       case "del":
       case "erase":
-        return dosResult("File not found.", this.host.remove(arguments_));
+        return this.host.dosDelete(arguments_);
       case "dir":
         return this.host.dosDirectory(arguments_);
       case "echo":
@@ -68,6 +74,8 @@ export class DosCommandAdapter {
           : dosStatus(2, "Invalid number of parameters.\r\n");
       case "help":
         return this.host.dosHelp(arguments_);
+      case "label":
+        return this.host.dosLabel(arguments_);
       case "md":
       case "mkdir":
         return dosResult(
@@ -91,10 +99,7 @@ export class DosCommandAdapter {
         return this.host.dosRemoveDirectory(arguments_);
       case "ren":
       case "rename":
-        return dosResult(
-          "The system cannot find the file specified.",
-          this.host.move(arguments_),
-        );
+        return this.host.dosRename(arguments_);
       case "rem":
         return dosSuccess();
       case "set":

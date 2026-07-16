@@ -12,6 +12,8 @@ export interface ShellCommandNode {
 }
 
 export interface ShellPipelineNode {
+  /** Linux-only trailing `&`; execution policy decides which forms are safe. */
+  readonly background?: boolean;
   readonly commands: readonly ShellCommandNode[];
 }
 
@@ -27,6 +29,7 @@ export interface ShellProgram {
 export type ShellVariableResolver = (name: string) => string | undefined;
 
 export interface ShellSyntaxFeatures {
+  readonly backgroundJobs: boolean;
   readonly chainOperators: ReadonlySet<ChainOperator>;
   readonly comments: boolean;
   readonly singleQuotes: boolean;
@@ -34,6 +37,7 @@ export interface ShellSyntaxFeatures {
 }
 
 export const busyBoxShellSyntaxFeatures: ShellSyntaxFeatures = {
+  backgroundJobs: true,
   chainOperators: new Set(["&&", "||", ";"]),
   comments: true,
   singleQuotes: true,
@@ -41,6 +45,7 @@ export const busyBoxShellSyntaxFeatures: ShellSyntaxFeatures = {
 };
 
 export const dosShellSyntaxFeatures: ShellSyntaxFeatures = {
+  backgroundJobs: false,
   chainOperators: new Set(["&&", "||"]),
   comments: false,
   singleQuotes: false,
@@ -97,10 +102,28 @@ export function parseShellProgram(
       break;
     }
 
+    let background = false;
+    const pipelineTerminator = tokens[cursor];
+    if (
+      pipelineTerminator?.kind === "operator" &&
+      pipelineTerminator.value === "&"
+    ) {
+      if (!features.backgroundJobs)
+        throw new ShellSyntaxError("background jobs are not supported");
+      background = true;
+      cursor += 1;
+      if (cursor < tokens.length) {
+        throw new ShellSyntaxError(
+          "background operator must terminate the command line",
+        );
+      }
+    }
+
     chains.push({
       ...(nextOperator === undefined ? {} : { operator: nextOperator }),
-      pipeline: { commands },
+      pipeline: { commands, ...(background ? { background: true } : {}) },
     });
+    if (background) break;
     const separator = tokens[cursor];
     if (separator === undefined) break;
     if (
@@ -269,7 +292,11 @@ function tokenize(
         continue;
       }
       if (character === "&") {
-        throw new ShellSyntaxError("background jobs are not supported");
+        if (!features.backgroundJobs)
+          throw new ShellSyntaxError("background jobs are not supported");
+        pushOperator(character);
+        index += 1;
+        continue;
       }
     }
     word += character;

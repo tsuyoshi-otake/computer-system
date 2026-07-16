@@ -3,6 +3,12 @@ import { installOsFilesystemImage } from "./osFilesystemImages.js";
 import type { ComputerOsProfile } from "../../domain/computer/computer.js";
 import { formatOsIdentity, getOsIdentity } from "./osIdentity.js";
 import type { OsIdentity } from "./osIdentity.js";
+import {
+  initialGroupId,
+  initialUserId,
+  initialUserName,
+} from "./linuxCredentials.js";
+import { linuxAccountLimits, linuxAccountPaths } from "./linuxAccounts.js";
 
 export interface OsBootContext {
   readonly computerName: string;
@@ -103,94 +109,136 @@ const linuxProfile: OsProfile = {
   id: "linux",
   identity: getOsIdentity("linux"),
   version: 1,
-  username: "computer",
-  home: "/home/computer",
-  initialDirectory: "/home/computer",
+  username: initialUserName,
+  home: "/home/cs",
+  initialDirectory: "/home/cs",
   pathDialect: linuxPathDialect,
   environment: new Map([
-    ["HOME", "/home/computer"],
+    ["HOME", "/home/cs"],
     ["PATH", "/usr/bin:/bin"],
     ["SHELL", "/bin/bash"],
     ["TERM", "computer-system"],
-    ["USER", "computer"],
-    ["LOGNAME", "computer"],
+    ["USER", initialUserName],
+    ["LOGNAME", initialUserName],
     ["OS", "CS-Linux"],
   ]),
   virtualDevices: new Map([["/dev/null", discardDevice("/dev/null")]]),
   boot: (filesystem, context) => {
+    const accountDatabasePresentBeforeBoot = Object.values(
+      linuxAccountPaths,
+    ).some((path) => filesystem.exists(path));
+    const legacyAccountPresentBeforeBoot =
+      hasRecognizedLegacyLinuxAccount(filesystem);
+    const initializeInitialHome =
+      !accountDatabasePresentBeforeBoot || legacyAccountPresentBeforeBoot;
+    const preserveExistingHomeMetadata =
+      filesystem.exists("/home/computer") || filesystem.exists("/home/cs");
+    const legacyHomePresentBeforeBoot = filesystem.exists("/home/computer");
+    if (
+      initializeInitialHome &&
+      legacyHomePresentBeforeBoot &&
+      filesystem.isSymbolicLink("/home/computer")
+    ) {
+      throw new Error(
+        "CS-Linux account migration: legacy home is a symbolic link",
+      );
+    }
+    if (
+      initializeInitialHome &&
+      legacyHomePresentBeforeBoot &&
+      !filesystem.isDirectory("/home/computer")
+    ) {
+      throw new Error(
+        "CS-Linux account migration: legacy home is not a directory",
+      );
+    }
     installOsFilesystemImage(filesystem, "linux");
-    ensureDirectories(filesystem, [
+    if (initializeInitialHome) migrateLegacyLinuxHome(filesystem);
+    else if (!legacyHomePresentBeforeBoot)
+      suppressImplicitLegacyBaseHome(filesystem);
+    const requiredDirectories = [
       "/bin",
       "/dev",
       "/etc",
-      "/home/computer",
       "/lib/python",
       "/proc",
+      "/run",
       "/root",
       "/tmp",
       "/usr/bin",
       "/usr/lib/computer-system/python",
+      "/usr/share/man",
+      "/var/lib/cs-os",
       "/var/log",
-    ]);
+    ];
+    if (initializeInitialHome) requiredDirectories.push("/home/cs");
+    ensureDirectories(filesystem, requiredDirectories);
     resetDirectory(filesystem, "/tmp");
+    resetDirectory(filesystem, "/run");
     ensureMigratedDefaultFile(filesystem, "/etc/os-release", linuxOsRelease, [
       legacyLinuxOsRelease,
     ]);
     ensureFile(filesystem, "/etc/hostname", `${context.computerName}\n`);
     ensureMigratedDefaultFile(
       filesystem,
-      "/etc/passwd",
-      "root:x:0:0:root:/root:/bin/bash\ncomputer:x:1000:1000:Computer System administrator:/home/computer:/bin/bash\n",
-      [
-        "computer:x:0:0:Computer System administrator:/home/computer:/bin/bash\n",
-      ],
-    );
-    ensureMigratedDefaultFile(
-      filesystem,
-      "/etc/group",
-      "root:x:0:\ncomputer:x:1000:computer\n",
-      ["computer:x:0:computer\n"],
-    );
-    ensureFile(
-      filesystem,
       "/etc/profile",
-      "export PATH=/usr/bin:/bin\nexport HOME=/home/computer\n",
+      "export PATH=/usr/bin:/bin\n",
+      [
+        "export PATH=/usr/bin:/bin\nexport HOME=/home/cs\n",
+        "export PATH=/usr/bin:/bin\nexport HOME=/home/computer\n",
+      ],
     );
     ensureFile(
       filesystem,
       "/etc/bash.bashrc",
       "# System-wide Computer System Bash configuration\nexport HISTSIZE=100\n",
     );
-    ensureFile(
-      filesystem,
-      "/home/computer/.bashrc",
-      "# Personal Computer System Bash configuration\nexport EDITOR=vi\n",
-    );
+    if (initializeInitialHome) {
+      ensureFile(
+        filesystem,
+        "/home/cs/.bashrc",
+        "# Personal Computer System Bash configuration\nexport EDITOR=vi\n",
+      );
+    }
     for (const path of [
+      "/",
       "/bin",
+      "/boot",
       "/dev",
       "/etc",
       "/lib",
+      "/lib/python",
       "/proc",
+      "/run",
       "/root",
       "/usr",
+      "/usr/bin",
+      "/usr/lib",
+      "/usr/lib/computer-system",
+      "/usr/lib/computer-system/python",
+      "/usr/share",
+      "/usr/share/man",
       "/var",
+      "/var/lib",
+      "/var/lib/cs-os",
+      "/var/log",
     ]) {
       filesystem.setMetadata(path, { gid: 0, mode: 0o755, uid: 0 });
     }
+    filesystem.setMetadata("/root", { gid: 0, mode: 0o700, uid: 0 });
     filesystem.setMetadata("/tmp", { gid: 0, mode: 0o1777, uid: 0 });
     filesystem.setMetadata("/home", { gid: 0, mode: 0o755, uid: 0 });
-    filesystem.setMetadata("/home/computer", {
-      gid: 1_000,
-      mode: 0o755,
-      uid: 1_000,
-    });
+    if (initializeInitialHome && !preserveExistingHomeMetadata) {
+      filesystem.setMetadata("/home/cs", {
+        gid: initialGroupId,
+        mode: 0o755,
+        uid: initialUserId,
+      });
+    }
     for (const path of [
       "/etc/bash.bashrc",
-      "/etc/group",
       "/etc/hostname",
       "/etc/os-release",
-      "/etc/passwd",
       "/etc/profile",
     ]) {
       filesystem.setMetadata(path, { gid: 0, mode: 0o644, uid: 0 });
@@ -280,6 +328,82 @@ function ensureMigratedDefaultFile(
   if (legacyDefaults.includes(filesystem.readFile(path))) {
     filesystem.writeFile(path, contents);
   }
+}
+
+function migrateLegacyLinuxHome(filesystem: InMemoryFilesystem): void {
+  const legacyHome = "/home/computer";
+  const currentHome = "/home/cs";
+  if (!filesystem.exists(legacyHome)) return;
+  if (filesystem.isSymbolicLink(legacyHome)) {
+    throw new Error(
+      "CS-Linux account migration: legacy home is a symbolic link",
+    );
+  }
+  if (!filesystem.isDirectory(legacyHome)) {
+    throw new Error(
+      "CS-Linux account migration: legacy home is not a directory",
+    );
+  }
+  if (!filesystem.exists(currentHome)) {
+    filesystem.move(legacyHome, currentHome);
+    return;
+  }
+  if (filesystem.isSymbolicLink(currentHome)) {
+    throw new Error(
+      "CS-Linux account migration: current home is a symbolic link",
+    );
+  }
+  if (!filesystem.isDirectory(currentHome)) {
+    throw new Error(
+      "CS-Linux account migration: current home is not a directory",
+    );
+  }
+  throw new Error(
+    "CS-Linux account migration: both legacy and current homes exist",
+  );
+}
+
+function hasRecognizedLegacyLinuxAccount(
+  filesystem: InMemoryFilesystem,
+): boolean {
+  const path = linuxAccountPaths.passwd;
+  if (
+    !filesystem.exists(path) ||
+    filesystem.isDirectory(path) ||
+    filesystem.isSymbolicLink(path) ||
+    filesystem.getSize(path) > linuxAccountLimits.maximumFileBytes.passwd
+  ) {
+    return false;
+  }
+  return filesystem
+    .readFile(path)
+    .split("\n")
+    .some((line) => {
+      const fields = line.split(":");
+      return (
+        fields.length === 7 &&
+        fields[0] === "computer" &&
+        fields[2] === String(initialUserId) &&
+        fields[3] === String(initialGroupId) &&
+        fields[5] === "/home/computer" &&
+        fields[6] === "/bin/bash"
+      );
+    });
+}
+
+function suppressImplicitLegacyBaseHome(filesystem: InMemoryFilesystem): void {
+  const path = "/home/computer";
+  if (!filesystem.exists(path)) return;
+  if (
+    filesystem.isSymbolicLink(path) ||
+    !filesystem.isDirectory(path) ||
+    filesystem.list(path).length > 0
+  ) {
+    throw new Error(
+      "CS-Linux account lifecycle: an unexpected legacy home appeared while mounting the OS image",
+    );
+  }
+  filesystem.delete(path);
 }
 
 function resetDirectory(filesystem: InMemoryFilesystem, path: string): void {

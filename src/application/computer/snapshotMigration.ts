@@ -1,6 +1,8 @@
 import type {
   ComputerOsProfile,
   ComputerSnapshot,
+  PersistedDosRuntimeStateSnapshot,
+  PersistedOsRuntimeStateSnapshot,
 } from "../../domain/computer/computer.js";
 import {
   restoreComputerHardware,
@@ -21,8 +23,11 @@ import {
   type LegacyInMemoryFilesystemSnapshot,
 } from "../../domain/filesystem/inMemoryFilesystem.js";
 import type { TerminalBufferSnapshot } from "../../domain/terminal/terminalBuffer.js";
+import { OsRuntimeState } from "../os/osRuntimeState.js";
+import { DosRuntimeState } from "../os/dosRuntimeState.js";
 
 const legacyShellPrompt = /^user@computer-[1-9][0-9]*:~\$/u;
+const compactShellPrompt = /^~\$/u;
 const legacyShellForeground = 5;
 const defaultShellForeground = 0;
 const maximumTerminalWidth = 200;
@@ -40,6 +45,7 @@ export interface LegacyComputerSnapshotV1 {
   readonly osProfile?: ComputerOsProfile;
   readonly hardware?: ComputerHardwareSnapshot;
   readonly displayProfileId?: DisplayProfileId;
+  readonly dosRuntime?: PersistedDosRuntimeStateSnapshot;
 }
 
 export type MigratableComputerSnapshot =
@@ -51,6 +57,8 @@ export function isMigratableComputerSnapshot(
   if (!isRecord(value) || (value.schema !== 1 && value.schema !== 2)) {
     return false;
   }
+  const computerId = value.computerId;
+  if (typeof computerId !== "string" || !isComputerId(computerId)) return false;
   if (
     !hasOnlyKeys(value, [
       "schema",
@@ -63,8 +71,9 @@ export function isMigratableComputerSnapshot(
       "osProfile",
       "hardware",
       "displayProfileId",
+      "osRuntime",
+      "dosRuntime",
     ]) ||
-    !isComputerId(value.computerId) ||
     (value.family !== "standard" && value.family !== "advanced") ||
     (value.label !== undefined &&
       (typeof value.label !== "string" ||
@@ -80,7 +89,11 @@ export function isMigratableComputerSnapshot(
     (value.hardware !== undefined &&
       !isComputerHardwareSnapshot(value.hardware)) ||
     (value.displayProfileId !== undefined &&
-      !isDisplayProfileId(value.displayProfileId))
+      !isDisplayProfileId(value.displayProfileId)) ||
+    (value.osRuntime !== undefined &&
+      !isMigratableOsRuntimeSnapshot(computerId, value.osRuntime)) ||
+    (value.dosRuntime !== undefined &&
+      !isMigratableDosRuntimeSnapshot(value.dosRuntime))
   ) {
     return false;
   }
@@ -94,35 +107,114 @@ export function migrateComputerSnapshot(value: unknown): ComputerSnapshot {
     throw new TypeError("Invalid or unsupported computer snapshot");
   }
   const snapshot = value;
-  const terminal = migrateLegacyShellTerminal(snapshot.terminal);
+  const terminal = migrateLegacyShellTerminal(
+    snapshot.terminal,
+    snapshot.computerId,
+  );
   if (snapshot.schema === 2) {
-    return terminal === snapshot.terminal
+    const osRuntime =
+      snapshot.osRuntime === undefined
+        ? undefined
+        : migrateOsRuntimeSnapshot(snapshot.computerId, snapshot.osRuntime);
+    const dosRuntime = migrateDosRuntimeForProfile(
+      snapshot.osProfile ?? "linux",
+      snapshot.dosRuntime,
+    );
+    return terminal === snapshot.terminal &&
+      osRuntime === snapshot.osRuntime &&
+      dosRuntime === snapshot.dosRuntime
       ? snapshot
-      : { ...snapshot, terminal };
+      : {
+          ...snapshot,
+          terminal,
+          ...(osRuntime === undefined ? {} : { osRuntime }),
+          ...(dosRuntime === undefined ? {} : { dosRuntime }),
+        };
   }
+  const dosRuntime = migrateDosRuntimeForProfile(
+    snapshot.osProfile ?? "linux",
+    snapshot.dosRuntime,
+  );
   return {
     ...snapshot,
     schema: 2,
     filesystem: migrateLegacyInMemoryFilesystemSnapshot(snapshot.filesystem),
     terminal,
+    ...(dosRuntime === undefined ? {} : { dosRuntime }),
   };
+}
+
+function isMigratableOsRuntimeSnapshot(
+  computerId: string,
+  value: unknown,
+): boolean {
+  try {
+    OsRuntimeState.restore(computerId, value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function migrateOsRuntimeSnapshot(
+  computerId: string,
+  value: unknown,
+): PersistedOsRuntimeStateSnapshot {
+  const persistent = OsRuntimeState.restore(
+    computerId,
+    value,
+  ).persistentSnapshot();
+  return hasSameSnapshotEncoding(value, persistent)
+    ? (value as PersistedOsRuntimeStateSnapshot)
+    : persistent;
+}
+
+function isMigratableDosRuntimeSnapshot(value: unknown): boolean {
+  try {
+    DosRuntimeState.restore(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function migrateDosRuntimeForProfile(
+  profile: ComputerOsProfile,
+  value: unknown,
+): PersistedDosRuntimeStateSnapshot | undefined {
+  if (value !== undefined) {
+    const persistent = DosRuntimeState.restore(value).persistentSnapshot();
+    return hasSameSnapshotEncoding(value, persistent)
+      ? (value as PersistedDosRuntimeStateSnapshot)
+      : persistent;
+  }
+  return profile === "dos"
+    ? DosRuntimeState.create().persistentSnapshot()
+    : undefined;
+}
+
+function hasSameSnapshotEncoding(value: unknown, canonical: unknown): boolean {
+  return JSON.stringify(value) === JSON.stringify(canonical);
 }
 
 function migrateLegacyShellTerminal(
   snapshot: TerminalBufferSnapshot,
+  computerId: string,
 ): TerminalBufferSnapshot {
   let changed = false;
   let cursorX = snapshot.cursor.x;
   const rows = snapshot.rows.map((row, rowIndex) => {
-    const match = legacyShellPrompt.exec(row);
+    const match = legacyShellPrompt.exec(row) ?? compactShellPrompt.exec(row);
     if (match === null) return row;
 
     changed = true;
-    const replacement = `~$${row.slice(match[0].length)}`
+    const prompt = `cs@${computerId}:~$`;
+    const replacement = `${prompt}${row.slice(match[0].length)}`
       .slice(0, snapshot.width)
       .padEnd(snapshot.width, " ");
     if (snapshot.cursor.y === rowIndex + 1 && cursorX > match[0].length) {
-      cursorX -= match[0].length - 2;
+      cursorX += prompt.length - match[0].length;
+      cursorX = Math.min(snapshot.width, cursorX);
     }
     return replacement;
   });

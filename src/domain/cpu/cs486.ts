@@ -29,14 +29,24 @@ export const cs486NominalClockHz = computerNominalClockHz;
 export { cs486RegisterNames };
 export type { Cs486Instruction, Cs486Operand, Cs486Register };
 
+/** The bounded function ABI currently carried by v2 symbol metadata. */
+export type Cs486FunctionSignature = "()->i32" | "()->void";
+
 export interface Cs486Executable {
   readonly dataBytes?: number;
   readonly format: "cs486-executable";
-  readonly version: 1;
+  readonly initialData?: readonly {
+    readonly bytes: readonly number[];
+    readonly offset: number;
+  }[];
+  readonly version: 1 | 2;
   readonly instructions: readonly Cs486Instruction[];
   readonly symbols?: readonly {
     readonly address: number;
+    readonly functionSignature?: Cs486FunctionSignature;
     readonly name: string;
+    readonly section?: "bss" | "data" | "rodata" | "text";
+    readonly type?: "function" | "notype" | "object";
   }[];
 }
 
@@ -97,6 +107,7 @@ export class Cs486Fault extends Error {
 
 const maximumProgramInstructions = 4_096;
 const maximumOutputBytes = 64_000;
+const maximumInspectionBytes = 4_096;
 
 export function runCs486(
   executable: Cs486Executable,
@@ -138,6 +149,7 @@ export class Cs486Process implements CpuProcess {
   private readonly cpuModel: CpuModel;
   private readonly memoryHierarchy: CpuMemoryHierarchy;
   private readonly memoryBytes: number;
+  private readonly stackFloorBytes: number;
   private stateValue: CpuProcessState = { kind: "ready" };
   private instructionPointer = 0;
   private compared = 0;
@@ -173,7 +185,10 @@ export class Cs486Process implements CpuProcess {
         "MemoryAccessError",
         "executable data exceeds available RAM",
       );
+    this.stackFloorBytes = Math.ceil((executable.dataBytes ?? 0) / 4) * 4;
     this.memory = new DataView(new ArrayBuffer(this.memoryBytes));
+    for (const segment of executable.initialData ?? [])
+      new Uint8Array(this.memory.buffer).set(segment.bytes, segment.offset);
     this.write("esp", this.memoryBytes);
     this.write("ebp", this.memoryBytes);
   }
@@ -193,6 +208,31 @@ export class Cs486Process implements CpuProcess {
         this.registerValues[index]!,
       ]),
     ) as Record<Cs486Register, number>;
+  }
+
+  /** Current zero-based instruction address for read-only debugger inspection. */
+  get instructionAddress(): number {
+    return this.instructionPointer;
+  }
+
+  /**
+   * Returns a bounded copy of guest RAM. The copy prevents debugger consumers
+   * from mutating process memory outside validated CS486 instructions.
+   */
+  inspectMemory(address: number, length: number): Uint8Array {
+    if (!Number.isSafeInteger(address) || address < 0)
+      throw new RangeError("memory inspection address must be non-negative");
+    if (
+      !Number.isSafeInteger(length) ||
+      length <= 0 ||
+      length > maximumInspectionBytes
+    )
+      throw new RangeError(
+        `memory inspection length must be between 1 and ${String(maximumInspectionBytes)}`,
+      );
+    if (address > this.memoryBytes - length)
+      throw new RangeError("memory inspection is outside RAM");
+    return new Uint8Array(this.memory.buffer, address, length).slice();
   }
 
   get memoryLimitBytes(): number {
@@ -216,6 +256,21 @@ export class Cs486Process implements CpuProcess {
 
   get hasPendingCpuCycles(): boolean {
     return this.cycleDebt > 0;
+  }
+
+  /**
+   * Pays only cycle debt already incurred by the current instruction.
+   *
+   * Scheduler adapters use this boundary when they must observe breakpoints or
+   * cancellation before allowing the next instruction to start. The operation
+   * is O(1) regardless of the number of cycles paid.
+   */
+  drainPendingCpuCycles(cpuCycleBudget: number): number {
+    if (!Number.isSafeInteger(cpuCycleBudget) || cpuCycleBudget <= 0)
+      throw new RangeError("CPU cycle budget must be a positive safe integer");
+    const paid = Math.min(this.cycleDebt, cpuCycleBudget);
+    this.cycleDebt -= paid;
+    return paid;
   }
 
   runCpuSlice(
@@ -317,8 +372,14 @@ export class Cs486Process implements CpuProcess {
     const instructionIndex = this.instructionPointer;
     const instruction = this.executable.instructions[instructionIndex];
     if (instruction === undefined) {
-      this.complete();
-      return undefined;
+      if (instructionIndex === this.executable.instructions.length) {
+        this.complete();
+        return undefined;
+      }
+      throw new Cs486Fault(
+        "ExecutableFormatError",
+        `instruction pointer ${String(instructionIndex)} is outside executable range 0..${String(this.executable.instructions.length)}`,
+      );
     }
     this.instructionPointer += 1;
     const branchTaken = this.branchTaken(instruction);
@@ -476,7 +537,7 @@ export class Cs486Process implements CpuProcess {
       case "ret": {
         const popped = this.pop();
         cycles += popped.cycles;
-        this.instructionPointer = popped.value;
+        this.instructionPointer = this.checkedInstructionTarget(popped.value);
         break;
       }
       case "syscall": {
@@ -621,7 +682,7 @@ export class Cs486Process implements CpuProcess {
       case "return": {
         this.memoryHierarchy.recordControlTransfer(true);
         const popped = this.pop();
-        this.instructionPointer = popped.value;
+        this.instructionPointer = this.checkedInstructionTarget(popped.value);
         return popped.cycles;
       }
       case "sleep":
@@ -649,7 +710,8 @@ export class Cs486Process implements CpuProcess {
 
   private push(value: number): number {
     const next = this.readRegister("esp") - 4;
-    if (next < 0) throw new Cs486Fault("StackOverflowError", "stack overflow");
+    if (next < this.stackFloorBytes || next + 4 > this.memoryBytes)
+      throw new Cs486Fault("StackOverflowError", "stack overflow");
     const cycles = this.memoryHierarchy.accessData(next, "write");
     this.memory.setInt32(next, value, true);
     this.write("esp", next);
@@ -658,12 +720,29 @@ export class Cs486Process implements CpuProcess {
 
   private pop(): { readonly cycles: number; readonly value: number } {
     const current = this.readRegister("esp");
-    if (current < 0 || current + 4 > this.memoryBytes)
+    if (current < this.stackFloorBytes)
+      throw new Cs486Fault("StackOverflowError", "stack overflow");
+    if (current + 4 > this.memoryBytes)
       throw new Cs486Fault("StackUnderflowError", "stack underflow");
     const cycles = this.memoryHierarchy.accessData(current, "read");
     const value = this.memory.getInt32(current, true);
     this.write("esp", current + 4);
     return { cycles, value };
+  }
+
+  private checkedInstructionTarget(value: number): number {
+    if (
+      !Number.isSafeInteger(value) ||
+      value < 0 ||
+      value >= this.executable.instructions.length
+    )
+      throw new Cs486Fault(
+        "ExecutableFormatError",
+        this.executable.instructions.length === 0
+          ? `instruction pointer ${String(value)} cannot target empty executable text`
+          : `instruction pointer ${String(value)} is outside executable instruction range 0..${String(this.executable.instructions.length - 1)}`,
+      );
+    return value;
   }
 
   private complete(): void {
@@ -710,7 +789,7 @@ export function validateCs486Executable(
   const candidate = value as Partial<Cs486Executable>;
   if (
     candidate.format !== "cs486-executable" ||
-    candidate.version !== 1 ||
+    (candidate.version !== 1 && candidate.version !== 2) ||
     !Array.isArray(candidate.instructions)
   )
     throw new Cs486Fault(
@@ -730,6 +809,13 @@ export function validateCs486Executable(
   )
     throw new Cs486Fault("ExecutableFormatError", "invalid data size");
   if (
+    candidate.version === 1
+      ? candidate.initialData !== undefined
+      : candidate.initialData !== undefined &&
+        !isValidInitialData(candidate.initialData, candidate.dataBytes ?? 0)
+  )
+    throw new Cs486Fault("ExecutableFormatError", "invalid initial data");
+  if (
     candidate.symbols !== undefined &&
     (!Array.isArray(candidate.symbols) ||
       candidate.symbols.length > 2_048 ||
@@ -737,14 +823,37 @@ export function validateCs486Executable(
         if (typeof value !== "object" || value === null) return true;
         const symbol = value as {
           readonly address?: unknown;
+          readonly functionSignature?: unknown;
           readonly name?: unknown;
+          readonly section?: unknown;
+          readonly type?: unknown;
         };
+        const section = symbol.section ?? "text";
         return (
           typeof symbol.name !== "string" ||
-          !/^[A-Za-z_][A-Za-z0-9_]*$/u.test(symbol.name) ||
+          !/^[A-Za-z_.$@?][A-Za-z0-9_.$@?]*$/u.test(symbol.name) ||
           !Number.isSafeInteger(symbol.address) ||
           (symbol.address as number) < 0 ||
-          (symbol.address as number) >= candidate.instructions!.length
+          (section !== "text" &&
+            section !== "rodata" &&
+            section !== "data" &&
+            section !== "bss") ||
+          (symbol.type !== undefined &&
+            symbol.type !== "function" &&
+            symbol.type !== "notype" &&
+            symbol.type !== "object") ||
+          (symbol.functionSignature !== undefined &&
+            (candidate.version !== 2 ||
+              symbol.type !== "function" ||
+              (symbol.functionSignature !== "()->i32" &&
+                symbol.functionSignature !== "()->void"))) ||
+          (section === "text"
+            ? (symbol.address as number) >= candidate.instructions!.length
+            : (symbol.address as number) >= (candidate.dataBytes ?? 0)) ||
+          (candidate.version === 1 &&
+            (symbol.section !== undefined ||
+              symbol.type !== undefined ||
+              symbol.functionSignature !== undefined))
         );
       }))
   )
@@ -808,6 +917,33 @@ export function validateCs486Executable(
         `invalid ${String(op)} instruction`,
       );
   }
+}
+
+function isValidInitialData(value: unknown, dataBytes: number): boolean {
+  if (!Array.isArray(value) || value.length > 256) return false;
+  let previousEnd = 0;
+  let totalBytes = 0;
+  for (const candidate of value as readonly unknown[]) {
+    if (typeof candidate !== "object" || candidate === null) return false;
+    const segment = candidate as {
+      readonly bytes?: unknown;
+      readonly offset?: unknown;
+    };
+    if (
+      !Number.isSafeInteger(segment.offset) ||
+      (segment.offset as number) < previousEnd ||
+      !Array.isArray(segment.bytes) ||
+      segment.bytes.some(
+        (byte) => !Number.isSafeInteger(byte) || byte < 0 || byte > 255,
+      ) ||
+      (segment.offset as number) + segment.bytes.length > dataBytes
+    )
+      return false;
+    previousEnd = (segment.offset as number) + segment.bytes.length;
+    totalBytes += segment.bytes.length;
+    if (totalBytes > 256_000) return false;
+  }
+  return true;
 }
 
 function isCs486Register(value: unknown): value is Cs486Register {

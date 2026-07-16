@@ -31,7 +31,7 @@ export type ScheduledBlockSubmitResult =
     }
   | {
       readonly outcome: "rejected";
-      readonly reason: "request_limit" | "unknown_device";
+      readonly reason: "request_limit" | "stopping" | "unknown_device";
     }
   | {
       readonly outcome: "rejected";
