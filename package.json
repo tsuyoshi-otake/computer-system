@@ -1,12 +1,13 @@
 {
   "name": "computer-system",
-  "version": "0.0.0",
+  "version": "0.1.0-alpha.1",
   "private": true,
   "description": "ComputerCraft-inspired programmable computers for Minecraft Bedrock Edition",
   "type": "module",
   "scripts": {
     "build": "npm run build:vendor-ui && node tools/build.mjs",
     "build:pages": "node tools/build-pages.mjs",
+    "build:release": "npm run build && node tools/package-release.mjs",
     "build:vendor-ui": "tsc -p vendor/bedrock-core-ui-0.9.2/tsconfig.build.json",
     "deploy": "node tools/deploy.mjs",
     "dev:bds:web": "node tools/bds-web-companion.mjs",

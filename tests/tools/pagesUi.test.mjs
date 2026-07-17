@@ -101,6 +101,14 @@ describe("GitHub Pages presentation source", () => {
     }
   });
 
+  it("describes CS QBASIC as DOS-only", () => {
+    expect(landing).toContain("Python, ASM, C, C++; no BASIC");
+    expect(landing).toContain("ASM, CS QBASIC, C, C++; no user Python");
+    expect(landing).toContain("QBASIC /RUN HELLO.BAS");
+    expect(landing).not.toContain("Python, ASM, BASIC, C, C++");
+    expect(landing).not.toContain("BASICC HELLO.BAS");
+  });
+
   it("reserves intrinsic space for authored images", () => {
     for (const template of [landing]) {
       const images = [...template.matchAll(/<img\b[^>]*>/gu)].map(

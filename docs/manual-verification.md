@@ -331,13 +331,16 @@ npm run test:pages
   its connection-number flow and live terminal still work and are not redirected
   to GitHub Pages.
 
-For the initial deployed check, run `.github/workflows/pages.yml` from
-`phase-2/computer-vertical-slice`; later use `main` or manual dispatch. Inspect
-the Pages deployment environment and repeat the link, search, hash-reload,
-JavaScript-disabled, and network checks at the published URL. The deployment
-must contain only `dist/pages`. A successful Pages check proves static-document
-publication only; it is never evidence of BDS reachability or a live Web
-Terminal session.
+The initial public deployment was verified from `main` on 2026-07-17 through
+[Actions run 29541984914](https://github.com/tsuyoshi-otake/computer-system/actions/runs/29541984914)
+and the published
+[GitHub Pages URL](https://tsuyoshi-otake.github.io/computer-system/). Chrome
+loaded the landing page, all 16 manual chapters, and the `manual/#chapter-basic`
+deep link with zero console errors. Repeat the link, search, hash-reload,
+JavaScript-disabled, mobile, 404, and network checks after publication changes.
+The deployment must contain only `dist/pages`. A successful Pages check proves
+static-document publication only; it is never evidence of BDS reachability or a
+live Web Terminal session.
 
 ## Persistent Web companion networking checklist
 

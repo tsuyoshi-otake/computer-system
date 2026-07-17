@@ -34,6 +34,11 @@ scheduler, computer lifecycle, terminal model, filesystem, persistence, redstone
 adapters, portable computer identity, monitor fallback, and bounded Bedrock
 probes are covered by host and Bedrock Dedicated Server verification.
 
+The first public build is
+[v0.1.0-alpha.1](https://github.com/tsuyoshi-otake/computer-system/releases/tag/v0.1.0-alpha.1).
+It is an alpha preview of the implemented Phase 2 slice, not the later Phase 6
+release-hardening milestone. Back up an existing world before testing it.
+
 The repository also includes a local stdio MCP companion that can build the
 packs, run an isolated BDS instance, execute allowlisted Computer System probes,
 return bounded server logs, acquire a computer-scoped one-use Web handoff, and
@@ -97,6 +102,20 @@ are intentionally isolated in the
 The current package baseline uses `@minecraft/server` 2.8.0,
 `@minecraft/server-ui` 2.1.0, and `@minecraft/vanilla-data` 1.26.33.
 
+## Install the alpha preview
+
+1. Download
+   [`computer-system-0.1.0-alpha.1.mcaddon`](https://github.com/tsuyoshi-otake/computer-system/releases/download/v0.1.0-alpha.1/computer-system-0.1.0-alpha.1.mcaddon).
+2. Open the downloaded file with Minecraft for Windows to import both packs.
+3. In the target world's settings, activate the Computer System Behavior Pack.
+   Its declared dependency activates the matching Resource Pack.
+4. Keep a stopped-world backup while this alpha release is under evaluation.
+
+The combined `.mcaddon`, separate Behavior/Resource `.mcpack` files, and
+`SHA256SUMS.txt` are attached to the GitHub Release. Live Web Terminal access
+still requires the local companion from the source repository; GitHub Pages is
+the static manual only.
+
 ## Quick start
 
 ```powershell
@@ -112,6 +131,7 @@ Useful development commands:
 
 ```powershell
 npm run build
+npm run build:release
 npm run deploy
 npm run test:bds
 npm run test:bds:disconnect
@@ -130,11 +150,14 @@ never copies the Web Terminal entry page, terminal application, session storage,
 or `/api/*` client. `npm run test:pages` checks the 16-chapter projection,
 base-path-safe links and assets, no-JavaScript fallback, search/deep links, SEO
 metadata, and the absence of live-terminal controls.
-`.github/workflows/pages.yml` performs the same build for pushes to `main` or
-the initial publication branch `phase-2/computer-vertical-slice`, and on manual
-dispatch. It deploys only `dist/pages` as the Pages artifact. The release-branch
-trigger can be removed after integration into `main`; generated Pages output is
-not committed.
+`.github/workflows/pages.yml` performs the same build for pushes to `main` and
+on manual dispatch. It deploys only `dist/pages` as the Pages artifact;
+generated Pages output is not committed.
+
+`npm run build:release` rebuilds both packs and writes deterministic `.mcpack`
+and combined `.mcaddon` archives plus SHA-256 checksums under `dist/release/`.
+Release packaging excludes repository guidance and JavaScript source maps from
+the player-facing archives.
 
 To accept every reverse-proxy Origin instead of pinning one domain, enable
 explicit wildcard mode:

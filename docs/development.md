@@ -83,14 +83,17 @@ search remains bounded to 24 results; the no-JavaScript fallback contains the
 whole publication; and no Terminal input, connection, token, session, or API
 surface is present.
 
-`.github/workflows/pages.yml` runs on pushes to `main`, pushes to the initial
-publication branch `phase-2/computer-vertical-slice`, and manual dispatch. The
-release-branch trigger can be removed after integration into `main`. The
+`.github/workflows/pages.yml` runs on pushes to `main` and manual dispatch. The
 workflow uses Node.js 24, obtains the deployed base URL from GitHub Pages
 configuration, builds and tests the static site, uploads only `dist/pages`, and
 deploys with the minimum `contents: read`, `pages: write`, and `id-token: write`
 permissions. Repository Pages settings and the account plan still determine
 whether a private repository can expose the resulting site.
+
+`npm run build:release` rebuilds the production packs, removes repository-only
+guidance and JavaScript source maps from the release file set, and emits
+deterministic Behavior/Resource `.mcpack` files, a combined `.mcaddon`, and
+`SHA256SUMS.txt` under `dist/release/`.
 
 When changing JSON UI under the Resource Pack, increment both the Resource Pack
 header/module version and the Behavior Pack dependency version. Bedrock caches
