@@ -14,26 +14,25 @@
   `upload-pages-artifact`; include hidden files for `.nojekyll`. Never upload
   the repository root, `web/`, live companion/session code, `.env*`, BDS data,
   Bedrock packs, or unrelated artifacts.
-- Keep `main`, the explicitly active publication branch, and manual dispatch
-  triggers synchronized with `docs/development.md`. A trigger change is release
-  policy, not cleanup.
+- Keep the `main` and manual dispatch triggers synchronized with
+  `docs/development.md`. A trigger change is release policy, not cleanup.
 
-## Publication recovery
+## Publication status and recovery
 
-The private repository's current plan rejects Pages enablement, so
-`configure-pages` currently reads `Not Found`. Do not set `enablement: true`,
-add a PAT, weaken permissions, or change visibility to bypass it.
+The public site is live at `https://tsuyoshi-otake.github.io/computer-system/`.
+The first successful `main` deployment was Actions run `29541984914`; Chrome
+verified the landing page, 16-chapter manual, and `manual/#chapter-basic` deep
+link with zero console errors.
 
-After a compatible plan or explicitly approved visibility change:
+If publication later fails:
 
-1. Enable Pages with `build_type: workflow`.
-2. Run **Deploy documentation to GitHub Pages**.
-3. Require successful build and deploy jobs.
+1. Read failed annotations and logs before editing.
+2. Confirm Pages still uses `build_type: workflow`.
+3. Require successful build and deploy jobs without weakening permissions,
+   environment protection, validation, or artifact boundaries.
 4. Read back Pages configuration and deployed URL.
 5. Verify HTTPS landing/manual, repository base path, deep links, no-JS content,
    bounded search, back/forward, mobile, and 404 recovery.
-6. Record Actions/browser evidence and close Issue #21 only after the URL is
-   live.
 
 ## Maintenance
 

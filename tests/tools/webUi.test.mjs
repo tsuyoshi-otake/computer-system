@@ -51,7 +51,7 @@ describe("Web terminal UI", () => {
     expect(html).not.toContain('class="prompt"');
     expect(html).toContain('id="input-state"');
     expect(css).toContain("position: absolute");
-    expect(html).toContain('<textarea\n              id="command-input"');
+    expect(html).toMatch(/<textarea\r?\n\s+id="command-input"/u);
     expect(css).toContain("text-indent: var(--cursor-left)");
     expect(css).toContain("top: calc(14px + var(--cursor-top))");
     expect(css).toContain("outline: 0 solid transparent");

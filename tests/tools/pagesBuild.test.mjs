@@ -154,6 +154,15 @@ describe("GitHub Pages publication", () => {
     );
   });
 
+  it("keeps BASIC exclusive to the CS-DOS profile", () => {
+    expect(landing).toContain("Python, ASM, C, C++; no BASIC");
+    expect(occurrences(landing, "Python, ASM, C, C++; no BASIC")).toBe(2);
+    expect(landing).toContain("ASM, CS QBASIC, C, C++; no user Python");
+    expect(landing).toContain("C:\\&gt;QBASIC /RUN HELLO.BAS");
+    expect(landing).not.toContain("Python, ASM, BASIC, C, C++");
+    expect(landing).not.toContain("C:\\&gt;BASICC HELLO.BAS");
+  });
+
   it("keeps links and assets under an arbitrary repository base path", async () => {
     await expectDocumentLinks(landing, siteUrl);
     await expectDocumentLinks(manual, new URL("manual/", siteUrl));
@@ -214,7 +223,7 @@ describe("GitHub Pages publication", () => {
       "tests/tools/pagesBuild.test.mjs",
     );
     expect(workflow).toContain("- main");
-    expect(workflow).toContain("- phase-2/computer-vertical-slice");
+    expect(workflow).not.toContain("- phase-2/computer-vertical-slice");
     expect(workflow).toContain("workflow_dispatch:");
     expect(workflow).toContain("node-version: 24");
     expect(workflow).toContain("actions/configure-pages@");

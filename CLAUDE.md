@@ -119,10 +119,12 @@ Issue. Issue #4 remains relevant while Phase 2 work is in scope.
 
 ## Current publication status
 
-The Pages artifact and workflow exist, but the public site is not live because
-of an external private-repository plan constraint. Do not claim publication or
-make the repository public without explicit user authorization. Exact Actions
-evidence and recovery steps belong to `.github/workflows/CLAUDE.md`.
+The public Pages site is live at
+`https://tsuyoshi-otake.github.io/computer-system/` through the official
+workflow. Keep publication on `main` or manual dispatch, require successful
+build/deploy jobs, and verify the deployed URL before claiming a later update.
+Exact Actions evidence and recovery steps belong to
+`.github/workflows/CLAUDE.md`.
 
 ## Working references
 

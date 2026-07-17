@@ -9,6 +9,8 @@
   the active VM limits rather than global defaults.
 - On Windows, Prettier uses `endOfLine: auto` so repository-wide checks preserve
   existing line endings while still validating content formatting.
+- Source-string tests that cross line boundaries must accept both LF and CRLF;
+  use `\r?\n` instead of embedding one platform's newline sequence.
 - Do not treat generated Bedrock JSON UI structure as runtime evidence. On GDK
   26.33, `CustomForm` collection controls outside the native factory did not
   resolve indexed text, and native label/header templates ignored attempted
