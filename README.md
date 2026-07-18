@@ -35,8 +35,8 @@ scheduler, computer lifecycle, terminal model, filesystem, persistence, redstone
 adapters, portable computer identity, monitor fallback, and bounded Bedrock
 probes are covered by host and Bedrock Dedicated Server verification.
 
-The first public build is
-[v0.1.0-alpha.1](https://github.com/tsuyoshi-otake/computer-system/releases/tag/v0.1.0-alpha.1).
+The latest public build is
+[v0.1.0-alpha.2](https://github.com/tsuyoshi-otake/computer-system/releases/tag/v0.1.0-alpha.2).
 It is an alpha preview of the implemented Phase 2 slice, not the later Phase 6
 release-hardening milestone. Back up an existing world before testing it.
 
@@ -140,7 +140,7 @@ The current package baseline uses `@minecraft/server` 2.8.0,
 ## Install the alpha preview
 
 1. Download
-   [`computer-system-0.1.0-alpha.1.mcaddon`](https://github.com/tsuyoshi-otake/computer-system/releases/download/v0.1.0-alpha.1/computer-system-0.1.0-alpha.1.mcaddon).
+   [`computer-system-0.1.0-alpha.2.mcaddon`](https://github.com/tsuyoshi-otake/computer-system/releases/download/v0.1.0-alpha.2/computer-system-0.1.0-alpha.2.mcaddon).
 2. Open the downloaded file with Minecraft for Windows to import both packs.
 3. In the target world's settings, activate the Computer System Behavior Pack.
    Its declared dependency activates the matching Resource Pack.
