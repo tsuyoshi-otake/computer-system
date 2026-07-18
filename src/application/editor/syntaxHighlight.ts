@@ -1,105 +1,127 @@
+import {
+  lexViLine,
+  resolveViFiletype,
+  type ViFiletypeOption,
+  type ViLexState,
+  type ViTokenKind,
+} from "./viLanguage.js";
+
 export interface HighlightedCell {
   readonly background: number;
   readonly character: string;
   readonly foreground: number;
 }
+export interface SyntaxHighlightOptions {
+  readonly baseColumn?: number;
+  readonly endOfLine?: boolean;
+  readonly filetype?: ViFiletypeOption;
+  readonly list?: boolean;
+  readonly lexState?: ViLexState;
+  readonly rainbow?: boolean;
+  readonly rainbowColumns?: number;
+  readonly rainbowWidth?: number;
+  readonly syntax?: boolean;
+}
 
 const indentBackgrounds = [11, 10, 14, 13] as const;
-const keywords = new Set([
-  "and",
-  "as",
-  "break",
-  "class",
-  "continue",
-  "def",
-  "do",
-  "done",
-  "elif",
-  "else",
-  "export",
-  "false",
-  "fi",
-  "for",
-  "from",
-  "function",
-  "if",
-  "import",
-  "in",
-  "None",
-  "not",
-  "null",
-  "or",
-  "pass",
-  "return",
-  "then",
-  "True",
-  "False",
-  "true",
-  "while",
-]);
+const tokenColors: Readonly<Record<ViTokenKind, number>> = {
+  comment: 13,
+  directive: 14,
+  identifier: 0,
+  instruction: 10,
+  keyword: 10,
+  number: 1,
+  operator: 9,
+  register: 12,
+  string: 5,
+};
 
 export function highlightLine(
   fileName: string,
   line: string,
   maximumColumns: number,
+  options: SyntaxHighlightOptions = {},
 ): readonly HighlightedCell[] {
-  if (!Number.isSafeInteger(maximumColumns) || maximumColumns < 1) {
-    throw new RangeError("Highlight width must be a positive integer");
-  }
-  const characters = [...line].slice(0, maximumColumns);
-  const cells = characters.map((character, index) => ({
-    background:
-      character === " " && index < leadingWhitespace(characters)
-        ? indentBackgrounds[Math.floor(index / 2) % indentBackgrounds.length]!
-        : 15,
-    character,
-    foreground: 0,
-  }));
-  const language = languageFor(fileName);
-  if (language === "text") return cells;
-
-  let index = 0;
-  while (index < characters.length) {
-    const character = characters[index]!;
-    if ((language === "python" || language === "shell") && character === "#") {
-      color(cells, index, characters.length, 13);
-      break;
-    }
-    if (character === '"' || character === "'") {
-      const end = quotedEnd(characters, index, character);
-      color(cells, index, end, 5);
-      index = end;
-      continue;
-    }
-    if (isDigit(character)) {
-      let end = index + 1;
-      while (end < characters.length && isDigit(characters[end]!)) end += 1;
-      color(cells, index, end, 1);
-      index = end;
-      continue;
-    }
-    if (isWordStart(character)) {
-      let end = index + 1;
-      while (end < characters.length && isWordPart(characters[end]!)) end += 1;
-      const word = characters.slice(index, end).join("");
-      if (keywords.has(word)) color(cells, index, end, 10);
-      index = end;
-      continue;
-    }
-    if ("{}[]():=+-*/|&<>".includes(character)) {
-      color(cells, index, index + 1, 9);
-    }
-    index += 1;
-  }
-  return cells;
+  return highlightLineWithState(fileName, line, maximumColumns, options).cells;
 }
 
-function languageFor(fileName: string): "json" | "python" | "shell" | "text" {
-  const lower = fileName.toLowerCase();
-  if (lower.endsWith(".py")) return "python";
-  if (lower.endsWith(".sh") || lower.endsWith(".bash")) return "shell";
-  if (lower.endsWith(".json") || lower.endsWith(".toml")) return "json";
-  return "text";
+export interface HighlightedLineResult {
+  readonly cells: readonly HighlightedCell[];
+  readonly state: ViLexState;
+}
+
+export function highlightLineWithState(
+  fileName: string,
+  line: string,
+  maximumColumns: number,
+  options: SyntaxHighlightOptions = {},
+): HighlightedLineResult {
+  if (!Number.isSafeInteger(maximumColumns) || maximumColumns < 1)
+    throw new RangeError("Highlight width must be a positive integer");
+  const syntax = options.syntax ?? true;
+  const rainbow = options.rainbow ?? true;
+  const list = options.list ?? false;
+  const baseColumn = options.baseColumn ?? 0;
+  const rainbowWidth = options.rainbowWidth ?? 2;
+  if (!Number.isSafeInteger(baseColumn) || baseColumn < 0)
+    throw new RangeError(
+      "Highlight base column must be a non-negative integer",
+    );
+  if (!Number.isSafeInteger(rainbowWidth) || rainbowWidth < 1)
+    throw new RangeError("Rainbow width must be a positive integer");
+
+  const characters = [...line].slice(0, maximumColumns);
+  const rainbowColumns = Math.max(
+    0,
+    Math.min(
+      characters.length,
+      options.rainbowColumns ?? leadingWhitespace(characters),
+    ),
+  );
+  const trailingWhitespaceStart = options.endOfLine
+    ? trailingWhitespace(characters)
+    : characters.length;
+  const cells = characters.map((character, index) => ({
+    background:
+      rainbow &&
+      (character === " " || character === "\t") &&
+      index < rainbowColumns
+        ? indentBackgrounds[
+            Math.floor((baseColumn + index) / rainbowWidth) %
+              indentBackgrounds.length
+          ]!
+        : 15,
+    character:
+      list && character === "\t"
+        ? "\u2192"
+        : list && character === " " && index >= trailingWhitespaceStart
+          ? "\u00b7"
+          : character === "\t"
+            ? " "
+            : character,
+    foreground: 0,
+  }));
+  if (list && options.endOfLine === true && cells.length < maximumColumns)
+    cells.push({ background: 15, character: "$", foreground: 8 });
+  if (!syntax)
+    return {
+      cells,
+      state: options.lexState ?? { multiline: null },
+    };
+
+  const filetype = resolveViFiletype(
+    options.filetype ?? "auto",
+    fileName,
+    line,
+  );
+  const lexed = lexViLine(filetype, line, maximumColumns, options.lexState);
+  for (const token of lexed.tokens) {
+    const foreground = tokenColors[token.kind];
+    for (let index = token.start; index < token.end; index += 1)
+      if (cells[index] !== undefined)
+        cells[index] = { ...cells[index]!, foreground };
+  }
+  return { cells, state: lexed.state };
 }
 
 function leadingWhitespace(characters: readonly string[]): number {
@@ -107,45 +129,9 @@ function leadingWhitespace(characters: readonly string[]): number {
   while (characters[count] === " " || characters[count] === "\t") count += 1;
   return count;
 }
-
-function quotedEnd(
-  characters: readonly string[],
-  start: number,
-  quote: string,
-): number {
-  let escaped = false;
-  for (let index = start + 1; index < characters.length; index += 1) {
-    const character = characters[index]!;
-    if (!escaped && character === quote) return index + 1;
-    escaped = !escaped && character === "\\";
-    if (character !== "\\") escaped = false;
-  }
-  return characters.length;
-}
-
-function color(
-  cells: HighlightedCell[],
-  start: number,
-  end: number,
-  foreground: number,
-): void {
-  for (let index = start; index < end; index += 1) {
-    cells[index] = { ...cells[index]!, foreground };
-  }
-}
-
-function isDigit(character: string): boolean {
-  return character >= "0" && character <= "9";
-}
-
-function isWordStart(character: string): boolean {
-  return (
-    (character >= "A" && character <= "Z") ||
-    (character >= "a" && character <= "z") ||
-    character === "_"
-  );
-}
-
-function isWordPart(character: string): boolean {
-  return isWordStart(character) || isDigit(character);
+function trailingWhitespace(characters: readonly string[]): number {
+  let index = characters.length;
+  while (characters[index - 1] === " " || characters[index - 1] === "\t")
+    index -= 1;
+  return index;
 }

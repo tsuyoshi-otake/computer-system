@@ -6,6 +6,7 @@ export interface Cs486SourcePosition {
 }
 
 export interface Cs486SourceSpan {
+  readonly diagnosticNotes?: readonly Cs486DiagnosticNote[];
   readonly end: Cs486SourcePosition;
   readonly start: Cs486SourcePosition;
 }

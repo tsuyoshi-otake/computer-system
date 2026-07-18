@@ -123,7 +123,7 @@ export class DosCommandAdapter {
         return dosResult("File not found.", this.host.cat(arguments_, stdin));
       case "ver":
         return arguments_.length === 0
-          ? dosSuccess("Computer System DOS Version 6.20\r\n")
+          ? dosSuccess("Computer System DOS Version 1.00\r\n")
           : dosStatus(2, "Invalid number of parameters.\r\n");
       case "vol":
         return this.host.dosVolume(arguments_);

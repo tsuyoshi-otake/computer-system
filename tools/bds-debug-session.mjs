@@ -1,5 +1,7 @@
 import { spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
+
+import { permanentComputerCode } from "./web-session-store.mjs";
 import {
   access,
   cp,
@@ -171,6 +173,12 @@ export function isAllowedBdsCommand(command) {
     )
   )
     return true;
+  if (
+    /^scriptevent computer_system:debug-computer-list l[a-z0-9]+-[a-z0-9]+ [0-9]{1,10} (?:[1-9]|[1-5][0-9]|6[0-4])$/u.test(
+      command,
+    )
+  )
+    return true;
 
   const serverProbe = /^scriptevent computer_system:probe ([a-z-]+)$/u.exec(
     command,
@@ -206,7 +214,7 @@ export function isAllowedWebRelayCommand(command) {
     /^scriptevent computer_system:web-(?:interrupt|close|take-control) [A-Za-z0-9_-]{12,32}$/u.test(
       command,
     ) ||
-    /^scriptevent computer_system:web-input [A-Za-z0-9_-]{12,32} (?:line|keys|mouse) [^\s]{0,180}$/u.test(
+    /^scriptevent computer_system:web-input [A-Za-z0-9_-]{12,32} [A-Za-z0-9_-]{6,20} (?:line|keys|mouse) [^\s]{0,180}$/u.test(
       command,
     ) ||
     /^scriptevent computer_system:web-complete [A-Za-z0-9_-]{12,32} [A-Za-z0-9_-]{6,20} [0-9]{1,3} v[^\s]{0,128}$/u.test(
@@ -236,6 +244,8 @@ export class BdsDebugSession {
     this.pendingDebugCommands = 0;
     this.nextWebRequest = 1;
     this.pendingWebRequests = 0;
+    this.nextComputerListRequest = 1;
+    this.pendingComputerListRequests = 0;
     this.workMonitor = undefined;
     this.serverPort = parseBdsPort(this.environment.BDS_MCP_PORT);
     this.worldName = this.environment.BDS_MCP_WORLD ?? defaultWorldName;
@@ -453,6 +463,90 @@ export class BdsDebugSession {
       return response;
     } finally {
       this.pendingWebRequests -= 1;
+    }
+  }
+
+  async listComputers(options = {}) {
+    const cursor = asNonNegativeInteger(options.cursor ?? 0);
+    const limit = asPositiveInteger(options.limit ?? 32);
+    if (limit > 64) {
+      throw new Error("Computer list limit must be between 1 and 64.");
+    }
+    if (cursor > 9_999_999_999) {
+      throw new Error("Computer list cursor exceeds the supported range.");
+    }
+    if (this.pendingComputerListRequests >= 4) {
+      throw new Error("Computer list debug capacity has been reached.");
+    }
+    const timeoutMs = Math.min(
+      asPositiveInteger(options.timeoutMs ?? 10_000),
+      120_000,
+    );
+    const requestId =
+      "l" +
+      Date.now().toString(36) +
+      "-" +
+      this.nextComputerListRequest.toString(36);
+    this.nextComputerListRequest =
+      this.nextComputerListRequest === Number.MAX_SAFE_INTEGER
+        ? 1
+        : this.nextComputerListRequest + 1;
+    this.pendingComputerListRequests += 1;
+    try {
+      const sent = await this.runCommand(
+        "scriptevent computer_system:debug-computer-list " +
+          requestId +
+          " " +
+          cursor.toString() +
+          " " +
+          limit.toString(),
+      );
+      const entry = await this.waitForLog({
+        contains: '"requestId":"' + requestId + '"',
+        afterCursor: sent.afterCursor,
+        timeoutMs,
+      });
+      const marker = "CS_DEBUG_COMPUTER_LIST ";
+      const markerIndex = entry.line.indexOf(marker);
+      if (markerIndex < 0) throw new Error("Malformed Computer list response.");
+      const response = JSON.parse(
+        entry.line.slice(markerIndex + marker.length),
+      );
+      if (response.requestId !== requestId) {
+        throw new Error("Mismatched Computer list response.");
+      }
+      if (response.status !== "completed") {
+        throw new Error(
+          typeof response.error === "string"
+            ? response.error
+            : "Bedrock rejected the Computer list request.",
+        );
+      }
+      if (
+        response.cursor !== cursor ||
+        !Number.isSafeInteger(response.total) ||
+        response.total < 0 ||
+        !Array.isArray(response.computers) ||
+        response.computers.length > limit ||
+        !response.computers.every(isComputerListEntry) ||
+        !(
+          response.nextCursor === null ||
+          (Number.isSafeInteger(response.nextCursor) &&
+            response.nextCursor > cursor &&
+            response.nextCursor <= response.total)
+        )
+      ) {
+        throw new Error("Invalid Computer list response.");
+      }
+      return {
+        ...response,
+        computers: response.computers.map((computer) => ({
+          ...computer,
+          connectionCode: permanentComputerCode(computer.computerId),
+        })),
+      };
+    } finally {
+      this.pendingComputerListRequests -= 1;
     }
   }
 
@@ -901,6 +995,19 @@ export class BdsDebugSession {
       });
     });
   }
+}
+
+function isComputerListEntry(value) {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    /^c-[0-9a-hjkmnp-tv-z]{6}$/u.test(value.computerId) &&
+    (value.family === "standard" || value.family === "advanced") &&
+    value.form === "block" &&
+    typeof value.physicalKey === "string" &&
+    value.physicalKey.length > 0 &&
+    value.physicalKey.length <= 256
+  );
 }
 
 function isWithin(candidate, parent) {

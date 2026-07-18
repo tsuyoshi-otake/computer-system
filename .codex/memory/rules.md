@@ -216,3 +216,21 @@
   Evidence: the second BDS session migrated 20 persisted probe Computers and
   passed only after the runner replaced its fixed one-second delay with the
   readiness record.
+- Managed Web Terminal acceptance is playerless and MCP-only: preserve the
+  managed world, wait for storage migration, page exact identities, then call
+  `bds_open_web_terminal`. Bedrock admits the headless principal only from
+  `ScriptEventSource.Server`; bind later TUI capture/input/waits to that exact
+  debug-owned writer, reject secret prompts again at Bedrock admission, and
+  never let a simultaneous Player handoff satisfy the MCP wait. Normal
+  player-owned sessions retain proximity, input, and disconnect rules. —
+  Evidence: real MCP acceptance with zero connected players opened the default
+  browser, observed an exact 80 x 25 row/color/cursor surface, drove EDIT
+  through its File menu across snapshot versions 1 through 4, and retained zero
+  diagnostics without in-game or separate browser automation.
+- MCP TUI key injection is not browser-input evidence: it bypasses client-side
+  mode detection, focus, keyboard-event mapping, and pointer gates. Feed the
+  actual serialized screen contract into executable client tests and retain a
+  real-browser keyboard/mouse check for behavior at that boundary. — Evidence:
+  plain EDIT's two leading menu cells did not match the one-cell WorkBench
+  detector, so MCP Alt+F passed while browser Alt+F and primary mouse were both
+  disabled until the detector consumed the real row shape.

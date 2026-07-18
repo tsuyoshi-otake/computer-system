@@ -189,7 +189,7 @@
       "computerId": "c-cqvhcs",
       "cpu": "CS386SX",
       "clockMHz": 16,
-      "os": "CS-DOS 6.2",
+      "os": "CS-DOS 1.0",
       "results": [
         {
           "language": "ASM",

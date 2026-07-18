@@ -52,13 +52,20 @@ Verify lifecycle and persistence:
   and redstone output changes do not reset orientation.
 - Put one Monitor adjacent to a Desktop, interact within three blocks, and
   verify Minecraft prints the stable LAN entry page plus a permanent four-digit
-  number. Enter it within two minutes. Confirm the URL becomes
-  `/?computer=NNNN`, the number is in browser local storage, and no bearer token
-  appears in the query. Move beyond three blocks and expect one `out_of_range`
-  transition with input disabled but no session close. Return within three
-  blocks and expect one automatic `in_range` resume. Reload the bookmark and
-  verify it reconnects after proximity is valid, rotates the bearer token, and
-  does not create parallel reconnect requests.
+  number. Interact twice rapidly and confirm there is one admitted request and
+  at most one browser launch. Before Bedrock acknowledges attachment, expect no
+  browser launch or consumable token. Enter the number within two minutes.
+  Confirm `GET /p/NNNN` redirects without a token and can be repeated without
+  consuming the handoff; exactly one `POST /api/handoff` succeeds. Confirm the
+  stable URL becomes `/?computer=NNNN`, the number is in browser local storage,
+  and no bearer token or `handoff` flag remains in the URL or history.
+- Move just beyond three blocks and expect one `out_of_range` transition with
+  input disabled but no session close. Move between 2.75 and 3.0 blocks and
+  expect the current state to remain unchanged; return to 2.75 blocks or nearer
+  and expect one automatic `in_range` resume. Confirm neither transition is
+  repeated in Minecraft chat. Reload the bookmark and verify it reconnects after
+  proximity is valid, rotates the bearer token, does not create parallel
+  reconnect requests, stops on 401/410, and honors `Retry-After` on 429.
 - On a fresh CS-Linux Computer, set an eight-or-more-character password twice.
   Confirm the boot banner and `New password:` prompt each appear exactly once
   for the initial `cs` account; no additional simulated first-boot notice or
@@ -74,9 +81,13 @@ Verify lifecycle and persistence:
   without horizontal gaps between the blue editor rows.
 - On that Portable, verify `VER`, `VOL`, `TIME`, `DIR C:\`, `TREE C:\ /F`,
   `MEM /F`, and `DOSKEY /HISTORY`. Expect DOS-style labels and CRLF output;
-  `TIME` must show the clock rather than timing a command. Run `TIMER VER` and
-  expect a separate elapsed-time line. Verify `CHDIR`, `ERASE`, `RENAME`, and
-  `RMDIR` behave as DOS aliases and malformed switches fail explicitly.
+  normal `DIR` must split 8.3 base/extension columns, align `<DIR>` or a
+  comma-grouped size, and show `MM-DD-YY` plus a space-padded 12-hour `a`/`p`
+  time; totals and free bytes must also be comma-grouped. `/B` and `/W` retain
+  their distinct layouts. `TIME` must show the clock rather than timing a
+  command. Run `TIMER VER` and expect a separate elapsed-time line. Verify
+  `CHDIR`, `ERASE`, `RENAME`, and `RMDIR` behave as DOS aliases and malformed
+  switches fail explicitly.
 - On CS-Linux, run `id`, `groups`, `uname -a`, `date`, `uptime`, `ls -la /etc`,
   `stat /etc/os-release`, `df -h`, `du -sh /etc`, `free -h`, `mount`, and
   `dmesg`. Expect LF Linux-style output, UID/GID 1000 for `cs`, `sudo` in the
@@ -515,12 +526,27 @@ does not migrate the previous sequential `computer-N` registry.
     `echo $FAVORITE`. Run a Bash script using `$1`, `if`, `for`, and a function;
     confirm it stays inside the Computer filesystem and loop limits fail
     explicitly rather than hanging the server.
-17. Run `vi /home/cs/demo.py`, press `i`, enter an indented Python sample, press
-    Escape, and run `:wq`. Confirm Normal/Insert/Command states, Python token
-    colors, four repeating indentation background colors, save, shell
-    restoration, and `cat`/reopen contents. Repeat `:q` with dirty contents and
-    confirm it blocks; use `:q!` and confirm discard. Repeat with bare `vi`,
-    `:w demo2.py`, empty-command Backspace, `gg`/`G`, and `ZZ`/`ZQ`.
+17. Run `vi /home/cs/demo.py` and confirm syntax colors, line numbers, rainbow
+    indentation, autoindent, whitespace markers, and wrapping initially remain
+    off. Exercise `:syntax on`, `:set number rainbow autoindent list wrap`,
+    `:set all`, `:set number?`, `tabstop`/`shiftwidth` values, `expandtab`,
+    `>>`/`<<`, and each matching `no` option. Put the same settings in
+    `~/.vimrc`, reopen, and repeat on DOS with `C:\_VIMRC`. Run `:!pwd` and
+    `:r !echo inserted`; confirm output stays in the guest, parent shell state
+    is restored, and an asynchronous/TUI command fails explicitly. Then verify
+    Normal/Insert/Command states, `:wq`, dirty `:q` blocking, `:q!`, bare `vi`,
+    `:w demo2.py`, empty-command Backspace, `gg`/`G`, and `ZZ`/`ZQ`. In Python,
+    C, C++, and ASM files, confirm `:syntax on` colors keywords, strings,
+    numbers, comments, C preprocessor directives, ASM instructions, registers,
+    and labels without rejecting incomplete source. Type a two-letter prefix and
+    exercise `Ctrl+N`, `Ctrl+P`, and `Ctrl+E`; confirm Tab still indents. Verify
+    current-file, visited-buffer, symbol, keyword, and opted-in direct-include
+    candidates appear in that order, with at most 64 candidates. Exercise
+    `:symbols`, `gd`, and `Ctrl+O`; confirm an external jump is blocked while
+    dirty. Set `ft=asm`, `completecase=insensitive`, `completeprefix=3`,
+    `completesources=current,includes`, and
+    `definitionsources=current,buffers,includes`, query each with `?`, and
+    confirm include reads remain inside the credentialed guest filesystem.
 18. Run `free` and `/proc/meminfo`; confirm used memory exceeds guest runtime
     and the kernel, services, buffers, and guest fields sum to the reported
     usage. On CS-DOS run `MEM` and `MEM /C`; confirm DOS system/driver plus
@@ -535,6 +561,63 @@ does not migrate the previous sequential `computer-N` registry.
 reaches the VM, takeover has one observable winner, a non-final detach does not
 close the shared terminal, and each Computer owns its writer lease
 independently.
+
+## Issue #29 EDIT and Web Terminal responsiveness
+
+Use a writer-owned 80x25 CS-DOS Web Terminal and retain the same Computer and
+browser sessions throughout this check. Treat Chrome wall time and visual input
+latency as host responsiveness; do not report them as CS386SX/CS486 guest
+`cpuCycles`.
+
+Before browser timing, run the playerless logical-surface preflight entirely
+through MCP: preserve the world with `bds_start({ resetWorld: false })`, resolve
+one exact ID with `bds_list_computers`, require `list` to report zero players,
+and call `bds_open_web_terminal`. Use `bds_wait_for_tui_screen` to capture the
+first frame, submit `edit` with `bds_send_tui_input`, wait for the EDIT marker,
+then submit `Escape` and `Alt+f` and wait for the File menu. Verify its leading
+cell, six ordered entries, two separators, lack of inline shortcuts, arrow-ended
+scrollbars, and line/column-only right field. Continue through `Ctrl+O` to Open,
+Options > Display, Exit, and `DIR C:\`; wait on a unique literal after each
+input and finish each state with `bds_get_tui_screen` and `includeColors: true`.
+
+`Expect:` The same non-secret debug-owned writer remains bound throughout; each
+later result has a greater snapshot version, an 80x25 `surface.kind: "text"`, 25
+rows, matching 80-cell foreground/background rows, a valid cursor, and no
+diagnostics. No connected player, right-click, Minecraft UI automation, exposed
+handoff URL/token, or separate browser automation is involved. This preflight
+proves logical text/palette/cursor state, not VGA glyph pixels, CSS scaling, or
+the Chrome timing criteria below.
+
+1. `Verify:` Open a 4,096-line text file in EDIT. Type 32 distinct characters as
+   one rapid burst, then use Home, End, PageDown, and PageUp while the browser
+   is receiving snapshots. `Expect:` Every character and navigation key is
+   applied once and in order; the caret and all attached views converge on the
+   latest complete frame, with no partially painted row, stuck key, or
+   input-pause message.
+2. `Verify:` Keep five browser sessions attached to that Computer, with exactly
+   one writer. In EDIT, enter several 16-key bursts and change a row that is not
+   currently selected in a viewer. Retain a reference to an unchanged
+   `.terminal-row` in Chrome before the edit and compare it afterward. `Expect:`
+   All viewers converge without duplicate input; the unchanged row keeps the
+   same DOM node, changed rows are replaced, and page scrolling and control
+   takeover remain responsive.
+3. `Verify:` Run
+   `npm test -- tests/tools/terminalInput.test.mjs tests/tools/webCompanionServer.test.mjs tests/tools/webUi.test.mjs`.
+   The deterministic fixture holds `/api/input` at 429 with `Retry-After: 1`,
+   then releases it with one matching accepted admission. It also offers 1,025
+   keys to an empty editor queue and replaces the session while a batch is
+   unacknowledged. `Expect:` Busy input remains queued and retries at most five
+   times with bounded exponential backoff and jitter; acceptance removes the
+   batch exactly once; the 1,025-key offer is rejected atomically with a visible
+   queue-full error; replacement explicitly discards the old generation instead
+   of replaying it.
+4. `Verify:` Record one Chrome Performance trace for the 32-key burst and
+   inspect the companion/BDS markers without copying credentials or input
+   payloads. `Expect:` Browser snapshots are consumed at most once per animation
+   frame, backpressured NDJSON retains the newest terminal and control state,
+   and each HTTP input success follows its matching Bedrock admission marker. No
+   trace or log attributes the host transport delay to the modeled CS386SX/CS486
+   clock.
 
 ## CS-Linux accounts, privilege, and DAC checklist
 
@@ -857,20 +940,154 @@ and stats show deterministic instruction/cycle counts. An infinite ASM jump
 exits with status 124 at the bounded instruction limit; invalid memory and
 corrupted executables report explicit faults without affecting BDS.
 
-## CS386SX CS QBASIC and shared EDIT
+## CS386SX development products and shared editor
+
+`Verify:` In the CS-DOS Web Terminal, run `ASM /VERSION`, `CC /VERSION`,
+`C++ /VERSION`, `CSASM /VERSION`, `CSCC /VERSION`, and `CSCPP /VERSION`. Open
+valid programs with `CSASM MAIN.ASM`, `CSCC MAIN.C`, `CSCPP MAIN.CPP`, and
+`PWB MAIN.CPP`. Use F2 to save, F7 to build, Ctrl+F5 to run the last build,
+Shift+F5 to build and run, and F4 to inspect output. Confirm that the
+same-basename `.CSX` persists. Start debugging with F5, trace with F8, toggle
+the current-EIP breakpoint with F9, return to source with Escape, and stop with
+Shift+F5.
+
+`Expect:` Every identity command reports CS ASM 1.0 or CS C/C++ 1.0 for the
+active CS386SX target using CRLF. Each launcher presents its full-screen
+File/Edit/View/Search/Make/Run/Debug/Options/Help WorkBench and compiles only
+through the bounded guest toolchain. `CSCC` accepts only `.C`, `CSCPP` only
+`.CPP`, and PWB selects ASM, C, or C++ from the extension. The Debug pane is
+backed by the real bounded instruction debugger: it displays EIP, registers,
+validated disassembly, step/continue results, and breakpoints. It does not claim
+source-line stepping, Microsoft C/C++ 7.0, native PWB, OMF, COM, EXE, or
+host-compiler compatibility.
+
+`Verify:` Compile without `/OUT:` using `CC /C C:\WORK\MAIN.C`, compile and link
+without `/OUT:`, and link `C:\WORK\MAIN.OBJ` without an output name.
+
+`Expect:` Compile-only creates `C:\WORK\MAIN.OBJ`; executable compilation and
+linking create `C:\WORK\MAIN.CSX`. Linux continues to default to `a.o`/`a.out`.
 
 `Verify:` In the CS-DOS Web Terminal, confirm `C:\COMMAND\QBASIC.EXE`, open bare
-`QBASIC`, open the same text file with both `EDIT` and `QBASIC /EDITOR`,
-drag-select text with the writer mouse, copy/cut / paste it, save it, and run a
-supported `.BAS` file with `QBASIC /RUN`. Repeat the pointer attempt from a
-viewer, after writer takeover, and after leaving range.
+`QBASIC`, and open the same text file with both `EDIT` and `QBASIC /EDITOR`. In
+EDIT, open F1 help, use Ctrl+Shift+S to save under a new strict 8.3 path,
+exercise Save/Discard/Cancel, and click outside an open menu. Drag-select text
+with the writer mouse, copy/cut/paste it, save it, and run a supported `.BAS`
+file with `QBASIC /RUN`. Repeat the pointer attempt from a viewer, after writer
+takeover, and after leaving range.
 
-`Expect:` The Welcome dialog is original CS QBASIC content; EDIT and
-`QBASIC /EDITOR` show the same buffer/UI and save the same bytes. Writer drag
-selection and clipboard operations work, while viewer, stale, out-of-range, and
-disconnected input cannot mutate the guest. `/RUN` returns to the IDE and F4
-shows bounded output. F5/F7/F8/F10 explicitly report that source-debug actions
-are not implemented rather than restarting the program.
+`Expect:` The CS QBASIC 1.0 Welcome dialog is original Computer System content;
+EDIT and `QBASIC /EDITOR` show the same buffer/UI and save the same bytes. Save
+As changes the owned guest path only after a successful write, an out-of-box
+menu click cancels rather than activating a row, and dirty failure keeps the
+buffer. Writer drag selection and clipboard operations work, while viewer,
+stale, out-of-range, and disconnected input cannot mutate the guest. `/RUN`
+returns to the IDE and F4 shows bounded output.
+
+`Verify:` At 80x25, compare EDIT, CS QBASIC, CSASM, and PWB with the DOS
+reference: plain menu headings with right-aligned Help, centered filename, blue
+document, gray vertical/horizontal scrollbars, one cyan footer, reversed active
+selection, and gray Save/Discard/Cancel dialog with a black shadow. Require the
+same EDIT left chrome offsets in all four environments: File starts after two
+cells, the cyan status starts after one cell, and the left document border is
+continuous below the title corner. In plain EDIT, require F1 Help, no inline
+shortcuts in the File dropdown, `↑`/`↓`/`←`/`→` scrollbar ends, and only
+`00001:001` at the right of the menu footer. Inspect the computed Web font and
+colors. Press bare Alt, Alt+F, F4 through F12, Shift+F3/Shift+F5,
+Ctrl+F5/Ctrl+F7, Alt+F7, Ctrl+Shift+S/O, and Alt+Left. From the QBASIC Welcome
+screen, click File once; then click and drag on the document row containing the
+caret.
+
+`Expect:` DOS development screens use IBM VGA 8x16 at weight 400, unit line
+spacing, continuous single-line box glyphs, and only the exact four colors
+`#AAAAAA`, `#0000AA`, `#00AAAA`, and `#000000`. Bare Alt provides the F10/File
+fallback, every listed modified key reaches the guest exactly once, the first
+Welcome-menu click opens the menu, and the transparent keyboard input does not
+intercept any terminal cell.
+
+`Verify:` In EDIT, use Ctrl+O and Ctrl+Shift+S on both C: and an inserted A:. At
+80x25 confirm Open starts with selected `*.TXT`, separate Files and Dirs/Drives
+panes, a file horizontal track, a directory vertical track, and OK, Cancel, and
+Help. At 51x19 confirm the compact fallback remains fully visible. Traverse a
+directory, apply `*.C`, scroll a list longer than the viewport, use keyboard and
+primary-mouse Open/Save/Cancel, and remove or replace A: after a selection but
+before Enter. Attempt to open a NUL/Ctrl+Z file and to Save after another guest
+write changed or deleted the original. Exercise Replace, Overwrite, Reopen,
+Discard, and Cancel.
+
+`Expect:` Only credentialed guest paths appear, at most 256 strict DOS 8.3
+entries are returned, filtering and scrolling are deterministic, empty and
+not-ready states are visible, and changed media resets the selection. Binary,
+capacity-plus-one, collision, external-change, deletion, and write failures keep
+the current buffer without partial mutation. Successful writes use CRLF.
+
+`Verify:` In `EDIT`, CS QBASIC, PWB with `.C` and `.CPP`, and CSASM with `.ASM`,
+open Options > Display/Editing/Completion/Language. Toggle syntax, line numbers,
+rainbow indentation, whitespace, wrap, autoindent, expandtab, tab/indent widths,
+completion sources, include definitions, and filetype. Save and reload
+`C:\EDITOR.INI`; verify `[common]`, `[edit]`, `[qbasic]`, `[pwb]`, and `[csasm]`
+overrides, then try an unknown key, a value above 16, 65 lines, and more than
+4,096 characters.
+
+`Expect:` All four products use the same bounded dialogs while keeping their
+language defaults. Saving one profile preserves the other sections. Valid
+settings survive reopen; invalid or oversized configuration reports its exact
+failure without partially opening or applying earlier lines. The 51x19 and 80x25
+layouts keep every selected row and close action visible. Plain EDIT Display
+shows the fixed White-on-Blue Foreground/Background preview, Scroll Bars, and
+`Tab Stops: 8`; the preview does not claim a persisted color-setting model.
+
+`Verify:` Type prefixes in BASIC, C, C++, ASM, Python, and text buffers. Press
+Ctrl+Space, select with arrows, accept with Enter, and cancel with Esc. Exercise
+current-file words, eight recent buffer summaries,
+functions/types/macros/labels, keywords, and opted-in direct includes; use
+Ctrl+Shift+O, F12, and Alt+Left, and attempt an external jump while dirty.
+
+`Expect:` Ctrl+N still creates a new file. Completion returns at most 64 unique
+candidates in the documented fixed order; symbol/index work is lazy and bounded.
+F12 resolves the lightweight definition, Alt+Left returns through at most 16
+locations, and a dirty external jump is refused without changing the buffer. No
+recursive project scan, LSP, external indexer, background worker, or host
+filesystem access occurs.
+
+`Verify:` From EDIT File and each IDE Run menu, execute `ECHO`, repeat it, and
+insert its output. Attempt nested EDIT/QBASIC/PWB, a background command, and a
+foreground/TUI command. Inside a command try changing directory, environment,
+alias/function state, umask, and status, then exit the editor and inspect them.
+
+`Expect:` Only the CS-DOS guest shell runs. Unsupported async, session-control,
+and TUI results fail explicitly; the outer editor remains active. Output is
+bounded to 128 lines/4,096 characters and is undoable. Parent directory,
+environment, aliases, functions, umask, and exit status are unchanged.
+
+`Verify:` Run one BASIC file with F5, Ctrl+F5, Shift+F5, and `QBASIC /RUN`, then
+list the source directory and inspect the QBASIC menus and F1 help.
+
+`Expect:` Each path runs the saved source transiently and returns bounded output
+to the IDE. No `.OBJ`, `.CSX`, `.EXE`, or other build artifact appears. QBASIC
+shows File/Edit/View/Search/Run/Options/Help and does not claim Make or Debug.
+
+`Verify:` Create a `CS PROGRAM LIST 1.0` file containing C, C++, ASM, and an
+authored OBJ, plus INCLUDE/DEFINE/ENTRY/OUTPUT/LISTING/MAP. Select it from Make,
+build twice, change one transitive header, rebuild, introduce `#error`, repair,
+run the exact last build, and Clean. Repeat with colliding canonical output
+paths and a pre-existing unowned output.
+
+`Expect:` The first build writes project-owned objects, CSX, listing, map, and
+CBR transactionally. The second reuses all units; the header change rebuilds
+only dependents. Failure preserves the last good CSX but Run Last reports stale.
+Clean removes only recorded generated paths. Collisions,
+malformed/capacity-plus- one lists, and unowned outputs fail before any partial
+write.
+
+`Verify:` Attempt to compile a C/C++ program that reads raw keys or mouse
+events, paints terminal cells or a framebuffer, opens a window, plays sound, or
+implements an EDIT-like TUI.
+
+`Expect:` No such public guest API is currently exposed. Built-in EDIT,
+WorkBench, and Web Terminal mouse handling do not imply that user programs can
+access those privileged paths. A shared application/display/input ABI for future
+TUI, graphics, DOOM-class programs, or CS Windows 1.0 remains future work and is
+not reported as shipped.
 
 `Verify:` Compile a C or C++ `main` and an ASM zero-argument function with `-c`,
 inspect both objects with `nm` and `objdump`, link them with `ld`, and execute
@@ -945,6 +1162,30 @@ or unbounded/backtracking allocator path is entered. Both OS profiles emit typed
 function symbols and structured relocations for the same validated CS486 ABI,
 including matching defined/undefined return signatures, with LF diagnostics on
 Linux and CRLF on DOS.
+
+`Verify:` Build the same C and C++ source on Linux and DOS using nested quoted
+and angle includes, object/function macros, rescanning, line continuation,
+stringification, token pasting, `defined`, every conditional branch, `#error`,
+and command-line `-I/-D/-U` versus `/I,/D,/U`. Repeat from a user that cannot
+read one header. Trigger circular/depth-plus-one includes, macro expansion-plus-
+one, conditional nesting-plus-one, `#pragma`, and a variadic macro. Compare
+direct shell and deferred CS386SX diagnostics.
+
+`Expect:` Both profiles feed equivalent tokens into the existing parser/CSIR/
+backend, preserve included/macro provenance, use the current guest credentials,
+and charge deferred preprocessing work. Missing/unreadable/circular/oversized
+input and unsupported directives terminate explicitly with no host read and no
+output artifact.
+
+`Verify:` Compile C++ with an individual `extern "C" int helper();`, link it to
+ASM exporting `helper` with `SIGNATURE helper, I32`, and run it. Then try an
+`extern "C" { ... }` block, another language linkage, parameters, overloads,
+class/member calls, near/far declarations, and an OMF/MASM object.
+
+`Expect:` The individual declaration emits the same unmangled zero-argument
+`()->i32` symbol and returns through EAX. Every unsupported C++/MASM/16-bit ABI
+construct fails explicitly; no documentation or UI claims ISO C++, MASM,
+Microsoft C/C++ 7.0, OMF, near/far, exceptions, RTTI, templates, or member ABI.
 
 `Verify:` Compile source containing `#define`, a global data declaration, an
 undeclared identifier, a duplicate local, a parameterized function, a C++ class,

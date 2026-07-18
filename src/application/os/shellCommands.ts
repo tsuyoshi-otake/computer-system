@@ -28,6 +28,16 @@ import {
   compileCs486Source,
   type Cs486SourceLanguage,
 } from "../toolchain/highLevelCompilers.js";
+import type { Cs486CFrontendOptions } from "../toolchain/cs486CFrontend.js";
+import {
+  preprocessCs486C,
+  type Cs486CPreprocessorInclude,
+} from "../toolchain/cs486CPreprocessor.js";
+import {
+  fingerprintCsDosProgram,
+  parseCsDosProgramList,
+  type CsDosProgramList,
+} from "../toolchain/csDosProgramList.js";
 import { Cs486LinkError, linkCs486Objects } from "../toolchain/cs486Linker.js";
 import {
   Cs486Debugger,
@@ -44,6 +54,7 @@ import { filesystemExecute, type GuestFilesystem } from "./guestFilesystem.js";
 import type { LinuxAccountDatabase, LinuxUserRecord } from "./linuxAccounts.js";
 import type { ProcessCredentials } from "./linuxCredentials.js";
 import { shellTextPolicyFor, type ShellTextPolicy } from "./shellTextPolicy.js";
+import type { DosFileDialogSnapshot } from "../editor/editorScreen.js";
 import type {
   ShellAction,
   ShellCommandResult,
@@ -77,6 +88,11 @@ import {
   type DosFatMetadataSnapshotV1,
 } from "./dosRuntimeState.js";
 import type { FloppyDrive, FloppyDriveIo } from "./floppyDrive.js";
+import {
+  csAsmProductName,
+  csCFamilyProductName,
+  csQBasicProductName,
+} from "../editor/qbasicSession.js";
 
 export type {
   ShellAction,
@@ -119,6 +135,32 @@ export interface ShellCommandRuntimeOptions {
   readonly onDosRuntimeChanged?: (state: DosRuntimeState) => void;
 }
 
+interface CFamilyCommandOptions {
+  readonly arguments: readonly string[];
+  readonly definitions: readonly {
+    readonly name: string;
+    readonly replacement?: string;
+  }[];
+  readonly includePaths: readonly string[];
+  readonly undefines: readonly string[];
+}
+
+interface CsDosBuildUnitRecord {
+  readonly fingerprint: string;
+  readonly objectDigest: string;
+  readonly objectPath: string;
+}
+
+interface CsDosBuildRecord {
+  readonly fingerprint: string;
+  readonly generatedPaths: readonly string[];
+  readonly projectPath: string;
+  readonly units: Readonly<Record<string, CsDosBuildUnitRecord>>;
+  readonly version: 1;
+}
+
+const csDosBuildRecordMarker = "CS-DOS-BUILD-RECORD 1.0\n";
+
 export interface ShellRuntimeIdentityState {
   readonly currentDirectory: string;
   readonly environment: readonly (readonly [string, string])[];
@@ -153,6 +195,26 @@ interface DosDirectoryGroup {
 
 const maximumOutputLength = 256_000;
 const maximumEnvironmentVariables = 256;
+const dosShortDisplayNamePattern =
+  /^[A-Za-z0-9!#$%&'()@^_`{}~-]{1,8}(?:\.[A-Za-z0-9!#$%&'()@^_`{}~-]{1,3})?$/u;
+
+function formatDosDirectoryName(name: string): string {
+  const normalized = name.toUpperCase();
+  const separator = normalized.indexOf(".");
+  const base = separator < 0 ? normalized : normalized.slice(0, separator);
+  const extension = separator < 0 ? "" : normalized.slice(separator + 1);
+  return `${base.padEnd(8)} ${extension.padEnd(3)}`;
+}
+
+function formatDosDecimal(value: number): string {
+  const digits = String(Math.max(0, Math.trunc(value)));
+  const leadingDigits = digits.length % 3 || 3;
+  const groups = [digits.slice(0, leadingDigits)];
+  for (let index = leadingDigits; index < digits.length; index += 3) {
+    groups.push(digits.slice(index, index + 3));
+  }
+  return groups.join(",");
+}
 
 export class ShellCommandRuntime {
   private readonly bootTick: number;
@@ -1211,6 +1273,7 @@ export class ShellCommandRuntime {
       }
       for (const target of group.targets) {
         const name = baseName(target);
+        const displayName = formatDosDirectoryName(name);
         const directoryEntry = this.filesystem.isDirectory(target);
         const metadata = this.filesystem.getMetadata(target);
         const fatMetadata =
@@ -1224,13 +1287,13 @@ export class ShellCommandRuntime {
         );
         if (directoryEntry) {
           directoryCount += 1;
-          rows.push(`${timestamp}    <DIR>          ${name.toUpperCase()}`);
+          rows.push(`${displayName} ${"<DIR>".padEnd(13)} ${timestamp}`);
         } else {
           const size = this.filesystem.getSize(target);
           fileCount += 1;
           fileBytes += size;
           rows.push(
-            `${timestamp}       ${String(size).padStart(10)} ${name.toUpperCase()}`,
+            `${displayName} ${formatDosDecimal(size).padStart(13)} ${timestamp}`,
           );
         }
       }
@@ -1251,8 +1314,8 @@ export class ShellCommandRuntime {
             ]
           : []),
         ...rows,
-        `${String(fileCount).padStart(9)} File(s) ${String(fileBytes).padStart(14)} bytes`,
-        `${String(directoryCount).padStart(9)} Dir(s)  ${String(this.filesystem.getFreeSpace()).padStart(14)} bytes free`,
+        `${String(fileCount).padStart(9)} file(s) ${formatDosDecimal(fileBytes).padStart(14)} bytes`,
+        `${String(directoryCount).padStart(9)} dir(s)  ${formatDosDecimal(this.filesystem.getFreeSpace()).padStart(14)} bytes free`,
         "",
       ].join("\r\n"),
     );
@@ -1350,7 +1413,7 @@ export class ShellCommandRuntime {
     const date = new Date(milliseconds);
     const hour = date.getUTCHours();
     const hour12 = hour % 12 || 12;
-    return `${String(date.getUTCMonth() + 1).padStart(2, "0")}-${String(date.getUTCDate()).padStart(2, "0")}-${String(date.getUTCFullYear()).slice(-2)}  ${String(hour12).padStart(2, "0")}:${String(date.getUTCMinutes()).padStart(2, "0")}${hour < 12 ? "a" : "p"}`;
+    return `${String(date.getUTCMonth() + 1).padStart(2, "0")}-${String(date.getUTCDate()).padStart(2, "0")}-${String(date.getUTCFullYear()).slice(-2)}  ${String(hour12).padStart(2)}:${String(date.getUTCMinutes()).padStart(2, "0")}${hour < 12 ? "a" : "p"}`;
   }
 
   isKnownCommand(name: string): boolean {
@@ -1358,22 +1421,93 @@ export class ShellCommandRuntime {
   }
 
   runQBasicSource(sourceName: string, source: string): ShellCommandResult {
-    if (source.length > 128_000)
-      return this.toolchainFailure("qbasic", "source limit exceeded");
+    return this.buildDosIdeSource("basic", sourceName, source, undefined, true);
+  }
+
+  runToolchainIdeSource(
+    language: "asm" | "c" | "cpp",
+    sourceName: string,
+    source: string,
+  ): ShellCommandResult {
+    return this.buildDosIdeSource(
+      language,
+      sourceName,
+      source,
+      undefined,
+      true,
+    );
+  }
+
+  buildDosIdeSource(
+    language: "asm" | "basic" | "c" | "cpp",
+    sourceName: string,
+    source: string,
+    outputPath: string,
+    runAfterCompile: boolean,
+  ): ShellCommandResult;
+  buildDosIdeSource(
+    language: "asm" | "basic" | "c" | "cpp",
+    sourceName: string,
+    source: string,
+    outputPath: string | undefined,
+    runAfterCompile: true,
+  ): ShellCommandResult;
+  buildDosIdeSource(
+    language: "asm" | "basic" | "c" | "cpp",
+    sourceName: string,
+    source: string,
+    outputPath: string | undefined,
+    runAfterCompile: boolean,
+  ): ShellCommandResult {
+    if (source.length > 128_000) {
+      return this.toolchainFailure(
+        language === "basic" ? "qbasic" : language,
+        "source limit exceeded",
+      );
+    }
+    if (!runAfterCompile && outputPath === undefined) {
+      throw new Error("WorkBench build output is missing");
+    }
+    const command =
+      language === "basic"
+        ? "qbasic"
+        : language === "asm"
+          ? "as"
+          : language === "cpp"
+            ? "c++"
+            : "c";
+    const cOptions =
+      language === "c" || language === "cpp"
+        ? this.parseCFamilyCommandOptions([], language)
+        : undefined;
     if (this.options.deferGuestExecution === true) {
       return {
         exitCode: 0,
         foreground: {
-          command: "qbasic",
+          command,
           credentials: this.options.credentials(),
           kind: "compile",
           task: {
             compileOnly: false,
             kind: "source",
-            language: "basic",
-            runAfterCompile: true,
+            language,
+            outputPath,
+            runAfterCompile,
             source,
             sourceName,
+            ...(language === "asm"
+              ? {
+                  assemblerDialect: this.options.profile.id,
+                  assemblerHome:
+                    this.environment.get("HOME") ?? this.options.profile.home,
+                }
+              : cOptions === undefined
+                ? {}
+                : {
+                    cDefinitions: cOptions.definitions,
+                    cIncludePaths: cOptions.includePaths,
+                    cUndefines: cOptions.undefines,
+                  }),
           },
           umask: this.filesystem.getUmask(),
         },
@@ -1381,8 +1515,488 @@ export class ShellCommandRuntime {
         stdout: "",
       };
     }
-    const executable = compileCs486Source("basic", source, { sourceName });
-    return this.executeCs486(executable, false, Math.ceil(source.length / 4));
+    const includeBytesBefore = this.ioReadBytes;
+    const executable =
+      language === "asm"
+        ? assembleCs486(source, this.assemblerOptions(sourceName))
+        : compileCs486Source(
+            language,
+            source,
+            cOptions === undefined
+              ? { sourceName }
+              : this.cFamilyFrontendOptions(
+                  sourceName,
+                  cOptions.includePaths,
+                  cOptions.definitions,
+                  cOptions.undefines,
+                ),
+          );
+    const compileCycles = Math.max(
+      1,
+      Math.ceil((source.length + this.ioReadBytes - includeBytesBefore) / 4) +
+        executable.instructions.length * 4,
+    );
+    if (outputPath !== undefined) {
+      this.writeFile(outputPath, `CS486\n${JSON.stringify(executable)}`);
+    }
+    if (runAfterCompile) {
+      return this.executeCs486(executable, false, compileCycles);
+    }
+    return {
+      cpuCycles: Math.min(1_000_000, compileCycles),
+      exitCode: 0,
+      stderr: "",
+      stdout: "",
+    };
+  }
+
+  buildDosProgramList(
+    projectInput: string,
+    rebuildAll = false,
+    runAfterBuild = false,
+    executeDeferred = false,
+  ): ShellCommandResult {
+    if (this.options.deferGuestExecution === true && !executeDeferred) {
+      return {
+        exitCode: 0,
+        foreground: {
+          command: "pwb",
+          credentials: this.options.credentials(),
+          kind: "compile",
+          task: {
+            execute: (): ShellCommandResult => {
+              const built = this.buildDosProgramList(
+                projectInput,
+                rebuildAll,
+                false,
+                true,
+              );
+              if (!runAfterBuild || built.exitCode !== 0) return built;
+              const { outputPath } = this.inspectDosProgramList(projectInput);
+              const run = this.execute(["run", outputPath], "");
+              return {
+                ...run,
+                cpuCycles:
+                  (built.cpuCycles ?? 0) + (run.cpuCycles ?? 0) || undefined,
+                stderr: `${built.stderr}${run.stderr}`,
+                stdout: `${built.stdout}${run.stdout}`,
+              };
+            },
+            kind: "program-list",
+          },
+          umask: this.filesystem.getUmask(),
+        },
+        stderr: "",
+        stdout: "",
+      };
+    }
+    try {
+      if (this.options.profile.id !== "dos") {
+        throw new Error("Program Lists are available only in CS-DOS");
+      }
+      const projectPath = this.resolvePath(projectInput);
+      const projectSource = this.readFile(projectPath);
+      const program = parseCsDosProgramList(projectSource);
+      const baseDirectory = parentPath(projectPath);
+      const metadataPath = this.filesystem.normalize(
+        replacePathExtension(projectPath, ".cbr"),
+      );
+      const previous = this.readCsDosBuildRecord(metadataPath, projectPath);
+      const previousGenerated = new Set(previous?.generatedPaths ?? []);
+      const resolvedSources = program.sources.map((source) => ({
+        ...source,
+        path: this.resolveProgramPath(baseDirectory, source.path),
+      }));
+      const resolvedUserObjects = program.objectPaths.map((path) =>
+        this.resolveProgramPath(baseDirectory, path),
+      );
+      const resolvedIncludePaths = program.includePaths.map((path) =>
+        this.resolveProgramPath(baseDirectory, path),
+      );
+      const outputPath = this.resolveProgramPath(
+        baseDirectory,
+        program.outputPath,
+      );
+      const listingPath =
+        program.listingPath === undefined
+          ? undefined
+          : this.resolveProgramPath(baseDirectory, program.listingPath);
+      const mapPath =
+        program.mapPath === undefined
+          ? undefined
+          : this.resolveProgramPath(baseDirectory, program.mapPath);
+      const generatedObjectPaths = resolvedSources.map((source) =>
+        this.resolveProgramPath(
+          baseDirectory,
+          `${dosSourceBasename(source.path)}.OBJ`,
+        ),
+      );
+      const generatedPaths = [
+        ...generatedObjectPaths,
+        outputPath,
+        ...(listingPath === undefined ? [] : [listingPath]),
+        ...(mapPath === undefined ? [] : [mapPath]),
+      ];
+      const generatedPathSet = new Set(generatedPaths);
+      const authoredPaths = new Set([
+        projectPath,
+        ...resolvedSources.map(({ path }) => path),
+        ...resolvedUserObjects,
+      ]);
+      if (generatedPathSet.size !== generatedPaths.length) {
+        throw new Error("generated outputs collide after DOS path resolution");
+      }
+      if (
+        authoredPaths.has(metadataPath) ||
+        generatedPathSet.has(metadataPath)
+      ) {
+        throw new Error(
+          `build record path collides with a project path: ${metadataPath}`,
+        );
+      }
+      for (const path of generatedPaths) {
+        if (authoredPaths.has(path)) {
+          throw new Error(
+            `generated output collides with authored input: ${path}`,
+          );
+        }
+        if (this.filesystem.exists(path) && !previousGenerated.has(path)) {
+          throw new Error(
+            `generated output already exists and is not project-owned: ${path}`,
+          );
+        }
+      }
+
+      const objects: Cs486Object[] = [];
+      const generatedObjects = new Map<string, string>();
+      const units: Record<string, CsDosBuildUnitRecord> = {};
+      const fingerprintInputs = [
+        { contents: projectSource, path: projectPath },
+      ];
+      const results: string[] = [];
+      for (const [index, source] of resolvedSources.entries()) {
+        const contents = this.readFile(source.path);
+        const dependencies = [{ contents, path: source.path }];
+        let frontendOptions: Cs486CFrontendOptions | undefined;
+        if (source.language === "c" || source.language === "cpp") {
+          const optionArguments = [
+            ...resolvedIncludePaths.flatMap((path) => ["-I", path]),
+            ...program.definitions.map(({ name, replacement }) =>
+              replacement === undefined
+                ? `-D${name}`
+                : `-D${name}=${replacement}`,
+            ),
+            ...program.undefines.map((name) => `-U${name}`),
+          ];
+          const parsed = this.parseCFamilyCommandOptions(
+            optionArguments,
+            source.language,
+          );
+          const baseOptions = this.cFamilyFrontendOptions(
+            source.path,
+            parsed.includePaths,
+            parsed.definitions,
+            parsed.undefines,
+          );
+          frontendOptions = {
+            ...baseOptions,
+            include: (request): Cs486CPreprocessorInclude | undefined => {
+              const included = baseOptions.include?.(request);
+              if (
+                included !== undefined &&
+                !dependencies.some(({ path }) => path === included.sourceName)
+              ) {
+                dependencies.push({
+                  contents: included.source,
+                  path: included.sourceName,
+                });
+              }
+              return included;
+            },
+          };
+          preprocessCs486C(contents, frontendOptions);
+        }
+        fingerprintInputs.push(...dependencies);
+        const unitFingerprint = fingerprintCsDosProgram(
+          program,
+          dependencies,
+          `CS-DOS-${source.language.toUpperCase()}-1.0`,
+        );
+        const objectPath = generatedObjectPaths[index]!;
+        const previousUnit = previous?.units[source.path];
+        let object: Cs486Object;
+        let encodedObject: string;
+        if (
+          !rebuildAll &&
+          previousUnit?.fingerprint === unitFingerprint &&
+          previousUnit.objectPath === objectPath &&
+          this.filesystem.exists(objectPath)
+        ) {
+          encodedObject = this.readFile(objectPath);
+          if (sha256Hex(encodedObject) !== previousUnit.objectDigest) {
+            throw new Error(
+              `cached object changed outside WorkBench: ${objectPath}`,
+            );
+          }
+          object = this.readCs486Object(objectPath);
+          results.push(
+            `Reused ${this.options.profile.pathDialect.display(objectPath)}`,
+          );
+        } else {
+          object =
+            source.language === "asm"
+              ? assembleCs486Object(
+                  contents,
+                  this.assemblerOptions(source.path),
+                )
+              : compileCs486Object(
+                  source.language,
+                  contents,
+                  frontendOptions ?? { sourceName: source.path },
+                );
+          encodedObject = `CS486OBJ\n${JSON.stringify(object)}`;
+          generatedObjects.set(objectPath, encodedObject);
+          results.push(
+            `Compiled ${this.options.profile.pathDialect.display(source.path)}`,
+          );
+        }
+        units[source.path] = {
+          fingerprint: unitFingerprint,
+          objectDigest: sha256Hex(encodedObject),
+          objectPath,
+        };
+        objects.push(object);
+      }
+      for (const path of resolvedUserObjects) {
+        const encoded = this.readFile(path);
+        fingerprintInputs.push({ contents: encoded, path });
+        objects.push(this.readCs486Object(path));
+        results.push(`Input ${this.options.profile.pathDialect.display(path)}`);
+      }
+
+      const executable = linkCs486Objects(objects, { entry: program.entry });
+      const fingerprint = fingerprintCsDosProgram(program, fingerprintInputs);
+      const record: CsDosBuildRecord = {
+        fingerprint,
+        generatedPaths,
+        projectPath,
+        units,
+        version: 1,
+      };
+      const listing =
+        listingPath === undefined
+          ? undefined
+          : renderCsNativeListing(resolvedSources, objects);
+      const symbolMap =
+        mapPath === undefined
+          ? undefined
+          : renderCsNativeMap(program.entry, executable);
+      this.runDosFilesystemTransaction(() => {
+        for (const path of previous?.generatedPaths ?? []) {
+          if (
+            !generatedPathSet.has(path) &&
+            !authoredPaths.has(path) &&
+            this.filesystem.exists(path)
+          ) {
+            this.filesystem.delete(path);
+          }
+        }
+        for (const [path, encoded] of generatedObjects) {
+          this.writeFile(path, encoded);
+        }
+        this.writeFile(outputPath, `CS486\n${JSON.stringify(executable)}`);
+        if (listingPath !== undefined && listing !== undefined) {
+          this.writeFile(listingPath, listing);
+        }
+        if (mapPath !== undefined && symbolMap !== undefined) {
+          this.writeFile(mapPath, symbolMap);
+        }
+        this.writeFile(
+          metadataPath,
+          `${csDosBuildRecordMarker}${JSON.stringify(record)}`,
+        );
+      });
+      results.push(
+        `Linked ${this.options.profile.pathDialect.display(outputPath)} fingerprint ${fingerprint.slice(0, 12)}`,
+      );
+      return success(`${results.join("\r\n")}\r\n`);
+    } catch (error: unknown) {
+      return this.toolchainFailure("PWB", message(error));
+    }
+  }
+
+  cleanDosProgramList(projectInput: string): ShellCommandResult {
+    try {
+      const projectPath = this.resolvePath(projectInput);
+      const metadataPath = this.filesystem.normalize(
+        replacePathExtension(projectPath, ".cbr"),
+      );
+      const record = this.readCsDosBuildRecord(metadataPath, projectPath);
+      if (record === undefined) {
+        throw new Error(
+          "no WorkBench build record exists for this Program List",
+        );
+      }
+      const program = parseCsDosProgramList(this.readFile(projectPath));
+      const baseDirectory = parentPath(projectPath);
+      const authored = new Set([
+        projectPath,
+        ...program.sources.map(({ path }) =>
+          this.resolveProgramPath(baseDirectory, path),
+        ),
+        ...program.objectPaths.map((path) =>
+          this.resolveProgramPath(baseDirectory, path),
+        ),
+      ]);
+      this.runDosFilesystemTransaction(() => {
+        for (const path of record.generatedPaths) {
+          if (authored.has(path)) {
+            throw new Error(`refusing to clean authored input ${path}`);
+          }
+          if (this.filesystem.exists(path)) this.filesystem.delete(path);
+        }
+        if (this.filesystem.exists(metadataPath)) {
+          this.filesystem.delete(metadataPath);
+        }
+      });
+      return success(
+        `Cleaned ${String(record.generatedPaths.length)} project-owned output(s)\r\n`,
+      );
+    } catch (error: unknown) {
+      return this.toolchainFailure("PWB", message(error));
+    }
+  }
+
+  inspectDosProgramList(projectInput: string): {
+    readonly listingPath?: string;
+    readonly mapPath?: string;
+    readonly outputPath: string;
+    readonly projectPath: string;
+  } {
+    const projectPath = this.resolvePath(projectInput);
+    const program = parseCsDosProgramList(this.readFile(projectPath));
+    const baseDirectory = parentPath(projectPath);
+    return {
+      listingPath:
+        program.listingPath === undefined
+          ? undefined
+          : this.resolveProgramPath(baseDirectory, program.listingPath),
+      mapPath:
+        program.mapPath === undefined
+          ? undefined
+          : this.resolveProgramPath(baseDirectory, program.mapPath),
+      outputPath: this.resolveProgramPath(baseDirectory, program.outputPath),
+      projectPath,
+    };
+  }
+
+  browseDosFiles(directoryInput: string): DosFileDialogSnapshot {
+    const directory = this.resolvePath(directoryInput);
+    const displayDirectory =
+      this.options.profile.pathDialect.display(directory);
+    const mediaGeneration = this.dosFileDialogGeneration(directory);
+    try {
+      if (
+        !this.filesystem.exists(directory) ||
+        !this.filesystem.isDirectory(directory) ||
+        this.filesystem.isSymbolicLink(directory)
+      ) {
+        throw new Error("Directory not found.");
+      }
+      const names = this.filesystem.list(directory);
+      if (names.length > 256) {
+        throw new Error("Directory entry limit exceeded.");
+      }
+      const entries = names.map((name) => {
+        if (!dosShortDisplayNamePattern.test(name)) {
+          throw new Error(`Directory contains invalid DOS 8.3 name: ${name}`);
+        }
+        const fileName = joinPath(directory, name);
+        const directoryEntry = this.filesystem.isDirectory(fileName);
+        return {
+          displayName: name.toUpperCase(),
+          fileName,
+          kind: directoryEntry ? ("directory" as const) : ("file" as const),
+          size: directoryEntry ? 0 : this.filesystem.getSize(fileName),
+        };
+      });
+      entries.sort(
+        (left, right) =>
+          (left.kind === right.kind ? 0 : left.kind === "directory" ? -1 : 1) ||
+          (left.displayName < right.displayName
+            ? -1
+            : left.displayName > right.displayName
+              ? 1
+              : 0),
+      );
+      const generationAfter = this.dosFileDialogGeneration(directory);
+      if (generationAfter !== mediaGeneration) {
+        throw new Error("Media changed while reading the directory.");
+      }
+      return {
+        directory,
+        displayDirectory,
+        drives: ["C:", "A:"],
+        entries,
+        mediaGeneration,
+      };
+    } catch (error: unknown) {
+      return {
+        directory,
+        displayDirectory,
+        drives: ["C:", "A:"],
+        entries: [],
+        error: message(error),
+        mediaGeneration,
+      };
+    }
+  }
+
+  private dosFileDialogGeneration(directory: string): number {
+    const letter =
+      /^\/drives\/([a-z])(?:\/|$)/u.exec(directory)?.[1]?.toUpperCase() ?? "C";
+    if (letter === "A" && this.options.floppyDrive !== undefined) {
+      return (
+        this.options.floppyDrive.media?.instanceGeneration ??
+        this.dosRuntime?.driveState("A").mediaGeneration ??
+        0
+      );
+    }
+    return this.dosRuntime?.driveState(letter).mediaGeneration ?? 0;
+  }
+
+  private resolveProgramPath(baseDirectory: string, input: string): string {
+    return this.filesystem.normalize(
+      this.options.profile.pathDialect.resolve(
+        input,
+        baseDirectory,
+        this.environment.get("HOME") ?? this.options.profile.home,
+      ),
+    );
+  }
+
+  private readCsDosBuildRecord(
+    metadataPath: string,
+    projectPath: string,
+  ): CsDosBuildRecord | undefined {
+    if (!this.filesystem.exists(metadataPath)) return undefined;
+    const encoded = this.readFile(metadataPath);
+    if (
+      encoded.length > 256_000 ||
+      !encoded.startsWith(csDosBuildRecordMarker)
+    ) {
+      throw new Error("invalid WorkBench build record");
+    }
+    let decoded: unknown;
+    try {
+      decoded = JSON.parse(encoded.slice(csDosBuildRecordMarker.length));
+    } catch {
+      throw new Error("invalid WorkBench build record");
+    }
+    if (!isCsDosBuildRecord(decoded, projectPath)) {
+      throw new Error("invalid WorkBench build record");
+    }
+    return decoded;
   }
 
   private dispatch(
@@ -3139,6 +3753,70 @@ export class ShellCommandRuntime {
     }
     if (arguments_[0] !== undefined) {
       const name = arguments_[0].toUpperCase();
+      if (["AS", "ASM", "CSASM"].includes(name)) {
+        return success(
+          [
+            csAsmProductName,
+            "Usage: ASM [/C] <source> [/OUT:output]",
+            "Use CSASM [source] or PWB [source] for the full-screen WorkBench.",
+            "WorkBench keys: F2 Save, F3 Next Error, F5 Debug, F7 Build, Shift+F5 Build and Run.",
+            "ABI: zero arguments, optional SIGNATURE name,I32 or VOID, integer return in EAX.",
+            "This is CS486OBJ/CSX, not MASM, OMF, COM, EXE, near/far, or DOS interrupts.",
+            "",
+          ].join("\r\n"),
+        );
+      }
+      if (["C++", "CC", "CSCC", "CSCPP"].includes(name)) {
+        return success(
+          [
+            csCFamilyProductName,
+            `Usage: ${name === "C++" || name === "CSCPP" ? "C++" : "CC"} [/C] <source> [/OUT:output]`,
+            "Use CSCC [source], CSCPP [source], or PWB [source] for the full-screen WorkBench.",
+            "Options: /I:path, /Dname[=value], /Uname; Linux uses -I, -D, and -U.",
+            "WorkBench keys: F2 Save, F3 Next Error, F5 Debug, F7 Build, Shift+F5 Build and Run.",
+            'C++ is a limited subset; extern "C" declarations use the unmangled zero-argument CS ABI.',
+            "",
+          ].join("\r\n"),
+        );
+      }
+      if (name === "QBASIC") {
+        return success(
+          [
+            csQBasicProductName,
+            "Usage: QBASIC [switches] [file]",
+            "Use QBASIC /RUN file or F5 to run source transiently in the IDE.",
+            "CS QBASIC does not create OBJ, CSX, EXE, or another persistent artifact.",
+            "Use HELP QBASIC because QBASIC /HELP is not a supported switch.",
+            "",
+          ].join("\r\n"),
+        );
+      }
+      if (name === "PWB") {
+        return success(
+          [
+            `${csAsmProductName} / ${csCFamilyProductName}`,
+            "Usage: PWB [source]",
+            "The source extension selects ASM, C, or C++ mode.",
+            "Make > Set Program List selects a bounded CS PROGRAM LIST 1.0 project.",
+            "F7 builds incrementally; Ctrl+F7 rebuilds; Clean removes only recorded project outputs.",
+            "F3 / Shift+F3 navigate compiler locations from the F4 Output pane.",
+            "F5 debugs inside WorkBench; the DEBUG command is optional, not a required post-build step.",
+            "",
+          ].join("\r\n"),
+        );
+      }
+      if (name === "EDIT") {
+        return success(
+          [
+            "CS-DOS EDIT 1.0",
+            "Usage: EDIT [file]",
+            "Ctrl+O and Ctrl+Shift+S open the bounded A:/C: DOS file browser.",
+            "Dirty New/Open/Exit and overwrite/external-change decisions require Save, Discard/Reopen, or Cancel.",
+            "F2 saves; F1 shows keyboard help; primary-mouse menus and dialog decisions are supported.",
+            "",
+          ].join("\r\n"),
+        );
+      }
       if (!this.isKnownCommand(name)) {
         return status(1, "", `Help not available for ${name}.\r\n`);
       }
@@ -3148,13 +3826,14 @@ export class ShellCommandRuntime {
     }
     return success(
       [
-        "Computer System DOS 6.2 Command Help",
+        "Computer System DOS 1.0 Command Help",
         "",
         "CD CHDIR CLS COPY DATE DEL DIR DOSKEY ECHO EDIT ERASE EXIT",
         "MD MEM MKDIR MOVE PATH PROMPT RD REN RENAME RMDIR SET TIME",
         "I2C SPI TIMER TREE TYPE VER VOL",
         "",
-        "Development extensions: AS CC C++ QBASIC LD NM OBJDUMP RUN DEBUG VI",
+        "Development: CS ASM 1.0 (AS/ASM/CSASM), CS C/C++ 1.0 (CC/C++/PWB)",
+        "Also available: CS QBASIC 1.0, LD, NM, OBJDUMP, RUN, DEBUG, VI",
         "Type HELP command for a short availability summary.",
         "",
       ].join("\r\n"),
@@ -3290,9 +3969,36 @@ export class ShellCommandRuntime {
     const name = language === "asm" ? "as" : language;
     const usageText =
       this.options.profile.id === "dos"
-        ? `${language === "asm" ? "ASM" : name.toUpperCase()} [/C] <source> [/OUT:output]`
-        : `${name} [-c] <source> [-o output]`;
+        ? `${language === "asm" ? "ASM" : name.toUpperCase()} [/C] <source> [/OUT:output]${language === "asm" ? "" : " [/Ipath] [/Dname[=value]] [/Uname]"}`
+        : `${name} [-c] <source> [-o output]${language === "asm" ? "" : " [-I path] [-D name[=value]] [-U name]"}`;
+    const productName =
+      language === "asm" ? csAsmProductName : csCFamilyProductName;
+    const versionRequested =
+      arguments_.length === 1 &&
+      (this.options.profile.id === "dos"
+        ? /^\/VERSION$/iu.test(arguments_[0]!)
+        : arguments_[0] === "--version");
+    if (versionRequested) {
+      return success(
+        `${productName} for ${cpuModelSpecification(this.options.hardware.cpuModel).runtimeName}${this.textPolicy.newline}`,
+      );
+    }
+    const helpRequested =
+      arguments_.length === 1 &&
+      (this.options.profile.id === "dos"
+        ? arguments_[0] === "/?"
+        : arguments_[0] === "--help");
+    if (helpRequested) {
+      return success(
+        `${productName}${this.textPolicy.newline}Usage: ${usageText}${this.textPolicy.newline}`,
+      );
+    }
     arguments_ = this.normalizeCompileOptions(arguments_);
+    const cOptions =
+      language === "asm"
+        ? undefined
+        : this.parseCFamilyCommandOptions(arguments_, language);
+    if (cOptions !== undefined) arguments_ = cOptions.arguments;
     const compileOnly = arguments_.filter(
       (argument) => argument === "-c",
     ).length;
@@ -3309,7 +4015,16 @@ export class ShellCommandRuntime {
     const sourcePath = filtered[0]!;
     const sourceName = this.resolvePath(sourcePath);
     const outputPath = this.resolvePath(
-      outputIndex < 0 ? (compileOnly === 1 ? "a.o" : "a.out") : filtered[2]!,
+      outputIndex < 0
+        ? this.options.profile.id === "dos"
+          ? replacePathExtension(
+              sourcePath,
+              compileOnly === 1 ? ".OBJ" : ".CSX",
+            )
+          : compileOnly === 1
+            ? "a.o"
+            : "a.out"
+        : filtered[2]!,
     );
     const source = this.readFile(sourceName);
     if (source.length > 128_000)
@@ -3335,7 +4050,11 @@ export class ShellCommandRuntime {
                   assemblerHome:
                     this.environment.get("HOME") ?? this.options.profile.home,
                 }
-              : {}),
+              : {
+                  cDefinitions: cOptions!.definitions,
+                  cIncludePaths: cOptions!.includePaths,
+                  cUndefines: cOptions!.undefines,
+                }),
           },
           umask: this.filesystem.getUmask(),
         },
@@ -3343,14 +4062,24 @@ export class ShellCommandRuntime {
         stdout: "",
       };
     }
+    const includeBytesBefore = this.ioReadBytes;
+    const cFrontendOptions =
+      language === "asm"
+        ? undefined
+        : this.cFamilyFrontendOptions(
+            sourceName,
+            cOptions!.includePaths,
+            cOptions!.definitions,
+            cOptions!.undefines,
+          );
     const output =
       compileOnly === 1
         ? language === "asm"
           ? assembleCs486Object(source, this.assemblerOptions(sourceName))
-          : compileCs486Object(language, source, { sourceName })
+          : compileCs486Object(language, source, cFrontendOptions)
         : language === "asm"
           ? assembleCs486(source, this.assemblerOptions(sourceName))
-          : compileCs486Source(language, source, { sourceName });
+          : compileCs486Source(language, source, cFrontendOptions);
     const object = output.format === "cs486-object";
     this.writeFile(
       outputPath,
@@ -3362,7 +4091,7 @@ export class ShellCommandRuntime {
       stdout: "",
       cpuCycles: Math.max(
         1,
-        Math.ceil(source.length / 4) +
+        Math.ceil((source.length + this.ioReadBytes - includeBytesBefore) / 4) +
           (object
             ? output.assembly.split("\n").length * 2
             : output.instructions.length * 4),
@@ -3383,7 +4112,7 @@ export class ShellCommandRuntime {
       return this.toolchainUsage(usageText);
     const entryIndex = Math.max(entryLongIndex, entryShortIndex);
     const consumed = new Set<number>();
-    let outputPath = "a.out";
+    let outputPath = this.options.profile.id === "dos" ? "" : "a.out";
     let entry: string | undefined;
     if (outputIndex >= 0) {
       if (arguments_[outputIndex + 1] === undefined)
@@ -3403,6 +4132,9 @@ export class ShellCommandRuntime {
     if (paths.length === 0 || paths.length > 64)
       return this.toolchainUsage(usageText);
     const objects = paths.map((path) => this.readCs486Object(path));
+    if (outputPath.length === 0) {
+      outputPath = replacePathExtension(paths[0]!, ".CSX");
+    }
     outputPath = this.resolvePath(outputPath);
     if (this.options.deferGuestExecution === true) {
       return {
@@ -4462,9 +5194,145 @@ export class ShellCommandRuntime {
         normalized.push("-o", output[1]!);
         continue;
       }
+      const preprocessor = /^\/([idu])(?::)?(.+)$/iu.exec(argument);
+      if (preprocessor !== null) {
+        normalized.push(
+          `-${preprocessor[1]!.toUpperCase()}${preprocessor[2]!}`,
+        );
+        continue;
+      }
       normalized.push(this.dosOption(argument));
     }
     return normalized;
+  }
+
+  private parseCFamilyCommandOptions(
+    arguments_: readonly string[],
+    language: "c" | "cpp",
+  ): CFamilyCommandOptions {
+    const structural: string[] = [];
+    const definitions: {
+      readonly name: string;
+      readonly replacement?: string;
+    }[] = [
+      { name: "__CS__", replacement: "1" },
+      { name: "__CS486__", replacement: "1" },
+      { name: "__STDC__", replacement: "1" },
+      {
+        name: this.options.profile.id === "dos" ? "__CS_DOS__" : "__CS_LINUX__",
+        replacement: "1",
+      },
+      ...(language === "cpp"
+        ? [{ name: "__cplusplus", replacement: "1" }]
+        : []),
+    ];
+    const undefines: string[] = [];
+    const includePaths: string[] = [];
+    const appendInclude = (value: string): void => {
+      if (value.length === 0 || value.length > 128)
+        throw new Error("include path limit exceeded");
+      const resolved = this.resolvePath(value);
+      if (!includePaths.includes(resolved)) includePaths.push(resolved);
+      if (includePaths.length > 16)
+        throw new Error("include path count limit exceeded");
+    };
+    const appendDefinition = (value: string): void => {
+      const match = /^([A-Za-z_][A-Za-z0-9_]{0,63})(?:=(.*))?$/u.exec(value);
+      if (match === null || (match[2]?.length ?? 0) > 2_048)
+        throw new Error(`invalid preprocessor definition ${value}`);
+      definitions.push({
+        name: match[1]!,
+        replacement: match[2] ?? "1",
+      });
+      if (definitions.length > 128)
+        throw new Error("preprocessor definition limit exceeded");
+    };
+    const appendUndefine = (value: string): void => {
+      if (!/^[A-Za-z_][A-Za-z0-9_]{0,63}$/u.test(value))
+        throw new Error(`invalid preprocessor undefine ${value}`);
+      if (!undefines.includes(value)) undefines.push(value);
+      if (undefines.length > 128)
+        throw new Error("preprocessor undefine limit exceeded");
+    };
+
+    for (let index = 0; index < arguments_.length; index += 1) {
+      const argument = arguments_[index]!;
+      const exact = /^-([IDU])$/u.exec(argument);
+      const attached = /^-([IDU])(.+)$/u.exec(argument);
+      if (exact === null && attached === null) {
+        structural.push(argument);
+        continue;
+      }
+      const option = (exact ?? attached)![1]!;
+      const value =
+        attached?.[2] ??
+        ((): string => {
+          const next = arguments_[++index];
+          if (next === undefined)
+            throw new Error(`-${option} requires an operand`);
+          return next;
+        })();
+      if (option === "I") appendInclude(value);
+      else if (option === "D") appendDefinition(value);
+      else appendUndefine(value);
+    }
+    if (this.options.profile.id === "dos") {
+      const include = this.environment.get("INCLUDE") ?? "";
+      for (const value of include.split(";")) {
+        if (value.trim().length > 0) appendInclude(value.trim());
+      }
+    }
+    return {
+      arguments: structural,
+      definitions,
+      includePaths,
+      undefines,
+    };
+  }
+
+  private cFamilyFrontendOptions(
+    sourceName: string,
+    includePaths: readonly string[],
+    definitions: CFamilyCommandOptions["definitions"],
+    undefines: readonly string[],
+  ): Cs486CFrontendOptions {
+    const systemDirectory =
+      this.options.profile.id === "dos" ? "/drives/c/include" : "/usr/include";
+    return {
+      definitions,
+      include: (request): Cs486CPreprocessorInclude | undefined => {
+        const directories = request.quoted
+          ? [parentPath(request.fromSource), ...includePaths, systemDirectory]
+          : [...includePaths, systemDirectory];
+        for (const directory of directories) {
+          let resolved: string;
+          try {
+            resolved = this.filesystem.normalize(
+              this.options.profile.pathDialect.resolve(
+                request.path,
+                directory,
+                this.environment.get("HOME") ?? this.options.profile.home,
+              ),
+            );
+          } catch {
+            continue;
+          }
+          if (!this.filesystem.exists(resolved)) continue;
+          if (
+            this.filesystem.isDirectory(resolved) ||
+            !this.filesystem.hasAccess(resolved, 0b100)
+          ) {
+            throw new Error(`${request.path}: include file is not readable`);
+          }
+          const source = this.filesystem.readFile(resolved);
+          this.ioReadBytes += utf8ByteLength(source);
+          return { identity: resolved, source, sourceName: resolved };
+        }
+        return undefined;
+      },
+      sourceName,
+      undefines,
+    };
   }
 
   private normalizeLinkOptions(
@@ -5806,6 +6674,94 @@ function isAssignment(value: string): boolean {
   return /^[A-Za-z_][A-Za-z0-9_]*=/u.test(value);
 }
 
+function dosSourceBasename(path: string): string {
+  const name = path.split("/").at(-1) ?? "";
+  const dot = name.lastIndexOf(".");
+  return dot < 0 ? name : name.slice(0, dot);
+}
+
+function renderCsNativeListing(
+  sources: CsDosProgramList["sources"],
+  objects: readonly Cs486Object[],
+): string {
+  const sections = sources.map((source, index) => {
+    const object = objects[index];
+    if (object === undefined) {
+      throw new Error("CS-native listing object is missing");
+    }
+    return [
+      `; CS ASM 1.0 native listing: ${source.path}`,
+      `; Language: ${source.language}; object format: CS486OBJ v${String(object.version)}`,
+      object.assembly,
+    ].join("\r\n");
+  });
+  const listing = `CS-NATIVE-LISTING 1.0\r\n${sections.join("\r\n\r\n")}\r\n`;
+  if (listing.length > 256_000) {
+    throw new Error("CS-native listing limit exceeded");
+  }
+  return listing;
+}
+
+function renderCsNativeMap(entry: string, executable: Cs486Executable): string {
+  const symbols = [...(executable.symbols ?? [])]
+    .sort(
+      (left, right) =>
+        left.address - right.address ||
+        (left.name < right.name ? -1 : left.name > right.name ? 1 : 0),
+    )
+    .slice(0, 4_096);
+  const rows = symbols.map(
+    (symbol) =>
+      `${symbol.address.toString(16).toUpperCase().padStart(8, "0")} ${symbol.section ?? "ABS"} ${symbol.type ?? "notype"} ${symbol.name}${symbol.functionSignature === undefined ? "" : ` ${symbol.functionSignature}`}`,
+  );
+  return [
+    "CS-NATIVE-LINK-MAP 1.0",
+    `Entry: ${entry}`,
+    "Format: validated CS486 executable / CS486OBJ v2 inputs",
+    ...rows,
+    "",
+  ].join("\r\n");
+}
+
+function isCsDosBuildRecord(
+  value: unknown,
+  projectPath: string,
+): value is CsDosBuildRecord {
+  if (typeof value !== "object" || value === null) return false;
+  const record = value as Record<string, unknown>;
+  if (
+    record.version !== 1 ||
+    record.projectPath !== projectPath ||
+    typeof record.fingerprint !== "string" ||
+    !/^[0-9a-f]{64}$/u.test(record.fingerprint) ||
+    !Array.isArray(record.generatedPaths) ||
+    record.generatedPaths.length > 70 ||
+    !record.generatedPaths.every(
+      (path) => typeof path === "string" && path.length <= 256,
+    ) ||
+    typeof record.units !== "object" ||
+    record.units === null
+  ) {
+    return false;
+  }
+  const units = Object.entries(record.units as Record<string, unknown>);
+  if (units.length > 64) return false;
+  return units.every(([path, unit]) => {
+    if (path.length > 256 || typeof unit !== "object" || unit === null) {
+      return false;
+    }
+    const candidate = unit as Record<string, unknown>;
+    return (
+      typeof candidate.fingerprint === "string" &&
+      /^[0-9a-f]{64}$/u.test(candidate.fingerprint) &&
+      typeof candidate.objectDigest === "string" &&
+      /^[0-9a-f]{64}$/u.test(candidate.objectDigest) &&
+      typeof candidate.objectPath === "string" &&
+      candidate.objectPath.length <= 256
+    );
+  });
+}
+
 function parentPath(path: string): string {
   return path === "/" ? "/" : path.slice(0, path.lastIndexOf("/")) || "/";
 }
@@ -5989,6 +6945,12 @@ function formatClock(clockHz: number): string {
   if (clockHz >= 1_000)
     return `${(clockHz / 1_000).toFixed(2).replace(/\.00$/u, "")} kHz`;
   return `${clockHz} Hz`;
+}
+
+function replacePathExtension(path: string, extension: string): string {
+  const slash = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+  const dot = path.lastIndexOf(".");
+  return `${dot > slash ? path.slice(0, dot) : path}${extension}`;
 }
 
 function applyDosRenameTemplate(sourceName: string, template: string): string {

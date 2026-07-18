@@ -19,7 +19,12 @@ describe("Web terminal UI", () => {
     expect(script).toContain("localStorage.setItem(codeStorageKey, code)");
     expect(script).toContain('url.searchParams.set("computer", code)');
     expect(script).toContain("reconnectGeneration");
-    expect(script).toContain("Math.min(10_000");
+    expect(script).toMatch(/Math\.min\(\s*10_000/u);
+    expect(script).toContain('initialSearch.get("handoff") === "1"');
+    expect(script).toContain('stableUrl.searchParams.delete("handoff")');
+    expect(script).toContain('response.headers.get("retry-after")');
+    expect(script).toContain('setConnection("offline", "REPLACED")');
+    expect(script).toContain("const maximumAttempts = 64");
   });
 
   it("masks secret input and paints full-height terminal cell backgrounds", async () => {
@@ -60,12 +65,18 @@ describe("Web terminal UI", () => {
     expect(script).toContain(
       "elements.terminalScreen.replaceChildren(fragment)",
     );
+    expect(script).toContain("terminalRenderFrame = requestAnimationFrame");
+    expect(script).toContain(
+      "renderedTerminalRowElements[y].replaceWith(line)",
+    );
   });
 
   it("keeps physical Enter, Ctrl+C, history, and textual focus feedback", async () => {
-    const [html, script] = await Promise.all([
+    const [html, css, script, inputHelpers] = await Promise.all([
       source("web/index.html"),
+      source("web/styles.css"),
       source("web/app.js"),
+      source("web/terminal-input.js"),
     ]);
 
     expect(html).toContain("<kbd>Enter</kbd>");
@@ -81,6 +92,31 @@ describe("Web terminal UI", () => {
     expect(script).toContain('elements.inputState.textContent = "WAIT"');
     expect(script).toContain('event.key === "Tab"');
     expect(script).toContain('api("/api/complete"');
+    for (const id of [
+      "caps-lock-indicator",
+      "num-lock-indicator",
+      "scroll-lock-indicator",
+    ]) {
+      expect(html).toContain(`id="${id}"`);
+    }
+    expect(html).toContain('aria-label="Keyboard lock status"');
+    expect(html).toContain('data-state="unknown"');
+    expect(css).toContain('.keyboard-lock-indicator[data-state="on"]');
+    expect(script).toContain(
+      'addEventListener("keydown", updateKeyboardLockIndicators)',
+    );
+    expect(script).toContain(
+      'addEventListener("keyup", updateKeyboardLockIndicators)',
+    );
+    expect(script).toContain(
+      'addEventListener("blur", resetKeyboardLockIndicators)',
+    );
+    expect(script).toContain(
+      "if (document.hidden) resetKeyboardLockIndicators()",
+    );
+    expect(script).toContain('off: { glyph: "\\u25cb", label: "off" }');
+    expect(script).toContain('on: { glyph: "\\u25cf", label: "on" }');
+    expect(inputHelpers).toContain("event.getModifierState(modifier)");
   });
 
   it("preserves native copy selections and normalizes bounded paste", async () => {
@@ -111,7 +147,7 @@ describe("Web terminal UI", () => {
     expect(inputHelpers).toContain('replace(/\\r\\n?|\\n/gu, " ")');
   });
 
-  it("places accessible PWR/HDD/FDD controls beside Copy and relays power", async () => {
+  it("places equal-size Copy and Manual controls before the hardware controls", async () => {
     const [html, css, script] = await Promise.all([
       source("web/index.html"),
       source("web/styles.css"),
@@ -122,23 +158,36 @@ describe("Web terminal UI", () => {
       "power-indicator",
       "hdd-indicator",
       "fdd-indicator",
+      "eject-button",
+      "eject-feedback",
       "power-button",
       "power-feedback",
     ]) {
       expect(html).toContain(`id="${id}"`);
     }
     expect(html.indexOf('id="copy-button"')).toBeLessThan(
-      html.indexOf('class="machine-panel"'),
-    );
-    expect(html.indexOf('class="machine-panel"')).toBeLessThan(
       html.indexOf('id="manual-button"'),
     );
+    expect(html.indexOf('id="manual-button"')).toBeLessThan(
+      html.indexOf('class="machine-panel"'),
+    );
+    expect(css).toMatch(
+      /\.topbar-button\s*\{[^}]*width:\s*68px;[^}]*min-width:\s*68px;[^}]*min-height:\s*36px;/u,
+    );
+    expect(css).toMatch(
+      /\.power-button\s*\{[^}]*width:\s*68px;[^}]*min-width:\s*68px;[^}]*min-height:\s*36px;/u,
+    );
     expect(html).toContain('aria-describedby="lifecycle-state power-feedback"');
+    expect(html).toContain('title="No floppy disk is present"');
     expect(css).toContain('.hardware-indicator[data-state="read"]');
     expect(css).toContain('.hardware-indicator[data-state="write"]');
     expect(css).toContain('.hardware-indicator[data-state="fault"]');
     expect(css).toContain(".power-button:active:not(:disabled)");
+    expect(css).toContain(".eject-button:active:not(:disabled)");
     expect(script).toContain('api("/api/power"');
+    expect(script).toContain('api("/api/floppy/eject"');
+    expect(script).toContain('floppyDriveState !== "absent"');
+    expect(script).toContain("Floppy disk ejected to the connected player.");
     expect(script).toContain("JSON.stringify({ action })");
     expect(script).toContain('return "safe_boot"');
     expect(script).toContain("/startup.py was not changed");
@@ -151,9 +200,16 @@ describe("Web terminal UI", () => {
     const script = await source("web/app.js");
 
     expect(script).toContain("editorActive =");
-    expect(script).toContain("(?:View\\s+)?Search\\s+(?:Run\\s+Debug\\s+)?");
+    expect(script).toContain("isEditorTerminalScreen(terminal.rows)");
     expect(script).toContain("queueEditorKeys([key])");
-    expect(script).toContain("Math.min(16, editorKeyQueue.length)");
+    expect(script).toContain("new BoundedEditorKeyQueue()");
+    expect(script).toContain("editorKeyQueue.peekBatch()");
+    expect(script).toContain("editorKeyQueue.acknowledge(keys)");
+    expect(script).toContain('admission.outcome === "rejected"');
+    expect(script).toContain("error?.status === 429");
+    expect(script).toContain("generation !== editorInputGeneration");
+    expect(script).toContain("discardEditorKeys()");
+    expect(script).toContain("unacknowledged editor key(s) were discarded");
     expect(script).toContain('kind: "keys"');
     expect(script).toContain('addEventListener("pointerdown"');
     expect(script).toContain('addEventListener("pointermove"');
@@ -161,10 +217,51 @@ describe("Web terminal UI", () => {
     expect(script).toContain('kind: "mouse"');
     expect(script).toContain("mouseTransitionQueue.length >= 16");
     expect(script).toContain("editorKeyQueue.length > 0");
-    expect(script).toContain("`Ctrl+${event.key.toLowerCase()}`");
-    expect(script).toContain("`Alt+${event.key.toLowerCase()}`");
-    expect(script).toContain('"PageDown"');
-    expect(script).toContain('"F10"');
+    expect(script).toContain("editorKeyFromKeyboardEvent(event)");
+    expect(script).toContain('event.key === "Alt"');
+    expect(script).toContain('queueEditorKeys(["F10"])');
+  });
+
+  it("renders DOS development screens with the reference VGA font and exact palette", async () => {
+    const [css, script, font] = await Promise.all([
+      source("web/styles.css"),
+      source("web/app.js"),
+      readFile(path.join(root, "web/fonts/WebPlus_IBM_VGA_8x16.woff")),
+    ]);
+
+    expect(font.subarray(0, 4).toString("ascii")).toBe("wOFF");
+    expect(font.byteLength).toBeGreaterThan(20_000);
+    expect(css).toContain('font-family: "IBM VGA 8x16"');
+    expect(css).toContain(
+      'src: url("/fonts/WebPlus_IBM_VGA_8x16.woff") format("woff")',
+    );
+    expect(css).toMatch(
+      /\.terminal-stage\.dos-editor-active[\s\S]*?font-weight: 400;[\s\S]*?font-synthesis: none;[\s\S]*?line-height: 1;[\s\S]*?letter-spacing: 0;/u,
+    );
+    expect(css).toContain("-webkit-font-smoothing: none");
+    expect(css).toMatch(
+      /\.terminal-stage\.dos-editor-active \.command-line textarea\s*\{[^}]*pointer-events: none;/su,
+    );
+    for (const color of ['"#AAAAAA"', '"#00AAAA"', '"#0000AA"', '"#000000"']) {
+      expect(script).toContain(color);
+    }
+    for (const color of ['"#FFFFFF"', '"#00AAA9"', '"#0100AB"']) {
+      expect(script).not.toContain(color);
+    }
+    expect(script).toContain('"terminal-cell--join-y"');
+    expect(css).toMatch(
+      /\.terminal-stage\.dos-editor-active \.terminal-cell--join-y\s*\{[^}]*text-shadow: 0 1px currentcolor;/su,
+    );
+    expect(script).toContain(
+      'classList.toggle("dos-editor-active", editorActive)',
+    );
+    expect(script).toContain(
+      "const activePalette = editorActive ? dosTuiPalette : palette",
+    );
+    expect(script).toContain("const lineHeightRatio = editorActive ? 1 : 1.32");
+    expect(script).toContain(
+      "const monospaceRatio = editorActive ? 0.5 : 0.61",
+    );
   });
 
   it("exposes view-only ownership and an explicit bounded takeover action", async () => {

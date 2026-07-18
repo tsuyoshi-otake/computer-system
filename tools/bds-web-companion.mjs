@@ -33,7 +33,7 @@ const web = new WebCompanionServer({
   publicOrigin: adminOptions.publicOrigin,
   allowedOrigins: process.env.WEB_COMPANION_ALLOWED_ORIGINS,
   autoOpenBrowser: parseOptionalBooleanFlag(
-    process.env.WEB_COMPANION_AUTO_OPEN,
+    process.env.WEB_COMPANION_AUTO_OPEN ?? "1",
     "WEB_COMPANION_AUTO_OPEN",
   ),
   debugIgnoreRange: parseBooleanFlag(

@@ -193,6 +193,86 @@ export class TerminalBuffer {
     return value;
   }
 
+  applyFrame(
+    rows: readonly (readonly TerminalCell[])[],
+    cursor: { readonly blink: boolean; readonly x: number; readonly y: number },
+    foreground = 0,
+    background = 15,
+  ): number {
+    if (rows.length > this.height) {
+      throw new TerminalError("Terminal frame has too many rows");
+    }
+    const nextForeground = requireColor(foreground);
+    const nextBackground = requireColor(background);
+    requireCoordinate(cursor.x, this.width, "x");
+    requireCoordinate(cursor.y, this.height, "y");
+    if (typeof cursor.blink !== "boolean") {
+      throw new TerminalError("Terminal cursor blink must be boolean");
+    }
+
+    const pending: { readonly cell: TerminalCell; readonly index: number }[] =
+      [];
+    for (let y = 0; y < this.height; y += 1) {
+      const sourceRow = rows[y];
+      if (sourceRow !== undefined && sourceRow.length > this.width) {
+        throw new TerminalError(
+          `Terminal frame row ${String(y + 1)} is too wide`,
+        );
+      }
+      for (let x = 0; x < this.width; x += 1) {
+        const source = sourceRow?.[x];
+        const character = source?.character ?? " ";
+        if (
+          typeof character !== "string" ||
+          character.length === 0 ||
+          character.length > 2 ||
+          [...character].length !== 1 ||
+          character.includes("\r") ||
+          character.includes("\n")
+        ) {
+          throw new TerminalError("Terminal frame cell must be one character");
+        }
+        const cell: TerminalCell = {
+          character,
+          foreground:
+            source === undefined
+              ? nextForeground
+              : requireColor(source.foreground),
+          background:
+            source === undefined
+              ? nextBackground
+              : requireColor(source.background),
+        };
+        const index = y * this.width + x;
+        const previous = this.cells[index]!;
+        if (
+          previous.character !== cell.character ||
+          previous.foreground !== cell.foreground ||
+          previous.background !== cell.background
+        ) {
+          pending.push({ cell, index });
+        }
+      }
+    }
+
+    const stateChanged =
+      pending.length > 0 ||
+      this.cursorXValue !== cursor.x ||
+      this.cursorYValue !== cursor.y ||
+      this.cursorBlinkValue !== cursor.blink ||
+      this.foregroundValue !== nextForeground ||
+      this.backgroundValue !== nextBackground;
+    if (!stateChanged) return 0;
+    for (const { cell, index } of pending) this.cells[index] = cell;
+    this.cursorXValue = cursor.x;
+    this.cursorYValue = cursor.y;
+    this.cursorBlinkValue = cursor.blink;
+    this.foregroundValue = nextForeground;
+    this.backgroundValue = nextBackground;
+    this.revisionValue += 1;
+    return pending.length;
+  }
+
   snapshot(): TerminalBufferSnapshot {
     return {
       schema: 1,

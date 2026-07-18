@@ -31,7 +31,7 @@ The server uses these optional environment variables:
 | `WEB_COMPANION_PUBLIC_ORIGIN`      | unset                                               | Complete HTTPS origin advertised behind a reverse proxy        |
 | `WEB_COMPANION_CONFIG_FILE`        | system-wide platform path                           | Persistent administrator configuration file                    |
 | `WEB_COMPANION_ALLOWED_ORIGINS`    | unset                                               | Extra origins, or `*` to accept every request Origin           |
-| `WEB_COMPANION_AUTO_OPEN`          | automatic local-address match                       | `0` disables and `1` explicitly enables host-browser opening   |
+| `WEB_COMPANION_AUTO_OPEN`          | `1`                                                 | `0` disables and `1` enables host-browser opening              |
 | `WEB_COMPANION_DEBUG_IGNORE_RANGE` | `0`                                                 | Debug only: skip the placed-machine range and dimension check  |
 
 No API key or `.env` file is required.
@@ -179,11 +179,11 @@ work after a fixed cycle ceiling. The normal CS-Linux Web Terminal separately
 supports foreground `python <file>`, `python --stats <file>`, and the
 `micropython` alias; that operator path may wait for guest events and supports
 Ctrl+C. Returned machine-instruction counts are diagnostic only. The `cpuCycles`
-field is the deterministic modeled CPU cost shared with ASM, C, C++, and CS
-QBASIC; `run --stats` and Python/CS486 diagnostics also convert it to virtual
-microseconds at the selected hardware clock. Do not use host wall-clock time for
-language rankings. Ordinary MCP shell commands still require a completed
-CS-Linux login. The isolated Python compile/run probe is a separate
+field is the deterministic modeled CPU cost shared with CS ASM 1.0, CS C/C++
+1.0, and CS QBASIC 1.0; `run --stats` and Python/CS486 diagnostics also convert
+it to virtual microseconds at the selected hardware clock. Do not use host
+wall-clock time for language rankings. Ordinary MCP shell commands still require
+a completed CS-Linux login. The isolated Python compile/run probe is a separate
 managed-debug operation and does not authenticate the interactive shell.
 
 BDS prints `Server started` before Script API world initialization is fully
@@ -197,10 +197,15 @@ Run `npm run dev:bds:web` to start the managed BDS runtime and Web Terminal in a
 single lifecycle. The companion selects a physical LAN IPv4 address unless
 `WEB_COMPANION_PUBLIC_HOST` overrides it. Using an eligible Computer prints the
 stable entry page and that Computer's permanent four-digit number. The
-interaction activates the number once for two minutes. Entering it exchanges the
-activation for a browser bearer token bound to the exact `c-xxxxxx` identity.
-Invalid guesses are limited to eight attempts per client per minute, and an
-active number collision returns an explicit conflict.
+interaction activates the number once for two minutes. The companion first
+prepares a viewer session, relays it to Bedrock, and waits for the exact
+`CS_WEB_SESSION_READY` acknowledgement. Only then may it satisfy an MCP waiter
+or queue the browser launch. Bedrock rejection, companion failure, and
+activation timeout all close the exact prepared session. Entering the number
+exchanges the activation for a browser bearer token bound to the exact
+`c-xxxxxx` identity and then claims the writer lease. Invalid guesses are
+limited to eight attempts per client per minute, and an active number collision
+returns an explicit conflict.
 
 For a one-action workflow on the companion host, leave `WEB_COMPANION_AUTO_OPEN`
 unset. A Desktop/Advanced block interaction or Portable Computer System use
@@ -213,32 +218,104 @@ times out explicitly, and runs at most once per activation. This checks the
 server endpoint rather than the initiating player's IP. The server cannot launch
 a browser on another player's device; remote players use the printed LAN entry
 page and four digits. Disabled, timed-out, and failed host launches retain that
-fallback.
+fallback. `GET /p/NNNN` is side-effect-free: it redirects to
+`/?computer=NNNN&handoff=1` without a token, and the client removes the handoff
+flag from history before using one same-origin `POST /api/handoff`.
 
-An MCP client can call `bds_issue_web_handoff` with the exact `c-xxxxxx`
-Computer ID to issue and receive the one-use URL in one operation. The managed
-debug server must have exactly one connected player; zero or multiple players, a
-missing Computer identity, relay failure, and timeout all terminate with an
-explicit error. The tool installs the Computer-scoped waiter before asking
-Bedrock to create the session, so the request cannot outrun the waiter.
+Call `bds_list_computers` first to read a non-wrapping page of the managed
+world's currently placed Computer identities. Each page contains at most 64
+records and returns `nextCursor` or `null`; its work is `O(K)` in the requested
+page size rather than an ordinary-tick `O(N)` scan. The result includes only the
+exact ID, family, block form, and physical key needed to distinguish placements.
+It does not power on or otherwise mutate a Computer.
 
-Use `bds_wait_for_web_handoff` instead when an operator will trigger the machine
-interaction separately. Both tools bound the wait to at most 120 seconds, and
-only one pending operation may own a Computer ID. A matching handoff is returned
-to MCP instead of browser auto-open, avoiding a race to consume the one-use URL.
-The URL remains absent from BDS logs and unrelated Computer IDs cannot satisfy
-the wait.
+Call `bds_open_web_terminal` with the selected exact `c-xxxxxx` to complete the
+normal debug workflow entirely through MCP. It installs the Computer-scoped
+waiter, asks Bedrock to activate and power the Computer through a headless debug
+principal, opens the one-use path in the companion host's default browser, and
+returns only after that exact session consumes the handoff and becomes the
+writer. No connected Bedrock player is required, and the MCP result contains
+connection state but no one-use URL or bearer token. Bedrock admits this
+playerless principal only for `ScriptEventSource.Server`; Entity, Block, and NPC
+events fail as `server_source_required`. A missing Computer identity,
+browser-launch rejection, relay failure, and either timeout all terminate with
+an explicit error. Normal player-owned sessions keep their existing proximity,
+disconnect, and interaction requirements.
+
+After `bds_open_web_terminal` succeeds, MCP retains a bounded internal binding
+from that exact Computer ID to the debug-owned writer session. It never follows
+a later Player-owned writer implicitly. Use the three TUI tools without copying
+the one-use URL or bearer token into another client:
+
+```json
+{ "computerId": "c-xxxxxx", "includeColors": true }
+```
+
+Pass that object to `bds_get_tui_screen` to read the current text surface. The
+result is schema-versioned and contains the non-secret session correlation ID,
+snapshot version, label/lifecycle, and `surface.kind: "text"` with exact width,
+height, row-ending spaces, cursor, and optional 0-15 foreground/background cell
+grids. It intentionally omits the bearer token, one-use URL, four-digit code,
+player ID, audio queue, and storage details.
+
+To enter a TUI and verify the following frame entirely through MCP, send one
+bounded input and then wait for a literal screen marker:
+
+```json
+{"computerId":"c-xxxxxx","kind":"line","value":"edit"}
+{"computerId":"c-xxxxxx","contains":"File  Edit","afterVersion":1,"timeoutMs":10000,"includeColors":true}
+```
+
+The first object is for `bds_send_tui_input`; `kind` is `line`, `keys`, or
+`interrupt`. Lines remain at most 128 characters. Key batches contain 1 through
+32 keys of at most 32 characters each and still pass through the same correlated
+Web/Bedrock admission queue as browser input. The second object is for
+`bds_wait_for_tui_screen`. One wait is allowed per exact session, no more than
+eight waits exist globally, and the timeout cannot exceed 120 seconds. Waiting
+is driven by session events rather than log scans or fixed-interval polling.
+`snapshotVersion` counts accepted Web Terminal envelopes, so lifecycle or audio
+metadata can advance it without changing text; combine `afterVersion` with a
+literal `contains` value when verifying an input result.
+
+MCP TUI tools require the session to remain active, in range under its debug
+policy, and the current writer. The Bedrock request envelope carries an explicit
+`principalKind`, so a simultaneous Player handoff cannot satisfy the debug wait.
+Companion checks reject stale/viewer/Player sessions, and Bedrock rechecks the
+live runtime immediately before queueing debug input. Both layers reject screen
+inspection or input while secret entry is active; the ordinary authenticated
+Player/browser route is unchanged.
+
+This contract proves the logical text cells, palette indexes, and cursor. It
+does not prove VGA glyph pixels, CSS scaling, or outer browser chrome. A future
+CS Windows-style GUI can reuse the exact Computer/session/writer/version
+lifecycle with a separate graphics surface backed by bounded palette/tile
+deltas; text continues to use `TerminalBuffer` as its sole state and graphics
+uses display VRAM rather than mirroring either one. Native Windows 3.1/x86
+compatibility is not implied, and final Canvas/CSS rendering will still require
+a real-browser check.
+
+Use `bds_issue_web_handoff` only when an MCP caller explicitly needs to own the
+one-use URL rather than open the host browser. Use `bds_wait_for_web_handoff`
+instead when an operator will trigger the machine interaction separately. Both
+tools bound the wait to at most 120 seconds, and only one pending operation may
+own a Computer ID. A matching handoff is returned to MCP instead of browser
+auto-open, avoiding a race to consume the one-use URL. The URL remains absent
+from BDS logs and unrelated Computer IDs cannot satisfy the wait.
 
 Placed-machine sessions recheck the requesting player against the access block
 during attachment, input, completion, resize, and snapshot work. Moving beyond
 three blocks or changing dimension pauses the bounded session as `out_of_range`;
-returning transitions it to `in_range` and resumes the existing browser stream.
-After a successful connection the browser remembers only the permanent
-four-digit number and updates the URL to `/?computer=NNNN`. Reloading that
-bookmark rotates the bearer token through one deduplicated exponential-backoff
-reconnect loop. The query never contains the bearer token. Range messages are
-transition-only, and the permanent-code session index avoids a linear scan. A
-held Portable remains exempt because the access point moves with its owner.
+returning to 2.75 blocks or nearer transitions it to `in_range` and resumes the
+existing browser stream. The interval between those thresholds retains the
+current state, so boundary jitter does not flap. After a successful connection
+the browser remembers only the permanent four-digit number and updates the URL
+to `/?computer=NNNN`. Reloading that bookmark rotates the bearer token through
+one deduplicated exponential-backoff reconnect loop. Terminal authentication
+errors stop the loop, rate limits honor `Retry-After`, and total attempts are
+capped. The query never contains the bearer token. Range transitions are shown
+by the Web UI and logged once at the bridge boundary; they are not repeated in
+Minecraft chat. The permanent-code session index avoids a linear scan. A held
+Portable remains exempt because the access point moves with its owner.
 
 The browser input is overlaid at the terminal cursor rather than rendered as a
 separate form field. Physical Enter sends one bounded `terminal_line` event,

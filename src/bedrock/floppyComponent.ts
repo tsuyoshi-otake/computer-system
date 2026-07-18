@@ -77,6 +77,16 @@ export function ejectFloppyForBreak(
   }
 }
 
+export function ejectFloppyToPlayer(
+  computerId: string,
+  player: Player,
+): "ejected" | "empty" {
+  if (computerHost.runtime.floppyDrive(computerId)?.media === undefined)
+    return "empty";
+  ejectFloppy(computerId, player, undefined);
+  return "ejected";
+}
+
 function insertFloppy(
   player: Player,
   item: ItemStack,

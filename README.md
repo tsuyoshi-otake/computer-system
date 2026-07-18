@@ -6,9 +6,10 @@ Minecraft Bedrock Edition.
 The project aims to reproduce the ComputerCraft experience as closely as the
 Bedrock Add-On and Script APIs allow. Desktop programs can use a sandboxed,
 MicroPython-compatible language called Computer System Python. The portable DOS
-profile instead supports ASM, C, C++, CS QBASIC, and bounded batch programs. The
-computer lifecycle, terminal, filesystem, events, networking, peripherals,
-portable computers, and turtles follow ComputerCraft-style behavior.
+profile instead supports CS ASM 1.0, CS C/C++ 1.0, CS QBASIC 1.0, and bounded
+batch programs. The computer lifecycle, terminal, filesystem, events,
+networking, peripherals, portable computers, and turtles follow
+ComputerCraft-style behavior.
 
 <table>
   <tr>
@@ -59,11 +60,45 @@ visible response does not wait for every viewer in the periodic round-robin.
 On the DOS profile, `EDIT [path]` opens an original DOS-era full-screen editor.
 Running `EDIT` by itself starts an `UNTITLED` buffer backed by `C:\NONAME.TXT`.
 It provides a blue fixed-cell editing surface, File/Edit/Search/Options/Help
-menus, cursor navigation, insert/overwrite modes, bounded undo and search,
-F2/Ctrl+S save, and an explicit Save/Discard/Cancel exit state. `vi` remains the
-syntax-highlighted modal editor for Linux and DOS; Linux deliberately does not
+menus, cursor navigation, insert/overwrite modes, bounded undo and search, F1
+help, F2/Ctrl+S save, Ctrl+Shift+S Save As, and an explicit Save/Discard/Cancel
+exit state. Menu pointer hits are constrained to the visible menu box. `vi` is
+the configurable modal editor for Linux and DOS; Linux deliberately does not
 expose `EDIT`. Both editors use the same writer-owned bounded key transport and
 render inside the fixed 80x25 Web Terminal hardware text grid.
+
+DOS `EDIT`, CS QBASIC, PWB/CS C/C++, and CSASM share configurable editor
+services. Their Options dialogs control syntax colors, line numbers, rainbow
+indentation, whitespace markers, wrapping, autoindent, tab expansion and widths,
+completion, candidate/definition sources, and language selection. Ctrl+Space
+opens at most 64 completion candidates, Ctrl+Shift+O lists document symbols, F12
+jumps to a lightweight definition, and Alt+Left returns through at most 16
+jumps. Ctrl+N remains File > New. The fixed candidate priority is current-file
+words, up to eight recently opened buffer summaries, functions/types/macros/
+labels, language keywords, then optional direct includes. Indexes are lazy and
+revision-cached; include lookup is non-recursive and opt-in, reads at most eight
+guest files and 32 KiB total, and never starts an LSP or host process.
+
+All four products load `C:\EDITOR.INI`, with `[common]`, `[edit]`, `[qbasic]`,
+`[pwb]`, and `[csasm]` sections. Options > Save Settings updates only the active
+product section while preserving the others; Reload Settings and Restore
+Defaults are explicit. The file is capped at 4,096 characters and 64 lines, and
+invalid input rejects editor startup atomically. Syntax and completion start on;
+line numbers, rainbow indentation, whitespace markers, and wrapping start off.
+Source IDEs enable autoindent and default to four expanded columns. Plain EDIT
+does not enable autoindent and uses the MS-DOS-style eight-column tab default.
+`EDIT` auto-detects Text, BASIC, C, C++, ASM, and Python; Python editing does
+not imply Python execution support on CS-DOS.
+
+Each IDE's Run menu provides DOS Command, Repeat DOS Command, and Insert Command
+Output. They use only the sandboxed guest shell, insert at most 128 lines or
+4,096 characters as one undoable operation, reject background/asynchronous/TUI/
+session-control work, and restore the parent guest directory, environment,
+aliases, functions, umask, exit status, and outer editor ownership before
+editing resumes. Plain EDIT keeps the MS-DOS File menu shape instead: New, Open,
+Save, Save As, Print, and Exit with the two canonical separators. Print remains
+visible for layout compatibility but fails explicitly because CS-DOS has no
+guest printer device.
 
 The Web Terminal header also opens a searchable, keyboard-navigable 16-chapter
 field manual. Goal paths lead new operators through a first program, a
@@ -203,13 +238,28 @@ safety constraints.
 Computer without using its TUI. It returns stdout, stderr, exit code, and
 modeled CPU cycles for the target Computer's persisted hardware model from the
 sandboxed shell; it never invokes host PowerShell/Bash or arbitrary BDS
-administration commands. `bds_issue_web_handoff` asks the single connected debug
-player to open one exact Computer ID and returns its one-use URL without a
-physical machine interaction. `bds_wait_for_web_handoff` remains available when
-an operator will trigger the interaction separately. Both paths prevent browser
-auto-open from consuming the claimed URL first and bound input, concurrency,
-output, and waits. The MCP direct `python <file>`, `micropython <file>`, and
-bounded multiline `python -c <source>` forms run through the target Computer's
+administration commands. `bds_list_computers` reads bounded pages of exact
+currently placed Computer identities without powering them on.
+`bds_open_web_terminal` uses a server-authorized headless MCP debug principal to
+activate one selected exact Computer ID, opens the one-use path in the companion
+host's default browser, and verifies that exact writer connection without a
+connected Bedrock player or an exposed URL in its MCP result.
+`bds_get_tui_screen` reads that exact debug-owned writer's current authoritative
+text surface; `bds_send_tui_input` relays one bounded line, up to 32 keys, or an
+interrupt; and `bds_wait_for_tui_screen` waits event-first for a literal screen
+match or later snapshot version. The screen result preserves row-ending spaces,
+geometry, cursor, and optionally the exact 0-15 foreground/background grids,
+while excluding bearer tokens, one-use URLs, connection codes, player IDs,
+audio, and storage details. Both companion and Bedrock reject MCP input and
+inspection while a secret prompt is active. The versioned `surface.kind: "text"`
+contract leaves pixel/tile surfaces additive for a future CS Windows-style UI;
+it does not claim to verify browser CSS, VGA font pixels, or scaling.
+`bds_issue_web_handoff` returns the one-use URL only when the caller explicitly
+needs to own it. `bds_wait_for_web_handoff` remains available when an operator
+will trigger the interaction separately. Both paths prevent browser auto-open
+from consuming the claimed URL first and bound input, concurrency, output, and
+waits. The MCP direct `python <file>`, `micropython <file>`, and bounded
+multiline `python -c <source>` forms run through the target Computer's
 MicroPython-compatible compiler, filesystem, hardware profile, and RAM limit.
 Only the inline Python debug form may contain encoded line breaks; ordinary
 debug commands remain one line. The normal CS-Linux shell also accepts
@@ -231,8 +281,8 @@ $env:BDS_HOME = "C:\path\to\bedrock-server"
 npm run dev:bds:web
 ```
 
-When `WEB_COMPANION_AUTO_OPEN` is unset, the companion automatically opens each
-eligible one-use handoff only when the effective published host—detected
+Browser auto-open defaults to enabled, and the companion automatically opens
+each eligible one-use handoff only when the effective published host—detected
 automatically or overridden by `WEB_COMPANION_PUBLIC_HOST`—is a literal IP
 address assigned to the companion host and no custom public origin is
 configured. A service published as `10.255.10.90` therefore opens the same path
@@ -248,21 +298,27 @@ selected but does not expose Web Terminal. The Portable Computer System has a
 built-in display and opens the link while held or placed without an external
 Monitor. The companion advertises a stable LAN entry page and Minecraft prints
 the Computer's permanent four-digit number. Touching the machine activates that
-number once for two minutes. Invalid codes are rate-limited per client, and a
-simultaneous four-digit collision fails explicitly rather than connecting the
-wrong Computer. Opening the entry page and entering the active number exchanges
-it for a browser-only bearer token that is never written to BDS logs. The
-authenticated session lasts at most 30 minutes. Placed machines remain usable
-only while that player stays within three blocks; leaving the radius pauses
-input as `out_of_range` without destroying the bounded session, and returning
-resumes the existing browser stream. After the first successful connection the
-browser stores only the permanent four-digit number in local storage and changes
-the bookmarkable URL to `/?computer=NNNN`. Opening that bookmark rotates the
-bearer token and reconnects through one deduplicated, 30-minute bounded
-exponential-backoff loop. No bearer token or password is put in the query. Code
-lookup is O(1), and access notifications are emitted only on range-state
-transitions rather than on every scheduler check. A held Portable is the access
-point itself and does not use the placed-block distance check.
+number once for two minutes. The companion waits for Bedrock to accept the exact
+session before it opens a browser or exposes the handoff; a rejection or timeout
+closes that exact session instead of leaving an orphan. Invalid codes are
+rate-limited per client, and a simultaneous four-digit collision fails
+explicitly rather than connecting the wrong Computer. A `GET /p/NNNN` only
+redirects to the stable entry page and never consumes or exposes authentication
+state. The page exchanges the activation with one same-origin
+`POST /api/handoff`, then takes the writer lease. The browser-only bearer token
+is never written to BDS logs, a query, or browser history. The authenticated
+session lasts at most 30 minutes. Placed machines pause only after the
+requesting player moves beyond three blocks, and resume at 2.75 blocks or
+nearer. The deadband keeps the current state, preventing boundary jitter from
+alternating `out_of_range` and `in_range`. Range state appears in the Web UI;
+Minecraft chat is not used for steady range-transition notices. After the first
+successful connection the browser stores only the permanent four-digit number in
+local storage and changes the bookmarkable URL to `/?computer=NNNN`. Opening
+that bookmark rotates the bearer token through one deduplicated, bounded
+exponential-backoff loop. The loop stops on terminal authentication outcomes,
+caps attempts, and honors `Retry-After` for rate limits. Code and exact-session
+lookups are O(1). A held Portable is the access point itself and does not use
+the placed-block distance check.
 
 For a local managed-BDS debugging session only, set
 `WEB_COMPANION_DEBUG_IGNORE_RANGE=1` before starting the companion to skip the
@@ -552,7 +608,7 @@ DOS-facing commands use CRLF and DOS-specific status/error text rather than
 leaking Linux applet output. The implemented compatibility surface includes
 `DIR`, `TYPE`, `COPY`, `DEL`/ `ERASE`, `MD`, `RD`, `MOVE`, `REN`/`RENAME`,
 `TREE`, `VOL`, `VER`, `TIME`, `TIMER`, `DOSKEY /HISTORY`, `MEM /F`, `ATTRIB`,
-`LABEL`, and read-only `CHKDSK`. Computer System DOS 6.2 (`CS-DOS 6.2`) reads a
+`LABEL`, and read-only `CHKDSK`. Computer System DOS 1.0 (`CS-DOS 1.0`) reads a
 bounded `CONFIG.SYS` and runs `AUTOEXEC.BAT`; `SET`, `PATH`, `PROMPT`, `REM`,
 `@ECHO OFF`, `%0`…`%9`, `%VAR%`, and `%ERRORLEVEL%` are supported. Unsupported
 boot directives fail visibly. `DEVICE`/`DEVICEHIGH` enables the modeled HIMEM or
@@ -571,12 +627,16 @@ safe boot was requested. On a Linux-installed machine that boot is an ephemeral
 A:-only DOS session: C: is unavailable and the Linux filesystem and OS snapshots
 are not changed. `DIR`, `COPY`, `DEL`/`ERASE`, and `REN`/`RENAME` support
 bounded DOS `*`/`?` file specifications and use each file's persisted two-second
-FAT timestamp. `DIR /A` filters read-only, hidden, system, directory, and
-archive state. `ATTRIB` displays or changes R/H/S/A (including bounded `/S`),
-and read-only state is enforced by write, delete, rename, copy, and editor
-paths. `LABEL` reads or changes the generation-bound volume label. `CHKDSK`
-reports actual file/directory/byte/free counts and metadata consistency but
-never repairs the volume. It does not alter guest file contents, labels, or
+FAT timestamp. Normal `DIR` splits a strict 8.3 name into eight-character base
+and three-character extension columns, aligns `<DIR>` or a comma-grouped size,
+and uses `MM-DD-YY` plus a space-padded 12-hour `a`/`p` time. Its totals and
+free bytes are also locale-independent comma-grouped values; `/B` and `/W`
+retain their separate formats. `DIR /A` filters read-only, hidden, system,
+directory, and archive state. `ATTRIB` displays or changes R/H/S/A (including
+bounded `/S`), and read-only state is enforced by write, delete, rename, copy,
+and editor paths. `LABEL` reads or changes the generation-bound volume label.
+`CHKDSK` reports actual file/directory/byte/free counts and metadata consistency
+but never repairs the volume. It does not alter guest file contents, labels, or
 attributes, although reading a legacy entry may materialize its missing
 versioned FAT metadata.
 
@@ -655,30 +715,71 @@ ceilings.
 `[No Name]` buffer; `:w path` or `:wq path` assigns its first file name, while
 `:w` without a name fails explicitly. Backspace on an empty `:` line returns to
 Normal mode. Bounded controls include `I`/`A`, `o`/`O`, `gg`/`G`, page movement,
-`dd`, `x`, undo, `:w`, `:q`, `:wq`, `:wq!`, `:q!`, Shift+ZZ, and `ZQ`. Python,
-shell, JSON/TOML tokens are highlighted, and indentation rainbow backgrounds are
-on by default. The native terminal remains 51x19; each Web writer session
-normalizes the guest text mode to 80x25 once, then scales the same fixed grid to
-the available browser viewport without changing the Computer's cell geometry.
-The browser subtracts terminal padding and fits both rows and columns, so the
-terminal surface does not expose an internal scrollbar. The browser coalesces up
-to 16 keys per relay, while the BDS boundary rejects batches above 32 keys. Tab
-performs bounded command/path completion through the same writer-authorized
-relay.
+`dd`, `x`, undo, `>>`/`<<`, `:w`, `:q`, `:wq`, `:wq!`, `:q!`, Shift+ZZ, and
+`ZQ`.
 
-The Web Terminal top bar places **PWR**, **HDD**, and **FDD** indicators plus an
-explicit writer-only **Power** button immediately after **Copy** and before
-**Manual**. The indicators follow the real lifecycle and block-device state; FDD
-reports absent media only while no Floppy Disk item is loaded. FDD insert,
-eject, motor start, seek, read, and write sounds are synthesized locally with
-Web Audio after a browser gesture; no Resource Pack sound file is required.
-Events use a per-Computer monotonic sequence, a 32-event ring, and an eight-per-
-second ceiling. Reconnect does not replay retained sounds, both writers and
-viewers can hear live activity, and leaving range or closing the session stops
-active voices. **Copy** copies an active terminal selection, or the visible
-fixed-cell screen when nothing is selected. It uses the Clipboard API when
-available and a synchronous browser copy fallback for LAN HTTP deployments; no
-polling or background clipboard work is performed.
+Insert-mode completion is enabled by default. `Ctrl+N` and `Ctrl+P` cycle a
+bounded candidate list and `Ctrl+E` restores the text from before completion;
+Tab remains indentation. Candidates have a fixed priority: words in the current
+file, words in the eight most recently visited buffers, indexed
+functions/types/macros/ASM labels, language keywords, and optional direct
+include files. `gd` jumps to the definition under the cursor, `Ctrl+O` returns,
+and `:symbols` shows the current lightweight index. Moving to another file is
+blocked while the current buffer has unsaved changes.
+
+Syntax colors, line numbers, indentation rainbow backgrounds, automatic
+indentation, whitespace markers, and line wrapping start disabled. Enable them
+with `:syntax on` and `:set number rainbow autoindent list wrap`; disable them
+with `:syntax off` and the matching `:set no...` names. `expandtab` starts
+enabled with `tabstop=2` and `shiftwidth=2`; `:set noexpandtab`, `tabstop=N`,
+and `shiftwidth=N` accept values from 1 through 16. `:set`, `:set all`, and
+`:set option?` report the complete current state. Linux loads `~/.vimrc`; DOS
+loads `C:\_VIMRC`. Configuration is capped at 4,096 characters and 32 lines, and
+an invalid line rejects the open without partially applying earlier lines.
+Completion uses `complete`, `completecase=smart`, `completeprefix=2`, and
+`completesources=current,buffers,symbols,keywords` by default. Select
+`completecase=sensitive|insensitive`, disable it with `nocomplete`, or opt into
+direct guest-file candidates with `completesources=...,includes`. Definition
+lookup defaults to `definitionsources=current,buffers`; append `includes` to
+search direct includes. `filetype=auto` (alias `ft`) detects
+`python|basic|c|cpp|asm|shell|json|text` and may be overridden explicitly.
+Include lookup is non-recursive and capped at eight readable guest files and 32
+KiB total; it never reads host files or starts an LSP. The on-demand
+current-file index scans at most 256 KiB or 16,384 lines and retains at most
+2,048 word occurrences and 512 symbols.
+
+`:!command` runs a bounded command through the same guest shell, `:!!` repeats
+it, and `:r !command` inserts at most 128 lines or 4,096 characters of stdout
+below the current line as one undoable edit. These commands never reach a host
+shell. Background, asynchronous, session-control, foreground-process, and TUI
+commands fail explicitly; the parent shell directory, environment, aliases,
+functions, umask, and exit status are restored before `vi` resumes. The native
+terminal remains 51x19; each Web writer session normalizes the guest text mode
+to 80x25 once, then scales the same fixed grid to the available browser viewport
+without changing the Computer's cell geometry. The browser subtracts terminal
+padding and fits both rows and columns, so the terminal surface does not expose
+an internal scrollbar. The browser coalesces up to 16 keys per relay, while the
+BDS boundary rejects batches above 32 keys. Tab performs bounded command/path
+completion through the same writer-authorized relay.
+
+The Web Terminal top bar places equal-size **Copy** and **Manual** controls
+first, followed by the **PWR**, **HDD**, and **FDD** indicators plus explicit
+writer-only **Eject** and **Power** buttons. The indicators follow the real
+lifecycle and block-device state; FDD reports absent media only while no Floppy
+Disk item is loaded. Eject returns loaded media to the connected player and is
+disabled for viewers, offline sessions, and an empty drive. The footer shows
+Caps Lock, Num Lock, and Scroll Lock from browser keyboard events as filled/on,
+hollow/off, or unknown; losing page focus resets them to unknown rather than
+preserving a potentially stale claim. FDD insert, eject, motor start, seek,
+read, and write sounds are synthesized locally with Web Audio after a browser
+gesture; no Resource Pack sound file is required. Events use a per-Computer
+monotonic sequence, a 32-event ring, and an eight-per- second ceiling. Reconnect
+does not replay retained sounds, both writers and viewers can hear live
+activity, and leaving range or closing the session stops active voices. **Copy**
+copies an active terminal selection, or the visible fixed-cell screen when
+nothing is selected. It uses the Clipboard API when available and a synchronous
+browser copy fallback for LAN HTTP deployments; no polling or background
+clipboard work is performed.
 
 Computer snapshots remain canonical in Bedrock World Dynamic Properties, which
 BDS stores in the world's LevelDB. Clean persistence checks compare O(1)
@@ -836,27 +937,81 @@ of process RAM and grows downward; PUSH/CALL and POP/RET may not cross the
 aligned static-data/BSS floor. ESP remains a general register, so these are RAM
 boundary checks rather than PUSH-word provenance tracking; RET separately
 validates its popped target against real instruction addresses, so one-past-end
-is valid only for sequential fallthrough and never as a return target. `as`,
-`cc`, and `c++` compile safe initial language subsets to the same versioned,
-validated `CS486` executable and accept `-c` to emit a bounded `CS486OBJ`
-relocatable object. CS-DOS alone exposes the original, sandboxed `QBASIC.EXE`;
-its currently supported integer/console source subset compiles to the same
-validated process. Current CS-Linux exposes neither `basic` nor `basicc`.
+is valid only for sequential fallthrough and never as a return target. CS ASM
+1.0 (`as`/`ASM`) and CS C/C++ 1.0 (`cc`/`CC` and `c++`/`C++`) compile safe
+initial language subsets to the same versioned, validated `CS486` executable and
+accept compile-only switches to emit a bounded `CS486OBJ` relocatable object.
+CS-DOS alone exposes the original, sandboxed `QBASIC.EXE`; its currently
+supported integer/console source subset compiles to the same validated process
+as CS QBASIC 1.0. Current CS-Linux exposes neither `basic` nor `basicc`.
 
-New ASM objects use `CS486OBJ` v2. A dedicated tokenizer, bounded preprocessor,
-parser, constant-expression evaluator, and source-span diagnostics feed `.text`,
-`.rodata`, `.data`, and `.bss` sections. Objects carry initialized little-endian
-data, alignment, local/global/undefined symbols typed as `function`, `object`,
-or `notype`, optional zero-argument function signatures (`()->i32` or
-`()->void`), plus structured `text-target`, `data-address`, and `absolute32`
-relocations. `ld` resolves Map-backed symbols and applies those records in
-O(instructions + initialized bytes + symbols + relocations) work rather than
-rewriting assembly text. Readers retain v1 object compatibility. `nm` and
-`objdump` inspect both versions and the executable. These files are neither
-Linux ELF nor DOS OMF, `.COM`, or `.EXE` files, and no frontend invokes a host
-assembler, compiler, linker, or loader.
+On CS-DOS, `CSASM [source]`, `CSCC [source]`, `CSCPP [source]`, and
+`PWB [source]` open the full-screen WorkBench. `CSCC` accepts C, `CSCPP` accepts
+C++, and `PWB` selects ASM, C, or C++ from the source extension. Its
+File/Edit/View/Search/Make/Run/Debug/Options/Help menus are separate from EDIT.
+F2 saves, F7 builds a persistent same-basename `.CSX`, Ctrl+F5 runs the last
+build, Shift+F5 builds and runs, and F4 toggles output. F5 starts or continues
+the in-WorkBench instruction debugger, F8 traces one instruction, F9 toggles a
+breakpoint at the current EIP, and Escape returns to source without discarding
+the paused debuggee. DOS compile-only defaults to same-basename `.OBJ`; a linked
+or executable build defaults to same-basename `.CSX`, never `a.o` or `a.out`.
+The interface takes its workflow cues from 1990s DOS programmer workbenches, but
+it is independent Computer System code and does not include Microsoft C/C++ 7.0,
+Programmer's WorkBench binaries, artwork, help databases, OMF objects, or native
+x86 tools.
 
-C and C++ use a dedicated, bounded tokenizer and parser instead of regular-
+`EDIT`, CS QBASIC, and the WorkBench share the same bounded editor state
+machine. Plain EDIT carries the title corner down a continuous left document
+border. In an 80x25 session, Ctrl+O opens with selected `*.TXT`, a bounded Files
+pane, a Dirs/Drives pane, and separate horizontal/vertical arrow tracks;
+narrower sessions retain the compact fallback. Ctrl+O and Ctrl+Shift+S browse
+only guest C: and A:, with directories, wildcard filters, keyboard and
+primary-mouse selection, scrolling, explicit empty/not-ready states, and
+removable-media generation checks. New, Open, Save As, overwrite,
+external-change, and Exit paths retain the dirty buffer until the user chooses
+Save, Discard/Reopen, or Cancel. Text is written as CRLF; NUL/Ctrl+Z binary
+input, capacity-plus-one edits, stale media, and changed-on-disk saves fail
+without partially replacing the buffer. The same core owns the Options dialogs,
+completion popup, symbol list, definition history, and guest-command dialogs, so
+modal keyboard/mouse ownership cannot be bypassed by WorkBench build/debug
+shortcuts.
+
+The CS ASM / CS C/C++ WorkBench can select a bounded `CS PROGRAM LIST 1.0`
+project from Make > Set Program List. A list declares ordered `SOURCE` entries
+for `.ASM`, `.C`, and `.CPP`, optional authored `OBJECT` inputs, `INCLUDE`,
+`DEFINE`, `UNDEF`, `ENTRY`, required `OUTPUT`, and optional `LISTING` and `MAP`
+paths. F7 incrementally rebuilds only units whose source, included headers,
+options, or compiler identity changed; Ctrl+F7 rebuilds every source. Successful
+output, objects, listing, map, and the ownership record are installed in one
+guest filesystem transaction. A failed build preserves the last good executable
+but marks Run Last stale. Clean removes only paths recorded as project-owned,
+and canonical-path collisions with source, user objects, other outputs, or a
+pre-existing unowned file are rejected before mutation. The F4 pane is
+scrollable; F3 and Shift+F3 open the next or previous bounded DOS compiler
+location in the editor.
+
+The WorkBench, EDIT, and Web Terminal mouse path are built-in privileged
+sessions. User-authored C/C++/ASM currently has console output but no public
+fixed-cell screen, keyboard-event, mouse-event, framebuffer, timer, sound, or
+windowing API, so it cannot yet implement an EDIT-like TUI, a DOOM-class game,
+or CS Windows. A future shared application/display/input ABI can extend the
+validated `.CSX` boundary for those programs and for CS Windows 1.0, but that
+ABI and product are not shipped or claimed here.
+
+New CS ASM 1.0 objects use `CS486OBJ` v2. A dedicated tokenizer, bounded
+preprocessor, parser, constant-expression evaluator, and source-span diagnostics
+feed `.text`, `.rodata`, `.data`, and `.bss` sections. Objects carry initialized
+little-endian data, alignment, local/global/undefined symbols typed as
+`function`, `object`, or `notype`, optional zero-argument function signatures
+(`()->i32` or `()->void`), plus structured `text-target`, `data-address`, and
+`absolute32` relocations. `ld` resolves Map-backed symbols and applies those
+records in O(instructions + initialized bytes + symbols + relocations) work
+rather than rewriting assembly text. Readers retain v1 object compatibility.
+`nm` and `objdump` inspect both versions and the executable. These files are
+neither Linux ELF nor DOS OMF, `.COM`, or `.EXE` files, and no frontend invokes
+a host assembler, compiler, linker, or loader.
+
+CS C/C++ 1.0 uses a dedicated, bounded tokenizer and parser instead of regular-
 expression source rewriting. The parser builds a typed AST with lexical scopes
 and source spans, requires a function declaration or prototype before each call,
 and rejects calling an in-scope local that shadows a function. It then lowers to
@@ -867,6 +1022,16 @@ targets, and explicit terminal states. Deterministic, pass-capped optimization
 performs constant folding, copy propagation, unreachable-block cleanup, and
 dead-pure-value elimination.
 
+Before parsing, a bounded token preprocessor handles quoted and angle
+`#include`, object-like and function-like `#define`, `#undef`, conditional
+compilation, `defined`, line continuations, macro rescanning, stringification,
+token pasting, and `#error`. CS-Linux accepts `-I`, `-D`, and `-U`; CS-DOS
+accepts the same forms plus `/I`, `/D`, and `/U`, with `INCLUDE` providing
+additional guest directories. Includes use the invoking guest credentials and
+never read host files. Include depth/cycles, macro depth/tokens, conditional
+depth, emitted tokens, source size, and diagnostics are bounded. Unsupported
+directives such as `#pragma` and variadic macros fail explicitly.
+
 The backend uses bounded deterministic linear-scan register allocation with
 checked stack spills and EBP-based stack frames. ESP and EBP are reserved, and
 values crossing a call are conservatively spilled under the current ABI. Graph
@@ -876,18 +1041,29 @@ the linker rejects conflicting known signatures while retaining untyped ASM and
 v1 compatibility. Integer-return calls use EAX, while known void functions
 cannot be exposed through the Python integer-extension ABI. Statement-boundary
 `asm("...")` rejects labels, control flow, stack operations, and ESP/EBP access.
+The current C++ frontend is the C subset plus bounded integer `std::cout` /
+`std::endl`; classes, inheritance, references, overloads, namespaces, templates,
+exceptions, RTTI, virtual dispatch, `constexpr`, and the ISO standard library
+are not implemented. All exported functions use one unmangled CS object ABI. The
+spelling `extern "C"` is accepted on individual C++ declarations, while linkage
+blocks and other linkages are rejected. Cross-language calls currently take zero
+arguments, return `int` in EAX or known `void`, and must agree with an ASM
+`SIGNATURE` when one is supplied. There is no MASM name decoration, near/far
+pointer model, C++ member ABI, DOS extender ABI, or compatibility with Microsoft
+objects and libraries.
 
 CS-Linux exposes the bounded instruction debugger as `csdb`; CS-DOS exposes the
-same core as `DEBUG` with DOS command spellings and CRLF output. After loading a
-validated CS486 executable, it can pause at an instruction address, set or clear
-breakpoints, single-step, continue with a bounded instruction budget, inspect
-registers, disassemble, and read memory without modifying it. The hard ceilings
-are 256 breakpoints, 100,000 instructions per continue request, 256 instructions
-per disassembly request, and 4,096 bytes per memory read. Debug state is owned
-by the shell session and is discarded on quit, logout, user switch, or terminal
-disconnect. This is not native GDB or DOS DEBUG emulation: source-level debug,
-symbolic local-variable reconstruction, memory writes, PIC/IRQ/IDT execution,
-and native BIOS/DOS interrupts are not implemented.
+same core through both the WorkBench Debug menu and the optional `DEBUG` command
+with DOS spellings and CRLF output. After loading a validated CS486 executable,
+it can pause at an instruction address, set or clear breakpoints, single-step,
+continue with a bounded instruction budget, inspect registers, disassemble, and
+read memory without modifying it. The hard ceilings are 256 breakpoints, 100,000
+instructions per continue request, 256 instructions per disassembly request, and
+4,096 bytes per memory read. Debug state is owned by the shell session and is
+discarded on quit, logout, user switch, or terminal disconnect. This is not
+native GDB or DOS DEBUG emulation: source-level debug, symbolic local-variable
+reconstruction, memory writes, PIC/IRQ/IDT execution, and native BIOS/DOS
+interrupts are not implemented.
 
 Desktop Python resolves same-directory modules followed by `/lib/python` and
 `/usr/lib/computer-system/python`. A `.py` module is compiled and initialized
@@ -898,15 +1074,19 @@ process with EAX returns. Global data symbols are never callable. For example,
 Missing, circular, oversized, corrupt, or ABI-incompatible imports fail
 explicitly. `run --stats` reports the active CS486DX, CS486DX2, or CS386SX
 model, instructions, CPU cycles, and virtual microseconds at its persisted
-clock. On CS-DOS, `QBASIC file.bas` opens the IDE and `QBASIC /RUN file.bas`
-compiles and runs the supported CS QBASIC subset. No frontend invokes a host
-compiler, linker, or native binary. General dynamic/shared libraries remain a
-follow-up on the versioned object and ABI foundation. MCP's `cpuCycles` field
-uses one unit across ASM, C, C++, CS QBASIC, and desktop Python;
-machine-instruction counts remain diagnostic values, not timing units. The
-portable CS386SX retains ASM, C, C++, CS QBASIC, and batch support, but rejects
-`python`/`micropython` commands with status 127 and does not execute
-`/startup.py`.
+clock. On CS-DOS, `QBASIC file.bas` opens the CS QBASIC 1.0 IDE and
+`QBASIC /RUN file.bas` compiles and runs its supported subset. `CSASM`, `CSCC`,
+`CSCPP`, and `PWB` open the CS ASM 1.0 or CS C/C++ 1.0 WorkBench. No frontend
+invokes a host compiler, linker, or native binary. General dynamic/shared
+libraries remain a follow-up on the versioned object and ABI foundation. MCP's
+`cpuCycles` field uses one unit across CS ASM 1.0, CS C/C++ 1.0, CS QBASIC 1.0,
+and desktop Python; machine-instruction counts remain diagnostic values, not
+timing units. The portable CS386SX retains CS ASM 1.0, CS C/C++ 1.0, CS QBASIC
+1.0, and batch support, but rejects `python`/`micropython` commands with status
+127 and does not execute `/startup.py`. CS QBASIC F5, Ctrl+F5, Shift+F5, and
+`/RUN` execute the saved `.BAS` source in a transient validated process and
+return output to the IDE. They do not create a `.OBJ`, `.CSX`, native `.EXE`, or
+another persistent build artifact.
 
 The native Python `shell` module is not a user API. It is enabled only for the
 built-in shell program selected when `/startup.py` is empty. User-authored

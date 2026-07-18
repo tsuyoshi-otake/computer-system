@@ -23,11 +23,22 @@ import {
   type Cs486IrValueLocation,
   type Cs486IrValueType,
 } from "./cs486Ir.js";
+import {
+  preprocessCs486C,
+  type Cs486CPreprocessorDefinition,
+  type Cs486CPreprocessorInclude,
+  type Cs486CPreprocessorIncludeRequest,
+} from "./cs486CPreprocessor.js";
 
 export type Cs486CFamilyLanguage = "c" | "cpp";
 
 export interface Cs486CFrontendOptions {
+  readonly definitions?: readonly Cs486CPreprocessorDefinition[];
+  readonly include?: (
+    request: Cs486CPreprocessorIncludeRequest,
+  ) => Cs486CPreprocessorInclude | undefined;
   readonly sourceName?: string;
+  readonly undefines?: readonly string[];
 }
 
 export interface Cs486CFrontendOutput {
@@ -38,8 +49,7 @@ export interface Cs486CFrontendOutput {
 type CType = "int" | "long" | "void";
 type ComparisonOperator = "<" | "<=" | ">" | ">=";
 
-type CTokenKind =
-  "directive" | "eof" | "identifier" | "number" | "punctuation" | "string";
+type CTokenKind = "eof" | "identifier" | "number" | "punctuation" | "string";
 
 interface CToken {
   readonly kind: CTokenKind;
@@ -176,14 +186,11 @@ interface CCallUse {
   readonly valueRequired: boolean;
 }
 
-const maximumSourceCharacters = 128_000;
-const maximumTokens = 32_000;
 const maximumExpressionTokens = 128;
 const maximumExpressionDepth = 48;
 const maximumBlockDepth = 48;
 const maximumFunctions = 256;
 const maximumLocalsPerFunction = 256;
-const maximumIdentifierLength = 64;
 const maximumInlineInstructions = 16;
 const maximumInlineRegions = 64;
 const maximumIrBlocksPerFunction = 256;
@@ -202,36 +209,6 @@ const cIrLimits = Object.freeze({
 const printI32Intrinsic = ".cs.print.i32";
 const printNewlineIntrinsic = ".cs.print.newline";
 const inlineAssemblyIntrinsicPrefix = ".cs.inline.";
-
-const twoCharacterPunctuation = new Set([
-  "++",
-  "--",
-  "+=",
-  "-=",
-  "<=",
-  ">=",
-  "<<",
-  ">>",
-  "::",
-]);
-
-const punctuation = new Set([
-  "{",
-  "}",
-  "(",
-  ")",
-  ";",
-  ",",
-  ":",
-  "=",
-  "+",
-  "-",
-  "*",
-  "/",
-  "%",
-  "<",
-  ">",
-]);
 
 const reservedIdentifiers = new Set([
   "alignas",
@@ -303,188 +280,24 @@ export function compileCs486CFrontend(
 ): Cs486CFrontendOutput {
   const sourceName =
     options.sourceName ?? (language === "cpp" ? "<c++>" : "<c>");
-  if (source.length > maximumSourceCharacters) {
-    const position: Cs486SourcePosition = {
-      column: 1,
-      line: 1,
-      offset: 0,
-      source: sourceName,
-    };
-    throw cError("source limit exceeded", { end: position, start: position });
-  }
-  const parser = new CParser(tokenizeC(source, sourceName), language);
+  const preprocessed = preprocessCs486C(source, { ...options, sourceName });
+  const end: Cs486SourcePosition = preprocessed.at(-1)?.span.end ?? {
+    column: 1,
+    line: 1,
+    offset: 0,
+    source: sourceName,
+  };
+  const tokens: CToken[] = [
+    ...preprocessed,
+    { kind: "eof", raw: "", span: { end, start: end }, value: "" },
+  ];
+  const parser = new CParser(tokens, language);
   const program = parser.parse();
   const intermediate = new CIntermediateBuilder(program).build();
   return {
     assembly: new CCodeGenerator().generate(program, intermediate),
     dataBytes: 0,
   };
-}
-
-function tokenizeC(source: string, sourceName: string): readonly CToken[] {
-  const normalized = source.replaceAll("\r\n", "\n").replaceAll("\r", "\n");
-  const tokens: CToken[] = [];
-  let index = 0;
-  let line = 1;
-  let column = 1;
-  let atLineStart = true;
-
-  const position = (): Cs486SourcePosition => ({
-    column,
-    line,
-    offset: index,
-    source: sourceName,
-  });
-  const advance = (): string => {
-    const character = normalized[index++]!;
-    if (character === "\n") {
-      line += 1;
-      column = 1;
-      atLineStart = true;
-    } else column += 1;
-    return character;
-  };
-  const push = (
-    kind: CTokenKind,
-    raw: string,
-    value: string,
-    start: Cs486SourcePosition,
-  ): void => {
-    const span = { end: position(), start };
-    if (tokens.length >= maximumTokens)
-      throw cError("C-family lexical token limit exceeded", span);
-    if (kind === "identifier" && value.length > maximumIdentifierLength)
-      throw cError("identifier length limit exceeded", span);
-    tokens.push({ kind, raw, span, value });
-    atLineStart = false;
-  };
-
-  while (index < normalized.length) {
-    const character = normalized[index]!;
-    if (character === " " || character === "\t" || character === "\n") {
-      advance();
-      continue;
-    }
-    if (character === "#" && atLineStart) {
-      const start = position();
-      while (index < normalized.length && normalized[index] !== "\n") advance();
-      const raw = normalized.slice(start.offset, index);
-      push("directive", raw, raw.trim(), start);
-      continue;
-    }
-    if (normalized.slice(index, index + 2) === "//") {
-      while (index < normalized.length && normalized[index] !== "\n") advance();
-      continue;
-    }
-    if (normalized.slice(index, index + 2) === "/*") {
-      const start = position();
-      advance();
-      advance();
-      let closed = false;
-      while (index < normalized.length) {
-        if (normalized.slice(index, index + 2) === "*/") {
-          advance();
-          advance();
-          closed = true;
-          break;
-        }
-        advance();
-      }
-      if (!closed)
-        throw cError("unterminated block comment", {
-          end: position(),
-          start,
-        });
-      continue;
-    }
-    if (character === '"') {
-      const start = position();
-      advance();
-      let escaped = false;
-      let closed = false;
-      while (index < normalized.length) {
-        const next = normalized[index]!;
-        if (next === "\n") break;
-        advance();
-        if (escaped) {
-          escaped = false;
-          continue;
-        }
-        if (next === "\\") {
-          escaped = true;
-          continue;
-        }
-        if (next === '"') {
-          closed = true;
-          break;
-        }
-      }
-      if (!closed)
-        throw cError("unterminated string literal", {
-          end: position(),
-          start,
-        });
-      const raw = normalized.slice(start.offset, index);
-      let value: string;
-      try {
-        value = JSON.parse(raw) as string;
-      } catch {
-        throw cError("invalid string literal", { end: position(), start });
-      }
-      push("string", raw, value, start);
-      continue;
-    }
-    if (/[0-9]/u.test(character)) {
-      const start = position();
-      while (
-        index < normalized.length &&
-        /[A-Za-z0-9_]/u.test(normalized[index]!)
-      )
-        advance();
-      const raw = normalized.slice(start.offset, index);
-      if (!/^\d+$/u.test(raw))
-        throw cError(`unsupported numeric literal ${raw}`, {
-          end: position(),
-          start,
-        });
-      push("number", raw, raw, start);
-      continue;
-    }
-    if (/[A-Za-z_]/u.test(character)) {
-      const start = position();
-      advance();
-      while (
-        index < normalized.length &&
-        /[A-Za-z0-9_]/u.test(normalized[index]!)
-      )
-        advance();
-      const raw = normalized.slice(start.offset, index);
-      push("identifier", raw, raw, start);
-      continue;
-    }
-    const pair = normalized.slice(index, index + 2);
-    if (twoCharacterPunctuation.has(pair)) {
-      const start = position();
-      advance();
-      advance();
-      push("punctuation", pair, pair, start);
-      continue;
-    }
-    if (punctuation.has(character)) {
-      const start = position();
-      push("punctuation", advance(), character, start);
-      continue;
-    }
-    const start = position();
-    advance();
-    throw cError(`unexpected character ${JSON.stringify(character)}`, {
-      end: position(),
-      start,
-    });
-  }
-  const end = position();
-  tokens.push({ kind: "eof", raw: "", span: { end, start: end }, value: "" });
-  return tokens;
 }
 
 class CParser {
@@ -501,10 +314,6 @@ class CParser {
 
   parse(): CProgram {
     while (!this.at("")) {
-      if (this.current().kind === "directive") {
-        this.parseDirective();
-        continue;
-      }
       this.parseTopLevelDeclaration();
     }
     for (const call of this.calls) {
@@ -520,25 +329,30 @@ class CParser {
     return { definitions: this.definitions, functions: this.functions };
   }
 
-  private parseDirective(): void {
-    const token = this.consume();
-    const include = /^#\s*include\s*<\s*([^>\s]+)\s*>\s*$/u.exec(token.value);
-    if (include === null)
-      throw cError(
-        `unsupported preprocessor directive ${token.value}`,
-        token.span,
-      );
-    const header = include[1]!;
-    const allowed =
-      header === "stdio.h" ||
-      (this.language === "cpp" &&
-        (header === "iostream" || header === "cstdio"));
-    if (!allowed)
-      throw cError(`unsupported C-family header ${header}`, token.span);
-  }
-
   private parseTopLevelDeclaration(): void {
-    const external = this.take("extern") !== undefined;
+    let external = this.take("extern") !== undefined;
+    if (
+      external &&
+      this.language === "cpp" &&
+      this.current().kind === "string"
+    ) {
+      const linkage = this.consume();
+      if (linkage.value !== "C") {
+        throw cError(
+          `unsupported C++ language linkage ${linkage.raw}; only extern "C" is accepted`,
+          linkage.span,
+        );
+      }
+      if (this.at("{")) {
+        throw cError(
+          'extern "C" linkage blocks are not supported; annotate each declaration',
+          this.current().span,
+        );
+      }
+      // The CS object ABI exposes one unmangled C-style symbol contract.
+      // Here `extern` selects language linkage rather than storage duration.
+      external = false;
+    }
     if (!isTypeToken(this.current())) {
       const token = this.current();
       const label = this.language === "cpp" ? "C++" : "C";
@@ -659,11 +473,6 @@ class CParser {
 
   private parseStatement(depth: number): CStatement {
     const token = this.current();
-    if (token.kind === "directive")
-      throw cError(
-        "preprocessor directives are only supported at top level",
-        token.span,
-      );
     if (this.at("{")) return this.parseBlock(depth);
     if (this.take(";") !== undefined)
       return { kind: "block", span: token.span, statements: [] };
@@ -2128,5 +1937,8 @@ function cError(
     readonly span?: Cs486SourceSpan;
   }[] = [],
 ): Cs486CompileError {
-  return compileErrorAt(message, span, { code: "CSC001", notes });
+  return compileErrorAt(message, span, {
+    code: "CSC001",
+    notes: [...notes, ...(span.diagnosticNotes ?? [])].slice(0, 8),
+  });
 }

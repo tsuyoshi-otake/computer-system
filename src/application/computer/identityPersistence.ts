@@ -164,6 +164,40 @@ export class PersistentComputerIdentityService {
       .filter((observation) => observation.form === "block");
   }
 
+  blockObservationPage(
+    cursor: number,
+    maximum: number,
+  ): {
+    readonly nextCursor: number | null;
+    readonly observations: readonly ComputerIdentityObservation[];
+    readonly total: number;
+  } {
+    if (!Number.isSafeInteger(cursor) || cursor < 0) {
+      throw new RangeError(
+        "Block observation page cursor must be non-negative",
+      );
+    }
+    if (!Number.isSafeInteger(maximum) || maximum <= 0 || maximum > 64) {
+      throw new RangeError(
+        "Block observation page size must be between 1 and 64",
+      );
+    }
+    const start = Math.min(cursor, this.blockComputerIds.length);
+    const end = Math.min(start + maximum, this.blockComputerIds.length);
+    const observations: ComputerIdentityObservation[] = [];
+    for (let index = start; index < end; index += 1) {
+      const computerId = this.blockComputerIds[index];
+      const observation =
+        computerId === undefined ? undefined : this.registry.get(computerId);
+      if (observation?.form === "block") observations.push(observation);
+    }
+    return {
+      nextCursor: end < this.blockComputerIds.length ? end : null,
+      observations,
+      total: this.blockComputerIds.length,
+    };
+  }
+
   blockObservationBatch(
     cursor: number,
     maximum: number,

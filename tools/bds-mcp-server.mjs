@@ -13,6 +13,7 @@ import {
 } from "./web-companion-server.mjs";
 
 const protocolVersion = "2025-11-25";
+const maximumMcpWebSessions = 32;
 const serverInfo = {
   name: "computer-system-bds",
   title: "Computer System Bedrock Debug Server",
@@ -33,7 +34,7 @@ const webCompanion = new WebCompanionServer({
   publicOrigin: adminOptions.publicOrigin,
   allowedOrigins: process.env.WEB_COMPANION_ALLOWED_ORIGINS,
   autoOpenBrowser: parseOptionalBooleanFlag(
-    process.env.WEB_COMPANION_AUTO_OPEN,
+    process.env.WEB_COMPANION_AUTO_OPEN ?? "1",
     "WEB_COMPANION_AUTO_OPEN",
   ),
   debugIgnoreRange: parseBooleanFlag(
@@ -44,6 +45,7 @@ const webCompanion = new WebCompanionServer({
 await webCompanion.start();
 let initialized = false;
 let shuttingDown = false;
+const mcpWebSessions = new Map();
 
 const tools = [
   {
@@ -230,10 +232,166 @@ const tools = [
     },
   },
   {
+    name: "bds_list_computers",
+    title: "List placed Computers",
+    description:
+      "Return one bounded O(K) page of exact identities for Computers currently placed in the managed world. This does not power on or mutate a Computer.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        cursor: {
+          type: "integer",
+          minimum: 0,
+          maximum: 9_999_999_999,
+        },
+        limit: { type: "integer", minimum: 1, maximum: 64 },
+        timeoutMs: {
+          type: "integer",
+          minimum: 1,
+          maximum: 120_000,
+        },
+      },
+    },
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  },
+  {
+    name: "bds_open_web_terminal",
+    title: "Open and verify Web Terminal",
+    description:
+      "Activate one exact Computer through the server-authorized MCP debug principal, open its one-use handoff in the companion host's default browser, and wait until that exact browser session becomes the writer. No connected Bedrock player or one-use URL is required.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        computerId: {
+          type: "string",
+          pattern: "^c-[0-9a-hjkmnp-tv-z]{6}$",
+        },
+        timeoutMs: {
+          type: "integer",
+          minimum: 1,
+          maximum: 120_000,
+        },
+        browserTimeoutMs: {
+          type: "integer",
+          minimum: 1,
+          maximum: 30_000,
+        },
+      },
+      required: ["computerId"],
+    },
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: false,
+    },
+  },
+  {
+    name: "bds_get_tui_screen",
+    title: "Read MCP Web Terminal TUI",
+    description:
+      "Return the latest validated text surface for the exact MCP debug-owned writer/session opened by bds_open_web_terminal. Includes rows, geometry, cursor, snapshot version, and optional 16-color cell grids; rejects secret input and never returns a bearer token, one-use URL, or connection code.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        computerId: {
+          type: "string",
+          pattern: "^c-[0-9a-hjkmnp-tv-z]{6}$",
+        },
+        includeColors: { type: "boolean" },
+      },
+      required: ["computerId"],
+    },
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  },
+  {
+    name: "bds_wait_for_tui_screen",
+    title: "Wait for MCP Web Terminal TUI",
+    description:
+      "Wait without polling for the exact MCP debug-owned writer/session to publish a validated text surface. A literal contains match is recommended for screen verification; afterVersion tracks bounded snapshot envelopes and may also advance for lifecycle metadata. Optional colors preserve exact 0-15 cell palettes.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        computerId: {
+          type: "string",
+          pattern: "^c-[0-9a-hjkmnp-tv-z]{6}$",
+        },
+        contains: {
+          type: "string",
+          minLength: 1,
+          maxLength: 500,
+        },
+        afterVersion: { type: "integer", minimum: 0 },
+        timeoutMs: {
+          type: "integer",
+          minimum: 1,
+          maximum: 120_000,
+        },
+        includeColors: { type: "boolean" },
+      },
+      required: ["computerId"],
+    },
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: false,
+    },
+  },
+  {
+    name: "bds_send_tui_input",
+    title: "Send MCP Web Terminal TUI input",
+    description:
+      "Send one bounded line, key batch, or interrupt through the exact MCP debug-owned writer/session and the existing correlated Web Terminal admission path. Secret prompts are rejected at both companion and Bedrock boundaries; normal Player input is unchanged.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        computerId: {
+          type: "string",
+          pattern: "^c-[0-9a-hjkmnp-tv-z]{6}$",
+        },
+        kind: { type: "string", enum: ["line", "keys", "interrupt"] },
+        value: {
+          anyOf: [
+            { type: "string", maxLength: 128 },
+            {
+              type: "array",
+              minItems: 1,
+              maxItems: 32,
+              items: { type: "string", minLength: 1, maxLength: 32 },
+            },
+          ],
+        },
+      },
+      required: ["computerId", "kind"],
+    },
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: false,
+    },
+  },
+  {
     name: "bds_issue_web_handoff",
     title: "Issue Web Terminal handoff",
     description:
-      "Issue and return a one-use Web Terminal URL for one exact Computer ID through the connected Bedrock player. The managed debug server must have exactly one connected player.",
+      "Issue and return a one-use Web Terminal URL for one exact Computer ID through the server-authorized MCP debug principal. No connected Bedrock player is required.",
     inputSchema: {
       type: "object",
       additionalProperties: false,
@@ -343,7 +501,7 @@ async function handleLine(line) {
           capabilities: { tools: { listChanged: false } },
           serverInfo,
           instructions:
-            "Call bds_start before commands. Use bds_run_probe for Computer System probes, bds_issue_web_handoff for an exact Computer Web URL, then bds_wait_for_log or bds_get_logs. Use bds_stop when debugging is complete.",
+            "Call bds_start before commands. Use bds_list_computers to resolve an exact placed Computer identity, then bds_open_web_terminal to activate its server-authorized debug principal and register the exact default-browser writer session. Use bds_get_tui_screen, bds_send_tui_input, and bds_wait_for_tui_screen to inspect and drive non-secret text surfaces entirely through MCP. Use bds_wait_for_log or bds_get_logs for supporting evidence, bds_issue_web_handoff only when the caller must own the one-use URL, and bds_stop when debugging is complete.",
         });
         return;
       }
@@ -381,11 +539,16 @@ async function callTool(name, args) {
       return toolSuccess(status());
     case "bds_start":
       requireKeys(args, ["resetWorld"]);
+      if (!session.getStatus().running) mcpWebSessions.clear();
       await session.start({ resetWorld: args.resetWorld ?? false });
       return toolSuccess(status());
     case "bds_stop":
       requireKeys(args, []);
-      await session.stop();
+      try {
+        await session.stop();
+      } finally {
+        mcpWebSessions.clear();
+      }
       return toolSuccess(status());
     case "bds_run_probe":
       requireKeys(args, ["probe", "target"]);
@@ -408,29 +571,120 @@ async function callTool(name, args) {
       requireKeys(args, ["contains", "afterCursor", "timeoutMs"]);
       requireString(args.contains, "contains");
       return toolSuccess(await session.waitForLog(args));
-    case "bds_issue_web_handoff": {
+    case "bds_list_computers":
+      requireKeys(args, ["cursor", "limit", "timeoutMs"]);
+      return toolSuccess(await session.listComputers(args));
+    case "bds_open_web_terminal": {
+      requireKeys(args, ["computerId", "timeoutMs", "browserTimeoutMs"]);
+      requireString(args.computerId, "computerId");
+      const handoff = await requestWebHandoff(args);
+      const connection = await webCompanion.openHandoffInBrowser(handoff, {
+        timeoutMs: args.browserTimeoutMs ?? 10_000,
+      });
+      rememberMcpWebSession(handoff.computerId, handoff.sessionId);
+      return toolSuccess({
+        computerId: handoff.computerId,
+        sessionId: handoff.sessionId,
+        expiresAt: handoff.expiresAt,
+        browserOpened: true,
+        connection,
+      });
+    }
+    case "bds_get_tui_screen": {
+      requireKeys(args, ["computerId", "includeColors"]);
+      requireString(args.computerId, "computerId");
+      return toolSuccess(
+        webCompanion.captureTuiScreen({
+          ...requireMcpWebSession(args.computerId),
+          includeColors: args.includeColors,
+        }),
+      );
+    }
+    case "bds_wait_for_tui_screen": {
+      requireKeys(args, [
+        "computerId",
+        "contains",
+        "afterVersion",
+        "timeoutMs",
+        "includeColors",
+      ]);
+      requireString(args.computerId, "computerId");
+      return toolSuccess(
+        await webCompanion.waitForTuiScreen({
+          ...requireMcpWebSession(args.computerId),
+          contains: args.contains,
+          afterVersion: args.afterVersion,
+          timeoutMs: args.timeoutMs,
+          includeColors: args.includeColors,
+        }),
+      );
+    }
+    case "bds_send_tui_input": {
+      requireKeys(args, ["computerId", "kind", "value"]);
+      requireString(args.computerId, "computerId");
+      requireString(args.kind, "kind");
+      return toolSuccess(
+        await webCompanion.sendTuiInput({
+          ...requireMcpWebSession(args.computerId),
+          kind: args.kind,
+          value: args.value,
+        }),
+      );
+    }
+    case "bds_issue_web_handoff":
       requireKeys(args, ["computerId", "timeoutMs"]);
       requireString(args.computerId, "computerId");
-      const waiting = webCompanion.waitForHandoff(args);
-      try {
-        await session.requestWebHandoff(args);
-        return toolSuccess(await waiting);
-      } catch (error) {
-        webCompanion.rejectPendingHandoff(
-          args.computerId,
-          `Web handoff request failed: ${errorMessage(error)}`,
-        );
-        await waiting.catch(() => undefined);
-        throw error;
-      }
-    }
+      return toolSuccess(await requestWebHandoff(args));
     case "bds_wait_for_web_handoff":
       requireKeys(args, ["computerId", "timeoutMs"]);
       requireString(args.computerId, "computerId");
-      return toolSuccess(await webCompanion.waitForHandoff(args));
+      return toolSuccess(
+        await webCompanion.waitForHandoff({ ...args, principalKind: "debug" }),
+      );
     default:
       throw new Error(`Unknown tool: ${String(name)}`);
   }
+}
+
+async function requestWebHandoff(args) {
+  const request = {
+    computerId: args.computerId,
+    principalKind: "debug",
+    timeoutMs: args.timeoutMs,
+  };
+  const waiting = webCompanion.waitForHandoff(request);
+  try {
+    await session.requestWebHandoff(request);
+    return await waiting;
+  } catch (error) {
+    webCompanion.rejectPendingHandoff(
+      request.computerId,
+      `Web handoff request failed: ${errorMessage(error)}`,
+    );
+    await waiting.catch(() => undefined);
+    throw error;
+  }
+}
+
+function rememberMcpWebSession(computerId, sessionId) {
+  if (!mcpWebSessions.has(computerId)) {
+    while (mcpWebSessions.size >= maximumMcpWebSessions) {
+      const oldestComputerId = mcpWebSessions.keys().next().value;
+      if (oldestComputerId === undefined) break;
+      mcpWebSessions.delete(oldestComputerId);
+    }
+  }
+  mcpWebSessions.set(computerId, sessionId);
+}
+
+function requireMcpWebSession(computerId) {
+  const sessionId = mcpWebSessions.get(computerId);
+  if (sessionId === undefined) {
+    throw new Error(
+      `No MCP debug-owned Web Terminal writer is registered for ${computerId}. Call bds_open_web_terminal first.`,
+    );
+  }
+  return { computerId, sessionId };
 }
 
 function toolSuccess(value) {
@@ -506,6 +760,7 @@ async function shutdown() {
   } catch (error) {
     process.stderr.write(`BDS MCP shutdown error: ${errorMessage(error)}\n`);
   } finally {
+    mcpWebSessions.clear();
     process.exit(0);
   }
 }

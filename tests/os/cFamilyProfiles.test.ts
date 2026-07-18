@@ -57,6 +57,73 @@ const languages = [
 ] as const;
 
 describe.each(profiles)("$name C-family profile contract", ({ profile }) => {
+  it("reports the CS C/C++ 1.0 product identity", (): void => {
+    const fixture = createFixture(profile);
+    if (profile === "dos") {
+      for (const command of ["CC", "C++", "CSCC", "CSCPP"]) {
+        expect(fixture.shell.submit(`${command} /VERSION`)).toMatchObject({
+          exitCode: 0,
+          stdout: "CS C/C++ 1.0 for CS486DX\r\n",
+        });
+      }
+      expect(fixture.shell.submit("CC /?").stdout).toContain("CS C/C++ 1.0");
+    } else {
+      for (const command of ["cc", "c++"]) {
+        expect(fixture.shell.submit(`${command} --version`)).toMatchObject({
+          exitCode: 0,
+          stdout: "CS C/C++ 1.0 for CS486DX\n",
+        });
+      }
+      expect(fixture.shell.submit("cc --help").stdout).toContain(
+        "CS C/C++ 1.0",
+      );
+    }
+  });
+
+  it("maps limited extern C declarations to the unmangled CS object ABI", (): void => {
+    const fixture = createFixture(profile);
+    const sourcePath = guestPath(profile, "LINKAGE.CPP");
+    const objectPath = guestPath(profile, "LINKAGE.OBJ");
+    fixture.filesystem.writeFile(
+      storagePath(profile, "linkage.cpp"),
+      [
+        'extern "C" int external_answer();',
+        "int main() { return external_answer(); }",
+        "",
+      ].join(fixture.newline),
+    );
+    const compiled = fixture.shell.submit(
+      profile === "dos"
+        ? `C++ /C ${sourcePath} /OUT:${objectPath}`
+        : `c++ -c ${sourcePath} -o ${objectPath}`,
+    );
+    expect(compiled).toMatchObject({ exitCode: 0, stderr: "" });
+    expect(
+      decodeObject(
+        fixture.filesystem.readFile(storagePath(profile, "linkage.obj")),
+      ).symbols,
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          functionSignature: "()->i32",
+          name: "external_answer",
+        }),
+      ]),
+    );
+
+    fixture.filesystem.writeFile(
+      storagePath(profile, "linkage.cpp"),
+      ['extern "C" {', "int unsupported();", "}", ""].join(fixture.newline),
+    );
+    expect(
+      fixture.shell.submit(
+        profile === "dos"
+          ? `C++ /C ${sourcePath} /OUT:${objectPath}`
+          : `c++ -c ${sourcePath} -o ${objectPath}`,
+      ).stderr,
+    ).toContain('extern "C" linkage blocks are not supported');
+  });
+
   it.each(languages)(
     "compiles and runs the supported $language subset through guest paths",
     ({ command, language, source }): void => {
@@ -96,6 +163,67 @@ describe.each(profiles)("$name C-family profile contract", ({ profile }) => {
         executable.instructions.some((instruction) => instruction.op === "mul"),
         `${profile} ${language} should fold the constant 6 * 7 expression`,
       ).toBe(false);
+    },
+  );
+
+  it.each(languages)(
+    "preprocesses guest headers and command-line macros for $language",
+    ({ command, language }): void => {
+      const fixture = createFixture(profile);
+      const extension = sourceExtension(language);
+      const includeDirectory =
+        profile === "dos" ? "/drives/c/work/inc" : "/work/inc";
+      fixture.filesystem.makeDirectory(includeDirectory);
+      fixture.filesystem.writeFile(
+        `${includeDirectory}/value.h`,
+        [
+          "#ifndef VALUE_H",
+          "#define VALUE_H 1",
+          "#define HEADER_VALUE 2",
+          "#endif",
+          "",
+        ].join(fixture.newline),
+      );
+      const sourceName = `PRE.${extension}`;
+      const outputName = language === "cpp" ? "PRECPP" : "PREC";
+      fixture.filesystem.writeFile(
+        storagePath(profile, sourceName.toLowerCase()),
+        [
+          language === "cpp" ? "#include <iostream>" : "#include <stdio.h>",
+          language === "cpp" ? "#include <cstdio>" : "",
+          "#include <value.h>",
+          "#if !defined(__CS__) || !defined(__CS486__)",
+          "#error missing CS built-ins",
+          "#endif",
+          "#ifdef REMOVED",
+          "#error -U did not remove REMOVED",
+          "#endif",
+          "int main() {",
+          language === "cpp"
+            ? "std::cout << BASE_VALUE + HEADER_VALUE << std::endl;"
+            : 'printf("%d\\n", BASE_VALUE + HEADER_VALUE);',
+          "return 0;",
+          "}",
+          "",
+        ].join(fixture.newline),
+      );
+      const sourcePath = guestPath(profile, sourceName);
+      const outputPath = guestPath(profile, outputName);
+      const compilation =
+        profile === "dos"
+          ? fixture.shell.submit(
+              `${command.toUpperCase()} /I:C:\\WORK\\INC /D:BASE_VALUE=40 /D:REMOVED /U:REMOVED ${sourcePath} /OUT:${outputPath}`,
+            )
+          : fixture.shell.submit(
+              `${command} -I /work/inc -D BASE_VALUE=40 -D REMOVED -U REMOVED ${sourcePath} -o ${outputPath}`,
+            );
+
+      expect(compilation).toMatchObject({ exitCode: 0, stderr: "" });
+      expect(fixture.shell.submit(outputPath)).toMatchObject({
+        exitCode: 0,
+        stderr: "",
+        stdout: `42${fixture.newline}`,
+      });
     },
   );
 
@@ -178,6 +306,146 @@ describe.each(profiles)("$name C-family profile contract", ({ profile }) => {
       expect(result.stderr.endsWith(fixture.newline)).toBe(true);
     },
   );
+});
+
+describe("CS C/C++ DOS WorkBench", (): void => {
+  it("uses the bounded DOS INCLUDE environment path", (): void => {
+    const fixture = createFixture("dos");
+    fixture.filesystem.makeDirectory("/drives/c/work/headers");
+    fixture.filesystem.writeFile(
+      "/drives/c/work/headers/value.h",
+      "#define DOS_INCLUDE_VALUE 42\r\n",
+    );
+    fixture.filesystem.writeFile(
+      "/drives/c/work/include.c",
+      [
+        "#include <value.h>",
+        "int main() {",
+        'printf("%d\\n", DOS_INCLUDE_VALUE);',
+        "return 0;",
+        "}",
+        "",
+      ].join("\r\n"),
+    );
+
+    expect(fixture.shell.submit("SET INCLUDE=C:\\WORK\\HEADERS")).toMatchObject(
+      { exitCode: 0 },
+    );
+    expect(
+      fixture.shell.submit("CC C:\\WORK\\INCLUDE.C /OUT:C:\\WORK\\INCLUDE.CSX"),
+    ).toMatchObject({ exitCode: 0, stderr: "" });
+    expect(fixture.shell.submit("C:\\WORK\\INCLUDE.CSX")).toMatchObject({
+      exitCode: 0,
+      stdout: "42\r\n",
+    });
+  });
+
+  it("uses source-based .OBJ and .CSX defaults for DOS compilation and linking", (): void => {
+    const fixture = createFixture("dos");
+    fixture.filesystem.writeFile(
+      "/drives/c/work/default.c",
+      ["int main() {", "return 0;", "}", ""].join("\r\n"),
+    );
+
+    expect(fixture.shell.submit("CC /C C:\\WORK\\DEFAULT.C").exitCode).toBe(0);
+    expect(fixture.filesystem.exists("/drives/c/work/default.obj")).toBe(true);
+    expect(fixture.shell.submit("LINK C:\\WORK\\DEFAULT.OBJ").exitCode).toBe(0);
+    expect(fixture.filesystem.exists("/drives/c/work/default.csx")).toBe(true);
+
+    fixture.filesystem.writeFile(
+      "/drives/c/work/direct.c",
+      ["int main() {", "return 0;", "}", ""].join("\r\n"),
+    );
+    expect(fixture.shell.submit("CC C:\\WORK\\DIRECT.C").exitCode).toBe(0);
+    expect(fixture.filesystem.exists("/drives/c/work/direct.csx")).toBe(true);
+  });
+
+  it("builds C and C++ through the fullscreen CSCC, CSCPP, and PWB launchers", (): void => {
+    const fixture = createFixture("dos");
+    fixture.filesystem.writeFile(
+      "/drives/c/work/main.c",
+      ["int main() {", 'printf("%d\\n", 42);', "return 0;", "}", ""].join(
+        "\r\n",
+      ),
+    );
+    fixture.filesystem.writeFile(
+      "/drives/c/work/main.cpp",
+      [
+        "int main() {",
+        "std::cout << 42 << std::endl;",
+        "return 0;",
+        "}",
+        "",
+      ].join("\r\n"),
+    );
+
+    expect(fixture.shell.submit("CSCC WRONG.ASM")).toMatchObject({
+      exitCode: 2,
+      stderr: "CSCC: source must use .C.\r\n",
+    });
+    expect(fixture.shell.submit("CSCPP WRONG.C")).toMatchObject({
+      exitCode: 2,
+      stderr: "CSCPP: source must use .CPP.\r\n",
+    });
+    expect(fixture.shell.submit("PWB WRONG.BAS")).toMatchObject({
+      exitCode: 2,
+      stderr: "PWB: source must use .ASM, .C, .CPP.\r\n",
+    });
+
+    const cWorkbench = fixture.shell.submit("CSCC C:\\WORK\\MAIN.C");
+    expect(
+      cWorkbench.terminalScreen!.rows.some((row) =>
+        row
+          .map(({ character }) => character)
+          .join("")
+          .includes("CS C/C++ 1.0"),
+      ),
+    ).toBe(true);
+    fixture.shell.keys(["Enter", "Shift+F5"]);
+    const cOutput = fixture.shell.keys(["F4"]);
+    expect(
+      cOutput.terminalScreen!.rows.some((row) =>
+        row
+          .map(({ character }) => character)
+          .join("")
+          .includes("42"),
+      ),
+    ).toBe(true);
+    expect(fixture.shell.keys(["Escape", "Alt+f", "x"]).resetTerminal).toBe(
+      true,
+    );
+
+    const cppWorkbench = fixture.shell.submit("CSCPP C:\\WORK\\MAIN.CPP");
+    expect(
+      cppWorkbench.terminalScreen!.rows.some((row) =>
+        row
+          .map(({ character }) => character)
+          .join("")
+          .includes("CS486DX Programmer's WorkBench"),
+      ),
+    ).toBe(true);
+    fixture.shell.keys(["Enter", "Shift+F5"]);
+    const cppOutput = fixture.shell.keys(["F4"]);
+    expect(
+      cppOutput.terminalScreen!.rows.some((row) =>
+        row
+          .map(({ character }) => character)
+          .join("")
+          .includes("42"),
+      ),
+    ).toBe(true);
+    fixture.shell.keys(["Escape", "Alt+f", "x"]);
+
+    const inferred = fixture.shell.submit("PWB C:\\WORK\\MAIN.CPP");
+    expect(
+      inferred.terminalScreen!.rows.some((row) =>
+        row
+          .map(({ character }) => character)
+          .join("")
+          .includes("CS C/C++ 1.0"),
+      ),
+    ).toBe(true);
+  });
 });
 
 describe.each(languages)(

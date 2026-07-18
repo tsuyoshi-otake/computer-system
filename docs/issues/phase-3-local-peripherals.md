@@ -55,3 +55,37 @@ survives reload, and unsupported behavior returns an explicit error.
   synthesized drive sounds are audible after a browser gesture. `Observed:`
   pending manual GDK client verification; no client-only visual or audibility
   claim is inferred from the successful BDS and Chrome checks.
+
+## Web Terminal keyboard indicators and Eject control (2026-07-18)
+
+- `Verify:` run
+  `rtk npm exec vitest run tests/tools/terminalInput.test.mjs tests/tools/webUi.test.mjs`.
+  `Expect:` Caps Lock, Num Lock, and Scroll Lock render an accessible unknown
+  state, consume browser modifier state as on/off, and reset to unknown after
+  page focus is lost; Eject retains its explicit disabled reason and responsive
+  contract. `Observed:` PASS; 2 test files and 19 tests passed.
+- `Verify:` run
+  `rtk npm exec vitest run tests/tools/webCompanionServer.test.mjs tests/bedrock/terminalAdapters.test.mjs`.
+  `Expect:` only the active writer can relay a bounded Eject request, explicit
+  ejected and empty outcomes finalize once, a demoted writer is rejected, and
+  Bedrock owns the media return. `Observed:` PASS; 2 test files and 60 tests
+  passed.
+- `Verify:` open the authored Web Terminal from a local HTTP server in real
+  Chrome at 1750 x 963 and 390 x 844, then inspect the top bar, footer, and
+  computed control bounds. `Expect:` PWR/HDD/FDD, Eject, and Power remain
+  visible, keyboard states expose text alternatives, no horizontal overflow is
+  introduced, and the mobile Eject target is at least 44 pixels high.
+  `Observed:` PASS; the mobile Eject target measured 50.08 x 44 pixels, its
+  empty-drive title was present, and neither the document nor status bar
+  overflowed horizontally. Chrome automation did not toggle the host's physical
+  Caps Lock state, so the real on transition remains covered by the
+  deterministic modifier-state unit test rather than a physical-key claim.
+- `Verify:` run `rtk npm run validate`. `Expect:` formatting, ESLint,
+  TypeScript, all host tests, the Bedrock pack, and all 16 manual chapters pass.
+  `Observed:` PASS; 149 test files and 999 tests passed.
+- `Verify:` with `BDS_HOME` configured, connect a real writer-owned Web Terminal
+  to a Computer with an inserted Floppy Disk and activate Eject. `Expect:` the
+  exact request finishes once, the FDD state becomes absent, and the
+  identity-carrying item returns to the connected player. `Observed:` pending;
+  this environment had no `BDS_HOME`, so no new BDS/GDK interaction claim is
+  made.

@@ -14,19 +14,33 @@ const projectRoot = path.resolve(
   "..",
 );
 const requestMarker = "CS_WEB_SESSION_REQUEST ";
+const readyMarker = "CS_WEB_SESSION_READY ";
 const snapshotMarker = "CS_WEB_TERMINAL ";
 const accessMarker = "CS_WEB_ACCESS ";
+const inputMarker = "CS_WEB_INPUT ";
 const completionMarker = "CS_WEB_COMPLETION ";
 const powerMarker = "CS_WEB_POWER ";
+const ejectMarker = "CS_WEB_FLOPPY_EJECT ";
 const finalMarker = "CS_WEB_SESSION_FINAL ";
 const maximumOperationWaitersPerComputer = 8;
 const maximumBrowserLaunchWaiters = 4;
+const maximumPendingActivations = 32;
 const defaultBrowserLaunchTimeoutMs = 5_000;
+const defaultBedrockActivationTimeoutMs = 5_000;
+const defaultInputTimeoutMs = 2_000;
+const maximumPendingInputs = 32;
 const completionTimeoutMs = 2_000;
 const maximumPendingCompletions = 32;
 const powerTimeoutMs = 5_000;
 const maximumPendingPowerRequests = 32;
+const ejectTimeoutMs = 5_000;
+const maximumPendingEjectRequests = 32;
 const maximumHandoffWaitMs = 120_000;
+const maximumPendingTuiWaits = 8;
+const maximumTuiWaitMs = 120_000;
+const maximumTuiWidth = 200;
+const maximumTuiHeight = 100;
+const maximumTuiContainsLength = 500;
 const maximumHandoffFailuresPerWindow = 8;
 const maximumHandoffFailureClients = 256;
 const handoffFailureWindowMs = 60_000;
@@ -37,6 +51,7 @@ const assetTypes = new Map([
   [".js", "text/javascript; charset=utf-8"],
   [".png", "image/png"],
   [".svg", "image/svg+xml"],
+  [".woff", "font/woff"],
 ]);
 
 export class WebCompanionServer {
@@ -59,6 +74,14 @@ export class WebCompanionServer {
       options.browserLaunchTimeoutMs ?? defaultBrowserLaunchTimeoutMs,
       "Browser launch timeout",
     );
+    this.bedrockActivationTimeoutMs = positiveInteger(
+      options.bedrockActivationTimeoutMs ?? defaultBedrockActivationTimeoutMs,
+      "Bedrock activation timeout",
+    );
+    this.inputTimeoutMs = positiveInteger(
+      options.inputTimeoutMs ?? defaultInputTimeoutMs,
+      "Terminal input timeout",
+    );
     this.writeDiagnostic =
       options.writeDiagnostic ??
       ((line) => {
@@ -78,12 +101,19 @@ export class WebCompanionServer {
     this.operationDepths = new Map();
     this.operationTails = new Map();
     this.browserLaunchDepth = 0;
+    this.browserConnectionWaiters = 0;
     this.browserLaunchTail = Promise.resolve();
+    this.pendingInputs = new Map();
     this.pendingCompletions = new Map();
     this.pendingPowerRequests = new Map();
+    this.pendingEjectRequests = new Map();
     this.pendingHandoffs = new Map();
+    this.pendingTuiWaits = new Map();
+    this.pendingActivations = new Map();
+    this.nextInput = 1;
     this.nextCompletion = 1;
     this.nextPowerRequest = 1;
+    this.nextEjectRequest = 1;
     this.browserLaunch = {
       enabled: this.browserAutoOpenPreference === true,
       eligible: false,
@@ -140,7 +170,9 @@ export class WebCompanionServer {
     );
     this.configureBrowserAutoOpen();
     this.started = true;
-    this.cleanupTimer = setInterval(() => this.store.expire(), 30_000);
+    this.cleanupTimer = setInterval(() => {
+      void this.cleanupSessions();
+    }, 30_000);
     this.cleanupTimer.unref();
     if (this.bds !== undefined) this.attachBds(this.bds);
     return this.status();
@@ -153,6 +185,7 @@ export class WebCompanionServer {
     this.unsubscribeLog = undefined;
     this.unsubscribeState?.();
     this.unsubscribeState = undefined;
+    this.failPendingInputs("Web companion stopped.");
     if (this.cleanupTimer !== undefined) clearInterval(this.cleanupTimer);
     this.cleanupTimer = undefined;
     await this.browserLaunchTail.catch(() => undefined);
@@ -168,8 +201,10 @@ export class WebCompanionServer {
       );
     }
     this.store.closeAll("companion_stopped");
+    this.failPendingActivations("companion_stopped");
     this.failPendingCompletions("Web companion stopped.");
     this.failPendingHandoffs("Web companion stopped.");
+    this.failPendingTuiWaits("Web companion stopped.");
     const server = this.server;
     this.server = undefined;
     if (server !== undefined) {
@@ -206,12 +241,24 @@ export class WebCompanionServer {
     });
     this.unsubscribeState = bds.onState((state) => {
       if (state === "idle" || state === "failed") {
+        this.failPendingActivations(
+          state === "failed" ? "bds_failed" : "bds_stopped",
+        );
         this.store.closeAll(state === "failed" ? "bds_failed" : "bds_stopped");
+        this.failPendingInputs(
+          "BDS stopped before terminal input was admitted.",
+        );
         this.failPendingCompletions("BDS stopped before completion finished.");
         this.failPendingPowerRequests(
           "BDS stopped before the power request finished.",
         );
+        this.failPendingEjectRequests(
+          "BDS stopped before the floppy eject request finished.",
+        );
         this.failPendingHandoffs("BDS stopped before a handoff was issued.");
+        this.failPendingTuiWaits(
+          "BDS stopped before TUI verification finished.",
+        );
       }
     });
   }
@@ -220,25 +267,16 @@ export class WebCompanionServer {
     const request = markerPayload(entry.line, requestMarker);
     if (request !== undefined) {
       const identity = JSON.parse(request);
-      const issued = this.store.issue(identity);
-      const handoffUrl = `${this.origin}/p/${issued.handoffCode}`;
-      const debugMarker = this.debugIgnoreRange ? " debug" : "";
-      try {
-        await this.bds.runWebRelay(
-          `scriptevent computer_system:web-response ${identity.requestId} ${issued.sessionId} ${issued.mode}${debugMarker} ${handoffUrl}`,
-        );
-      } catch (error) {
-        this.store.close(issued.sessionId, "relay_failed");
-        throw error;
+      await this.issueHandoff(identity);
+      return;
+    }
+
+    const ready = markerPayload(entry.line, readyMarker);
+    if (ready !== undefined) {
+      const payload = JSON.parse(ready);
+      if (typeof payload.sessionId === "string") {
+        await this.completeActivation(payload.sessionId);
       }
-      const claimedByMcp = this.resolvePendingHandoff(identity.computerId, {
-        computerId: identity.computerId,
-        expiresAt: issued.handoffExpiresAt,
-        mode: issued.mode,
-        sessionId: issued.sessionId,
-        url: handoffUrl,
-      });
-      if (!claimedByMcp) await this.queueBrowserLaunch(handoffUrl);
       return;
     }
 
@@ -247,6 +285,28 @@ export class WebCompanionServer {
       const payload = JSON.parse(snapshot);
       if (typeof payload.sessionId === "string") {
         this.store.updateTerminal(payload.sessionId, payload);
+      }
+      return;
+    }
+
+    const input = markerPayload(entry.line, inputMarker);
+    if (input !== undefined) {
+      const payload = JSON.parse(input);
+      const pending =
+        payload !== null && typeof payload === "object"
+          ? this.pendingInputs.get(payload.requestId)
+          : undefined;
+      if (
+        pending !== undefined &&
+        pending.sessionId === payload.sessionId &&
+        (payload.outcome === "accepted" ||
+          payload.outcome === "failed" ||
+          payload.outcome === "ignored" ||
+          payload.outcome === "missing")
+      ) {
+        this.finalizePendingInput(payload.requestId, pending, () => {
+          pending.resolve(payload);
+        });
       }
       return;
     }
@@ -294,6 +354,25 @@ export class WebCompanionServer {
       return;
     }
 
+    const eject = markerPayload(entry.line, ejectMarker);
+    if (eject !== undefined) {
+      const payload = JSON.parse(eject);
+      const pending = this.pendingEjectRequests.get(payload.requestId);
+      if (
+        pending !== undefined &&
+        pending.sessionId === payload.sessionId &&
+        (payload.outcome === "ejected" ||
+          payload.outcome === "empty" ||
+          payload.outcome === "failed" ||
+          payload.outcome === "missing")
+      ) {
+        clearTimeout(pending.timer);
+        this.pendingEjectRequests.delete(payload.requestId);
+        pending.resolve(payload);
+      }
+      return;
+    }
+
     const access = markerPayload(entry.line, accessMarker);
     if (access !== undefined) {
       const payload = JSON.parse(access);
@@ -307,9 +386,140 @@ export class WebCompanionServer {
     if (final !== undefined) {
       const payload = JSON.parse(final);
       if (typeof payload.sessionId === "string") {
+        const activation = this.cancelActivation(payload.sessionId);
+        if (activation !== undefined) {
+          this.rejectPendingHandoff(
+            activation.computerId,
+            payload.reason ?? "bedrock_closed",
+          );
+        }
         this.store.close(payload.sessionId, payload.reason ?? "bedrock_closed");
       }
     }
+  }
+
+  async issueHandoff(identity) {
+    let issued;
+    try {
+      if (
+        typeof identity?.computerId !== "string" ||
+        !computerIdPattern.test(identity.computerId)
+      ) {
+        throw new WebSessionError(
+          "identity",
+          "Invalid browser session identity.",
+        );
+      }
+      await this.serializeComputerOperation(identity.computerId, async () => {
+        if (this.pendingActivations.size >= maximumPendingActivations) {
+          throw new WebSessionError(
+            "capacity",
+            "Browser terminal activation capacity has been reached.",
+            503,
+          );
+        }
+        issued = this.store.prepare(identity);
+        const handoffUrl = `${this.origin}/p/${issued.handoffCode}`;
+        const timer = setTimeout(() => {
+          void this.failActivation(issued.sessionId, "activation_timeout");
+        }, this.bedrockActivationTimeoutMs);
+        this.pendingActivations.set(issued.sessionId, {
+          computerId: identity.computerId,
+          handoffUrl,
+          issued,
+          timer,
+        });
+        const debugMarker = this.debugIgnoreRange ? " debug" : "";
+        try {
+          await this.flushBedrockClosures();
+          await this.bds.runWebRelay(
+            `scriptevent computer_system:web-response ${identity.requestId} ${issued.sessionId} viewer${debugMarker} ${handoffUrl}`,
+          );
+        } catch (error) {
+          this.cancelActivation(issued.sessionId);
+          this.store.close(issued.sessionId, "relay_failed", {
+            relayToBedrock: true,
+          });
+          await this.flushBedrockClosures();
+          throw error;
+        }
+      });
+    } catch (error) {
+      const reason =
+        typeof error?.code === "string" &&
+        /^[a-z][a-z_]{0,31}$/u.test(error.code)
+          ? error.code
+          : "companion_error";
+      await this.rejectBedrockRequest(identity?.requestId, reason);
+      this.writeDiagnostic(`Web companion handoff rejected: ${reason}.`);
+    }
+  }
+
+  async completeActivation(sessionId) {
+    const activation = this.cancelActivation(sessionId);
+    if (activation === undefined) return false;
+    let accepted;
+    try {
+      accepted = this.store.accept(sessionId, "viewer");
+    } catch (error) {
+      this.store.close(sessionId, "activation_accept_failed", {
+        relayToBedrock: true,
+      });
+      this.rejectPendingHandoff(activation.computerId, message(error));
+      await this.flushBedrockClosures();
+      return false;
+    }
+    const handoff = {
+      computerId: activation.computerId,
+      expiresAt: accepted.handoffExpiresAt,
+      mode: accepted.mode,
+      principalKind: accepted.principalKind,
+      sessionId: accepted.sessionId,
+      url: activation.handoffUrl,
+    };
+    const claimedByMcp = this.resolvePendingHandoff(
+      activation.computerId,
+      handoff,
+    );
+    if (!claimedByMcp) {
+      await this.queueBrowserLaunch(activation.handoffUrl, sessionId);
+    }
+    return true;
+  }
+
+  async failActivation(sessionId, reason) {
+    const activation = this.cancelActivation(sessionId);
+    if (activation === undefined) return false;
+    this.store.close(sessionId, reason, { relayToBedrock: true });
+    this.rejectPendingHandoff(
+      activation.computerId,
+      `Web Terminal activation failed: ${reason}.`,
+    );
+    await this.flushBedrockClosures();
+    return true;
+  }
+
+  cancelActivation(sessionId) {
+    const activation = this.pendingActivations.get(sessionId);
+    if (activation === undefined) return undefined;
+    this.pendingActivations.delete(sessionId);
+    clearTimeout(activation.timer);
+    return activation;
+  }
+
+  async rejectBedrockRequest(requestId, reason) {
+    if (
+      typeof requestId !== "string" ||
+      !/^r[a-z0-9]+-[a-z0-9]+$/u.test(requestId) ||
+      this.bds === undefined
+    ) {
+      return;
+    }
+    await this.bds
+      .runWebRelay(
+        `scriptevent computer_system:web-reject ${requestId} ${reason}`,
+      )
+      .catch(() => undefined);
   }
 
   waitForHandoff(options = {}) {
@@ -318,6 +528,14 @@ export class WebCompanionServer {
       throw new Error("computerId must use the c-xxxxxx identity format.");
     }
     if (!this.started) throw new Error("Web companion is not running.");
+    const principalKind = options.principalKind;
+    if (
+      principalKind !== undefined &&
+      principalKind !== "debug" &&
+      principalKind !== "player"
+    ) {
+      throw new Error("Handoff principalKind must be debug or player.");
+    }
     if (this.pendingHandoffs.has(computerId)) {
       throw new Error(`A handoff wait is already active for ${computerId}.`);
     }
@@ -334,13 +552,24 @@ export class WebCompanionServer {
           ),
         );
       }, timeoutMs);
-      this.pendingHandoffs.set(computerId, { reject, resolve, timer });
+      this.pendingHandoffs.set(computerId, {
+        principalKind,
+        reject,
+        resolve,
+        timer,
+      });
     });
   }
 
   resolvePendingHandoff(computerId, handoff) {
     const pending = this.pendingHandoffs.get(computerId);
     if (pending === undefined) return false;
+    if (
+      pending.principalKind !== undefined &&
+      pending.principalKind !== handoff.principalKind
+    ) {
+      return false;
+    }
     this.pendingHandoffs.delete(computerId);
     clearTimeout(pending.timer);
     pending.resolve(handoff);
@@ -362,6 +591,39 @@ export class WebCompanionServer {
       pending.reject(new Error(reason));
     }
     this.pendingHandoffs.clear();
+  }
+
+  failPendingActivations(reason) {
+    for (const [sessionId, activation] of this.pendingActivations) {
+      clearTimeout(activation.timer);
+      this.store.close(sessionId, reason);
+      this.rejectPendingHandoff(activation.computerId, reason);
+    }
+    this.pendingActivations.clear();
+  }
+
+  async cleanupSessions() {
+    this.store.expire();
+    await this.flushBedrockClosures();
+  }
+
+  async flushBedrockClosures() {
+    const closures = this.store.drainBedrockClosures();
+    if (closures.length === 0) return;
+    for (const closure of closures) {
+      const activation = this.cancelActivation(closure.sessionId);
+      if (activation !== undefined) {
+        this.rejectPendingHandoff(activation.computerId, closure.reason);
+      }
+    }
+    if (this.bds === undefined || !this.started) return;
+    await Promise.allSettled(
+      closures.map((closure) =>
+        this.bds.runWebRelay(
+          `scriptevent computer_system:web-close ${closure.sessionId}`,
+        ),
+      ),
+    );
   }
 
   configureBrowserAutoOpen() {
@@ -405,8 +667,10 @@ export class WebCompanionServer {
     };
   }
 
-  async queueBrowserLaunch(url) {
-    if (!this.browserLaunch.enabled || !this.browserLaunch.eligible) return;
+  async queueBrowserLaunch(url, sessionId) {
+    if (!this.browserLaunch.enabled || !this.browserLaunch.eligible)
+      return false;
+    if (!this.store.isHandoffCurrent(sessionId)) return false;
     if (this.browserLaunchDepth >= maximumBrowserLaunchWaiters) {
       this.browserLaunch = {
         ...this.browserLaunch,
@@ -417,7 +681,7 @@ export class WebCompanionServer {
       this.writeDiagnostic(
         "Web companion browser launch skipped: queue capacity reached.",
       );
-      return;
+      return false;
     }
 
     this.browserLaunchDepth += 1;
@@ -430,13 +694,18 @@ export class WebCompanionServer {
       `${published.pathname}${published.search}${published.hash}`,
       this.browserOrigin,
     ).toString();
+    const launchIfCurrent = () => {
+      if (!this.started || !this.store.isHandoffCurrent(sessionId))
+        return false;
+      return this.launchBrowser(localUrl);
+    };
     const operation = this.browserLaunchTail.then(
-      () => this.launchBrowser(localUrl),
-      () => this.launchBrowser(localUrl),
+      launchIfCurrent,
+      launchIfCurrent,
     );
     this.browserLaunchTail = operation.catch(() => undefined);
     try {
-      await operation;
+      return await operation;
     } finally {
       this.browserLaunchDepth -= 1;
     }
@@ -460,6 +729,7 @@ export class WebCompanionServer {
         opened: this.browserLaunch.opened + 1,
         lastError: null,
       };
+      return true;
     } catch (error) {
       const detail = message(error);
       this.browserLaunch = {
@@ -469,6 +739,233 @@ export class WebCompanionServer {
         lastError: detail,
       };
       this.writeDiagnostic(`Web companion browser launch failed: ${detail}`);
+      return false;
+    }
+  }
+
+  async openHandoffInBrowser(handoff, options = {}) {
+    if (
+      handoff === null ||
+      typeof handoff !== "object" ||
+      typeof handoff.sessionId !== "string" ||
+      typeof handoff.computerId !== "string" ||
+      typeof handoff.url !== "string"
+    ) {
+      throw new Error("A valid Web Terminal handoff is required.");
+    }
+    if (this.browserConnectionWaiters >= 4) {
+      throw new Error("Browser connection wait capacity has been reached.");
+    }
+    const timeoutMs = Math.min(
+      positiveInteger(
+        options.timeoutMs ?? 30_000,
+        "Browser connection timeout",
+      ),
+      maximumHandoffWaitMs,
+    );
+    this.browserConnectionWaiters += 1;
+    try {
+      const launched = await this.queueBrowserLaunch(
+        handoff.url,
+        handoff.sessionId,
+      );
+      if (!launched) {
+        throw new Error(
+          this.browserLaunch.lastError ??
+            this.browserLaunch.reason ??
+            "Default browser launch was not admitted.",
+        );
+      }
+      const deadline = Date.now() + timeoutMs;
+      while (Date.now() < deadline) {
+        if (!this.started) {
+          throw new Error(
+            "Web companion stopped before the browser connected.",
+          );
+        }
+        const session = this.store.activeSession(handoff.sessionId);
+        if (session === undefined) {
+          throw new Error(
+            "Web Terminal session ended before the browser connected.",
+          );
+        }
+        if (session.mode === "writer") {
+          return {
+            computerId: session.computerId,
+            mode: session.mode,
+            access: session.access,
+            state: session.state,
+            terminalReady: session.terminal !== null,
+          };
+        }
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      throw new Error(
+        "Timed out after " +
+          String(timeoutMs) +
+          " ms waiting for the default browser to connect.",
+      );
+    } finally {
+      this.browserConnectionWaiters -= 1;
+    }
+  }
+
+  async sendTuiInput(options = {}) {
+    const identity = requireTuiSessionIdentity(options);
+    if (
+      options.kind !== "line" &&
+      options.kind !== "keys" &&
+      options.kind !== "interrupt"
+    ) {
+      throw new Error("TUI input kind must be line, keys, or interrupt.");
+    }
+    if (options.kind === "interrupt" && options.value !== undefined) {
+      throw new Error("TUI interrupt input must not include a value.");
+    }
+    return this.serializeComputerOperation(identity.computerId, async () => {
+      const session = this.requireTuiSession(identity);
+      if (session.terminal?.terminal?.secretInput !== false) {
+        throw new Error(
+          "MCP TUI input is unavailable until a non-secret terminal frame is active.",
+        );
+      }
+      return this.relayValidatedInput(session, {
+        kind: options.kind,
+        value: options.value,
+      });
+    });
+  }
+
+  captureTuiScreen(options = {}) {
+    const identity = requireTuiSessionIdentity(options);
+    const includeColors = optionalBoolean(
+      options.includeColors,
+      "includeColors",
+    );
+    const session = this.requireTuiSession(identity);
+    const screen = serializeTuiScreen(session, includeColors);
+    if (screen === undefined) {
+      throw new Error(
+        `The Web Terminal writer for ${identity.computerId} has not published a TUI frame yet.`,
+      );
+    }
+    return screen;
+  }
+
+  waitForTuiScreen(options = {}) {
+    const identity = requireTuiSessionIdentity(options);
+    const includeColors = optionalBoolean(
+      options.includeColors,
+      "includeColors",
+    );
+    const contains = optionalTuiContains(options.contains);
+    const afterVersion = optionalTuiVersion(options.afterVersion);
+    const timeoutMs = Math.min(
+      positiveInteger(options.timeoutMs ?? 10_000, "TUI wait timeout"),
+      maximumTuiWaitMs,
+    );
+    if (!this.started) throw new Error("Web companion is not running.");
+    this.requireTuiSession(identity);
+    if (this.pendingTuiWaits.has(identity.sessionId)) {
+      throw new Error(
+        `A TUI wait is already active for ${identity.computerId}.`,
+      );
+    }
+    if (this.pendingTuiWaits.size >= maximumPendingTuiWaits) {
+      throw new Error("TUI verification wait capacity has been reached.");
+    }
+
+    return new Promise((resolve, reject) => {
+      let pending;
+      const observation = this.store.observe(identity.sessionId, () => {
+        this.evaluatePendingTuiWait(identity.sessionId, pending);
+      });
+      const timer = setTimeout(() => {
+        this.finalizePendingTuiWait(identity.sessionId, pending, () => {
+          reject(
+            new Error(
+              `Timed out after ${String(timeoutMs)} ms waiting for the TUI screen for ${identity.computerId}.`,
+            ),
+          );
+        });
+      }, timeoutMs);
+      timer.unref();
+      pending = {
+        afterVersion,
+        contains,
+        identity,
+        includeColors,
+        observation,
+        reject,
+        resolve,
+        timer,
+      };
+      this.pendingTuiWaits.set(identity.sessionId, pending);
+      this.evaluatePendingTuiWait(identity.sessionId, pending);
+    });
+  }
+
+  requireTuiSession(identity) {
+    if (!this.started) throw new Error("Web companion is not running.");
+    const session = this.store.activeSession(identity.sessionId);
+    if (session === undefined || session.computerId !== identity.computerId) {
+      throw new Error(
+        `The MCP Web Terminal session for ${identity.computerId} is no longer active.`,
+      );
+    }
+    if (session.principalKind !== "debug") {
+      throw new Error(
+        `The Web Terminal writer for ${identity.computerId} is not owned by the MCP debug principal.`,
+      );
+    }
+    if (session.mode !== "writer" || !this.store.isWriter(identity.sessionId)) {
+      throw new Error(
+        `The MCP Web Terminal session for ${identity.computerId} is no longer the active writer.`,
+      );
+    }
+    if (session.access !== "in_range") {
+      throw new Error(
+        `The MCP Web Terminal session for ${identity.computerId} is not accessible.`,
+      );
+    }
+    return session;
+  }
+
+  evaluatePendingTuiWait(sessionId, pending) {
+    if (
+      pending === undefined ||
+      this.pendingTuiWaits.get(sessionId) !== pending
+    ) {
+      return;
+    }
+    try {
+      const session = this.requireTuiSession(pending.identity);
+      const screen = serializeTuiScreen(session, pending.includeColors);
+      if (screen === undefined || !matchesTuiWait(screen, pending)) return;
+      this.finalizePendingTuiWait(sessionId, pending, () => {
+        pending.resolve(screen);
+      });
+    } catch (error) {
+      this.finalizePendingTuiWait(sessionId, pending, () => {
+        pending.reject(error);
+      });
+    }
+  }
+
+  finalizePendingTuiWait(sessionId, pending, finalize) {
+    if (this.pendingTuiWaits.get(sessionId) !== pending) return false;
+    this.pendingTuiWaits.delete(sessionId);
+    clearTimeout(pending.timer);
+    pending.observation.unsubscribe();
+    finalize();
+    return true;
+  }
+
+  failPendingTuiWaits(reason) {
+    for (const [sessionId, pending] of this.pendingTuiWaits) {
+      this.finalizePendingTuiWait(sessionId, pending, () => {
+        pending.reject(new Error(reason));
+      });
     }
   }
 
@@ -476,10 +973,17 @@ export class WebCompanionServer {
     setSecurityHeaders(response);
     const url = new URL(request.url ?? "/", this.origin ?? "http://127.0.0.1");
     if (request.method === "GET" && url.pathname.startsWith("/p/")) {
-      const code = url.pathname.slice(3);
-      const consumed = this.consumeHandoffCode(request, code);
+      const match = /^\/p\/([0-9]{4})$/u.exec(url.pathname);
+      if (match === null) {
+        throw new WebSessionError(
+          "unauthorized",
+          "A valid browser terminal link is required.",
+          401,
+        );
+      }
+      const code = match[1];
       response.writeHead(302, {
-        Location: `/?computer=${encodeURIComponent(code)}#${consumed.token}`,
+        Location: `/?computer=${encodeURIComponent(code)}&handoff=1`,
         "Cache-Control": "no-store",
       });
       response.end();
@@ -488,7 +992,7 @@ export class WebCompanionServer {
     if (request.method === "POST" && url.pathname === "/api/handoff") {
       requireSameOrigin(request, this.allowedOrigins);
       const body = await readJson(request, 1_024);
-      const consumed = this.consumeHandoffCode(request, body?.code);
+      const consumed = await this.consumeHandoffCode(request, body?.code);
       writeJson(response, 200, { code: body.code, token: consumed.token });
       return;
     }
@@ -512,8 +1016,8 @@ export class WebCompanionServer {
       requireSameOrigin(request, this.allowedOrigins);
       const session = this.store.authenticate(bearerToken(request));
       const body = await readJson(request, 4_096);
-      await this.relayInput(session, body);
-      writeJson(response, 202, { outcome: "accepted" });
+      const result = await this.relayInput(session, body);
+      writeJson(response, 202, result);
       return;
     }
     if (request.method === "POST" && url.pathname === "/api/complete") {
@@ -547,6 +1051,13 @@ export class WebCompanionServer {
       writeJson(response, 200, result);
       return;
     }
+    if (request.method === "POST" && url.pathname === "/api/floppy/eject") {
+      requireSameOrigin(request, this.allowedOrigins);
+      const session = this.store.authenticate(bearerToken(request));
+      const result = await this.requestFloppyEject(session);
+      writeJson(response, 200, result);
+      return;
+    }
     if (request.method === "POST" && url.pathname === "/api/close") {
       requireSameOrigin(request, this.allowedOrigins);
       const session = this.store.authenticate(bearerToken(request));
@@ -563,29 +1074,7 @@ export class WebCompanionServer {
 
   streamEvents(request, response) {
     const token = bearerToken(request);
-    let blocked = false;
-    let latest;
-    const writeEvent = (event) => {
-      if (blocked) {
-        latest = event;
-        return;
-      }
-      blocked = !response.write(`${JSON.stringify(event)}\n`);
-      if (event.type === "replaced") {
-        response.end();
-        return;
-      }
-      if (blocked) {
-        response.once("drain", () => {
-          blocked = false;
-          if (latest !== undefined) {
-            const pending = latest;
-            latest = undefined;
-            writeEvent(pending);
-          }
-        });
-      }
-    };
+    const writeEvent = createCoalescedEventWriter(response);
     const subscription = this.store.subscribe(token, writeEvent);
     response.writeHead(200, {
       "Content-Type": "application/x-ndjson; charset=utf-8",
@@ -612,106 +1101,177 @@ export class WebCompanionServer {
   async relayInput(session, body) {
     return this.serializeComputerOperation(session.computerId, async () => {
       const active = this.store.authenticate(session.token);
-      this.requireInRange(active);
-      if (!this.store.isWriter(active.sessionId)) {
-        throw new WebSessionError(
-          "read_only",
-          "This browser terminal is view only. Take control before typing.",
-          409,
-        );
-      }
-      if (body?.kind === "interrupt") {
-        await this.bds.runWebRelay(
-          `scriptevent computer_system:web-interrupt ${active.sessionId}`,
-        );
-        return;
-      }
-      if (body?.kind === "mouse") {
-        const value = body.value;
-        if (
-          value === null ||
-          typeof value !== "object" ||
-          !["down", "move", "up"].includes(value.action) ||
-          ![0, 1, 2].includes(value.button) ||
-          !Number.isSafeInteger(value.sequence) ||
-          value.sequence < 0 ||
-          !Number.isSafeInteger(value.x) ||
-          value.x < 1 ||
-          value.x > 80 ||
-          !Number.isSafeInteger(value.y) ||
-          value.y < 1 ||
-          value.y > 25
-        ) {
-          throw new WebSessionError("input", "Invalid terminal mouse event.");
-        }
-        const encodedMouse = encodeURIComponent(
-          JSON.stringify({
-            action: value.action,
-            button: value.button,
-            sequence: value.sequence,
-            x: value.x,
-            y: value.y,
-          }),
-        );
-        if (encodedMouse.length > 180) {
-          throw new WebSessionError(
-            "input",
-            "Encoded terminal mouse event is too long.",
-          );
-        }
-        await this.bds.runWebRelay(
-          `scriptevent computer_system:web-input ${active.sessionId} mouse ${encodedMouse}`,
-        );
-        return;
-      }
-      if (body?.kind === "keys") {
-        if (
-          !Array.isArray(body.value) ||
-          body.value.length === 0 ||
-          body.value.length > 32 ||
-          body.value.some(
-            (key) =>
-              typeof key !== "string" || key.length === 0 || key.length > 32,
-          )
-        ) {
-          throw new WebSessionError("input", "Invalid terminal key batch.");
-        }
-        const encodedKeys = encodeURIComponent(JSON.stringify(body.value));
-        if (encodedKeys.length > 180) {
-          throw new WebSessionError(
-            "input",
-            "Encoded terminal keys are too long.",
-          );
-        }
-        await this.bds.runWebRelay(
-          `scriptevent computer_system:web-input ${active.sessionId} keys ${encodedKeys}`,
-        );
-        return;
-      }
-      if (body?.kind !== "line" || typeof body.value !== "string") {
-        throw new WebSessionError("input", "Input must be a terminal line.");
-      }
-      if (
-        body.value.includes("\0") ||
-        /[\r\n]/u.test(body.value) ||
-        body.value.length > 128
-      ) {
-        throw new WebSessionError(
-          "input",
-          "Terminal input must be one line of at most 128 characters.",
-        );
-      }
-      const encoded = encodeURIComponent(body.value);
-      if (encoded.length > 180) {
-        throw new WebSessionError(
-          "input",
-          "Encoded terminal input is too long for the BDS relay.",
-        );
-      }
-      await this.bds.runWebRelay(
-        `scriptevent computer_system:web-input ${active.sessionId} line ${encoded}`,
-      );
+      return this.relayValidatedInput(active, body);
     });
+  }
+
+  async relayValidatedInput(active, body) {
+    this.requireInRange(active);
+    if (!this.store.isWriter(active.sessionId)) {
+      throw new WebSessionError(
+        "read_only",
+        "This browser terminal is view only. Take control before typing.",
+        409,
+      );
+    }
+    if (body?.kind === "interrupt") {
+      await this.bds.runWebRelay(
+        `scriptevent computer_system:web-interrupt ${active.sessionId}`,
+      );
+      return { outcome: "accepted" };
+    }
+    if (body?.kind === "mouse") {
+      const value = body.value;
+      if (
+        value === null ||
+        typeof value !== "object" ||
+        !["down", "move", "up"].includes(value.action) ||
+        ![0, 1, 2].includes(value.button) ||
+        !Number.isSafeInteger(value.sequence) ||
+        value.sequence < 0 ||
+        !Number.isSafeInteger(value.x) ||
+        value.x < 1 ||
+        value.x > 80 ||
+        !Number.isSafeInteger(value.y) ||
+        value.y < 1 ||
+        value.y > 25
+      ) {
+        throw new WebSessionError("input", "Invalid terminal mouse event.");
+      }
+      const encodedMouse = encodeURIComponent(
+        JSON.stringify({
+          action: value.action,
+          button: value.button,
+          sequence: value.sequence,
+          x: value.x,
+          y: value.y,
+        }),
+      );
+      if (encodedMouse.length > 180) {
+        throw new WebSessionError(
+          "input",
+          "Encoded terminal mouse event is too long.",
+        );
+      }
+      return this.requestInputAdmission(
+        active.sessionId,
+        "mouse",
+        encodedMouse,
+      );
+    }
+    if (body?.kind === "keys") {
+      if (
+        !Array.isArray(body.value) ||
+        body.value.length === 0 ||
+        body.value.length > 32 ||
+        body.value.some(
+          (key) =>
+            typeof key !== "string" || key.length === 0 || key.length > 32,
+        )
+      ) {
+        throw new WebSessionError("input", "Invalid terminal key batch.");
+      }
+      const encodedKeys = encodeURIComponent(JSON.stringify(body.value));
+      if (encodedKeys.length > 180) {
+        throw new WebSessionError(
+          "input",
+          "Encoded terminal keys are too long.",
+        );
+      }
+      return this.requestInputAdmission(active.sessionId, "keys", encodedKeys);
+    }
+    if (body?.kind !== "line" || typeof body.value !== "string") {
+      throw new WebSessionError("input", "Input must be a terminal line.");
+    }
+    if (
+      body.value.includes("\0") ||
+      /[\r\n]/u.test(body.value) ||
+      body.value.length > 128
+    ) {
+      throw new WebSessionError(
+        "input",
+        "Terminal input must be one line of at most 128 characters.",
+      );
+    }
+    const encoded = encodeURIComponent(body.value);
+    if (encoded.length > 180) {
+      throw new WebSessionError(
+        "input",
+        "Encoded terminal input is too long for the BDS relay.",
+      );
+    }
+    return this.requestInputAdmission(active.sessionId, "line", encoded);
+  }
+
+  async requestInputAdmission(sessionId, kind, encoded) {
+    if (this.pendingInputs.size >= maximumPendingInputs) {
+      throw retryableInputBusy(
+        "Too many terminal input admissions are pending.",
+      );
+    }
+    const requestId = this.allocateInputRequestId();
+    let resolveAdmission;
+    let rejectAdmission;
+    const completion = new Promise((resolve, reject) => {
+      resolveAdmission = resolve;
+      rejectAdmission = reject;
+    });
+    let pending;
+    const timer = setTimeout(() => {
+      this.finalizePendingInput(requestId, pending, () => {
+        rejectAdmission(
+          new WebSessionError(
+            "input_timeout",
+            "Terminal input admission timed out.",
+            504,
+          ),
+        );
+      });
+    }, this.inputTimeoutMs);
+    timer.unref();
+    pending = {
+      reject: rejectAdmission,
+      resolve: resolveAdmission,
+      sessionId,
+      timer,
+    };
+    this.pendingInputs.set(requestId, pending);
+    try {
+      await this.bds.runWebRelay(
+        `scriptevent computer_system:web-input ${sessionId} ${requestId} ${kind} ${encoded}`,
+      );
+    } catch (error) {
+      this.finalizePendingInput(requestId, pending, () => {
+        rejectAdmission(error);
+      });
+    }
+    return requireAcceptedInput(await completion);
+  }
+
+  allocateInputRequestId() {
+    for (let attempt = 0; attempt <= maximumPendingInputs; attempt += 1) {
+      const requestId = `i${this.nextInput.toString(36).padStart(5, "0")}`;
+      this.nextInput =
+        this.nextInput === Number.MAX_SAFE_INTEGER ? 1 : this.nextInput + 1;
+      if (!this.pendingInputs.has(requestId)) return requestId;
+    }
+    throw retryableInputBusy("Terminal input request IDs are busy.");
+  }
+
+  finalizePendingInput(requestId, pending, finalize) {
+    if (this.pendingInputs.get(requestId) !== pending) return false;
+    clearTimeout(pending.timer);
+    this.pendingInputs.delete(requestId);
+    finalize();
+    return true;
+  }
+
+  failPendingInputs(detail) {
+    for (const [requestId, pending] of this.pendingInputs) {
+      this.finalizePendingInput(requestId, pending, () => {
+        pending.reject(new WebSessionError("closed", detail, 503));
+      });
+    }
   }
 
   async completeInput(session, body) {
@@ -911,6 +1471,73 @@ export class WebCompanionServer {
     this.pendingPowerRequests.clear();
   }
 
+  async requestFloppyEject(session) {
+    return this.serializeComputerOperation(session.computerId, async () => {
+      const active = this.store.authenticate(session.token);
+      this.requireInRange(active);
+      if (!this.store.isWriter(active.sessionId)) {
+        throw new WebSessionError(
+          "read_only",
+          "This browser terminal is view only. Take control before ejecting a floppy disk.",
+          409,
+        );
+      }
+      if (this.pendingEjectRequests.size >= maximumPendingEjectRequests) {
+        throw new WebSessionError(
+          "busy",
+          "Too many Web Terminal floppy eject requests are pending.",
+          503,
+        );
+      }
+      const requestId = `e${this.nextEjectRequest.toString(36).padStart(5, "0")}`;
+      this.nextEjectRequest =
+        this.nextEjectRequest === Number.MAX_SAFE_INTEGER
+          ? 1
+          : this.nextEjectRequest + 1;
+      let resolveEject;
+      let rejectEject;
+      const completion = new Promise((resolve, reject) => {
+        resolveEject = resolve;
+        rejectEject = reject;
+      });
+      const timer = setTimeout(() => {
+        this.pendingEjectRequests.delete(requestId);
+        rejectEject(
+          new WebSessionError(
+            "timeout",
+            "Floppy eject request timed out.",
+            504,
+          ),
+        );
+      }, ejectTimeoutMs);
+      timer.unref();
+      this.pendingEjectRequests.set(requestId, {
+        reject: rejectEject,
+        resolve: resolveEject,
+        sessionId: active.sessionId,
+        timer,
+      });
+      try {
+        await this.bds.runWebRelay(
+          `scriptevent computer_system:web-floppy-eject ${active.sessionId} ${requestId}`,
+        );
+      } catch (error) {
+        clearTimeout(timer);
+        this.pendingEjectRequests.delete(requestId);
+        throw error;
+      }
+      return completion;
+    });
+  }
+
+  failPendingEjectRequests(detail) {
+    for (const pending of this.pendingEjectRequests.values()) {
+      clearTimeout(pending.timer);
+      pending.reject(new WebSessionError("closed", detail, 503));
+    }
+    this.pendingEjectRequests.clear();
+  }
+
   async closeSession(session) {
     return this.serializeComputerOperation(session.computerId, async () => {
       const active = this.store.authenticate(session.token);
@@ -953,23 +1580,40 @@ export class WebCompanionServer {
       failures !== undefined &&
       failures.count >= maximumHandoffFailuresPerWindow
     ) {
-      throw new WebSessionError(
+      const error = new WebSessionError(
         "handoff_rate_limit",
         "Too many invalid connection-code attempts. Try again later.",
         429,
       );
+      error.retryAfterSeconds = Math.max(
+        1,
+        Math.ceil((failures.expiresAt - Date.now()) / 1_000),
+      );
+      throw error;
     }
   }
 
-  consumeHandoffCode(request, code) {
+  async consumeHandoffCode(request, code) {
     const client = request.socket.remoteAddress ?? "unknown";
     this.requireHandoffAttemptAllowed(client);
+    let consumed;
     try {
-      const consumed = this.store.consumeHandoff(code);
+      consumed = this.store.consumeHandoff(code);
+      const session = this.store.authenticate(consumed.token);
+      const controlled = await this.takeControl(session);
       this.handoffFailures.delete(client);
-      return consumed;
+      return { token: consumed.token, session: controlled };
     } catch (error) {
-      this.recordHandoffFailure(client);
+      if (consumed !== undefined) {
+        this.store.restoreHandoff(consumed.session.sessionId);
+      }
+      if (
+        error?.code !== "not_ready" &&
+        error?.code !== "out_of_range" &&
+        error?.code !== "handoff_required"
+      ) {
+        this.recordHandoffFailure(client);
+      }
       throw error;
     }
   }
@@ -984,7 +1628,13 @@ export class WebCompanionServer {
       this.handoffFailures.delete(client);
       return reconnected;
     } catch (error) {
-      if (error?.code !== "out_of_range") this.recordHandoffFailure(client);
+      if (
+        error?.code !== "not_ready" &&
+        error?.code !== "out_of_range" &&
+        error?.code !== "handoff_required"
+      ) {
+        this.recordHandoffFailure(client);
+      }
       throw error;
     }
   }
@@ -1060,11 +1710,119 @@ export class WebCompanionServer {
       return;
     }
     const status = error instanceof WebSessionError ? error.status : 500;
+    if (
+      status === 429 &&
+      Number.isSafeInteger(error?.retryAfterSeconds) &&
+      error.retryAfterSeconds > 0
+    ) {
+      response.setHeader("Retry-After", String(error.retryAfterSeconds));
+    }
     writeJson(response, status, {
       code: error instanceof WebSessionError ? error.code : "internal",
       error: status >= 500 ? "Internal companion error." : message(error),
     });
   }
+}
+
+export function createCoalescedEventWriter(response) {
+  let blocked = false;
+  let controlPending;
+  let drainPending = false;
+  let ended = false;
+  let finalPending;
+  let keepalivePending = false;
+  let order = 0;
+  let terminalPending;
+
+  const enqueue = (event) => {
+    if (event.type === "replaced") {
+      finalPending = event;
+      controlPending = undefined;
+      terminalPending = undefined;
+      keepalivePending = false;
+      return;
+    }
+    if (finalPending !== undefined) return;
+    if (event.type === "terminal") {
+      terminalPending = { event, order: (order += 1) };
+      keepalivePending = false;
+      return;
+    }
+    if (event.type === "keepalive") {
+      if (controlPending === undefined && terminalPending === undefined) {
+        keepalivePending = true;
+      }
+      return;
+    }
+    controlPending = { event, order: (order += 1) };
+    keepalivePending = false;
+  };
+
+  const takePending = () => {
+    if (finalPending !== undefined) {
+      const event = finalPending;
+      finalPending = undefined;
+      return event;
+    }
+    if (
+      controlPending !== undefined &&
+      (terminalPending === undefined ||
+        controlPending.order < terminalPending.order)
+    ) {
+      const { event } = controlPending;
+      controlPending = undefined;
+      return event;
+    }
+    if (terminalPending !== undefined) {
+      const { event } = terminalPending;
+      terminalPending = undefined;
+      return event;
+    }
+    if (keepalivePending) {
+      keepalivePending = false;
+      return { type: "keepalive" };
+    }
+    return undefined;
+  };
+
+  const onDrain = () => {
+    drainPending = false;
+    blocked = false;
+    flush();
+  };
+
+  const writeNow = (event) => {
+    const accepted = response.write(`${JSON.stringify(event)}\n`);
+    if (event.type === "replaced") {
+      ended = true;
+      response.end();
+      return;
+    }
+    if (!accepted) {
+      blocked = true;
+      if (!drainPending) {
+        drainPending = true;
+        response.once("drain", onDrain);
+      }
+    }
+  };
+
+  const flush = () => {
+    while (!blocked && !ended) {
+      const event = takePending();
+      if (event === undefined) return;
+      writeNow(event);
+    }
+  };
+
+  return (event) => {
+    if (ended) return;
+    if (blocked) {
+      enqueue(event);
+      return;
+    }
+    writeNow(event);
+  };
 }
 
 export function parsePort(value) {
@@ -1088,6 +1846,223 @@ export function parseBooleanFlag(value, name) {
 export function parseOptionalBooleanFlag(value, name) {
   if (value === undefined) return undefined;
   return parseBooleanFlag(value, name);
+}
+
+function retryableInputBusy(detail) {
+  const error = new WebSessionError("input_busy", detail, 429);
+  error.retryAfterSeconds = 1;
+  return error;
+}
+
+function requireAcceptedInput(result) {
+  if (result.outcome === "accepted") return { outcome: "accepted" };
+  if (result.outcome === "missing") {
+    throw new WebSessionError(
+      "input_missing",
+      "The Computer is no longer available.",
+      410,
+    );
+  }
+  if (result.outcome === "ignored") {
+    const reason =
+      result.reason === "not_running"
+        ? "The Computer is not running."
+        : result.reason === "stopping"
+          ? "The Computer is stopping."
+          : result.reason === "secret_input"
+            ? "MCP debug input is disabled while secret input is active."
+            : "The Computer ignored terminal input.";
+    throw new WebSessionError("input_ignored", reason, 409);
+  }
+  const failure = `${String(result.reason ?? "")} ${String(result.error ?? "")}`;
+  if (
+    /event (?:queue )?limit exceeded|queue (?:is )?full|capacity/iu.test(
+      failure,
+    )
+  ) {
+    throw retryableInputBusy("The terminal input queue is full. Retry later.");
+  }
+  throw new WebSessionError(
+    "input_failed",
+    "The Computer could not admit terminal input.",
+    503,
+  );
+}
+
+function requireTuiSessionIdentity(options) {
+  if (
+    options === null ||
+    typeof options !== "object" ||
+    Array.isArray(options)
+  ) {
+    throw new TypeError("TUI session options must be an object.");
+  }
+  if (
+    typeof options.computerId !== "string" ||
+    !computerIdPattern.test(options.computerId)
+  ) {
+    throw new Error("computerId must use the c-xxxxxx identity format.");
+  }
+  if (
+    typeof options.sessionId !== "string" ||
+    !/^[A-Za-z0-9_-]{12,32}$/u.test(options.sessionId)
+  ) {
+    throw new Error("An exact active Web Terminal session is required.");
+  }
+  return {
+    computerId: options.computerId,
+    sessionId: options.sessionId,
+  };
+}
+
+function optionalBoolean(value, name) {
+  if (value === undefined) return false;
+  if (typeof value !== "boolean") {
+    throw new TypeError(`${name} must be boolean.`);
+  }
+  return value;
+}
+
+function optionalTuiContains(value) {
+  if (value === undefined) return undefined;
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    value.length > maximumTuiContainsLength ||
+    value.includes("\0")
+  ) {
+    throw new Error(
+      `contains must contain 1 to ${String(maximumTuiContainsLength)} literal characters.`,
+    );
+  }
+  return value;
+}
+
+function optionalTuiVersion(value) {
+  if (value === undefined) return undefined;
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new RangeError("afterVersion must be a non-negative integer.");
+  }
+  return value;
+}
+
+function serializeTuiScreen(session, includeColors) {
+  const payload = session.terminal;
+  if (payload === null) return undefined;
+  if (
+    payload === null ||
+    typeof payload !== "object" ||
+    payload.sessionId !== session.sessionId ||
+    payload.computerId !== session.computerId ||
+    typeof payload.label !== "string" ||
+    typeof payload.lifecycle !== "string" ||
+    !Number.isSafeInteger(session.terminalVersion) ||
+    session.terminalVersion < 1
+  ) {
+    throw new Error("The Web Terminal published an invalid TUI envelope.");
+  }
+  const terminal = payload.terminal;
+  if (
+    terminal === null ||
+    typeof terminal !== "object" ||
+    terminal.schema !== 1 ||
+    !Number.isSafeInteger(terminal.width) ||
+    terminal.width < 1 ||
+    terminal.width > maximumTuiWidth ||
+    !Number.isSafeInteger(terminal.height) ||
+    terminal.height < 1 ||
+    terminal.height > maximumTuiHeight ||
+    !Array.isArray(terminal.rows) ||
+    terminal.rows.length !== terminal.height ||
+    !Array.isArray(terminal.foreground) ||
+    terminal.foreground.length !== terminal.height ||
+    !Array.isArray(terminal.background) ||
+    terminal.background.length !== terminal.height ||
+    typeof terminal.secretInput !== "boolean"
+  ) {
+    throw new Error("The Web Terminal published an invalid text surface.");
+  }
+  if (terminal.secretInput) {
+    throw new Error(
+      "TUI inspection is unavailable while secret input is active.",
+    );
+  }
+  const rows = terminal.rows.map((row) => {
+    if (typeof row !== "string" || [...row].length !== terminal.width) {
+      throw new Error("The Web Terminal published an invalid text row.");
+    }
+    return row;
+  });
+  validateTuiColors(terminal.foreground, terminal.width, "foreground");
+  validateTuiColors(terminal.background, terminal.width, "background");
+  const cursor = terminal.cursor;
+  if (
+    cursor === null ||
+    typeof cursor !== "object" ||
+    !Number.isSafeInteger(cursor.x) ||
+    cursor.x < 1 ||
+    cursor.x > terminal.width + 1 ||
+    !Number.isSafeInteger(cursor.y) ||
+    cursor.y < 1 ||
+    cursor.y > terminal.height ||
+    typeof cursor.blink !== "boolean"
+  ) {
+    throw new Error("The Web Terminal published an invalid text cursor.");
+  }
+  const surface = {
+    kind: "text",
+    schema: 1,
+    width: terminal.width,
+    height: terminal.height,
+    rows,
+    cursor: { blink: cursor.blink, x: cursor.x, y: cursor.y },
+    secretInput: false,
+  };
+  if (includeColors) {
+    surface.foreground = terminal.foreground.map((row) => [...row]);
+    surface.background = terminal.background.map((row) => [...row]);
+  }
+  return {
+    schema: 1,
+    computerId: session.computerId,
+    sessionId: session.sessionId,
+    principalKind: session.principalKind,
+    mode: session.mode,
+    access: session.access,
+    state: session.state,
+    label: payload.label,
+    lifecycle: payload.lifecycle,
+    snapshotVersion: session.terminalVersion,
+    surface,
+  };
+}
+
+function validateTuiColors(grid, width, name) {
+  for (const row of grid) {
+    if (
+      !Array.isArray(row) ||
+      row.length !== width ||
+      row.some(
+        (color) => !Number.isSafeInteger(color) || color < 0 || color > 15,
+      )
+    ) {
+      throw new Error(`The Web Terminal published an invalid ${name} row.`);
+    }
+  }
+}
+
+function matchesTuiWait(screen, pending) {
+  if (
+    pending.afterVersion !== undefined &&
+    screen.snapshotVersion <= pending.afterVersion
+  ) {
+    return false;
+  }
+  if (pending.contains === undefined) return true;
+  if (pending.contains.includes("\n")) {
+    return screen.surface.rows.join("\n").includes(pending.contains);
+  }
+  return screen.surface.rows.some((row) => row.includes(pending.contains));
 }
 
 function markerPayload(line, marker) {

@@ -77,4 +77,37 @@ describe("terminal cell buffer", (): void => {
     expect(terminal.revision).toBe(revision + 1);
     expect(() => terminal.resize(7, 4)).toThrow(TerminalError);
   });
+  it("applies validated frames atomically and retains unchanged cells", (): void => {
+    const terminal = new TerminalBuffer(3, 2);
+    const rows = [
+      [
+        { background: 2, character: "A", foreground: 1 },
+        { background: 15, character: " ", foreground: 0 },
+      ],
+      [],
+    ] as const;
+    const before = terminal.revision;
+
+    expect(terminal.applyFrame(rows, { blink: true, x: 2, y: 1 })).toBe(1);
+    expect(terminal.revision).toBe(before + 1);
+    expect(terminal.cell(1, 1)).toEqual({
+      background: 2,
+      character: "A",
+      foreground: 1,
+    });
+    const stableRevision = terminal.revision;
+    expect(terminal.applyFrame(rows, { blink: true, x: 2, y: 1 })).toBe(0);
+    expect(terminal.revision).toBe(stableRevision);
+
+    expect(terminal.applyFrame(rows, { blink: true, x: 3, y: 1 })).toBe(0);
+    expect(terminal.revision).toBe(stableRevision + 1);
+    const snapshot = terminal.snapshot();
+    expect(() =>
+      terminal.applyFrame(
+        [[{ background: 2, character: "\n", foreground: 1 }]],
+        { blink: true, x: 1, y: 1 },
+      ),
+    ).toThrow(TerminalError);
+    expect(terminal.snapshot()).toEqual(snapshot);
+  });
 });

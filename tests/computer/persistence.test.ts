@@ -77,7 +77,7 @@ describe("Computer persistence boundary", (): void => {
       },
       {
         computerId: "computer-702",
-        imageId: "cs-dos-6.2-rootfs-v1",
+        imageId: "cs-dos-1.0-rootfs-v1",
         osProfile: "dos" as const,
         expectedPath: "/drives/c/command.com",
       },

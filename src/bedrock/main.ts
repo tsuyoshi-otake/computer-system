@@ -23,6 +23,7 @@ import {
   startPortableComputerLifecycle,
 } from "./portableComputer.js";
 import { handleDebugCommand } from "./debugCommandBridge.js";
+import { handleDebugComputerListRequest } from "./debugComputerListBridge.js";
 import { startComputerStorageBreakGuard } from "./computerRegistry.js";
 import { startFloppyComponent } from "./floppyComponent.js";
 import { handleDebugWebSessionRequest } from "./debugWebSessionBridge.js";
@@ -76,8 +77,12 @@ system.afterEvents.scriptEventReceive.subscribe((event): void => {
     handleDebugCommand(event.message);
     return;
   }
+  if (event.id === "computer_system:debug-computer-list") {
+    handleDebugComputerListRequest(event.message);
+    return;
+  }
   if (event.id === "computer_system:debug-web-request") {
-    handleDebugWebSessionRequest(event.message);
+    handleDebugWebSessionRequest(event.message, event.sourceType);
     return;
   }
   if (event.id !== "computer_system:probe") {

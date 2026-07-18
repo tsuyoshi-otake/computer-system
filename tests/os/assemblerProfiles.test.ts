@@ -81,4 +81,68 @@ describe("OS-specific CS486 assembler adapters", (): void => {
     );
     expect(rejected.stderr).not.toMatch(/(?<!\r)\n/u);
   });
+
+  it("reports CS ASM 1.0 and runs its DOS WorkBench", (): void => {
+    const filesystem = new InMemoryFilesystem();
+    const shell = new ShellSession(filesystem, { osProfile: "dos" });
+    filesystem.writeFile(
+      "/drives/c/main.asm",
+      [
+        ".CODE",
+        "PUBLIC MAIN",
+        "MAIN:",
+        "mov eax, 42",
+        "print eax",
+        "halt",
+        "",
+      ].join("\r\n"),
+    );
+
+    expect(shell.submit("ASM /VERSION")).toMatchObject({
+      exitCode: 0,
+      stdout: "CS ASM 1.0 for CS486DX\r\n",
+    });
+    expect(shell.submit("CSASM /VERSION")).toMatchObject({
+      exitCode: 0,
+      stdout: "CS ASM 1.0 for CS486DX\r\n",
+    });
+    expect(shell.submit("ASM /?").stdout).toContain("CS ASM 1.0");
+    expect(shell.submit("HELP CSASM").stdout).toContain("Shift+F5");
+    expect(shell.submit("CSASM WRONG.C")).toMatchObject({
+      exitCode: 2,
+      stderr: "CSASM: source must use .ASM.\r\n",
+    });
+
+    const launched = shell.submit("CSASM MAIN.ASM");
+    expect(launched.exitCode).toBe(0);
+    expect(
+      launched.terminalScreen!.rows.some((row) =>
+        row
+          .map(({ character }) => character)
+          .join("")
+          .includes("CS ASM 1.0"),
+      ),
+    ).toBe(true);
+    shell.keys(["Enter", "Shift+F5"]);
+    const output = shell.keys(["F4"]);
+    expect(
+      output.terminalScreen!.rows.some((row) =>
+        row
+          .map(({ character }) => character)
+          .join("")
+          .includes("42"),
+      ),
+    ).toBe(true);
+    expect(shell.keys(["Escape", "Alt+f", "x"]).resetTerminal).toBe(true);
+
+    const inferred = shell.submit("PWB MAIN.ASM");
+    expect(
+      inferred.terminalScreen!.rows.some((row) =>
+        row
+          .map(({ character }) => character)
+          .join("")
+          .includes("CS ASM 1.0"),
+      ),
+    ).toBe(true);
+  });
 });

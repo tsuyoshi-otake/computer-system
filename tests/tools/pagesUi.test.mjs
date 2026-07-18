@@ -101,9 +101,12 @@ describe("GitHub Pages presentation source", () => {
     }
   });
 
-  it("describes CS QBASIC as DOS-only", () => {
-    expect(landing).toContain("Python, ASM, C, C++; no BASIC");
-    expect(landing).toContain("ASM, CS QBASIC, C, C++; no user Python");
+  it("describes the versioned CS toolchains and keeps CS QBASIC DOS-only", () => {
+    expect(landing).toContain("Python, CS ASM 1.0, CS C/C++ 1.0; no BASIC");
+    expect(landing).toContain(
+      "CS ASM 1.0, CS C/C++ 1.0, CS QBASIC 1.0; no user Python",
+    );
+    expect(landing).toContain("PWB HELLO.CPP");
     expect(landing).toContain("QBASIC /RUN HELLO.BAS");
     expect(landing).not.toContain("Python, ASM, BASIC, C, C++");
     expect(landing).not.toContain("BASICC HELLO.BAS");

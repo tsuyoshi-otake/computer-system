@@ -34,10 +34,31 @@ before effects.
 - Resolve the managed world's current exact `c-xxxxxx` identities and persisted
   hardware profiles. Never reuse an old four-digit browser number, LAN address,
   player name, or stale Computer ID as MCP identity.
-- `bds_issue_web_handoff` and `bds_wait_for_web_handoff` own at most one bounded
-  wait per exact Computer. Install the waiter before issuing the one-use path
-  and finalize every player-count, relay, disconnect, cancellation, and timeout
-  path.
+- Activate and verify the Web Terminal entirely through MCP. Do not use Computer
+  Use, Minecraft UI automation, right-click simulation, a connected Bedrock
+  player, or manual player interaction for this debug workflow. Start with
+  `bds_start({ resetWorld: false })`, page current placed identities with
+  `bds_list_computers`, select the exact Computer ID, then call
+  `bds_open_web_terminal`. That MCP tool activates the Computer through a
+  headless debug principal, opens the one-use handoff in the companion host's
+  default browser, and succeeds only after that exact session becomes the
+  writer. Bedrock accepts this principal only from a `ScriptEventSource.Server`
+  event; Entity, Block, and NPC sources fail explicitly. Normal player-owned
+  sessions retain their proximity and disconnect rules. Use
+  `bds_get_tui_screen`, `bds_send_tui_input`, and `bds_wait_for_tui_screen` on
+  the registered exact debug writer to inspect cell rows/colors/cursor, drive a
+  bounded non-secret line/key/interrupt sequence, and wait event-first for the
+  expected literal screen. Never accept a Player-owned session, follow a writer
+  replacement implicitly, poll logs for frames, or admit MCP input while the
+  current runtime prompt is secret. The versioned screen result uses
+  `surface.kind: "text"`; future graphics use a distinct bounded pixel/tile
+  surface without turning text and VRAM into parallel truth. Use `bds_status`,
+  `bds_get_logs`, and `bds_wait_for_log` for supporting evidence; do not hand
+  the URL to a separate browser automation tool.
+- `bds_open_web_terminal`, `bds_issue_web_handoff`, and
+  `bds_wait_for_web_handoff` own at most one bounded wait per exact Computer.
+  Install the waiter before issuing the one-use path and finalize every source
+  rejection, relay, disconnect, cancellation, and timeout path.
 
 ## Guest benchmark and load evidence
 

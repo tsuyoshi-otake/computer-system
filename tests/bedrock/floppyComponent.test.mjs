@@ -30,6 +30,7 @@ describe("Bedrock Floppy Disk adapter", () => {
     expect(floppy).toContain("floppyMediaService().create()");
     expect(floppy).toContain("floppyMediaService().insert");
     expect(floppy).toContain("floppyMediaService().eject");
+    expect(floppy).toContain("ejectFloppyToPlayer");
     expect(floppy).toContain("Floppy eject delivery and rollback failed");
     expect(floppy).toContain("giveOrDropItem");
   });

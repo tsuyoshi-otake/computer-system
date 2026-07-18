@@ -50,6 +50,11 @@ describe("BDS debug session", () => {
         "scriptevent computer_system:debug-web-request wabc-1 c-9dwhx6",
       ),
     ).toBe(true);
+    expect(
+      isAllowedBdsCommand(
+        "scriptevent computer_system:debug-computer-list labc-1 0 64",
+      ),
+    ).toBe(true);
 
     expect(isAllowedBdsCommand("stop")).toBe(false);
     expect(isAllowedBdsCommand("op @a")).toBe(false);
@@ -76,6 +81,11 @@ describe("BDS debug session", () => {
     expect(
       isAllowedBdsCommand(
         "scriptevent computer_system:debug-web-request wabc-1 c-9dwhx6 stop",
+      ),
+    ).toBe(false);
+    expect(
+      isAllowedBdsCommand(
+        "scriptevent computer_system:debug-computer-list labc-1 0 65",
       ),
     ).toBe(false);
   });
@@ -116,19 +126,29 @@ describe("BDS debug session", () => {
     ).toBe(false);
     expect(
       isAllowedWebRelayCommand(
+        "scriptevent computer_system:web-input abcdefghijkl request1 line hello%20world",
+      ),
+    ).toBe(true);
+    expect(
+      isAllowedWebRelayCommand(
+        "scriptevent computer_system:web-input abcdefghijkl request2 keys %5B%22i%22%5D",
+      ),
+    ).toBe(true);
+    expect(
+      isAllowedWebRelayCommand(
+        "scriptevent computer_system:web-input abcdefghijkl request3 mouse %7B%22action%22%3A%22move%22%2C%22button%22%3A0%2C%22sequence%22%3A1%2C%22x%22%3A12%2C%22y%22%3A4%7D",
+      ),
+    ).toBe(true);
+    expect(
+      isAllowedWebRelayCommand(
         "scriptevent computer_system:web-input abcdefghijkl line hello%20world",
       ),
-    ).toBe(true);
+    ).toBe(false);
     expect(
       isAllowedWebRelayCommand(
-        "scriptevent computer_system:web-input abcdefghijkl keys %5B%22i%22%5D",
+        "scriptevent computer_system:web-input abcdefghijkl short line hello",
       ),
-    ).toBe(true);
-    expect(
-      isAllowedWebRelayCommand(
-        "scriptevent computer_system:web-input abcdefghijkl mouse %7B%22action%22%3A%22move%22%2C%22button%22%3A0%2C%22sequence%22%3A1%2C%22x%22%3A12%2C%22y%22%3A4%7D",
-      ),
-    ).toBe(true);
+    ).toBe(false);
     expect(
       isAllowedWebRelayCommand(
         "scriptevent computer_system:web-interrupt abcdefghijkl",
@@ -152,7 +172,7 @@ describe("BDS debug session", () => {
     expect(isAllowedWebRelayCommand("op @a")).toBe(false);
     expect(
       isAllowedWebRelayCommand(
-        "scriptevent computer_system:web-input abcdefghijkl line hi\nstop",
+        "scriptevent computer_system:web-input abcdefghijkl request4 line hi\nstop",
       ),
     ).toBe(false);
     expect(
@@ -299,6 +319,55 @@ describe("BDS debug session", () => {
         command: "echo first\necho second",
       }),
     ).rejects.toThrow("only python -c");
+  });
+
+  it("lists a bounded page of exact placed Computer identities", async () => {
+    class ComputerListSession extends BdsDebugSession {
+      async runCommand(command) {
+        this.command = command;
+        return { command, afterCursor: 48 };
+      }
+
+      async waitForLog(options) {
+        const requestId = options.contains.match(/"requestId":"([^"]+)"/u)?.[1];
+        return {
+          line:
+            "CS_DEBUG_COMPUTER_LIST " +
+            JSON.stringify({
+              requestId,
+              status: "completed",
+              cursor: 0,
+              nextCursor: null,
+              total: 1,
+              computers: [
+                {
+                  computerId: "c-00696j",
+                  family: "advanced",
+                  form: "block",
+                  physicalKey: "overworld:1,2,3",
+                },
+              ],
+            }),
+        };
+      }
+    }
+
+    const session = new ComputerListSession({
+      environment: { BDS_HOME: "C:/not-accessed-by-computer-list" },
+    });
+    await expect(
+      session.listComputers({ cursor: 0, limit: 1, timeoutMs: 1_000 }),
+    ).resolves.toMatchObject({
+      status: "completed",
+      total: 1,
+      computers: [{ computerId: "c-00696j", connectionCode: "6034" }],
+    });
+    expect(session.command).toMatch(
+      /^scriptevent computer_system:debug-computer-list l[^ ]+ 0 1$/u,
+    );
+    await expect(session.listComputers({ limit: 65 })).rejects.toThrow(
+      /between 1 and 64/u,
+    );
   });
 
   it("requests a bounded Web handoff for one exact Computer identity", async () => {

@@ -488,7 +488,7 @@ describe("CS486DX shell toolchain", (): void => {
         detail: /preprocessor|directive/iu,
         extension: "c",
         name: "unsupported preprocessor directive",
-        source: "#define ANSWER 42\nint main() {\nreturn ANSWER;\n}\n",
+        source: "#pragma pack(1)\nint main() {\nreturn 42;\n}\n",
       },
       {
         detail: /top-level|outside (?:of )?(?:a )?function|global/iu,

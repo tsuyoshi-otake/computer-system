@@ -44,17 +44,18 @@ timing.
 - `as`, `cc`, `c++`, and `ld` submit explicit compile jobs. DOS-only `QBASIC`
   submits the same bounded frontend work when a program starts. A shell
   invocation cannot compile on its initiating event callback. The job is
-  admitted on a later tick in `guest_compile`; CS QBASIC then hands the compiled
-  executable to the normal bounded CPU scheduler. Source, object-count, memory,
-  and instruction ceilings still apply. ASM preprocessing is additionally capped
-  at 1,000,000 aggregate source characters, 100,000 lexical tokens, 64 includes,
-  include depth 8, 256 macros, macro depth 16, 32 parameters, and 100,000
-  expanded tokens. Character and token capacity is checked before source,
-  definition, or macro output is appended. Because included text is not
-  represented by the root source length, an ASM job reserves the lane's 256-unit
-  maximum before expansion. The linker caps sections, initialized bytes,
-  symbols, relocations, cumulative static data, and output instructions; symbol
-  resolution is Map-backed and object layouts are computed once.
+  admitted on a later tick in `guest_compile`; CS QBASIC 1.0 then hands the
+  compiled executable to the normal bounded CPU scheduler. Source, object-count,
+  memory, and instruction ceilings still apply. ASM preprocessing is
+  additionally capped at 1,000,000 aggregate source characters, 100,000 lexical
+  tokens, 64 includes, include depth 8, 256 macros, macro depth 16, 32
+  parameters, and 100,000 expanded tokens. Character and token capacity is
+  checked before source, definition, or macro output is appended. Because
+  included text is not represented by the root source length, an ASM job
+  reserves the lane's 256-unit maximum before expansion. The linker caps
+  sections, initialized bytes, symbols, relocations, cumulative static data, and
+  output instructions; symbol resolution is Map-backed and object layouts are
+  computed once.
 - RS-232C uses an intrusive O(1) ready-link deque and admits work only when the
   deque is non-empty. Link, dequeue, and byte budgets are fixed. I2C and SPI
   charge bounded payload/address units and return `deferred` plus `retryTick`

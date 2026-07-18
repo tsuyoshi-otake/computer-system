@@ -60,6 +60,8 @@ import {
   compileCs486Object,
   compileCs486Source,
 } from "../toolchain/highLevelCompilers.js";
+import type { Cs486CFrontendOptions } from "../toolchain/cs486CFrontend.js";
+import type { Cs486CPreprocessorInclude } from "../toolchain/cs486CPreprocessor.js";
 import { Cs486LinkError, linkCs486Objects } from "../toolchain/cs486Linker.js";
 import { getOsProfile, type OsProfile } from "../os/osProfile.js";
 import { credentialedFilesystem } from "../os/credentialedFilesystem.js";
@@ -715,7 +717,7 @@ export class ComputerRuntime {
         if (completion !== undefined) return completion;
         return {
           outcome: "failed",
-          error: new Error("Synchronous BASIC execution is not supported"),
+          error: new Error("Synchronous compiled execution is not supported"),
         };
       }
       if (result.foreground?.kind === "python") {
@@ -2042,6 +2044,36 @@ export class ComputerRuntime {
 
   private executeCompileJob(entry: RuntimeEntry, job: CompileJob): void {
     const task = job.request.task;
+    if (task.kind === "program-list") {
+      const result = task.execute();
+      const output = `${result.stdout}${result.stderr}`;
+      if (result.foreground !== undefined) {
+        if (result.foreground.kind !== "cs486") {
+          throw new Error(
+            "Program List produced an unsupported nested foreground request",
+          );
+        }
+        this.startCompiledForeground(
+          entry,
+          result.foreground.executable,
+          job.completionEvent,
+          result.foreground.compileCycles,
+          job.osPid,
+          "run",
+          output,
+        );
+        this.compileReady.delete(entry);
+        entry.compileJob = undefined;
+        return;
+      }
+      this.completeCompileJob(
+        entry,
+        result.exitCode,
+        output,
+        result.cpuCycles ?? 1,
+      );
+      return;
+    }
     const filesystem = guestFilesystemForEntry(
       entry,
       job.request.credentials,
@@ -2096,21 +2128,90 @@ export class ComputerRuntime {
             sourceName: task.sourceName,
           }
         : undefined;
+    let includedSourceCharacters = 0;
+    const cFamilyOptions: Cs486CFrontendOptions | undefined =
+      task.language === "c" || task.language === "cpp"
+        ? {
+            definitions: task.cDefinitions,
+            include: (request): Cs486CPreprocessorInclude | undefined => {
+              const profile = getOsProfile(activeOsProfile(entry));
+              const includePaths = task.cIncludePaths ?? [];
+              if (includePaths.length > 16)
+                throw new Error("include path count limit exceeded");
+              const systemDirectory =
+                profile.id === "dos" ? "/drives/c/include" : "/usr/include";
+              const directories = request.quoted
+                ? [
+                    guestParentPath(request.fromSource),
+                    ...includePaths,
+                    systemDirectory,
+                  ]
+                : [...includePaths, systemDirectory];
+              for (const directory of directories) {
+                let resolved: string;
+                try {
+                  resolved = filesystem.normalize(
+                    profile.pathDialect.resolve(
+                      request.path,
+                      directory,
+                      profile.home,
+                    ),
+                  );
+                } catch {
+                  continue;
+                }
+                if (!filesystem.exists(resolved)) continue;
+                if (
+                  filesystem.isDirectory(resolved) ||
+                  !filesystem.hasAccess(resolved, 0b100)
+                ) {
+                  throw new Error(
+                    `${request.path}: include file is not readable`,
+                  );
+                }
+                const source = filesystem.readFile(resolved);
+                includedSourceCharacters += source.length;
+                return {
+                  identity: resolved,
+                  source,
+                  sourceName: resolved,
+                };
+              }
+              return undefined;
+            },
+            sourceName: task.sourceName,
+            undefines: task.cUndefines,
+          }
+        : undefined;
     const output = task.compileOnly
       ? task.language === "asm"
         ? assembleCs486Object(task.source, assemblerOptions)
-        : compileCs486Object(task.language, task.source, {
-            sourceName: task.sourceName,
-          })
+        : compileCs486Object(
+            task.language,
+            task.source,
+            cFamilyOptions ?? { sourceName: task.sourceName },
+          )
       : task.language === "asm"
         ? assembleCs486(task.source, assemblerOptions)
-        : compileCs486Source(task.language, task.source, {
-            sourceName: task.sourceName,
-          });
-    const compileCycles = compileTaskCycles(job.request, output);
+        : compileCs486Source(
+            task.language,
+            task.source,
+            cFamilyOptions ?? { sourceName: task.sourceName },
+          );
+    const compileCycles = compileTaskCycles(
+      job.request,
+      output,
+      includedSourceCharacters,
+    );
     if (task.runAfterCompile) {
       if (output.format !== "cs486-executable") {
-        throw new Error("Compiled BASIC program did not produce an executable");
+        throw new Error("Compiled source did not produce an executable");
+      }
+      if (task.outputPath !== undefined) {
+        filesystem.writeFile(
+          task.outputPath,
+          `CS486\n${JSON.stringify(output)}`,
+        );
       }
       if (job.onComplete !== undefined) {
         this.startDebugJob(
@@ -2140,7 +2241,13 @@ export class ComputerRuntime {
           job.completionEvent,
           compileCycles,
           job.osPid,
-          job.request.command === "qbasic" ? "qbasic" : "basic",
+          job.request.command === "qbasic"
+            ? "qbasic"
+            : job.request.command === "as"
+              ? "csasm"
+              : job.request.command === "c" || job.request.command === "c++"
+                ? "cscc"
+                : "basic",
         );
       }
       this.compileReady.delete(entry);
@@ -2162,7 +2269,8 @@ export class ComputerRuntime {
     completionEvent: string,
     compileCycles: number,
     osPid: number,
-    command: "basic" | "qbasic",
+    command: "basic" | "csasm" | "cscc" | "qbasic" | "run",
+    completionOutputPrefix = "",
   ): void {
     const runtimeId = this.nextRuntimeId++;
     const process = new Cs486Process(executable, {
@@ -2173,6 +2281,7 @@ export class ComputerRuntime {
       command,
       compileCycles,
       completionEvent,
+      completionOutputPrefix,
       cpuCycles: 0,
       executedInstructions: 0,
       instructionLimit: 100_000,
@@ -2413,9 +2522,10 @@ export class ComputerRuntime {
       foreground.kind === "cs486"
         ? (foreground.process as Cs486Process).output
         : "";
+    const completionOutput = `${foreground.completionOutputPrefix ?? ""}${processOutput}`;
     const completionScreen = entry.shell?.completeForegroundProcess(
       exitCode,
-      processOutput,
+      completionOutput,
     );
     if (
       foreground.kind === "cs486" &&
@@ -3750,6 +3860,8 @@ interface DebugGuestJob {
 interface ForegroundGuestProcess {
   readonly command:
     | "basic"
+    | "csasm"
+    | "cscc"
     | "csdb"
     | "debug"
     | "micropython"
@@ -3760,6 +3872,7 @@ interface ForegroundGuestProcess {
   readonly commandLine?: string;
   readonly compileCycles: number;
   readonly completionEvent: string;
+  readonly completionOutputPrefix?: string;
   cpuCycles: number;
   readonly debuggerCompletion?: () => ShellCommandResult;
   executedInstructions: number;
@@ -3912,11 +4025,14 @@ function formatClock(clockHz: number): string {
 function compileJobUnits(
   request: Extract<ShellForegroundRequest, { readonly kind: "compile" }>,
 ): number {
+  if (request.task.kind === "program-list") return 256;
   if (request.task.kind === "source") {
     // Assembly may expand bounded guest includes and macros that are not
     // represented by the root source length. Reserve the lane maximum so the
     // admission decision covers that hidden work before preprocessing starts.
-    return request.task.language === "asm"
+    return request.task.language === "asm" ||
+      request.task.language === "c" ||
+      request.task.language === "cpp"
       ? 256
       : Math.max(1, Math.min(256, Math.ceil(request.task.source.length / 512)));
   }
@@ -3927,7 +4043,9 @@ function compileTaskCycles(
   request: Extract<ShellForegroundRequest, { readonly kind: "compile" }>,
   output?:
     ReturnType<typeof assembleCs486Object> | ReturnType<typeof assembleCs486>,
+  includedSourceCharacters = 0,
 ): number {
+  if (request.task.kind === "program-list") return 1;
   if (request.task.kind === "link") {
     return Math.min(
       1_000_000,
@@ -3944,7 +4062,11 @@ function compileTaskCycles(
       : output.format === "cs486-object"
         ? output.assembly.split("\n").length * 2
         : output.instructions.length * 4;
-  return Math.max(1, Math.ceil(request.task.source.length / 4) + outputWork);
+  return Math.max(
+    1,
+    Math.ceil((request.task.source.length + includedSourceCharacters) / 4) +
+      outputWork,
+  );
 }
 
 /** Scheduler-owned bounded timer process used by `sleep N &`. */

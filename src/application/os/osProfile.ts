@@ -166,6 +166,7 @@ const linuxProfile: OsProfile = {
       "/root",
       "/tmp",
       "/usr/bin",
+      "/usr/include",
       "/usr/lib/computer-system/python",
       "/usr/share/man",
       "/var/lib/cs-os",
@@ -213,6 +214,7 @@ const linuxProfile: OsProfile = {
       "/root",
       "/usr",
       "/usr/bin",
+      "/usr/include",
       "/usr/lib",
       "/usr/lib/computer-system",
       "/usr/lib/computer-system/python",
@@ -255,6 +257,7 @@ const dosProfile: OsProfile = {
   initialDirectory: "/drives/c",
   pathDialect: dosPathDialect,
   environment: new Map([
+    ["INCLUDE", "C:\\INCLUDE"],
     ["PATH", "C:\\DOS;C:\\COMMAND"],
     ["PROMPT", "$P$G"],
     ["SHELL", "C:\\COMMAND.COM"],
@@ -272,13 +275,14 @@ const dosProfile: OsProfile = {
     ensureDirectories(filesystem, [
       "/drives/c/command",
       "/drives/c/dos",
+      "/drives/c/include",
       "/drives/c/temp",
     ]);
     resetDirectory(filesystem, "/drives/c/temp");
     ensureFile(
       filesystem,
       "/drives/c/autoexec.bat",
-      "@ECHO OFF\r\nPATH C:\\DOS;C:\\COMMAND\r\n",
+      "@ECHO OFF\r\nPATH C:\\DOS;C:\\COMMAND\r\nSET INCLUDE=C:\\INCLUDE\r\n",
     );
     ensureFile(
       filesystem,

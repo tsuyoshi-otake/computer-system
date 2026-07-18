@@ -444,23 +444,13 @@ function createShellModule(
 export function renderTerminalScreen(
   terminal: TerminalBuffer,
   screen: EditorScreen,
-): void {
-  terminal.setTextColor(0);
-  terminal.setBackgroundColor(15);
-  terminal.clear();
-  for (let y = 0; y < Math.min(terminal.height, screen.rows.length); y += 1) {
-    const row = screen.rows[y] ?? [];
-    terminal.setCursorPosition(1, y + 1);
-    for (const cell of row.slice(0, terminal.width)) {
-      terminal.setTextColor(cell.foreground);
-      terminal.setBackgroundColor(cell.background);
-      terminal.write(cell.character);
-    }
-  }
-  terminal.setTextColor(0);
-  terminal.setBackgroundColor(15);
-  terminal.setCursorPosition(screen.cursor.x, screen.cursor.y);
-  terminal.setCursorBlink(true);
+): number {
+  return terminal.applyFrame(
+    screen.rows,
+    { ...screen.cursor, blink: true },
+    0,
+    15,
+  );
 }
 
 export function writeTerminalLines(

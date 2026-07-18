@@ -18,6 +18,12 @@ enabled_tools = [
   "bds_execute_computer_command",
   "bds_get_logs",
   "bds_wait_for_log",
+  "bds_list_computers",
+  "bds_open_web_terminal",
+  "bds_get_tui_screen",
+  "bds_wait_for_tui_screen",
+  "bds_send_tui_input",
+  "bds_issue_web_handoff",
   "bds_wait_for_web_handoff",
 ]
 default_tools_approval_mode = "auto"

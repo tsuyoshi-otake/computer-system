@@ -121,8 +121,10 @@ describe("Bedrock terminal adapters", () => {
     );
     expect(portable).toContain("requestWebComputerTerminal(source, record)");
     expect(bridge).toContain("CS_WEB_SESSION_REQUEST");
+    expect(bridge).toContain("CS_WEB_SESSION_READY");
+    expect(bridge).toContain("computer_system:web-reject");
     expect(bridge).toContain(
-      "selectComputerTerminal(player.id, record.computerId)",
+      "selectComputerTerminal(principal.player.id, record.computerId)",
     );
     expect(bridge).toContain("CS_WEB_TERMINAL");
     expect(bridge).toContain("maxSnapshotsPerPass = 2");
@@ -131,6 +133,9 @@ describe("Bedrock terminal adapters", () => {
     expect(bridge).toContain("snapshotScheduler.requestEager");
     expect(bridge).toContain("snapshotScheduler.takePeriodicBatch");
     expect(bridge).toContain("FloppyAudioEventBroker");
+    expect(bridge).toContain("computer_system:web-floppy-eject");
+    expect(bridge).toContain("ejectFloppyToPlayer");
+    expect(bridge).toContain("CS_WEB_FLOPPY_EJECT");
     expect(bridge).toContain("audioCursor");
     expect(bridge).toContain("setFloppyActivityHandler");
     expect(bridge).toContain("sessionsByComputer");
@@ -145,17 +150,118 @@ describe("Bedrock terminal adapters", () => {
     expect(bridge).toContain("terminalAccess.canWrite");
     expect(bridge).toContain("detached.wasLast");
     expect(bridge).toContain("rejectSession");
-    expect(bridge).toContain("x * x + y * y + z * z <= 9");
+    expect(bridge).toContain("isInitialWebTerminalAccessAllowed");
+    expect(bridge).toContain("nextWebTerminalRangeAccess");
     expect(bridge).toContain("rangeCheckDisabledForDebug");
     expect(bridge).toContain('debugMarker === "debug"');
     expect(bridge).toContain('setSessionAccess(session, "out_of_range")');
     expect(bridge).toContain('setSessionAccess(session, "in_range")');
+    expect(bridge).not.toContain("Web Terminal paused:");
+    expect(bridge).not.toContain("Web Terminal reconnected:");
     expect(bridge).toContain("Connection code:");
+    expect(bridge).toContain('kind: "debug"');
+    expect(bridge).toContain("principalKind: principal.kind");
+    expect(bridge).toContain('error: "floppy_eject_requires_player"');
     const debugBridge = await source("src/bedrock/debugWebSessionBridge.ts");
-    expect(debugBridge).toContain("world.getAllPlayers()");
-    expect(debugBridge).toContain("players.length !== 1");
-    expect(debugBridge).toContain("requestWebComputerTerminal(player, record)");
+    expect(main).toContain(
+      "handleDebugWebSessionRequest(event.message, event.sourceType)",
+    );
+    expect(debugBridge).toContain("sourceType !== ScriptEventSource.Server");
+    expect(debugBridge).toContain('error: "server_source_required"');
+    expect(debugBridge).toContain("requestDebugWebComputerTerminal(record)");
+    expect(debugBridge).not.toContain("world.getAllPlayers()");
     expect(debugBridge).toContain("CS_DEBUG_WEB_REQUEST");
+    const listBridge = await source("src/bedrock/debugComputerListBridge.ts");
+    expect(listBridge).toContain("blockObservationPage");
+    expect(listBridge).toContain("CS_DEBUG_COMPUTER_LIST");
+    expect(listBridge).not.toContain("requestWebComputerTerminal");
+  });
+
+  it("correlates every bounded Web input with an explicit admission result", async () => {
+    const bridge = await source("src/bedrock/webTerminalBridge.ts");
+    const handlerStart = bridge.indexOf("function handleInput");
+    const handlerEnd = bridge.indexOf("function parseTerminalMouseEvent");
+    const finalizerStart = bridge.indexOf("function finalizeInputRequest");
+    const finalizerEnd = bridge.indexOf("function requireActiveSession");
+    const flushStart = bridge.indexOf("function flushPendingMouseMove");
+    const flushEnd = bridge.indexOf("function releaseMouseButtons");
+
+    expect(handlerStart).toBeGreaterThan(-1);
+    expect(handlerEnd).toBeGreaterThan(handlerStart);
+    expect(finalizerStart).toBeGreaterThan(-1);
+    expect(finalizerEnd).toBeGreaterThan(finalizerStart);
+    expect(flushStart).toBeGreaterThan(-1);
+    expect(flushEnd).toBeGreaterThan(flushStart);
+
+    const handler = bridge.slice(handlerStart, handlerEnd);
+    const finalizer = bridge.slice(finalizerStart, finalizerEnd);
+    const mouseFlush = bridge.slice(flushStart, flushEnd);
+    const markerWrite = finalizer.slice(
+      finalizer.indexOf("console.warn"),
+      finalizer.indexOf('if (result.outcome === "accepted")'),
+    );
+
+    expect(bridge).toContain('const inputMarker = "CS_WEB_INPUT "');
+    expect(handler).toContain("([A-Za-z0-9_-]{6,20}) (line|keys|mouse)");
+    expect(handler).toContain('resource: "session"');
+    expect(handler).toContain('reason: "read_only"');
+    expect(handler).toContain('session.principal.kind === "debug"');
+    expect(handler).toContain(
+      "computerHost.runtime.isShellSecretInput(session.computerId)",
+    );
+    expect(handler).toContain('reason: "secret_input"');
+    expect(handler).toContain('failedInputResult("malformed_input")');
+    expect(handler).toContain('failedInputResult("invalid_encoding")');
+    expect(handler.match(/computerHost\.runtime\.queueEvent/gu)).toHaveLength(
+      3,
+    );
+    expect(handler.match(/const result = safeInputQueueResult/gu)).toHaveLength(
+      3,
+    );
+    expect(handler.match(/finalizeInputRequest\(/gu)).toHaveLength(15);
+    expect(handler).not.toContain("snapshotScheduler.requestEager");
+
+    expect(mouseFlush).toContain("pending.requestId");
+    expect(mouseFlush).toContain("const result = safeInputQueueResult");
+    expect(mouseFlush).toContain(
+      "finalizeInputRequest(session.sessionId, pending.requestId, result)",
+    );
+    expect(mouseFlush).not.toContain("snapshotScheduler.requestEager");
+
+    expect(bridge).toContain('failedInputResult("input_queue_failed")');
+    expect(finalizer).toContain("...serializableRuntimeResult(result)");
+    expect(finalizer).toContain('if (result.outcome === "accepted")');
+    expect(finalizer).toContain("snapshotScheduler.requestEager(sessionId)");
+    expect(markerWrite).toContain("sessionId");
+    expect(markerWrite).toContain("requestId");
+    expect(markerWrite).not.toContain("value");
+    expect(markerWrite).not.toContain("message");
+    expect(markerWrite).not.toContain("token");
+  });
+
+  it("short-circuits unchanged Web snapshots before copying the fixed cell grid", async () => {
+    const bridge = await source("src/bedrock/webTerminalBridge.ts");
+    const start = bridge.indexOf("function emitSnapshot");
+    const end = bridge.indexOf("function pruneExpiredRequests", start);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const emit = bridge.slice(start, end);
+
+    expect(bridge).toContain("lastTerminalRevision?: number");
+    expect(bridge).toContain("lastSnapshotMetadata?: string");
+    expect(bridge).toContain("sharedSnapshotFrames");
+    expect(emit).toContain("sharedSnapshotFrames.get(record.computerId)");
+    expect(bridge).toContain("sharedSnapshotFrames.delete(session.computerId)");
+    expect(
+      emit.indexOf("const terminalRevision = record.terminal.revision"),
+    ).toBeLessThan(emit.indexOf("record.terminal.snapshot()"));
+    expect(emit).toContain("session.lastTerminal === record.terminal");
+    expect(emit).toContain("session.lastTerminalRevision === terminalRevision");
+    expect(emit).toContain("session.lastSnapshotMetadata === metadata");
+    expect(emit).toContain("audio.events.length === 0");
+    expect(emit.match(/record\.terminal\.snapshot\(\)/gu)).toHaveLength(1);
+    expect(emit.match(/JSON\.stringify/gu)).toHaveLength(2);
+    expect(emit).not.toContain("const comparison");
   });
 
   it("keeps the Bedrock Core prototype isolated from the production DDUI coordinator", async () => {

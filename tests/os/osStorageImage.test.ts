@@ -49,7 +49,7 @@ describe("OS filesystem images and disk profiles", (): void => {
 
     expect(afterSecond).toEqual(afterFirst);
     const snapshot = second.filesystem.snapshot();
-    expect(snapshot.baseImageId).toBe("cs-linux-1.0-rootfs-v6");
+    expect(snapshot.baseImageId).toBe("cs-linux-1.0-rootfs-v7");
     expect(second.filesystem.exists("/home/cs")).toBe(true);
     expect(second.filesystem.exists("/home/computer")).toBe(false);
     expect(snapshot.files.some(([path]) => path.startsWith("/usr/bin/"))).toBe(
@@ -112,7 +112,7 @@ describe("OS filesystem images and disk profiles", (): void => {
 
     new ShellSession(filesystem, { osProfile: "linux" });
 
-    expect(filesystem.baseImageId).toBe("cs-linux-1.0-rootfs-v6");
+    expect(filesystem.baseImageId).toBe("cs-linux-1.0-rootfs-v7");
     expect(filesystem.exists("/usr/bin/sudo")).toBe(true);
     expect(filesystem.exists("/usr/bin/ls")).toBe(false);
     expect(filesystem.exists("/home/computer")).toBe(false);
@@ -130,24 +130,63 @@ describe("OS filesystem images and disk profiles", (): void => {
     expect(filesystem.snapshot().tombstones).toContain("/usr/bin/ls");
   });
 
-  it("removes BASIC from current Linux and replaces DOS BASIC tools with QBASIC.EXE", (): void => {
+  it("installs CS QBASIC 1.0 and the CS ASM/C/C++ WorkBench launchers only on current DOS", (): void => {
     const linux = new InMemoryFilesystem();
     const linuxShell = new ShellSession(linux, { osProfile: "linux" });
     const dos = new InMemoryFilesystem();
     const dosShell = new ShellSession(dos, { osProfile: "dos" });
 
-    expect(linux.baseImageId).toBe("cs-linux-1.0-rootfs-v6");
+    expect(linux.baseImageId).toBe("cs-linux-1.0-rootfs-v7");
     expect(linux.exists("/usr/bin/basic")).toBe(false);
     expect(linux.exists("/usr/bin/basicc")).toBe(false);
     expect(linuxShell.submit("basic C:/DEMO.BAS").exitCode).toBe(127);
     expect(linuxShell.submit("basicc C:/DEMO.BAS").exitCode).toBe(127);
 
-    expect(dos.baseImageId).toBe("cs-dos-6.2-rootfs-v5");
+    expect(linux.readFile("/usr/include/stdio.h")).toContain(
+      "#define CS_STDIO_H 1\n",
+    );
+    expect(linux.exists("/usr/include/cstdio")).toBe(true);
+    expect(linux.exists("/usr/include/iostream")).toBe(true);
+
+    expect(dos.baseImageId).toBe("cs-dos-1.0-rootfs-v7");
     expect(dos.exists("/drives/c/command/basic.com")).toBe(false);
     expect(dos.exists("/drives/c/command/basicc.com")).toBe(false);
     expect(dos.exists("/drives/c/command/qbasic.exe")).toBe(true);
     expect(dos.getSize("/drives/c/command/qbasic.exe")).toBe(196_608);
+    for (const launcher of ["csasm", "cscc", "cscpp", "pwb"]) {
+      expect(dos.exists(`/drives/c/command/${launcher}.exe`)).toBe(true);
+    }
+    expect(dos.readFile("/drives/c/include/stdio.h")).toContain(
+      "#define CS_STDIO_H 1\r\n",
+    );
+    expect(dos.exists("/drives/c/include/cstdio")).toBe(true);
+    expect(dos.exists("/drives/c/include/iostream")).toBe(true);
     expect(dosShell.submit("BASIC C:\\DEMO.BAS").exitCode).toBe(127);
+  });
+
+  it("keeps the pre-preprocessor Linux and DOS v6 base images immutable", (): void => {
+    registerOsFilesystemImages();
+    const linux = new InMemoryFilesystem();
+    linux.restore({
+      baseImageId: "cs-linux-1.0-rootfs-v6",
+      blobs: [],
+      directories: [],
+      files: [],
+      schema: 2,
+    });
+    const dos = new InMemoryFilesystem();
+    dos.restore({
+      baseImageId: "cs-dos-1.0-rootfs-v6",
+      blobs: [],
+      directories: [],
+      files: [],
+      schema: 2,
+    });
+
+    expect(linux.exists("/usr/include")).toBe(false);
+    expect(dos.exists("/drives/c/include")).toBe(false);
+    expect(linux.exists("/usr/bin/cc")).toBe(true);
+    expect(dos.exists("/drives/c/command/cc.com")).toBe(true);
   });
 
   it("keeps the pre-QBASIC Linux v5 and DOS v4 base images immutable", (): void => {
@@ -162,7 +201,7 @@ describe("OS filesystem images and disk profiles", (): void => {
     });
     const dos = new InMemoryFilesystem();
     dos.restore({
-      baseImageId: "cs-dos-6.2-rootfs-v4",
+      baseImageId: "cs-dos-1.0-rootfs-v4",
       blobs: [],
       directories: [],
       files: [],
@@ -174,6 +213,23 @@ describe("OS filesystem images and disk profiles", (): void => {
     expect(dos.exists("/drives/c/command/basic.com")).toBe(true);
     expect(dos.exists("/drives/c/command/basicc.com")).toBe(true);
     expect(dos.exists("/drives/c/command/qbasic.exe")).toBe(false);
+  });
+
+  it("keeps the pre-WorkBench DOS v5 base image immutable", (): void => {
+    registerOsFilesystemImages();
+    const dos = new InMemoryFilesystem();
+    dos.restore({
+      baseImageId: "cs-dos-1.0-rootfs-v5",
+      blobs: [],
+      directories: [],
+      files: [],
+      schema: 2,
+    });
+
+    expect(dos.exists("/drives/c/command/qbasic.exe")).toBe(true);
+    for (const launcher of ["csasm", "cscc", "cscpp", "pwb"]) {
+      expect(dos.exists(`/drives/c/command/${launcher}.exe`)).toBe(false);
+    }
   });
 
   it("renames a full legacy home with internal and external hard links without duplicating bytes", (): void => {

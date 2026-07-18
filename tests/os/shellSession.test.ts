@@ -26,7 +26,7 @@ describe("Computer System Linux shell and editor", (): void => {
     shell.keys([...'print("ready")']);
     expect(shell.keys(["Ctrl+s"]).terminalScreen).toBeDefined();
     expect(filesystem.readFile("/drives/c/startup.txt")).toBe(
-      'import redstone\nprint("ready")',
+      'import redstone\r\nprint("ready")',
     );
     expect(shell.keys(["Alt+f", "x"]).resetTerminal).toBe(true);
 

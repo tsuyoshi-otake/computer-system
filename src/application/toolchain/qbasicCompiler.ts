@@ -105,7 +105,7 @@ class QBasicCompiler {
     if (text.length === 0 || /^REM(?:\s|$)/iu.test(text)) return;
     if (unsafeStatements.test(text) || unsafeExpression.test(text)) {
       throw new Cs486CompileError(
-        "sandboxed CS QBASIC does not expose host shell, ports, raw memory, machine code, COM, or LPT devices",
+        "sandboxed CS QBASIC 1.0 does not expose host shell, ports, raw memory, machine code, COM, or LPT devices",
         line,
       );
     }

@@ -28,7 +28,7 @@ describe("OS profile boundary", (): void => {
     const directory = shell.submit("DIR C:\\").stdout;
     expect(directory).toContain("Volume in drive C is CS-DOS\r\n");
     expect(directory).toContain("Directory of C:\\\r\n");
-    expect(directory).toContain("AUTOEXEC.BAT");
+    expect(directory).toContain("AUTOEXEC BAT");
     expect(shell.submit("ECHO discarded > NUL").exitCode).toBe(0);
   });
 });

@@ -15,7 +15,7 @@ const identities: Readonly<Record<ComputerOsProfile, OsIdentity>> = {
   dos: {
     fullName: "Computer System DOS",
     shortName: "CS-DOS",
-    version: "6.2",
+    version: "1.0",
   },
 };
 

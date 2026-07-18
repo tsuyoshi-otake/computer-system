@@ -21,7 +21,7 @@ export interface ShellForegroundPython extends ShellProcessContext {
 }
 
 export interface ShellForegroundCs486 extends ShellProcessContext {
-  readonly command: "basic" | "qbasic" | "run";
+  readonly command: "basic" | "csasm" | "cscc" | "qbasic" | "run";
   readonly compileCycles: number;
   readonly executable: Cs486Executable;
   readonly kind: "cs486";
@@ -54,9 +54,27 @@ export type ShellCompileTask =
       readonly assemblerDialect?: "dos" | "linux";
       /** Process HOME captured when the compile request is admitted. */
       readonly assemblerHome?: string;
+      /** Bounded command-line and profile definitions for C/C++ preprocessing. */
+      readonly cDefinitions?: readonly {
+        readonly name: string;
+        readonly replacement?: string;
+      }[];
+      /** Canonical credentialed guest directories searched before system headers. */
+      readonly cIncludePaths?: readonly string[];
+      /** Bounded command-line names removed after built-in definitions. */
+      readonly cUndefines?: readonly string[];
       readonly outputPath?: string;
       readonly compileOnly: boolean;
       readonly runAfterCompile: boolean;
+    }
+  | {
+      /**
+       * Scheduler-owned CS-DOS WorkBench project operation. The closure is
+       * bounded to guest-only ShellCommandRuntime state captured by its owning
+       * session and must return one terminal result.
+       */
+      readonly execute: () => ShellCommandResult;
+      readonly kind: "program-list";
     }
   | {
       readonly kind: "link";
@@ -66,7 +84,7 @@ export type ShellCompileTask =
     };
 
 export interface ShellForegroundCompile extends ShellProcessContext {
-  readonly command: "as" | "c" | "c++" | "ld" | "qbasic";
+  readonly command: "as" | "c" | "c++" | "ld" | "pwb" | "qbasic";
   readonly kind: "compile";
   readonly task: ShellCompileTask;
 }
@@ -85,7 +103,10 @@ export type ShellForegroundRequest =
  * pipelines, redirects, and lifecycle commands are rejected before execution.
  */
 export type ShellBackgroundRequest =
-  | (ShellForegroundCs486 & { readonly commandLine: string })
+  | (Omit<ShellForegroundCs486, "command"> & {
+      readonly command: "run";
+      readonly commandLine: string;
+    })
   | (ShellForegroundPython & { readonly commandLine: string })
   | (ShellProcessContext & {
       readonly command: "sleep";

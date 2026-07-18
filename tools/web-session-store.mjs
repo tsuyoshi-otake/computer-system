@@ -31,18 +31,17 @@ export class WebSessionStore {
     this.sessionsByCode = new Map();
     this.writersByComputer = new Map();
     this.handoffs = new Map();
+    this.bedrockClosures = [];
   }
 
   issue(identity) {
+    const prepared = this.prepare(identity);
+    return this.accept(prepared.sessionId, "writer");
+  }
+
+  prepare(identity) {
     validateIdentity(identity);
     this.expire();
-    if (this.activeCount() >= this.maxSessions) {
-      throw new WebSessionError(
-        "capacity",
-        "Browser terminal capacity has been reached.",
-        503,
-      );
-    }
     const now = this.clock();
     const handoffCode = permanentComputerCode(identity.computerId);
     const codeOwner = this.sessionsByCode.get(handoffCode);
@@ -66,26 +65,42 @@ export class WebSessionStore {
           409,
         );
       }
-      this.finalize(conflicting, "closed", "handoff_superseded");
     }
-    const attached = this.sessionsByComputer.get(identity.computerId);
+    const replacing =
+      conflicting !== undefined && isActive(conflicting) ? 1 : 0;
+    if (this.activeCount() - replacing >= this.maxSessions) {
+      throw new WebSessionError(
+        "capacity",
+        "Browser terminal capacity has been reached.",
+        503,
+      );
+    }
+    const sessionId = this.uniqueValue(12, this.sessionsById);
+    const token = this.uniqueValue(32, this.sessionsByToken);
     const session = {
-      sessionId: this.uniqueValue(12, this.sessionsById),
-      token: this.uniqueValue(32, this.sessionsByToken),
+      sessionId,
+      token,
       handoffCode,
       requestId: identity.requestId,
       playerId: identity.playerId,
+      principalKind: identity.principalKind === "debug" ? "debug" : "player",
       computerId: identity.computerId,
       mode: "viewer",
       access: "in_range",
-      state: "issued",
+      state: "pending",
       createdAt: now,
       expiresAt: now + this.sessionTtlMs,
       handoffExpiresAt: now + this.handoffTtlMs,
       terminal: null,
+      terminalVersion: 0,
       listeners: new Set(),
+      observers: new Set(),
       finalReason: null,
     };
+    if (conflicting !== undefined) {
+      this.finalize(conflicting, "closed", "handoff_superseded", true);
+    }
+    const attached = this.sessionsByComputer.get(identity.computerId);
     this.sessionsById.set(session.sessionId, session);
     this.sessionsByToken.set(session.token, session);
     if (attached === undefined) {
@@ -97,9 +112,41 @@ export class WebSessionStore {
       attached.add(session.sessionId);
     }
     this.handoffs.set(session.handoffCode, session);
-    const controlled = this.takeControl(session.sessionId);
     return {
-      ...controlled,
+      ...this.publicSession(session),
+      handoffCode: session.handoffCode,
+      handoffExpiresAt: session.handoffExpiresAt,
+    };
+  }
+
+  accept(sessionId, mode = "viewer") {
+    if (mode !== "viewer" && mode !== "writer") {
+      throw new WebSessionError("mode", "Invalid browser terminal mode.");
+    }
+    const session = this.sessionsById.get(sessionId);
+    if (session === undefined || !isActive(session)) {
+      throw new WebSessionError(
+        "gone",
+        "The browser terminal session is no longer active.",
+        410,
+      );
+    }
+    if (session.state === "pending") {
+      if (this.handoffs.get(session.handoffCode) !== session) {
+        throw new WebSessionError(
+          "superseded",
+          "The browser terminal request was superseded.",
+          409,
+        );
+      }
+      session.state = "issued";
+    }
+    const accepted =
+      mode === "writer"
+        ? this.takeControl(session.sessionId)
+        : this.publicSession(session);
+    return {
+      ...accepted,
       handoffCode: session.handoffCode,
       handoffExpiresAt: session.handoffExpiresAt,
     };
@@ -110,16 +157,24 @@ export class WebSessionStore {
       throw unauthorized();
     }
     const session = this.handoffs.get(code);
-    this.handoffs.delete(code);
     if (session === undefined) throw unauthorized();
+    if (session.state === "pending") {
+      throw new WebSessionError(
+        "not_ready",
+        "The browser terminal is not ready yet.",
+        409,
+      );
+    }
     if (
       session.state === "closed" ||
       session.state === "expired" ||
       session.handoffExpiresAt <= this.clock()
     ) {
-      this.finalize(session, "expired", "handoff_expired");
+      this.finalize(session, "expired", "handoff_expired", true);
       throw new WebSessionError("expired", "The link has expired.", 410);
     }
+    if (this.handoffs.get(code) !== session) throw unauthorized();
+    this.handoffs.delete(code);
     return { token: session.token, session: this.publicSession(session) };
   }
 
@@ -130,8 +185,9 @@ export class WebSessionStore {
     const session = this.sessionsByToken.get(token);
     if (session === undefined) throw unauthorized();
     if (session.expiresAt <= this.clock()) {
-      this.finalize(session, "expired", "session_expired");
+      this.finalize(session, "expired", "session_expired", true);
     }
+    if (session.state === "pending") throw unauthorized();
     if (session.state === "expired" || session.state === "closed") {
       throw new WebSessionError(
         "gone",
@@ -145,6 +201,16 @@ export class WebSessionStore {
   reconnect(code, { ignoreRange = false } = {}) {
     if (typeof code !== "string" || !handoffPattern.test(code)) {
       throw unauthorized();
+    }
+    const handoff = this.handoffs.get(code);
+    if (handoff !== undefined && isActive(handoff)) {
+      throw new WebSessionError(
+        handoff.state === "pending" ? "not_ready" : "handoff_required",
+        handoff.state === "pending"
+          ? "The browser terminal is not ready yet."
+          : "Open the new browser terminal link before reconnecting.",
+        409,
+      );
     }
     const session = this.sessionsByCode.get(code);
     if (session === undefined || !isActive(session)) throw unauthorized();
@@ -190,9 +256,34 @@ export class WebSessionStore {
     };
   }
 
+  observe(sessionId, listener) {
+    if (typeof listener !== "function") {
+      throw new TypeError("A terminal session observer must be a function.");
+    }
+    const session = this.sessionsById.get(sessionId);
+    if (session === undefined || !isActive(session)) {
+      throw new WebSessionError(
+        "gone",
+        "The browser terminal session is no longer active.",
+        410,
+      );
+    }
+    session.observers.add(listener);
+    let active = true;
+    return {
+      session: this.publicSession(session),
+      unsubscribe: () => {
+        if (!active) return;
+        active = false;
+        session.observers.delete(listener);
+      },
+    };
+  }
+
   updateTerminal(sessionId, payload) {
     const session = this.sessionsById.get(sessionId);
     if (session === undefined || !isActive(session)) return false;
+    session.terminalVersion += 1;
     session.terminal = payload;
     this.emit(session, {
       type: "terminal",
@@ -236,6 +327,30 @@ export class WebSessionStore {
     );
   }
 
+  isHandoffCurrent(sessionId) {
+    const session = this.sessionsById.get(sessionId);
+    return (
+      session !== undefined &&
+      (session.state === "issued" || session.state === "connected") &&
+      this.handoffs.get(session.handoffCode) === session
+    );
+  }
+
+  restoreHandoff(sessionId) {
+    const session = this.sessionsById.get(sessionId);
+    if (
+      session === undefined ||
+      !isActive(session) ||
+      session.state === "pending" ||
+      session.handoffExpiresAt <= this.clock() ||
+      this.handoffs.has(session.handoffCode)
+    ) {
+      return false;
+    }
+    this.handoffs.set(session.handoffCode, session);
+    return true;
+  }
+
   takeControl(sessionId) {
     const session = this.sessionsById.get(sessionId);
     if (session === undefined || !isActive(session)) {
@@ -243,6 +358,13 @@ export class WebSessionStore {
         "gone",
         "The browser terminal session is no longer active.",
         410,
+      );
+    }
+    if (session.state === "pending") {
+      throw new WebSessionError(
+        "not_ready",
+        "The browser terminal is not ready yet.",
+        409,
       );
     }
     const previousId = this.writersByComputer.get(session.computerId);
@@ -263,10 +385,10 @@ export class WebSessionStore {
     return this.publicSession(session);
   }
 
-  close(sessionId, reason = "closed") {
+  close(sessionId, reason = "closed", { relayToBedrock = false } = {}) {
     const session = this.sessionsById.get(sessionId);
     if (session === undefined || !isActive(session)) return false;
-    this.finalize(session, "closed", reason);
+    this.finalize(session, "closed", reason, relayToBedrock);
     return true;
   }
 
@@ -274,6 +396,10 @@ export class WebSessionStore {
     for (const session of this.sessionsById.values()) {
       if (isActive(session)) this.finalize(session, "closed", reason);
     }
+  }
+
+  drainBedrockClosures() {
+    return this.bedrockClosures.splice(0);
   }
 
   activeSessions() {
@@ -288,13 +414,13 @@ export class WebSessionStore {
     for (const session of this.sessionsById.values()) {
       if (
         isActive(session) &&
-        this.handoffs.has(session.handoffCode) &&
+        this.handoffs.get(session.handoffCode) === session &&
         session.handoffExpiresAt <= now
       ) {
-        this.finalize(session, "expired", "handoff_expired");
+        this.finalize(session, "expired", "handoff_expired", true);
         count += 1;
       } else if (isActive(session) && session.expiresAt <= now) {
-        this.finalize(session, "expired", "session_expired");
+        this.finalize(session, "expired", "session_expired", true);
         count += 1;
       }
       if (
@@ -313,6 +439,7 @@ export class WebSessionStore {
       sessionId: session.sessionId,
       requestId: session.requestId,
       computerId: session.computerId,
+      principalKind: session.principalKind,
       mode: session.mode,
       access: session.access,
       connectionCode: session.handoffCode,
@@ -320,9 +447,17 @@ export class WebSessionStore {
       createdAt: session.createdAt,
       expiresAt: session.expiresAt,
       terminal: session.terminal,
+      terminalVersion: session.terminalVersion,
       finalReason: session.finalReason,
       ...extra,
     };
+  }
+
+  activeSession(sessionId) {
+    const session = this.sessionsById.get(sessionId);
+    return session !== undefined && isActive(session)
+      ? this.publicSession(session)
+      : undefined;
   }
 
   activeCount() {
@@ -353,9 +488,16 @@ export class WebSessionStore {
         session.listeners.delete(listener);
       }
     }
+    for (const observer of [...session.observers]) {
+      try {
+        observer(event);
+      } catch {
+        session.observers.delete(observer);
+      }
+    }
   }
 
-  finalize(session, state, reason) {
+  finalize(session, state, reason, relayToBedrock = false) {
     if (!isActive(session)) return;
     const attached = this.sessionsByComputer.get(session.computerId);
     attached?.delete(session.sessionId);
@@ -370,14 +512,28 @@ export class WebSessionStore {
     session.state = state;
     session.finalReason = reason;
     session.finalizedAt = this.clock();
-    this.handoffs.delete(session.handoffCode);
+    if (this.handoffs.get(session.handoffCode) === session) {
+      this.handoffs.delete(session.handoffCode);
+    }
+    if (relayToBedrock) {
+      this.bedrockClosures.push({
+        computerId: session.computerId,
+        reason,
+        sessionId: session.sessionId,
+      });
+    }
     this.emit(session, { type: "state", session: this.publicSession(session) });
     session.listeners.clear();
+    session.observers.clear();
   }
 }
 
 function isActive(session) {
-  return session.state === "issued" || session.state === "connected";
+  return (
+    session.state === "pending" ||
+    session.state === "issued" ||
+    session.state === "connected"
+  );
 }
 
 function validateIdentity(identity) {
@@ -390,7 +546,12 @@ function validateIdentity(identity) {
     ) ||
     typeof identity.playerId !== "string" ||
     identity.playerId.length === 0 ||
-    identity.playerId.length > 128
+    identity.playerId.length > 128 ||
+    (identity.principalKind !== undefined &&
+      identity.principalKind !== "player" &&
+      identity.principalKind !== "debug") ||
+    (identity.principalKind === "debug" && identity.playerId !== "mcp-debug") ||
+    (identity.principalKind !== "debug" && identity.playerId === "mcp-debug")
   ) {
     throw new WebSessionError("identity", "Invalid browser session identity.");
   }

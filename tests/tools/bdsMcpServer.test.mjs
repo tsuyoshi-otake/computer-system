@@ -39,12 +39,54 @@ describe("BDS MCP stdio server", () => {
       "bds_execute_computer_command",
       "bds_get_logs",
       "bds_wait_for_log",
+      "bds_list_computers",
+      "bds_open_web_terminal",
+      "bds_get_tui_screen",
+      "bds_wait_for_tui_screen",
+      "bds_send_tui_input",
       "bds_issue_web_handoff",
       "bds_wait_for_web_handoff",
     ]);
     expect(
       listed.tools.find((tool) => tool.name === "bds_stop")?.annotations,
     ).toMatchObject({ destructiveHint: true });
+    const openTool = listed.tools.find(
+      (tool) => tool.name === "bds_open_web_terminal",
+    );
+    expect(openTool?.description).toContain(
+      "server-authorized MCP debug principal",
+    );
+    expect(openTool?.description).toContain("No connected Bedrock player");
+    const captureTool = listed.tools.find(
+      (tool) => tool.name === "bds_get_tui_screen",
+    );
+    expect(captureTool).toMatchObject({
+      annotations: { readOnlyHint: true, idempotentHint: true },
+      inputSchema: {
+        additionalProperties: false,
+        required: ["computerId"],
+      },
+    });
+    expect(captureTool?.description).toContain("exact MCP debug-owned writer");
+    expect(captureTool?.description).toContain("optional 16-color cell grids");
+    const waitTool = listed.tools.find(
+      (tool) => tool.name === "bds_wait_for_tui_screen",
+    );
+    expect(waitTool?.inputSchema.properties.contains.maxLength).toBe(500);
+    expect(waitTool?.inputSchema.properties.timeoutMs.maximum).toBe(120_000);
+    expect(waitTool?.annotations).toMatchObject({
+      readOnlyHint: true,
+      idempotentHint: false,
+    });
+    const inputTool = listed.tools.find(
+      (tool) => tool.name === "bds_send_tui_input",
+    );
+    expect(inputTool?.inputSchema.properties.kind.enum).toEqual([
+      "line",
+      "keys",
+      "interrupt",
+    ]);
+    expect(inputTool?.description).toContain("Secret prompts are rejected");
   });
 
   it("returns structured status and rejects arbitrary console commands", async () => {
@@ -74,6 +116,15 @@ describe("BDS MCP stdio server", () => {
     });
     expect(rejected.isError).toBe(true);
     expect(rejected.structuredContent.error).toMatch(/Command rejected/u);
+
+    const noWriter = await client.request("tools/call", {
+      name: "bds_get_tui_screen",
+      arguments: { computerId: "c-000001" },
+    });
+    expect(noWriter.isError).toBe(true);
+    expect(noWriter.structuredContent.error).toMatch(
+      /Call bds_open_web_terminal first/u,
+    );
   });
 });
 

@@ -156,13 +156,13 @@ function caseTexture() {
 function computerFrontTexture(advanced) {
   const canvas = caseTexture();
   if (advanced) {
-    drive(canvas, 2, 2);
-    drive(canvas, 2, 6);
+    drive(canvas, 1, 2);
+    drive(canvas, 1, 6);
   } else {
-    drive(canvas, 2, 3);
+    drive(canvas, 1, 2);
   }
-  rectangle(canvas, 11, advanced ? 10 : 8, 2, 2, [82, 82, 79, 255]);
-  pixel(canvas, 11, advanced ? 10 : 8, [231, 224, 195, 255]);
+  rectangle(canvas, 13, 3, 2, 2, [82, 82, 79, 255]);
+  pixel(canvas, 13, 3, [231, 224, 195, 255]);
   for (let y = 12; y <= 14; y += 2) {
     for (let x = 2; x <= 12; x += 2) {
       rectangle(canvas, x, y, 1, 1, [119, 116, 111, 255]);

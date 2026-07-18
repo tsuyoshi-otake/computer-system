@@ -45,7 +45,20 @@ describe("DOS profile contract", (): void => {
       "Elapsed time: 0.000 seconds\r\n",
     );
     expect(shell.submit("VER").stdout).toBe(
-      "Computer System DOS Version 6.20\r\n",
+      "Computer System DOS Version 1.00\r\n",
+    );
+    const help = shell.submit("HELP");
+    expect(help.lines).toContain("Computer System DOS 1.0 Command Help");
+    expect(help.stdout).toContain("CS ASM 1.0");
+    expect(help.stdout).toContain("CS C/C++ 1.0");
+    expect(help.stdout).toContain("CS QBASIC 1.0");
+    expect(shell.submit("HELP EDIT").stdout).toContain(
+      "bounded A:/C: DOS file browser",
+    );
+    expect(shell.submit("HELP PWB").stdout).toContain("CS PROGRAM LIST 1.0");
+    expect(shell.submit("HELP CSCPP").stdout).toContain('extern "C"');
+    expect(shell.submit("HELP QBASIC").stdout).toContain(
+      "does not create OBJ, CSX, EXE",
     );
     expect(shell.submit("VOL").stdout).toContain(
       "Volume Serial Number is 0000-1234\r\n",
@@ -64,7 +77,7 @@ describe("DOS profile contract", (): void => {
     const detailed = shell.submit("DIR").stdout;
     expect(detailed).toContain("Volume in drive C is CS-DOS\r\n");
     expect(detailed).toContain("Directory of C:\\WORK\r\n");
-    expect(detailed).toContain("2 File(s)");
+    expect(detailed).toContain("2 file(s)");
     expect(detailed).not.toMatch(/(?<!\r)\n/u);
     expect(shell.submit("TREE C:\\ /F").stdout).toContain("+---WORK");
     expect(shell.submit("MEM /F").stdout).toContain("Free memory blocks:");
@@ -75,6 +88,39 @@ describe("DOS profile contract", (): void => {
     expect(shell.submit("DEL ONE.TXT").exitCode).toBe(0);
     expect(shell.submit("CHDIR C:\\").exitCode).toBe(0);
     expect(shell.submit("RMDIR C:\\WORK").exitCode).toBe(0);
+  });
+
+  it("renders aligned MS-DOS-style 8.3 DIR rows and comma-separated sizes", (): void => {
+    const writtenAt = Date.UTC(2026, 6, 18, 9, 36);
+    const filesystem = new InMemoryFilesystem();
+    const shell = new ShellSession(filesystem, {
+      clock: {
+        currentGameTime: (): { absoluteTicks: number; timeOfDay: number } => ({
+          absoluteTicks: 0,
+          timeOfDay: 0,
+        }),
+        currentWallTimeMilliseconds: (): number => writtenAt,
+      },
+      osProfile: "dos",
+    });
+
+    expect(shell.submit("MD C:\\VIEW").exitCode).toBe(0);
+    filesystem.makeDirectory("/drives/c/view/dos");
+    filesystem.setModifiedTime("/drives/c/view/dos", writtenAt);
+    filesystem.writeFile("/drives/c/view/bigfile.txt", "X".repeat(54_645));
+    filesystem.setModifiedTime(
+      "/drives/c/view/bigfile.txt",
+      Date.UTC(1994, 4, 31, 6, 22),
+    );
+
+    const output = shell.submit("DIR C:\\VIEW").stdout;
+
+    expect(output).toContain("BIGFILE  TXT        54,645 05-31-94   6:22a\r\n");
+    expect(output).toContain("DOS          <DIR>         07-18-26   9:36a\r\n");
+    expect(output).toContain("        1 file(s)         54,645 bytes\r\n");
+    expect(output).toMatch(
+      /\r\n {8}1 dir\(s\)\s+\d{1,3}(?:,\d{3})+ bytes free\r\n/u,
+    );
   });
 
   it("supports drive paths, case-insensitive lookup, CRLF boot files, and NUL", (): void => {
@@ -155,10 +201,10 @@ describe("DOS profile contract", (): void => {
     expect(shell.submit("MEM /P").exitCode).toBe(2);
     expect(shell.submit("SYSTEMINFO").lines).toContain("Computer ID: c-dos002");
     expect(shell.submit("VER").lines[0]).toBe(
-      "Computer System DOS Version 6.20",
+      "Computer System DOS Version 1.00",
     );
     expect(shell.submit("ECHO %OS%").lines).toEqual(["CS-DOS"]);
-    expect(shell.submit("SYSTEMINFO").lines).toContain("OS Alias: CS-DOS 6.2");
+    expect(shell.submit("SYSTEMINFO").lines).toContain("OS Alias: CS-DOS 1.0");
     expect(shell.submit("SYSTEMINFO").stdout).toContain(
       "CPU: Computer System 386SX, 16 MHz",
     );

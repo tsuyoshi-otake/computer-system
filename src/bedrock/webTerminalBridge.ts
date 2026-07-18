@@ -5,17 +5,29 @@ import type { RuntimeCommandResult } from "../application/computer/computerRunti
 import { TerminalSnapshotScheduler } from "../application/terminal/terminalSnapshotScheduler.js";
 import { FloppyAudioEventBroker } from "../application/terminal/floppyAudioEvents.js";
 import {
+  WebTerminalRequestAdmission,
+  type WebTerminalRequestSource,
+} from "../application/terminal/webTerminalRequestAdmission.js";
+import {
+  isInitialWebTerminalAccessAllowed,
+  nextWebTerminalRangeAccess,
+} from "../application/terminal/webTerminalRange.js";
+import {
   WebTerminalAccessRegistry,
   type WebTerminalAccessMode,
 } from "../application/terminal/webTerminalAccess.js";
 import { computerHost, setFloppyActivityHandler } from "./computerHost.js";
 import { selectComputerTerminal } from "./computerTerminal.js";
+import { ejectFloppyToPlayer } from "./floppyComponent.js";
 
 const requestMarker = "CS_WEB_SESSION_REQUEST ";
+const readyMarker = "CS_WEB_SESSION_READY ";
 const snapshotMarker = "CS_WEB_TERMINAL ";
 const accessMarker = "CS_WEB_ACCESS ";
 const completionMarker = "CS_WEB_COMPLETION ";
+const inputMarker = "CS_WEB_INPUT ";
 const powerMarker = "CS_WEB_POWER ";
+const ejectMarker = "CS_WEB_FLOPPY_EJECT ";
 const finalMarker = "CS_WEB_SESSION_FINAL ";
 const requestLifetimeTicks = 200;
 const sessionLifetimeTicks = 36_000;
@@ -25,11 +37,17 @@ const maxSnapshotsPerPass = 2;
 const maxEagerSnapshotsPerPass = 4;
 const maxEagerSnapshotAttempts = 3;
 
+interface WebTerminalPrincipal {
+  readonly id: string;
+  readonly kind: "debug" | "player";
+  readonly player?: Player;
+}
+
 interface PendingRequest {
   readonly accessPoint?: WebTerminalAccessPoint;
   readonly computerId: string;
   readonly expiresAtTick: number;
-  readonly player: Player;
+  readonly principal: WebTerminalPrincipal;
   readonly requestId: string;
 }
 
@@ -37,19 +55,70 @@ interface ActiveSession {
   readonly accessPoint?: WebTerminalAccessPoint;
   readonly computerId: string;
   readonly expiresAtTick: number;
-  readonly playerId: string;
-  readonly player: Player;
+  readonly principal: WebTerminalPrincipal;
   readonly rangeCheckDisabledForDebug: boolean;
   readonly sessionId: string;
   access: "in_range" | "out_of_range";
   audioCursor: number;
-  lastSnapshot?: string;
+  lastSnapshotMetadata?: string;
+  lastTerminal?: ComputerRecord["terminal"];
+  lastTerminalRevision?: number;
   mouseButtons: number;
   mouseSequence: number;
   mouseX: number;
   mouseY: number;
-  pendingMouseMove?: string;
+  pendingMouseMove?: PendingMouseMove;
 }
+
+interface SharedSnapshotFrame {
+  readonly metadata: string;
+  readonly payload: {
+    readonly computerId: string;
+    readonly label: string;
+    readonly lifecycle: string;
+    readonly storage: ReturnType<typeof computerHost.storageStatus>;
+    readonly terminal: ReturnType<ComputerRecord["terminal"]["snapshot"]> & {
+      readonly secretInput: boolean;
+    };
+  };
+  readonly terminal: ComputerRecord["terminal"];
+  readonly terminalRevision: number;
+}
+
+interface PendingMouseMove {
+  readonly event: TerminalMouseEvent;
+  readonly requestId: string;
+  readonly value: string;
+}
+
+interface TerminalMouseEvent {
+  readonly action: "down" | "move" | "up";
+  readonly button: 0 | 1 | 2;
+  readonly sequence: number;
+  readonly x: number;
+  readonly y: number;
+}
+
+type WebInputResult =
+  | RuntimeCommandResult
+  | {
+      readonly outcome: "ignored";
+      readonly reason:
+        | "duplicate_mouse_button"
+        | "mouse_move_superseded"
+        | "read_only"
+        | "secret_input"
+        | "stale_mouse_event";
+    }
+  | { readonly outcome: "missing"; readonly resource: "session" };
+
+type WebInputFailureCode =
+  | "input_queue_failed"
+  | "invalid_encoding"
+  | "invalid_key_batch"
+  | "invalid_line"
+  | "invalid_mouse_event"
+  | "malformed_input";
 
 interface WebTerminalAccessPoint {
   readonly dimensionId: string;
@@ -60,9 +129,14 @@ interface WebTerminalAccessPoint {
 
 const pendingRequests = new Map<string, PendingRequest>();
 const activeSessions = new Map<string, ActiveSession>();
+const sharedSnapshotFrames = new Map<string, SharedSnapshotFrame>();
 const sessionsByComputer = new Map<string, Set<string>>();
 const floppyAudio = new FloppyAudioEventBroker(256);
 const terminalAccess = new WebTerminalAccessRegistry(maxActiveSessions);
+const requestAdmission = new WebTerminalRequestAdmission(
+  maxPendingRequests,
+  10,
+);
 const snapshotScheduler = new TerminalSnapshotScheduler({
   maximumEagerAttempts: maxEagerSnapshotAttempts,
   maximumEagerPerPass: maxEagerSnapshotsPerPass,
@@ -75,54 +149,103 @@ export function requestWebComputerTerminal(
   player: Player,
   record: ComputerRecord,
   accessBlock?: Block,
+  source: WebTerminalRequestSource = "interaction",
+): void {
+  requestWebComputerTerminalForPrincipal(
+    { id: player.id, kind: "player", player },
+    record,
+    accessBlock,
+    source,
+  );
+}
+
+export function requestDebugWebComputerTerminal(record: ComputerRecord): void {
+  requestWebComputerTerminalForPrincipal(
+    { id: "mcp-debug", kind: "debug" },
+    record,
+    undefined,
+    "debug",
+  );
+}
+
+function requestWebComputerTerminalForPrincipal(
+  principal: WebTerminalPrincipal,
+  record: ComputerRecord,
+  accessBlock: Block | undefined,
+  source: WebTerminalRequestSource,
 ): void {
   pruneExpiredRequests();
-  if (pendingRequests.size >= maxPendingRequests) {
-    player.sendMessage(
+  const requestId = `r${system.currentTick.toString(36)}-${nextRequest.toString(36)}`;
+  nextRequest = nextRequest === Number.MAX_SAFE_INTEGER ? 1 : nextRequest + 1;
+  const admission = requestAdmission.admit({
+    computerId: record.computerId,
+    currentTick: system.currentTick,
+    playerId: principal.id,
+    requestId,
+    source,
+  });
+  if (admission.outcome === "duplicate") return;
+  if (admission.outcome === "capacity") {
+    sendPrincipalMessage(
+      principal,
       "Web Terminal is busy. Try again after another request finishes.",
     );
     return;
   }
 
-  selectComputerTerminal(player.id, record.computerId);
-  if (record.lifecycle.state.kind === "off") {
-    computerHost.runtime.powerOn(record.computerId);
-  }
-  const requestId = `r${system.currentTick.toString(36)}-${nextRequest.toString(36)}`;
-  nextRequest = nextRequest === Number.MAX_SAFE_INTEGER ? 1 : nextRequest + 1;
-  const request: PendingRequest = {
-    accessPoint:
-      accessBlock === undefined
-        ? undefined
-        : {
-            dimensionId: accessBlock.dimension.id,
-            x: accessBlock.x + 0.5,
-            y: accessBlock.y + 0.5,
-            z: accessBlock.z + 0.5,
-          },
-    computerId: record.computerId,
-    expiresAtTick: system.currentTick + requestLifetimeTicks,
-    player,
-    requestId,
-  };
-  pendingRequests.set(requestId, request);
-  player.sendMessage("Preparing a secure browser terminal link…");
-  console.warn(
-    `${requestMarker}${JSON.stringify({
-      requestId,
-      playerId: player.id,
+  try {
+    if (principal.player !== undefined) {
+      selectComputerTerminal(principal.player.id, record.computerId);
+    }
+    if (record.lifecycle.state.kind === "off") {
+      computerHost.runtime.powerOn(record.computerId);
+    }
+    const request: PendingRequest = {
+      accessPoint:
+        accessBlock === undefined
+          ? undefined
+          : {
+              dimensionId: accessBlock.dimension.id,
+              x: accessBlock.x + 0.5,
+              y: accessBlock.y + 0.5,
+              z: accessBlock.z + 0.5,
+            },
       computerId: record.computerId,
-    })}`,
-  );
+      expiresAtTick: system.currentTick + requestLifetimeTicks,
+      principal,
+      requestId,
+    };
+    pendingRequests.set(requestId, request);
+    sendPrincipalMessage(
+      principal,
+      "Preparing a secure browser terminal link...",
+    );
+    console.warn(
+      `${requestMarker}${JSON.stringify({
+        requestId,
+        playerId: principal.id,
+        principalKind: principal.kind,
+        computerId: record.computerId,
+      })}`,
+    );
+  } catch {
+    pendingRequests.delete(requestId);
+    requestAdmission.finalize(requestId, "failed", system.currentTick);
+    sendPrincipalMessage(
+      principal,
+      "Web Terminal request could not be started.",
+    );
+    return;
+  }
 
   system.runTimeout((): void => {
     const pending = pendingRequests.get(requestId);
     if (pending === undefined || pending.expiresAtTick > system.currentTick) {
       return;
     }
-    pendingRequests.delete(requestId);
-    if (!pending.player.isValid) return;
-    pending.player.sendMessage(
+    finalizePendingRequest(pending, "failed");
+    sendPrincipalMessage(
+      pending.principal,
       "Web Terminal companion did not respond. Check that the companion is running, then try again.",
     );
   }, requestLifetimeTicks + 1);
@@ -135,6 +258,9 @@ export function handleWebTerminalScriptEvent(
   switch (id) {
     case "computer_system:web-response":
       handleResponse(message);
+      return true;
+    case "computer_system:web-reject":
+      handleRejection(message);
       return true;
     case "computer_system:web-input":
       handleInput(message);
@@ -153,6 +279,9 @@ export function handleWebTerminalScriptEvent(
       return true;
     case "computer_system:web-power":
       handlePower(message);
+      return true;
+    case "computer_system:web-floppy-eject":
+      handleFloppyEject(message);
       return true;
     case "computer_system:web-close":
       handleClose(message);
@@ -187,7 +316,8 @@ export function disconnectWebTerminalPlayer(
 ): void {
   for (const session of [...activeSessions.values()]) {
     if (
-      session.playerId === playerId &&
+      session.principal.kind === "player" &&
+      session.principal.id === playerId &&
       (computerId === undefined || session.computerId === computerId)
     ) {
       finalizeSession(session, reason);
@@ -195,12 +325,27 @@ export function disconnectWebTerminalPlayer(
   }
   for (const request of [...pendingRequests.values()]) {
     if (
-      request.player.id === playerId &&
+      request.principal.kind === "player" &&
+      request.principal.id === playerId &&
       (computerId === undefined || request.computerId === computerId)
     ) {
-      pendingRequests.delete(request.requestId);
+      finalizePendingRequest(request, "failed");
     }
   }
+}
+
+function handleRejection(message: string): void {
+  const match = /^(r[a-z0-9]+-[a-z0-9]+) ([a-z][a-z_]{0,31})$/u.exec(message);
+  if (match === null) return;
+  const request = pendingRequests.get(match[1] ?? "");
+  if (request === undefined) return;
+  finalizePendingRequest(request, "failed");
+  sendPrincipalMessage(
+    request.principal,
+    match[2] === "capacity"
+      ? "Web Terminal is busy. Try again after another session closes."
+      : "Web Terminal request was rejected by the companion. Try again.",
+  );
 }
 
 function handleResponse(message: string): void {
@@ -217,36 +362,44 @@ function handleResponse(message: string): void {
     debugMarker = "",
     url = "",
   ] = match;
-  const rangeCheckDisabledForDebug = debugMarker === "debug";
   const request = pendingRequests.get(requestId);
   if (request === undefined) {
     rejectSession(sessionId, "request_missing");
     return;
   }
-  pendingRequests.delete(requestId);
-  if (!request.player.isValid || request.expiresAtTick <= system.currentTick) {
+  if (
+    !isPrincipalAvailable(request.principal) ||
+    request.expiresAtTick <= system.currentTick
+  ) {
+    finalizePendingRequest(request, "failed");
     rejectSession(sessionId, "request_expired");
     return;
   }
+  const rangeCheckDisabledForDebug =
+    request.principal.kind === "debug" || debugMarker === "debug";
   if (
-    !isWithinAccessRange(
-      request.player,
+    !isInitialAccessAllowed(
+      request.principal,
       request.accessPoint,
       rangeCheckDisabledForDebug,
     )
   ) {
-    request.player.sendMessage(
+    sendPrincipalMessage(
+      request.principal,
       "Web Terminal access expired: stay within 3 blocks of the Computer.",
     );
+    finalizePendingRequest(request, "failed");
     rejectSession(sessionId, "out_of_range");
     return;
   }
 
   pruneExpiredSessions();
   if (activeSessions.size >= maxActiveSessions) {
-    request.player.sendMessage(
+    sendPrincipalMessage(
+      request.principal,
       "Web Terminal capacity was reached. Close another session and try again.",
     );
+    finalizePendingRequest(request, "failed");
     rejectSession(sessionId, "capacity");
     return;
   }
@@ -255,8 +408,7 @@ function handleResponse(message: string): void {
     accessPoint: request.accessPoint,
     computerId: request.computerId,
     expiresAtTick: system.currentTick + sessionLifetimeTicks,
-    playerId: request.player.id,
-    player: request.player,
+    principal: request.principal,
     rangeCheckDisabledForDebug,
     sessionId,
     access: "in_range",
@@ -278,9 +430,11 @@ function handleResponse(message: string): void {
     }
   } catch {
     snapshotScheduler.detach(sessionId);
-    request.player.sendMessage(
+    sendPrincipalMessage(
+      request.principal,
       "Web Terminal session could not be attached. Try again.",
     );
+    finalizePendingRequest(request, "failed");
     rejectSession(sessionId, "attach_failed");
     return;
   }
@@ -291,65 +445,178 @@ function handleResponse(message: string): void {
     sessionsByComputer.set(session.computerId, computerSessions);
   }
   computerSessions.add(sessionId);
-  request.player.sendMessage(
-    "Open Computer System Web Terminal (valid for 2 minutes):",
-  );
+  finalizePendingRequest(request, "accepted");
+  console.warn(`${readyMarker}${JSON.stringify({ sessionId })}`);
   const shortHandoff = /^(https?:\/\/[^/\s]+)\/p\/([0-9]{4})$/u.exec(url);
   if (shortHandoff === null) {
-    request.player.sendMessage(url);
+    sendPrincipalMessage(
+      request.principal,
+      `Web Terminal ready for 2 minutes: ${url}`,
+    );
   } else {
-    request.player.sendMessage(`${shortHandoff[1]}/`);
-    request.player.sendMessage(`Connection code: ${shortHandoff[2]}`);
+    sendPrincipalMessage(
+      request.principal,
+      `Web Terminal ready for 2 minutes: ${shortHandoff[1]}/ - Connection code: ${shortHandoff[2]}`,
+    );
   }
   emitSnapshot(session, true);
 }
 
 function handleInput(message: string): void {
+  const correlation =
+    /^([A-Za-z0-9_-]{12,32}) ([A-Za-z0-9_-]{6,20})(?: |$)/u.exec(message);
+  if (correlation === null) return;
+  const sessionId = correlation[1] ?? "";
+  const requestId = correlation[2] ?? "";
   const match =
-    /^([A-Za-z0-9_-]{12,32}) (line|keys|mouse) ([^\s]{0,180})$/u.exec(message);
-  if (match === null) return;
-  const session = requireActiveSession(match[1] ?? "");
-  if (session === undefined || !terminalAccess.canWrite(session.sessionId))
-    return;
-  let value: string;
-  try {
-    value = decodeURIComponent(match[3] ?? "");
-  } catch {
+    /^([A-Za-z0-9_-]{12,32}) ([A-Za-z0-9_-]{6,20}) (line|keys|mouse) ([^\s]{0,180})$/u.exec(
+      message,
+    );
+  if (match === null) {
+    finalizeInputRequest(
+      sessionId,
+      requestId,
+      failedInputResult("malformed_input"),
+    );
     return;
   }
-  if (match[2] === "mouse") {
+  const session = requireActiveSession(sessionId);
+  if (session === undefined) {
+    finalizeInputRequest(sessionId, requestId, {
+      outcome: "missing",
+      resource: "session",
+    });
+    return;
+  }
+  if (!terminalAccess.canWrite(session.sessionId)) {
+    finalizeInputRequest(sessionId, requestId, {
+      outcome: "ignored",
+      reason: "read_only",
+    });
+    return;
+  }
+  if (
+    session.principal.kind === "debug" &&
+    computerHost.runtime.isShellSecretInput(session.computerId)
+  ) {
+    finalizeInputRequest(sessionId, requestId, {
+      outcome: "ignored",
+      reason: "secret_input",
+    });
+    return;
+  }
+  let value: string;
+  try {
+    value = decodeURIComponent(match[4] ?? "");
+  } catch {
+    finalizeInputRequest(
+      sessionId,
+      requestId,
+      failedInputResult("invalid_encoding"),
+    );
+    return;
+  }
+  if (match[3] === "mouse") {
     const event = parseTerminalMouseEvent(value);
-    if (event === undefined || event.sequence <= session.mouseSequence) return;
-    session.mouseSequence = event.sequence;
-    session.mouseX = event.x;
-    session.mouseY = event.y;
+    if (event === undefined) {
+      finalizeInputRequest(
+        sessionId,
+        requestId,
+        failedInputResult("invalid_mouse_event"),
+      );
+      return;
+    }
+    const newestSequence = Math.max(
+      session.mouseSequence,
+      session.pendingMouseMove?.event.sequence ?? -1,
+    );
+    if (event.sequence <= newestSequence) {
+      finalizeInputRequest(sessionId, requestId, {
+        outcome: "ignored",
+        reason: "stale_mouse_event",
+      });
+      return;
+    }
     if (event.action === "move") {
-      session.pendingMouseMove = value;
+      const superseded = session.pendingMouseMove;
+      if (superseded !== undefined) {
+        finalizeInputRequest(sessionId, superseded.requestId, {
+          outcome: "ignored",
+          reason: "mouse_move_superseded",
+        });
+      }
+      session.pendingMouseMove = { event, requestId, value };
       return;
     }
     flushPendingMouseMove(session);
     const mask = 1 << event.button;
     if (event.action === "down") {
-      if ((session.mouseButtons & mask) !== 0) return;
-      session.mouseButtons |= mask;
-    } else {
-      if ((session.mouseButtons & mask) === 0) return;
-      session.mouseButtons &= ~mask;
-    }
-    computerHost.runtime.queueEvent(
-      session.computerId,
-      "terminal_mouse",
-      value,
-    );
-  } else if (match[2] === "keys") {
-    if (!isTerminalKeyBatch(value)) return;
-    computerHost.runtime.queueEvent(session.computerId, "terminal_keys", value);
-  } else {
-    if (value.includes("\0") || /[\r\n]/u.test(value) || value.length > 128)
+      if ((session.mouseButtons & mask) !== 0) {
+        finalizeInputRequest(sessionId, requestId, {
+          outcome: "ignored",
+          reason: "duplicate_mouse_button",
+        });
+        return;
+      }
+    } else if ((session.mouseButtons & mask) === 0) {
+      finalizeInputRequest(sessionId, requestId, {
+        outcome: "ignored",
+        reason: "duplicate_mouse_button",
+      });
       return;
-    computerHost.runtime.queueEvent(session.computerId, "terminal_line", value);
+    }
+    const result = safeInputQueueResult(
+      computerHost.runtime.queueEvent(
+        session.computerId,
+        "terminal_mouse",
+        value,
+      ),
+    );
+    if (result.outcome === "accepted") {
+      session.mouseSequence = event.sequence;
+      session.mouseX = event.x;
+      session.mouseY = event.y;
+      session.mouseButtons =
+        event.action === "down"
+          ? session.mouseButtons | mask
+          : session.mouseButtons & ~mask;
+    }
+    finalizeInputRequest(sessionId, requestId, result);
+  } else if (match[3] === "keys") {
+    if (!isTerminalKeyBatch(value)) {
+      finalizeInputRequest(
+        sessionId,
+        requestId,
+        failedInputResult("invalid_key_batch"),
+      );
+      return;
+    }
+    const result = safeInputQueueResult(
+      computerHost.runtime.queueEvent(
+        session.computerId,
+        "terminal_keys",
+        value,
+      ),
+    );
+    finalizeInputRequest(sessionId, requestId, result);
+  } else {
+    if (value.includes("\0") || /[\r\n]/u.test(value) || value.length > 128) {
+      finalizeInputRequest(
+        sessionId,
+        requestId,
+        failedInputResult("invalid_line"),
+      );
+      return;
+    }
+    const result = safeInputQueueResult(
+      computerHost.runtime.queueEvent(
+        session.computerId,
+        "terminal_line",
+        value,
+      ),
+    );
+    finalizeInputRequest(sessionId, requestId, result);
   }
-  snapshotScheduler.requestEager(session.sessionId);
 }
 
 function parseTerminalMouseEvent(value: string):
@@ -522,6 +789,47 @@ function handlePower(message: string): void {
   snapshotScheduler.requestEager(session.sessionId);
 }
 
+function handleFloppyEject(message: string): void {
+  const match = /^([A-Za-z0-9_-]{12,32}) ([A-Za-z0-9_-]{6,20})$/u.exec(message);
+  if (match === null) return;
+  const session = requireActiveSession(match[1] ?? "");
+  if (session === undefined || !terminalAccess.canWrite(session.sessionId))
+    return;
+  const requestId = match[2] ?? "";
+  const record = computerHost.get(session.computerId);
+  const player = session.principal.player;
+  let result:
+    | { readonly outcome: "ejected" | "empty" | "missing" }
+    | { readonly error: string; readonly outcome: "failed" };
+  if (record === undefined) {
+    result = { outcome: "missing" };
+  } else if (player === undefined) {
+    result = {
+      error: "floppy_eject_requires_player",
+      outcome: "failed",
+    };
+  } else {
+    try {
+      result = {
+        outcome: ejectFloppyToPlayer(session.computerId, player),
+      };
+    } catch (error: unknown) {
+      result = {
+        error: error instanceof Error ? error.message : String(error),
+        outcome: "failed",
+      };
+    }
+  }
+  console.warn(
+    `${ejectMarker}${JSON.stringify({
+      ...result,
+      requestId,
+      sessionId: session.sessionId,
+    })}`,
+  );
+  snapshotScheduler.requestEager(session.sessionId);
+}
+
 function handleClose(message: string): void {
   const match = /^([A-Za-z0-9_-]{12,32})$/u.exec(message);
   if (match === null) return;
@@ -530,11 +838,40 @@ function handleClose(message: string): void {
 }
 
 function serializableRuntimeResult(
-  result: RuntimeCommandResult,
+  result: WebInputResult,
 ): Record<string, unknown> {
   return result.outcome === "failed"
     ? { outcome: result.outcome, error: result.error.message }
     : result;
+}
+
+function failedInputResult(error: WebInputFailureCode): RuntimeCommandResult {
+  return { outcome: "failed", error: new Error(error) };
+}
+
+function safeInputQueueResult(
+  result: RuntimeCommandResult,
+): RuntimeCommandResult {
+  return result.outcome === "failed"
+    ? failedInputResult("input_queue_failed")
+    : result;
+}
+
+function finalizeInputRequest(
+  sessionId: string,
+  requestId: string,
+  result: WebInputResult,
+): void {
+  console.warn(
+    `${inputMarker}${JSON.stringify({
+      sessionId,
+      requestId,
+      ...serializableRuntimeResult(result),
+    })}`,
+  );
+  if (result.outcome === "accepted") {
+    snapshotScheduler.requestEager(sessionId);
+  }
 }
 
 function requireActiveSession(sessionId: string): ActiveSession | undefined {
@@ -544,13 +881,7 @@ function requireActiveSession(sessionId: string): ActiveSession | undefined {
     finalizeSession(session, "expired");
     return undefined;
   }
-  if (
-    !isWithinAccessRange(
-      session.player,
-      session.accessPoint,
-      session.rangeCheckDisabledForDebug,
-    )
-  ) {
+  if (nextAccessForSession(session) === "out_of_range") {
     setSessionAccess(session, "out_of_range");
     return undefined;
   }
@@ -570,32 +901,84 @@ function setSessionAccess(
     releaseMouseButtons(session);
     session.audioCursor = floppyAudio.latestSequence(session.computerId);
   }
-  if (session.player.isValid) {
-    session.player.sendMessage(
-      access === "in_range"
-        ? "Web Terminal reconnected: Computer is within 3 blocks."
-        : "Web Terminal paused: move within 3 blocks of the Computer to reconnect.",
-    );
-  }
   console.warn(
     `${accessMarker}${JSON.stringify({ sessionId: session.sessionId, access })}`,
   );
   return true;
 }
 
-function isWithinAccessRange(
-  player: Player,
+function isPrincipalAvailable(principal: WebTerminalPrincipal): boolean {
+  return principal.kind === "debug" || principal.player?.isValid === true;
+}
+
+function sendPrincipalMessage(
+  principal: WebTerminalPrincipal,
+  message: string,
+): void {
+  if (principal.player?.isValid) principal.player.sendMessage(message);
+}
+
+function isInitialAccessAllowed(
+  principal: WebTerminalPrincipal,
   accessPoint: WebTerminalAccessPoint | undefined,
   rangeCheckDisabledForDebug = false,
 ): boolean {
-  if (rangeCheckDisabledForDebug) return true;
-  if (accessPoint === undefined) return true;
-  if (!player.isValid || player.dimension.id !== accessPoint.dimensionId)
-    return false;
+  if (principal.kind === "debug") return accessPoint === undefined;
+  const player = principal.player;
+  if (player === undefined || !player.isValid) return false;
+  return isInitialWebTerminalAccessAllowed(
+    accessOptions(player, accessPoint, rangeCheckDisabledForDebug),
+  );
+}
+
+function nextAccessForSession(
+  session: ActiveSession,
+): "in_range" | "out_of_range" {
+  if (session.principal.kind === "debug") return "in_range";
+  const player = session.principal.player;
+  if (player === undefined || !player.isValid) return "out_of_range";
+  return nextWebTerminalRangeAccess({
+    currentAccess: session.access,
+    ...accessOptions(
+      player,
+      session.accessPoint,
+      session.rangeCheckDisabledForDebug,
+    ),
+  });
+}
+
+function accessOptions(
+  player: Player,
+  accessPoint: WebTerminalAccessPoint | undefined,
+  rangeCheckDisabledForDebug: boolean,
+): {
+  readonly rangeCheckDisabledForDebug: boolean;
+  readonly sameDimension: boolean;
+  readonly squaredDistance: number;
+} {
+  if (accessPoint === undefined) {
+    return {
+      rangeCheckDisabledForDebug: true,
+      sameDimension: true,
+      squaredDistance: 0,
+    };
+  }
+  const sameDimension = player.dimension.id === accessPoint.dimensionId;
+  if (!sameDimension) {
+    return {
+      rangeCheckDisabledForDebug,
+      sameDimension: false,
+      squaredDistance: 0,
+    };
+  }
   const x = player.location.x - accessPoint.x;
   const y = player.location.y - accessPoint.y;
   const z = player.location.z - accessPoint.z;
-  return x * x + y * y + z * z <= 9;
+  return {
+    rangeCheckDisabledForDebug,
+    sameDimension: true,
+    squaredDistance: x * x + y * y + z * z,
+  };
 }
 
 function emitChangedSnapshots(): void {
@@ -624,13 +1007,26 @@ function flushPendingMouseMove(session: ActiveSession): void {
   const pending = session.pendingMouseMove;
   if (pending === undefined) return;
   session.pendingMouseMove = undefined;
-  if (!terminalAccess.canWrite(session.sessionId)) return;
-  computerHost.runtime.queueEvent(
-    session.computerId,
-    "terminal_mouse",
-    pending,
+  if (!terminalAccess.canWrite(session.sessionId)) {
+    finalizeInputRequest(session.sessionId, pending.requestId, {
+      outcome: "ignored",
+      reason: "read_only",
+    });
+    return;
+  }
+  const result = safeInputQueueResult(
+    computerHost.runtime.queueEvent(
+      session.computerId,
+      "terminal_mouse",
+      pending.value,
+    ),
   );
-  snapshotScheduler.requestEager(session.sessionId);
+  if (result.outcome === "accepted") {
+    session.mouseSequence = pending.event.sequence;
+    session.mouseX = pending.event.x;
+    session.mouseY = pending.event.y;
+  }
+  finalizeInputRequest(session.sessionId, pending.requestId, result);
 }
 
 function releaseMouseButtons(session: ActiveSession | undefined): void {
@@ -656,13 +1052,7 @@ function releaseMouseButtons(session: ActiveSession | undefined): void {
 }
 
 function emitSnapshot(session: ActiveSession, force: boolean): boolean {
-  if (
-    !isWithinAccessRange(
-      session.player,
-      session.accessPoint,
-      session.rangeCheckDisabledForDebug,
-    )
-  ) {
+  if (nextAccessForSession(session) === "out_of_range") {
     setSessionAccess(session, "out_of_range");
     return false;
   }
@@ -676,42 +1066,109 @@ function emitSnapshot(session: ActiveSession, force: boolean): boolean {
     session.computerId,
     session.audioCursor,
   );
-  const snapshot = {
-    sessionId: session.sessionId,
-    computerId: session.computerId,
-    label: record.label ?? record.computerId,
-    lifecycle: record.lifecycle.state.kind,
-    storage: computerHost.storageStatus(record.computerId),
-    terminal: {
-      ...record.terminal.snapshot(),
-      secretInput: computerHost.runtime.isShellSecretInput(record.computerId),
-    },
-  };
-  const comparison = JSON.stringify({
-    ...snapshot,
-    audio: { events: [], latestSequence: audio.latestSequence },
+  const label = record.label ?? record.computerId;
+  const lifecycle = record.lifecycle.state.kind;
+  const storage = computerHost.storageStatus(record.computerId);
+  const secretInput = computerHost.runtime.isShellSecretInput(
+    record.computerId,
+  );
+  const terminalRevision = record.terminal.revision;
+  const frameMetadata = JSON.stringify({
+    label,
+    lifecycle,
+    secretInput,
+    storage,
   });
+  const metadata = `${String(audio.latestSequence)}:${frameMetadata}`;
   if (
     !force &&
     !resumed &&
     audio.events.length === 0 &&
-    session.lastSnapshot === comparison
+    session.lastTerminal === record.terminal &&
+    session.lastTerminalRevision === terminalRevision &&
+    session.lastSnapshotMetadata === metadata
   ) {
     return false;
   }
-  const serialized = JSON.stringify({ ...snapshot, audio });
-  session.lastSnapshot = comparison;
+  const frame = getSharedSnapshotFrame(
+    record,
+    label,
+    lifecycle,
+    storage,
+    secretInput,
+    terminalRevision,
+    frameMetadata,
+  );
+  const serialized = JSON.stringify({
+    sessionId: session.sessionId,
+    ...frame.payload,
+    audio,
+  });
   console.warn(`${snapshotMarker}${serialized}`);
+  session.lastTerminal = record.terminal;
+  session.lastTerminalRevision = terminalRevision;
+  session.lastSnapshotMetadata = metadata;
   session.audioCursor = audio.latestSequence;
   return true;
 }
 
+function getSharedSnapshotFrame(
+  record: ComputerRecord,
+  label: string,
+  lifecycle: string,
+  storage: ReturnType<typeof computerHost.storageStatus>,
+  secretInput: boolean,
+  terminalRevision: number,
+  metadata: string,
+): SharedSnapshotFrame {
+  const cached = sharedSnapshotFrames.get(record.computerId);
+  if (
+    cached !== undefined &&
+    cached.terminal === record.terminal &&
+    cached.terminalRevision === terminalRevision &&
+    cached.metadata === metadata
+  ) {
+    return cached;
+  }
+  const frame: SharedSnapshotFrame = {
+    metadata,
+    payload: {
+      computerId: record.computerId,
+      label,
+      lifecycle,
+      storage,
+      terminal: {
+        ...record.terminal.snapshot(),
+        secretInput,
+      },
+    },
+    terminal: record.terminal,
+    terminalRevision,
+  };
+  sharedSnapshotFrames.set(record.computerId, frame);
+  return frame;
+}
+
 function pruneExpiredRequests(): void {
-  for (const request of pendingRequests.values()) {
+  requestAdmission.prune(system.currentTick);
+  for (const request of [...pendingRequests.values()]) {
     if (request.expiresAtTick <= system.currentTick) {
-      pendingRequests.delete(request.requestId);
+      finalizePendingRequest(request, "failed");
+      sendPrincipalMessage(
+        request.principal,
+        "Web Terminal request expired before the companion responded.",
+      );
     }
   }
+}
+
+function finalizePendingRequest(
+  request: PendingRequest,
+  outcome: "accepted" | "failed",
+): boolean {
+  if (!pendingRequests.delete(request.requestId)) return false;
+  requestAdmission.finalize(request.requestId, outcome, system.currentTick);
+  return true;
 }
 
 function pruneExpiredSessions(): void {
@@ -727,8 +1184,10 @@ function finalizeSession(session: ActiveSession, reason: string): void {
   if (!activeSessions.delete(session.sessionId)) return;
   const computerSessions = sessionsByComputer.get(session.computerId);
   computerSessions?.delete(session.sessionId);
-  if (computerSessions?.size === 0)
+  if (computerSessions?.size === 0) {
     sessionsByComputer.delete(session.computerId);
+    sharedSnapshotFrames.delete(session.computerId);
+  }
   snapshotScheduler.detach(session.sessionId);
   const detached = terminalAccess.detach(session.sessionId);
   if (detached.outcome === "detached" && detached.wasLast) {

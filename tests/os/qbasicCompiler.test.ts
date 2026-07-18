@@ -96,7 +96,7 @@ describe("CS QBASIC compiler", (): void => {
     'OPEN "LPT1" FOR OUTPUT AS #1',
   ])("rejects unsafe DOS/host access explicitly: %s", (statement): void => {
     expect(() => compileCs486Source("basic", `${statement}\nEND\n`)).toThrow(
-      "sandboxed CS QBASIC",
+      "sandboxed CS QBASIC 1.0",
     );
   });
 

@@ -23,6 +23,15 @@
           <button id="copy-button" class="topbar-button" type="button">
             Copy
           </button>
+          <button
+            id="manual-button"
+            class="topbar-button"
+            type="button"
+            aria-haspopup="dialog"
+            aria-controls="manual-dialog"
+          >
+            Manual
+          </button>
           <div class="machine-panel" aria-label="Computer hardware status">
             <div
               id="power-indicator"
@@ -52,6 +61,22 @@
               <span>FDD</span>
             </div>
             <button
+              id="eject-button"
+              class="eject-button"
+              type="button"
+              aria-describedby="eject-feedback"
+              title="No floppy disk is present"
+              disabled
+            >
+              Eject
+            </button>
+            <span
+              id="eject-feedback"
+              class="sr-only"
+              role="status"
+              aria-live="polite"
+            ></span>
+            <button
               id="power-button"
               class="power-button"
               type="button"
@@ -69,15 +94,6 @@
               aria-live="polite"
             ></span>
           </div>
-          <button
-            id="manual-button"
-            class="topbar-button"
-            type="button"
-            aria-haspopup="dialog"
-            aria-controls="manual-dialog"
-          >
-            Manual
-          </button>
           <div class="connection" role="status" aria-live="polite">
             <span
               id="status-light"
@@ -137,6 +153,35 @@
           <span aria-hidden="true">·</span> <kbd>Ctrl</kbd>+<kbd>D</kbd> logout
           <span aria-hidden="true">·</span> <kbd>↑</kbd><kbd>↓</kbd> history
         </p>
+        <div class="keyboard-locks" aria-label="Keyboard lock status">
+          <span
+            id="caps-lock-indicator"
+            class="keyboard-lock-indicator"
+            data-state="unknown"
+            aria-label="Caps Lock status unknown"
+          >
+            <span class="keyboard-lock-light" aria-hidden="true">?</span>
+            <span aria-hidden="true">Caps</span>
+          </span>
+          <span
+            id="num-lock-indicator"
+            class="keyboard-lock-indicator"
+            data-state="unknown"
+            aria-label="Num Lock status unknown"
+          >
+            <span class="keyboard-lock-light" aria-hidden="true">?</span>
+            <span aria-hidden="true">Num</span>
+          </span>
+          <span
+            id="scroll-lock-indicator"
+            class="keyboard-lock-indicator"
+            data-state="unknown"
+            aria-label="Scroll Lock status unknown"
+          >
+            <span class="keyboard-lock-light" aria-hidden="true">?</span>
+            <span aria-hidden="true">Scroll</span>
+          </span>
+        </div>
         <div class="status-actions">
           <button
             id="take-control-button"

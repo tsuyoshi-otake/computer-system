@@ -47,13 +47,32 @@ import {
   unrestrictedGuestFilesystem,
 } from "./guestFilesystem.js";
 import type { FloppyDrive, FloppyDriveIo } from "./floppyDrive.js";
-import type { EditorScreen } from "../editor/editorScreen.js";
+import type {
+  DosFileDialogSnapshot,
+  EditorScreen,
+} from "../editor/editorScreen.js";
 import {
+  csAsmProductName,
+  csCFamilyProductName,
+  DosIdeSession,
   parseTerminalMouseEvent,
   QBasicSession,
+  type DosIdeCommand,
+  type DosIdeLanguage,
   type QBasicSessionResult,
 } from "../editor/qbasicSession.js";
 import { ViSession, type ViResult } from "../editor/viSession.js";
+import { maximumViConfigurationCharacters } from "../editor/viOptions.js";
+import {
+  maximumViIncludeBytes,
+  type ViExternalContextRequest,
+  type ViExternalDocument,
+} from "../editor/viCompletion.js";
+import {
+  maximumDosEditorConfigurationCharacters,
+  parseDosEditorConfiguration,
+  type DosEditorConfiguration,
+} from "../editor/dosEditorOptions.js";
 import {
   parseQBasicCommandLine,
   QBasicCommandLineError,
@@ -202,7 +221,10 @@ export class ShellSession {
   private readonly authentication: LinuxAuthentication | undefined;
   private readonly credentialContext: CredentialContext;
   private readonly guestFilesystem: GuestFilesystem;
-  private editor: QBasicSession | undefined;
+  private editor: DosIdeSession | undefined;
+  private pendingEditorArtifactPath: string | undefined;
+  private pendingEditorCommand: DosIdeCommand | undefined;
+  private pendingEditorOutputPrefix = "";
   private vi: ViSession | undefined;
   private readonly commands: ShellCommandRuntime;
   private readonly frontend: ShellFrontend;
@@ -407,6 +429,7 @@ export class ShellSession {
     this.disconnected = true;
     this.vi = undefined;
     this.editor = undefined;
+    this.pendingEditorCommand = undefined;
     this.commands.closeDebugger();
     return this.logoutAuthenticatedSession("disconnect");
   }
@@ -645,10 +668,63 @@ export class ShellSession {
     output = "",
   ): EditorScreen | undefined {
     this.lastExitCode = exitCode;
-    if (this.editor?.options.editorMode === false) {
-      return this.editor.completeRun(exitCode, output);
+    const editor = this.editor;
+    if (editor?.options.editorMode !== false) return undefined;
+    const command = this.pendingEditorCommand ?? "build-run";
+    const artifactPath =
+      this.pendingEditorArtifactPath ??
+      editor.lastArtifactPath ??
+      editorArtifactPath(editor.fileName);
+    const combinedOutput = joinEditorDebuggerOutput([
+      this.pendingEditorOutputPrefix,
+      output,
+    ]);
+    this.pendingEditorArtifactPath = undefined;
+    this.pendingEditorCommand = undefined;
+    this.pendingEditorOutputPrefix = "";
+    if (command === "debug-start") {
+      if (exitCode !== 0) {
+        return editor.completeDebuggerCommand(
+          command,
+          exitCode,
+          combinedOutput,
+        );
+      }
+      return this.startEditorDebugger(editor, combinedOutput, artifactPath);
     }
-    return undefined;
+    if (command === "debug-step" || command === "debug-continue") {
+      return editor.completeDebuggerCommand(
+        command,
+        exitCode,
+        this.editorDebuggerSnapshot(combinedOutput),
+      );
+    }
+    if (
+      command === "build" ||
+      command === "build-run" ||
+      command === "clean" ||
+      command === "compile-file" ||
+      command === "rebuild" ||
+      command === "run"
+    ) {
+      const screen = editor.completeCommand(
+        command,
+        exitCode,
+        combinedOutput,
+        this.commands.profile.pathDialect.display(artifactPath),
+      );
+      if (
+        editor.product !== "qbasic" &&
+        exitCode === 0 &&
+        (command === "build" ||
+          command === "build-run" ||
+          command === "rebuild")
+      ) {
+        editor.recordSuccessfulArtifact(artifactPath);
+      }
+      return screen;
+    }
+    return editor.completeDebuggerCommand(command, exitCode, combinedOutput);
   }
 
   complete(line: string, cursor: number): ShellCompletionResult {
@@ -681,18 +757,31 @@ export class ShellSession {
         resultFromStreams("", "editor: key batch limit exceeded\n", 2),
       );
     }
-    let result: ShellResult =
-      this.editor === undefined
-        ? this.viResult({ kind: "continue", screen: this.vi!.screen() })
-        : this.editorResult({
-            kind: "continue",
-            screen: this.editor.screen(),
-          });
-    for (const key of keys) {
-      if (this.editor !== undefined)
-        result = this.editorResult(this.editor.key(key));
-      else if (this.vi !== undefined) result = this.viResult(this.vi.key(key));
-      else break;
+    let result: ShellResult;
+    if (this.editor !== undefined) {
+      const editor = this.editor;
+      editor.beginKeyBatch();
+      result = {
+        ...resultFromStreams("", "", 0),
+        terminalScreen: editor.screen(),
+      };
+      try {
+        for (const key of keys) {
+          if (this.editor === undefined) break;
+          result = this.editorResult(this.editor.key(key));
+        }
+      } finally {
+        const finalScreen = editor.endKeyBatch();
+        if (this.editor === editor && result.terminalScreen !== undefined) {
+          result = { ...result, terminalScreen: finalScreen };
+        }
+      }
+    } else {
+      result = this.viResult({ kind: "continue", screen: this.vi!.screen() });
+      for (const key of keys) {
+        if (this.vi === undefined) break;
+        result = this.viResult(this.vi.key(key));
+      }
     }
     return this.withCpuCycles(result);
   }
@@ -730,6 +819,7 @@ export class ShellSession {
     line: string,
     depth: number,
     variablesExpanded = false,
+    interactiveAllowed = true,
   ): ShellResult {
     const frame = this.scriptFrames.at(-1);
     const prepared = this.frontend.prepare(line, this.commands, {
@@ -780,7 +870,8 @@ export class ShellSession {
       const executed = this.executePipeline(
         chain.pipeline,
         depth,
-        program.chains.length === 1,
+        program.chains.length === 1 && interactiveAllowed,
+        interactiveAllowed,
       );
       stdout += executed.stdout;
       stderr += executed.stderr;
@@ -835,6 +926,7 @@ export class ShellSession {
     pipeline: ShellPipelineNode,
     depth: number,
     foregroundAllowed: boolean,
+    interactiveAllowed = true,
   ): ShellCommandResult {
     if (pipeline.background === true) {
       return this.executeBackgroundPipeline(pipeline, depth, foregroundAllowed);
@@ -871,7 +963,7 @@ export class ShellSession {
           expanded,
           stdin,
           depth,
-          pipeline.commands.length === 1,
+          interactiveAllowed && pipeline.commands.length === 1,
           foregroundAllowed,
         );
       } catch (error: unknown) {
@@ -1017,15 +1109,27 @@ export class ShellSession {
         },
       };
     }
-    if (
-      executed.foreground?.kind === "python" ||
-      executed.foreground?.kind === "cs486"
-    ) {
+    if (executed.foreground?.kind === "python") {
       return {
         exitCode: 0,
         stderr: executed.stderr,
         stdout: executed.stdout,
         background: { ...executed.foreground, commandLine },
+      };
+    }
+    if (executed.foreground?.kind === "cs486") {
+      if (executed.foreground.command !== "run") {
+        return commandFailure(
+          requestedName || "shell",
+          "only linked RUN executables may become background jobs",
+          2,
+        );
+      }
+      return {
+        exitCode: 0,
+        stderr: executed.stderr,
+        stdout: executed.stdout,
+        background: { ...executed.foreground, command: "run", commandLine },
       };
     }
     return commandFailure(
@@ -1260,6 +1364,12 @@ export class ShellSession {
         return commandFailure(name, "cannot run in a pipeline or redirect");
       }
       return this.startQBasic(arguments_);
+    }
+    if (sessionCommand === "dos-toolchain-ide") {
+      if (!interactiveAllowed || command.redirects.length > 0) {
+        return commandFailure(name, "cannot run in a pipeline or redirect");
+      }
+      return this.startToolchainIde(name, arguments_);
     }
     if (sessionCommand === "linux-script") {
       if (name !== "bash" && name !== "sh" && name !== "source") {
@@ -3103,16 +3213,24 @@ export class ShellSession {
     const untitled = arguments_.length === 0;
     const path = this.commands.resolvePath(arguments_[0] ?? "C:\\NONAME.TXT");
     try {
-      const existing = this.filesystem.exists(path)
-        ? this.commands.readFile(path)
-        : "";
+      const sourceExists = this.filesystem.exists(path);
+      const existing = sourceExists ? this.commands.readFile(path) : "";
+      const editorConfiguration = this.readDosEditorConfiguration();
       this.editor = new QBasicSession(
         path,
         existing,
         this.terminalWidth,
         this.terminalHeight,
         untitled ? "UNTITLED" : this.commands.profile.pathDialect.display(path),
-        { editorMode: true },
+        {
+          editorMode: true,
+          editorConfiguration,
+          externalContext: (request): readonly ViExternalDocument[] =>
+            this.viExternalDocuments(request),
+          fileDialog: ({ directory }): DosFileDialogSnapshot =>
+            this.commands.browseDosFiles(directory),
+          sourceExists,
+        },
       );
       return {
         exitCode: 0,
@@ -3137,16 +3255,28 @@ export class ShellSession {
       const path = this.commands.resolvePath(
         commandLine.fileName ?? "C:\\UNTITLED.BAS",
       );
-      const contents = this.filesystem.exists(path)
-        ? this.commands.readFile(path)
-        : "";
+      const sourceExists = this.filesystem.exists(path);
+      const contents = sourceExists ? this.commands.readFile(path) : "";
+      const editorConfiguration = this.readDosEditorConfiguration();
       this.editor = new QBasicSession(
         path,
         contents,
         this.terminalWidth,
         this.terminalHeight,
         untitled ? "Untitled" : this.commands.profile.pathDialect.display(path),
-        { editorMode: false, showWelcome: untitled },
+        {
+          editorMode: false,
+          editorConfiguration,
+          externalContext: (request): readonly ViExternalDocument[] =>
+            this.viExternalDocuments(request),
+          fileDialog: ({ directory }): DosFileDialogSnapshot =>
+            this.commands.browseDosFiles(directory),
+          language: "basic",
+          product: "qbasic",
+          showWelcome: untitled,
+          sourceExists,
+          targetName: cpuModelSpecification(this.hardware.cpuModel).runtimeName,
+        },
       );
       const terminalScreen = this.editor.screen();
       if (!commandLine.run) {
@@ -3175,6 +3305,116 @@ export class ShellSession {
     }
   }
 
+  private startToolchainIde(
+    command: string,
+    arguments_: readonly string[],
+  ): ShellCommandResult {
+    const upper = command.toUpperCase();
+    const productName =
+      command === "csasm"
+        ? csAsmProductName
+        : command === "pwb"
+          ? `${csAsmProductName} / ${csCFamilyProductName}`
+          : csCFamilyProductName;
+    if (arguments_.length === 1 && /^\/VERSION$/iu.test(arguments_[0] ?? "")) {
+      return commandSuccess(
+        `${productName} for ${cpuModelSpecification(this.hardware.cpuModel).runtimeName}\r\n`,
+      );
+    }
+    if (arguments_.length === 1 && arguments_[0] === "/?") {
+      return commandSuccess(
+        `${productName}\r\nUsage: ${upper} [source]\r\nF2 Save  F5 Debug  F7 Build  Shift+F5 Build and Run\r\n`,
+      );
+    }
+    if (arguments_.length > 1 || (arguments_[0]?.startsWith("/") ?? false)) {
+      return {
+        exitCode: 2,
+        stderr: `Usage: ${upper} [source]\r\n`,
+        stdout: "",
+      };
+    }
+
+    const sourceArgument = arguments_[0];
+    const authoredExtension = /\.([A-Za-z0-9+]{1,3})$/u
+      .exec(sourceArgument ?? "")?.[1]
+      ?.toLowerCase();
+    const allowedExtensions =
+      command === "csasm"
+        ? ["asm"]
+        : command === "cscpp"
+          ? ["cpp"]
+          : command === "cscc"
+            ? ["c"]
+            : ["asm", "c", "cpp"];
+    if (
+      authoredExtension !== undefined &&
+      !allowedExtensions.includes(authoredExtension)
+    ) {
+      return {
+        exitCode: 2,
+        stderr: `${upper}: source must use ${allowedExtensions.map((extension) => `.${extension.toUpperCase()}`).join(", ")}.\r\n`,
+        stdout: "",
+      };
+    }
+    let language: Exclude<DosIdeLanguage, "basic">;
+    if (command === "csasm") language = "asm";
+    else if (command === "cscpp") language = "cpp";
+    else if (authoredExtension === "asm") language = "asm";
+    else if (authoredExtension === "cpp") language = "cpp";
+    else language = "c";
+
+    const extension =
+      language === "asm" ? "ASM" : language === "cpp" ? "CPP" : "C";
+    const defaultName = `C:\\UNTITLED.${extension}`;
+    const pathInput =
+      sourceArgument === undefined
+        ? defaultName
+        : authoredExtension === undefined
+          ? `${sourceArgument}.${extension}`
+          : sourceArgument;
+    try {
+      const path = this.commands.resolvePath(pathInput);
+      const sourceExists = this.filesystem.exists(path);
+      const contents = sourceExists ? this.commands.readFile(path) : "";
+      const editorConfiguration = this.readDosEditorConfiguration();
+      this.editor = new DosIdeSession(
+        path,
+        contents,
+        this.terminalWidth,
+        this.terminalHeight,
+        sourceArgument === undefined
+          ? "Untitled"
+          : this.commands.profile.pathDialect.display(path),
+        {
+          editorMode: false,
+          editorConfiguration,
+          externalContext: (request): readonly ViExternalDocument[] =>
+            this.viExternalDocuments(request),
+          fileDialog: ({ directory }): DosFileDialogSnapshot =>
+            this.commands.browseDosFiles(directory),
+          language,
+          product: language === "asm" ? "cs-asm" : "cs-cpp",
+          showWelcome: true,
+          sourceExists,
+          targetName: cpuModelSpecification(this.hardware.cpuModel).runtimeName,
+        },
+      );
+      return {
+        exitCode: 0,
+        stderr: "",
+        stdout: "",
+        terminalScreen: this.editor.screen(),
+      };
+    } catch (error: unknown) {
+      this.editor = undefined;
+      return {
+        exitCode: 2,
+        stderr: `${upper}: ${message(error)}\r\n`,
+        stdout: "",
+      };
+    }
+  }
+
   private startVi(arguments_: readonly string[]): ShellCommandResult {
     if (arguments_.length > 1) return commandUsage("vi [path]");
     const path =
@@ -3186,11 +3426,28 @@ export class ShellSession {
         path !== undefined && this.guestFilesystem.exists(path)
           ? this.commands.readFile(path)
           : "";
+      const configurationPath = this.commands.resolvePath(
+        this.commands.profile.id === "dos" ? "C:\\_VIMRC" : "~/.vimrc",
+      );
+      let configuration = "";
+      if (this.guestFilesystem.exists(configurationPath)) {
+        if (
+          this.guestFilesystem.getSize(configurationPath) >
+          maximumViConfigurationCharacters
+        ) {
+          throw new Error(
+            `vi configuration exceeds ${String(maximumViConfigurationCharacters)} bytes`,
+          );
+        }
+        configuration = this.commands.readFile(configurationPath);
+      }
       this.vi = new ViSession(
         path,
         existing,
         this.terminalWidth,
         this.terminalHeight,
+        configuration,
+        (request) => this.viExternalDocuments(request),
       );
       return {
         exitCode: 0,
@@ -3203,6 +3460,22 @@ export class ShellSession {
     }
   }
 
+  private readDosEditorConfiguration(): DosEditorConfiguration {
+    const path = this.commands.resolvePath("C:\\EDITOR.INI");
+    if (!this.guestFilesystem.exists(path)) {
+      return parseDosEditorConfiguration("");
+    }
+    if (
+      this.guestFilesystem.getSize(path) >
+      maximumDosEditorConfigurationCharacters
+    ) {
+      throw new Error(
+        `EDITOR.INI exceeds ${String(maximumDosEditorConfigurationCharacters)} bytes`,
+      );
+    }
+    return parseDosEditorConfiguration(this.commands.readFile(path));
+  }
+
   private submitViLine(line: string): ShellResult {
     const keys = line.startsWith(":")
       ? [...line, "Enter"]
@@ -3213,6 +3486,27 @@ export class ShellSession {
   private viResult(result: ViResult): ShellResult {
     const vi = this.vi;
     if (vi === undefined) throw new Error("vi state is unavailable");
+    if (result.kind === "shell") {
+      return this.executeViShellCommand(vi, result);
+    }
+    if (result.kind === "navigate") {
+      this.commands.beginFilesystemIo();
+      try {
+        const contents = this.commands.readFile(result.path);
+        return this.viResult(
+          vi.completeNavigation(
+            result.path,
+            contents,
+            result.line,
+            result.column,
+          ),
+        );
+      } catch (error: unknown) {
+        return this.viResult(vi.failNavigation(message(error)));
+      } finally {
+        this.commands.completeFilesystemIo(false);
+      }
+    }
     if (result.kind === "save") {
       try {
         const path =
@@ -3244,6 +3538,136 @@ export class ShellSession {
     };
   }
 
+  private viExternalDocuments(
+    request: ViExternalContextRequest,
+  ): readonly ViExternalDocument[] {
+    const documents: ViExternalDocument[] = [];
+    const seen = new Set<string>();
+    let bytes = 0;
+    const parent =
+      request.fileName === undefined
+        ? undefined
+        : request.fileName.slice(
+            0,
+            Math.max(1, request.fileName.lastIndexOf("/")),
+          );
+    const systemDirectory =
+      this.commands.profile.id === "dos" ? "/drives/c/include" : "/usr/include";
+    this.commands.beginFilesystemIo();
+    try {
+      for (const include of request.includes.slice(0, 8)) {
+        const modulePath = include.authored.replaceAll(".", "/");
+        const candidates =
+          include.kind === "python"
+            ? [
+                ...(parent === undefined
+                  ? [`${modulePath}.py`, `${modulePath}/__init__.py`]
+                  : [
+                      `${parent}/${modulePath}.py`,
+                      `${parent}/${modulePath}/__init__.py`,
+                    ]),
+              ]
+            : include.kind === "system"
+              ? [`${systemDirectory}/${include.authored}`]
+              : parent === undefined
+                ? [include.authored]
+                : [
+                    `${parent}/${include.authored}`,
+                    ...(include.kind === "quoted"
+                      ? [`${systemDirectory}/${include.authored}`]
+                      : []),
+                  ];
+        for (const candidate of candidates) {
+          let path: string;
+          try {
+            path = this.commands.resolvePath(candidate);
+          } catch {
+            continue;
+          }
+          if (
+            seen.has(path) ||
+            !this.commands.pathExists(path) ||
+            this.guestFilesystem.isDirectory(path)
+          ) {
+            continue;
+          }
+          const size = this.guestFilesystem.getSize(path);
+          if (size > maximumViIncludeBytes - bytes) continue;
+          const contents = this.commands.readFile(path);
+          const contentBytes = utf8ByteLength(contents);
+          if (contentBytes > maximumViIncludeBytes - bytes) continue;
+          bytes += contentBytes;
+          seen.add(path);
+          documents.push({ contents, path });
+          break;
+        }
+        if (documents.length >= 8 || bytes >= maximumViIncludeBytes) break;
+      }
+      return documents;
+    } finally {
+      this.commands.completeFilesystemIo(false);
+    }
+  }
+
+  private executeViShellCommand(
+    vi: ViSession,
+    request: Extract<ViResult, { readonly kind: "shell" }>,
+  ): ShellResult {
+    const previousEditor = this.editor;
+    const previousVi = this.vi;
+    const identity = this.commands.captureIdentityState();
+    const aliases = [...this.shellAliases];
+    const functions = [...this.shellFunctions];
+    const previousExitCode = this.lastExitCode;
+    const previousUmask = this.guestFilesystem.getUmask();
+    let executed: ShellResult;
+    this.commands.beginFilesystemIo();
+    try {
+      executed = this.executeLine(request.command, 0, false, false);
+    } catch (error: unknown) {
+      executed = resultFromStreams("", `vi: ${message(error)}\n`, 2);
+    } finally {
+      try {
+        this.commands.completeFilesystemIo(false);
+      } finally {
+        this.commands.restoreIdentityState(identity);
+        this.shellAliases.clear();
+        for (const [name, value] of aliases) this.shellAliases.set(name, value);
+        this.shellFunctions.clear();
+        for (const [name, value] of functions)
+          this.shellFunctions.set(name, value);
+        this.guestFilesystem.setUmask(previousUmask);
+        this.lastExitCode = previousExitCode;
+        this.editor = previousEditor;
+        this.vi = previousVi ?? vi;
+      }
+    }
+    if (
+      executed.action !== undefined ||
+      executed.background !== undefined ||
+      executed.foreground !== undefined ||
+      executed.ioWaitEvent !== undefined ||
+      executed.jobControl !== undefined ||
+      executed.resetTerminal === true ||
+      executed.sleepTicks !== undefined ||
+      executed.terminalScreen !== undefined
+    ) {
+      executed = resultFromStreams(
+        "",
+        "vi: asynchronous, session-control, and TUI commands are unavailable\n",
+        2,
+      );
+    }
+    return this.viResult(
+      vi.completeShellCommand(
+        executed.exitCode,
+        executed.stdout,
+        executed.stderr,
+        request.insertOutput,
+      ),
+    );
+  }
+
   private submitEditor(line: string): ShellResult {
     const editor = this.editor;
     if (editor === undefined) throw new Error("Editor state is unavailable");
@@ -3268,43 +3692,162 @@ export class ShellSession {
   private editorResult(result: QBasicSessionResult): ShellResult {
     const editor = this.editor;
     if (editor === undefined) throw new Error("Editor state is unavailable");
-    if (result.kind === "run") {
-      const run = this.commands.runQBasicSource(
-        editor.fileName,
-        editor.contents,
-      );
-      if (run.foreground !== undefined) {
-        return {
-          ...shellResultFromCommand(run),
-          terminalScreen: result.screen,
-        };
+    if (result.kind === "shell") {
+      return this.executeEditorShellCommand(editor, result);
+    }
+    if (result.kind === "settings-save") {
+      try {
+        const path = this.commands.resolvePath("C:\\EDITOR.INI");
+        this.commands.writeFile(path, result.contents);
+        return this.editorResult(editor.completeSettingsSave());
+      } catch (error: unknown) {
+        return this.editorResult(editor.failSettingsSave(message(error)));
       }
-      return {
-        ...shellResultFromCommand({ ...run, stderr: "", stdout: "" }),
-        terminalScreen: editor.completeRun(
-          run.exitCode,
-          `${run.stdout}${run.stderr}`,
-        ),
-      };
+    }
+    if (result.kind === "settings-reload") {
+      try {
+        return this.editorResult(
+          editor.completeSettingsReload(this.readDosEditorConfiguration()),
+        );
+      } catch (error: unknown) {
+        return this.editorResult(editor.failSettingsReload(message(error)));
+      }
+    }
+    if (result.kind === "navigate") {
+      try {
+        const path = this.commands.resolvePath(result.path);
+        if (
+          !this.filesystem.exists(path) ||
+          this.guestFilesystem.isDirectory(path)
+        ) {
+          throw new Error("definition source does not exist");
+        }
+        const contents = this.commands.readFile(path);
+        return this.editorResult(
+          editor.completeNavigation(
+            path,
+            contents,
+            this.commands.profile.pathDialect.display(path),
+            result.line,
+            result.column,
+          ),
+        );
+      } catch (error: unknown) {
+        return this.editorResult(editor.failNavigation(message(error)));
+      }
+    }
+    if (result.kind === "command") {
+      return this.executeEditorCommand(editor, result.command);
+    }
+    if (result.kind === "diagnostic") {
+      try {
+        const path = this.commands.resolvePath(result.fileName);
+        if (!this.filesystem.exists(path)) {
+          throw new Error("diagnostic source does not exist");
+        }
+        const contents =
+          path === editor.fileName ? undefined : this.commands.readFile(path);
+        return this.editorResult(
+          editor.completeDiagnostic(
+            path,
+            contents,
+            this.commands.profile.pathDialect.display(path),
+            result.line,
+            result.column,
+          ),
+        );
+      } catch (error: unknown) {
+        return this.editorResult(editor.failDiagnostic(message(error)));
+      }
+    }
+    if (result.kind === "program-list") {
+      try {
+        const inspected = this.commands.inspectDosProgramList(result.fileName);
+        return this.editorResult(
+          editor.completeProgramList(inspected.projectPath),
+        );
+      } catch (error: unknown) {
+        return this.editorResult(editor.failProgramList(message(error)));
+      }
+    }
+    if (result.kind === "open") {
+      try {
+        const path = this.commands.resolvePath(result.fileName);
+        if (!this.filesystem.exists(path)) {
+          throw new Error("file does not exist");
+        }
+        const contents = this.commands.readFile(path);
+        return this.editorResult(
+          editor.completeOpen(
+            path,
+            contents,
+            this.commands.profile.pathDialect.display(path),
+          ),
+        );
+      } catch (error: unknown) {
+        return this.editorResult(editor.failOpen(message(error)));
+      }
     }
     if (result.kind === "save") {
       try {
-        this.commands.writeFile(editor.fileName, result.contents);
-        return this.editorResult(editor.completeSave(result.closeAfter));
+        const path =
+          result.fileName === undefined
+            ? editor.fileName
+            : this.commands.resolvePath(result.fileName);
+        const targetExists = this.filesystem.exists(path);
+        const current = targetExists ? this.commands.readFile(path) : undefined;
+        if (!result.overwrite) {
+          if (path !== editor.fileName && current !== undefined) {
+            return this.editorResult(
+              editor.offerSaveDecision("replace", result, path, current),
+            );
+          }
+          if (
+            path === editor.fileName &&
+            result.expectedContents !== undefined &&
+            (!targetExists || current !== result.expectedContents)
+          ) {
+            return this.editorResult(
+              editor.offerSaveDecision(
+                "external-change",
+                result,
+                path,
+                current,
+              ),
+            );
+          }
+        } else if (
+          targetExists !== result.expectedTargetExists ||
+          (targetExists && current !== result.expectedContents)
+        ) {
+          return this.editorResult(
+            editor.offerSaveDecision("external-change", result, path, current),
+          );
+        }
+        this.commands.writeFile(path, result.contents);
+        return this.editorResult(
+          editor.completeSave(
+            result.closeAfter,
+            path,
+            this.commands.profile.pathDialect.display(path),
+          ),
+        );
       } catch (error: unknown) {
         return this.editorResult(editor.failSave(message(error)));
       }
     }
     if (result.kind === "closed") {
       this.editor = undefined;
+      this.pendingEditorArtifactPath = undefined;
+      this.pendingEditorCommand = undefined;
+      this.pendingEditorOutputPrefix = "";
+      this.commands.closeDebugger();
       this.lastExitCode = 0;
       return {
         ...resultFromStreams(
           result.discardedChanges
             ? "Changes discarded\n"
-            : editor.options.editorMode === true
-              ? "EDIT closed\n"
-              : "QBASIC closed\n",
+            : `${editor.closeLabel} closed\n`,
           "",
           0,
         ),
@@ -3316,6 +3859,377 @@ export class ShellSession {
       terminalScreen: result.screen,
     };
   }
+
+  private executeEditorShellCommand(
+    editor: QBasicSession,
+    request: Extract<QBasicSessionResult, { readonly kind: "shell" }>,
+  ): ShellResult {
+    const previousVi = this.vi;
+    const identity = this.commands.captureIdentityState();
+    const aliases = [...this.shellAliases];
+    const functions = [...this.shellFunctions];
+    const previousExitCode = this.lastExitCode;
+    const previousUmask = this.guestFilesystem.getUmask();
+    let executed: ShellResult;
+    this.commands.beginFilesystemIo();
+    try {
+      executed = this.executeLine(request.command, 0, false, false);
+    } catch (error: unknown) {
+      executed = resultFromStreams("", `edit: ${message(error)}\r\n`, 2);
+    } finally {
+      try {
+        this.commands.completeFilesystemIo(false);
+      } finally {
+        this.commands.restoreIdentityState(identity);
+        this.shellAliases.clear();
+        for (const [name, value] of aliases) this.shellAliases.set(name, value);
+        this.shellFunctions.clear();
+        for (const [name, value] of functions) {
+          this.shellFunctions.set(name, value);
+        }
+        this.guestFilesystem.setUmask(previousUmask);
+        this.lastExitCode = previousExitCode;
+        this.editor = editor;
+        this.vi = previousVi;
+      }
+    }
+    if (
+      executed.action !== undefined ||
+      executed.background !== undefined ||
+      executed.foreground !== undefined ||
+      executed.ioWaitEvent !== undefined ||
+      executed.jobControl !== undefined ||
+      executed.resetTerminal === true ||
+      executed.sleepTicks !== undefined ||
+      executed.terminalScreen !== undefined
+    ) {
+      executed = resultFromStreams(
+        "",
+        "edit: asynchronous, session-control, and TUI commands are unavailable\r\n",
+        2,
+      );
+    }
+    return this.editorResult(
+      editor.completeShellCommand(
+        executed.exitCode,
+        executed.stdout,
+        executed.stderr,
+        request.insertOutput,
+      ),
+    );
+  }
+
+  private executeEditorCommand(
+    editor: DosIdeSession,
+    command: DosIdeCommand,
+  ): ShellResult {
+    try {
+      let artifactPath = editorArtifactPath(editor.fileName);
+      let operation: ShellCommandResult;
+      let outputPrefix = "";
+      let producerSucceeded = false;
+      if (
+        editor.product === "qbasic" &&
+        (command === "build-run" || command === "run")
+      ) {
+        this.commands.writeFile(
+          editor.fileName,
+          editor.contents.replaceAll("\n", "\r\n"),
+        );
+        editor.completeSave(
+          false,
+          editor.fileName,
+          this.commands.profile.pathDialect.display(editor.fileName),
+        );
+        operation = this.commands.runQBasicSource(
+          editor.fileName,
+          editor.contents,
+        );
+      } else if (command === "clean") {
+        if (editor.programListPath === undefined) {
+          throw new Error("Set a Program List before Clean");
+        }
+        editor.invalidateBuild();
+        operation = this.commands.cleanDosProgramList(editor.programListPath);
+      } else if (command === "compile-file") {
+        artifactPath = editorObjectPath(editor.fileName);
+        const compiler =
+          editor.language === "asm"
+            ? "as"
+            : editor.language === "cpp"
+              ? "c++"
+              : "c";
+        operation = this.commands.execute(
+          [compiler, editor.fileName, "-c", "-o", artifactPath],
+          "",
+        );
+      } else if (
+        editor.programListPath !== undefined &&
+        (command === "build" ||
+          command === "build-run" ||
+          command === "debug-start" ||
+          command === "rebuild")
+      ) {
+        editor.invalidateBuild();
+        const inspected = this.commands.inspectDosProgramList(
+          editor.programListPath,
+        );
+        artifactPath = inspected.outputPath;
+        const built = this.commands.buildDosProgramList(
+          inspected.projectPath,
+          command === "rebuild",
+          command === "build-run",
+        );
+        if (built.foreground !== undefined || built.exitCode !== 0) {
+          operation = built;
+        } else {
+          producerSucceeded = true;
+          editor.recordSuccessfulArtifact(artifactPath);
+          if (command === "build-run") {
+            outputPrefix = `${built.stdout}${built.stderr}`;
+            operation = this.commands.execute(["run", artifactPath], "");
+          } else {
+            operation = built;
+          }
+        }
+      } else if (
+        command === "build" ||
+        command === "build-run" ||
+        command === "rebuild" ||
+        command === "debug-start"
+      ) {
+        this.commands.writeFile(
+          editor.fileName,
+          editor.contents.replaceAll("\n", "\r\n"),
+        );
+        editor.completeSave(
+          false,
+          editor.fileName,
+          this.commands.profile.pathDialect.display(editor.fileName),
+        );
+        if (command === "debug-start") this.commands.closeDebugger();
+        operation = this.commands.buildDosIdeSource(
+          editor.language,
+          editor.fileName,
+          editor.contents,
+          artifactPath,
+          command === "build-run",
+        );
+        producerSucceeded = operation.foreground === undefined;
+      } else if (command === "run") {
+        const lastArtifactPath = editor.lastArtifactPath;
+        if (lastArtifactPath === undefined) {
+          throw new Error(
+            "Run Last Build is unavailable: build output is missing or stale",
+          );
+        }
+        artifactPath = lastArtifactPath;
+        operation = this.commands.execute(["run", artifactPath], "");
+      } else if (command === "debug-step") {
+        operation = this.commands.execute(["debug", "t"], "");
+      } else if (command === "debug-continue") {
+        operation = this.commands.execute(["debug", "g"], "");
+      } else if (command === "debug-set-breakpoint") {
+        operation = this.commands.execute(
+          ["debug", "bp", formatEditorDebuggerAddress(editor.debuggerAddress)],
+          "",
+        );
+      } else if (command === "debug-clear-breakpoint") {
+        operation = this.commands.execute(
+          ["debug", "bc", formatEditorDebuggerAddress(editor.debuggerAddress)],
+          "",
+        );
+      } else {
+        operation = this.commands.execute(["debug", "q"], "");
+      }
+
+      if (operation.foreground !== undefined) {
+        this.pendingEditorArtifactPath = artifactPath;
+        this.pendingEditorCommand = command;
+        this.pendingEditorOutputPrefix = outputPrefix;
+        return shellResultFromCommand(operation);
+      }
+
+      const output = joinEditorDebuggerOutput([
+        outputPrefix,
+        operation.stdout,
+        operation.stderr,
+      ]);
+      if (
+        producerSucceeded &&
+        editor.product !== "qbasic" &&
+        (command === "build" ||
+          command === "build-run" ||
+          command === "debug-start" ||
+          command === "rebuild")
+      ) {
+        editor.recordSuccessfulArtifact(artifactPath);
+      }
+      let terminalScreen: EditorScreen;
+      if (command === "debug-start") {
+        terminalScreen =
+          operation.exitCode === 0
+            ? this.startEditorDebugger(editor, output, artifactPath)
+            : editor.completeDebuggerCommand(
+                command,
+                operation.exitCode,
+                output,
+              );
+      } else if (command === "debug-step" || command === "debug-continue") {
+        terminalScreen = editor.completeDebuggerCommand(
+          command,
+          operation.exitCode,
+          this.editorDebuggerSnapshot(output),
+        );
+      } else if (
+        command === "debug-set-breakpoint" ||
+        command === "debug-clear-breakpoint" ||
+        command === "debug-stop"
+      ) {
+        terminalScreen = editor.completeDebuggerCommand(
+          command,
+          operation.exitCode,
+          output,
+        );
+      } else {
+        terminalScreen = editor.completeCommand(
+          command,
+          operation.exitCode,
+          output,
+          this.commands.profile.pathDialect.display(artifactPath),
+        );
+      }
+      return {
+        ...shellResultFromCommand({
+          ...operation,
+          foreground: undefined,
+          stderr: "",
+          stdout: "",
+        }),
+        terminalScreen,
+      };
+    } catch (error: unknown) {
+      const output = message(error);
+      if (
+        command === "build" ||
+        command === "build-run" ||
+        command === "debug-start" ||
+        command === "rebuild"
+      ) {
+        editor.invalidateBuild();
+      }
+      const terminalScreen = command.startsWith("debug")
+        ? editor.completeDebuggerCommand(
+            command as Exclude<
+              DosIdeCommand,
+              | "build"
+              | "build-run"
+              | "clean"
+              | "compile-file"
+              | "rebuild"
+              | "run"
+            >,
+            1,
+            output,
+          )
+        : editor.completeCommand(
+            command as
+              | "build"
+              | "build-run"
+              | "clean"
+              | "compile-file"
+              | "rebuild"
+              | "run",
+            1,
+            output,
+            this.commands.profile.pathDialect.display(
+              editorArtifactPath(editor.fileName),
+            ),
+          );
+      return {
+        ...resultFromStreams("", "", 1),
+        terminalScreen,
+      };
+    }
+  }
+
+  private startEditorDebugger(
+    editor: DosIdeSession,
+    buildOutput = "",
+    artifactPath = editorArtifactPath(editor.fileName),
+  ): EditorScreen {
+    this.commands.closeDebugger();
+    const loaded = this.commands.execute(["debug", artifactPath], "");
+    const loadOutput = joinEditorDebuggerOutput([
+      buildOutput,
+      loaded.stdout,
+      loaded.stderr,
+    ]);
+    if (loaded.exitCode !== 0) {
+      return editor.completeDebuggerCommand(
+        "debug-start",
+        loaded.exitCode,
+        loadOutput,
+      );
+    }
+    return editor.completeDebuggerCommand(
+      "debug-start",
+      0,
+      this.editorDebuggerSnapshot(loadOutput),
+    );
+  }
+
+  private editorDebuggerSnapshot(prefix = ""): string {
+    const registers = this.commands.execute(["debug", "r"], "");
+    const disassembly = this.commands.execute(["debug", "u"], "");
+    return joinEditorDebuggerOutput([
+      prefix,
+      registers.stdout,
+      registers.stderr,
+      disassembly.stdout,
+      disassembly.stderr,
+    ]);
+  }
+}
+
+function editorArtifactPath(sourcePath: string): string {
+  const slash = Math.max(
+    sourcePath.lastIndexOf("/"),
+    sourcePath.lastIndexOf("\\"),
+  );
+  const dot = sourcePath.lastIndexOf(".");
+  return `${dot > slash ? sourcePath.slice(0, dot) : sourcePath}.csx`;
+}
+
+function editorObjectPath(sourcePath: string): string {
+  const slash = Math.max(
+    sourcePath.lastIndexOf("/"),
+    sourcePath.lastIndexOf("\\"),
+  );
+  const dot = sourcePath.lastIndexOf(".");
+  return `${dot > slash ? sourcePath.slice(0, dot) : sourcePath}.obj`;
+}
+
+function formatEditorDebuggerAddress(address: number): string {
+  return address.toString(16).toUpperCase().padStart(8, "0");
+}
+
+function joinEditorDebuggerOutput(parts: readonly string[]): string {
+  let output = "";
+  for (const part of parts) {
+    if (part.length === 0) continue;
+    if (
+      output.length > 0 &&
+      !output.endsWith("\n") &&
+      !output.endsWith("\r") &&
+      !part.startsWith("\n") &&
+      !part.startsWith("\r")
+    ) {
+      output += "\r\n";
+    }
+    output += part;
+  }
+  return output;
 }
 
 function ensureLinuxRuntimePresence(

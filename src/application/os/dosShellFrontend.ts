@@ -64,6 +64,9 @@ export class DosShellFrontend implements ShellFrontend {
     if (name === "timer") return "dos-timer";
     if (name === "edit") return "dos-editor";
     if (name === "qbasic") return "dos-qbasic";
+    if (["csasm", "cscc", "cscpp", "pwb"].includes(name)) {
+      return "dos-toolchain-ide";
+    }
     if (name === "vi") return "vi";
     return undefined;
   }

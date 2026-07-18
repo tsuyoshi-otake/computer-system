@@ -140,6 +140,37 @@ describe("PersistentComputerIdentityService", (): void => {
     ).not.toContain("c");
     expect(remaining.observations).toHaveLength(4);
   });
+
+  it("pages placed identities in bounded non-wrapping windows", (): void => {
+    const repository = new MemoryRepository();
+    const service = serviceWithIds(repository, 1, 2, 3, 4, 5);
+    service.place("a", "standard");
+    service.createItem("advanced");
+    service.place("b", "advanced");
+    service.place("c", "standard");
+    service.place("d", "advanced");
+
+    const first = service.blockObservationPage(0, 2);
+    const second = service.blockObservationPage(first.nextCursor!, 2);
+    expect(first).toMatchObject({ nextCursor: 2, total: 4 });
+    expect(first.observations.map(({ physicalKey }) => physicalKey)).toEqual([
+      "a",
+      "b",
+    ]);
+    expect(second).toMatchObject({ nextCursor: null, total: 4 });
+    expect(second.observations.map(({ physicalKey }) => physicalKey)).toEqual([
+      "c",
+      "d",
+    ]);
+    expect(service.blockObservationPage(99, 2)).toMatchObject({
+      nextCursor: null,
+      observations: [],
+      total: 4,
+    });
+    expect(() => service.blockObservationPage(-1, 2)).toThrow(/cursor/u);
+    expect(() => service.blockObservationPage(0, 0)).toThrow(/size/u);
+    expect(() => service.blockObservationPage(0, 65)).toThrow(/1 and 64/u);
+  });
 });
 
 function serviceWithIds(

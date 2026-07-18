@@ -59,11 +59,11 @@ describe("default Computer System Linux boot", (): void => {
     expect(post).toContain("Main Processor : CS386SX");
     expect(post).toContain("Video Memory     : 256 KB");
     expect(post).toContain("Display Panel    : 800x480 LCD");
-    expect(post).toContain("Starting Computer System DOS 6.2");
+    expect(post).toContain("Starting Computer System DOS 1.0");
 
     runtime.runTick();
     const dos = record.terminal.snapshot().rows.join("\n");
-    expect(record.terminal.line(1).trimEnd()).toBe("Computer System DOS 6.2");
+    expect(record.terminal.line(1).trimEnd()).toBe("Computer System DOS 1.0");
     expect(record.terminal.line(2).trimEnd()).toBe("");
     expect(record.terminal.line(3).trimEnd()).toBe("C:\\>");
     expect(dos).not.toContain("tty1");
@@ -102,7 +102,11 @@ describe("default Computer System Linux boot", (): void => {
     for (let tick = 0; tick < 20; tick += 1) runtime.runTick();
 
     let screen = record.terminal.snapshot().rows.join("\n");
-    expect(screen).toContain("File  Edit  View  Search  Run  Debug");
+    expect(screen).toContain("File Edit View Search Run Options");
+    expect(screen).toMatch(
+      /^ {2}File Edit View Search Run Options\s+Help\s*$/mu,
+    );
+    expect(screen).not.toContain("Make Run Debug");
     expect(screen).toContain("Program finished");
     runtime.queueEvent(
       record.computerId,
@@ -119,6 +123,166 @@ describe("default Computer System Linux boot", (): void => {
       JSON.stringify({ action: "down", button: 0, sequence: 1, x: 4, y: 2 }),
     );
     runtime.runTick();
+    expect(record.lifecycle.state.kind).toBe("waiting_event");
+  });
+
+  it("persists an asynchronous .CSX build and opens the WorkBench debugger on CS386SX", (): void => {
+    const record = new ComputerRecord("computer-134", "standard", {
+      displayProfileId: "portable-vga-256k",
+      hardware: {
+        clockHz: 16_000_000,
+        cpuModel: "cs386sx",
+        memoryBytes: 2_097_152,
+      },
+      osProfile: "dos",
+    });
+    const runtime = new ComputerRuntime();
+    runtime.register(record);
+    runtime.powerOn(record.computerId);
+    runtime.runTick();
+    record.filesystem.writeFile(
+      "/drives/c/main.c",
+      ["int main() {", 'printf("%d\\n", 42);', "return 0;", "}", ""].join(
+        "\r\n",
+      ),
+    );
+
+    runtime.queueEvent(record.computerId, "terminal_line", "CSCC C:\\MAIN.C");
+    for (let tick = 0; tick < 5; tick += 1) runtime.runTick();
+    expect(record.lifecycle.state.kind).toBe("waiting_event");
+    runtime.queueEvent(
+      record.computerId,
+      "terminal_keys",
+      JSON.stringify(["Enter"]),
+    );
+    for (let tick = 0; tick < 5; tick += 1) runtime.runTick();
+    expect(record.terminal.snapshot().rows.join("\n")).not.toContain(
+      "Enter  Continue",
+    );
+    expect(
+      runtime.queueEvent(
+        record.computerId,
+        "terminal_keys",
+        JSON.stringify(["F7"]),
+      ),
+    ).toMatchObject({ outcome: "accepted" });
+    runtime.runTick();
+    const compileWait = record.lifecycle.state;
+    expect(compileWait.kind).toBe("waiting_event");
+    if (compileWait.kind !== "waiting_event") {
+      throw new Error("WorkBench build did not enter foreground wait");
+    }
+    expect(compileWait.filter).toContain("__cs_foreground_complete:compile:");
+    expect(record.terminal.snapshot().rows.join("\n")).toContain(
+      "CS C/C++ 1.0",
+    );
+    for (let tick = 0; tick < 19; tick += 1) runtime.runTick();
+
+    expect(
+      record.filesystem.exists("/drives/c/main.csx"),
+      record.terminal.snapshot().rows.join("\n"),
+    ).toBe(true);
+    expect(record.terminal.snapshot().rows.join("\n")).toContain(
+      "Built C:\\MAIN.CSX",
+    );
+
+    runtime.queueEvent(
+      record.computerId,
+      "terminal_keys",
+      JSON.stringify(["F5"]),
+    );
+    for (let tick = 0; tick < 20; tick += 1) runtime.runTick();
+    const debuggerScreen = record.terminal.snapshot().rows.join("\n");
+    expect(debuggerScreen).toContain("CS Debugger 1.0");
+    expect(debuggerScreen).toContain("EIP=00000000");
+  });
+
+  it("schedules Program List Build and Build-and-Run as one deferred owner", (): void => {
+    const record = new ComputerRecord("computer-135", "standard", {
+      displayProfileId: "portable-vga-256k",
+      hardware: {
+        clockHz: 16_000_000,
+        cpuModel: "cs386sx",
+        memoryBytes: 2_097_152,
+      },
+      osProfile: "dos",
+    });
+    const runtime = new ComputerRuntime();
+    runtime.register(record);
+    runtime.powerOn(record.computerId);
+    runtime.runTick();
+    record.filesystem.writeFile(
+      "/drives/c/main.c",
+      ["int main() {", 'printf("%d\\n", 42);', "return 0;", "}", ""].join(
+        "\r\n",
+      ),
+    );
+    record.filesystem.writeFile(
+      "/drives/c/main.csp",
+      [
+        "CS PROGRAM LIST 1.0",
+        "SOURCE=MAIN.C",
+        "OUTPUT=APP.CSX",
+        "LISTING=APP.LST",
+        "MAP=APP.MAP",
+        "",
+      ].join("\r\n"),
+    );
+
+    runtime.queueEvent(record.computerId, "terminal_line", "PWB C:\\MAIN.C");
+    for (let tick = 0; tick < 5; tick += 1) runtime.runTick();
+    runtime.queueEvent(
+      record.computerId,
+      "terminal_keys",
+      JSON.stringify(["Enter", "Alt+m", "p", "Enter"]),
+    );
+    for (let tick = 0; tick < 5; tick += 1) runtime.runTick();
+    runtime.queueEvent(
+      record.computerId,
+      "terminal_keys",
+      JSON.stringify(["F7"]),
+    );
+    runtime.runTick();
+
+    expect(record.filesystem.exists("/drives/c/app.csx")).toBe(false);
+    const buildWait = record.lifecycle.state;
+    expect(buildWait.kind).toBe("waiting_event");
+    if (buildWait.kind !== "waiting_event") {
+      throw new Error("Program List build did not enter foreground wait");
+    }
+    expect(buildWait.filter).toContain("__cs_foreground_complete:compile:");
+    for (let tick = 0; tick < 20; tick += 1) runtime.runTick();
+    expect(record.filesystem.exists("/drives/c/app.csx")).toBe(true);
+    expect(record.filesystem.exists("/drives/c/app.lst")).toBe(true);
+    expect(record.filesystem.exists("/drives/c/app.map")).toBe(true);
+    expect(record.terminal.snapshot().rows.join("\n")).toContain(
+      "Built C:\\APP.CSX",
+    );
+
+    runtime.queueEvent(
+      record.computerId,
+      "terminal_keys",
+      JSON.stringify(["Shift+F5"]),
+    );
+    runtime.runTick();
+    const runWait = record.lifecycle.state;
+    expect(runWait.kind).toBe("waiting_event");
+    if (runWait.kind !== "waiting_event") {
+      throw new Error(
+        "Program List Build-and-Run did not enter foreground wait",
+      );
+    }
+    expect(runWait.filter).toContain("__cs_foreground_complete:compile:");
+    for (let tick = 0; tick < 30; tick += 1) runtime.runTick();
+    runtime.queueEvent(
+      record.computerId,
+      "terminal_keys",
+      JSON.stringify(["F4"]),
+    );
+    runtime.runTick();
+    const results = record.terminal.snapshot().rows.join("\n");
+    expect(results).toContain("Reused C:\\MAIN.OBJ");
+    expect(results).toContain("42");
     expect(record.lifecycle.state.kind).toBe("waiting_event");
   });
 

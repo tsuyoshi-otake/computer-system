@@ -421,3 +421,44 @@ the preserved real client/server runtime.
 `Expect:` Editor modes and file naming match the manual, Copy returns the
 selection or visible screen, and displayed memory totals include OS overhead
 without double-counting guest runtime.
+
+## July 2026 DOS development product identity and WorkBench
+
+The guest toolchain is presented as CS ASM 1.0, CS C/C++ 1.0, and CS QBASIC 1.0
+under CS-DOS 1.0. `CSASM`, C-only `CSCC`, C++-only `CSCPP`, and
+extension-selecting `PWB` launch the original full-screen WorkBench. EDIT
+retains its own five-menu DOS editor surface, F1 help, Save As, bounded
+selection, and explicit Save/Discard/Cancel ownership.
+
+The WorkBench owns separate File/Edit/View/Search/Make/Run/Debug/Options/Help
+menus. F7 creates a persistent same-basename `.CSX`, Ctrl+F5 runs that build,
+and Shift+F5 builds and runs. F5, F8, and F9 drive the existing bounded debugger
+in the WorkBench rather than creating inert source markers or sending the user
+back to the shell. The debugger pane shows the current EIP, registers, validated
+disassembly, instruction-step/continue outcomes, and current-EIP breakpoints.
+Command-line `DEBUG` remains available over the same state machine.
+
+DOS command-line defaults now derive `.OBJ` and `.CSX` from the input base name,
+while Linux retains `a.o` and `a.out`. Version output and WorkBench identity use
+the active CS386SX, CS486DX, or CS486DX2 runtime target. The current CS-DOS base
+remains v6; immutable v5 remains the pre-WorkBench migration source.
+
+`Verify:` Run the focused EDIT/WorkBench, assembler-profile, C-family-profile,
+system-boot, DOS-profile, storage-image, Pages, and manual tests, then run
+`npm run validate`. In Chrome, inspect the EDIT, Assembly, C-family, debugger,
+and CS-DOS manual sections.
+
+`Expect:` Save As changes the editor path only after a successful guest write,
+outside-menu pointer hits cancel, dirty failures retain ownership, and every
+WorkBench operation reaches a visible terminal state. Sync and tick-sliced
+builds persist `.CSX`; the in-WorkBench debugger actually steps, continues, and
+toggles bounded breakpoints. PWB selects `.ASM`, `.C`, or `.CPP`, and the
+browser does not claim Microsoft C/C++ 7.0 binaries, artwork, OMF, COM/EXE,
+source-line debugging, or native x86 compatibility.
+
+The built-in editor/debugger terminal path is not a public guest application
+API. User ASM/C/C++ still lacks raw keyboard/mouse events, terminal-cell or
+framebuffer drawing, audio, and windowing. A shared application/display/input
+ABI suitable for future EDIT-like user TUIs, DOOM-class programs, and CS Windows
+1.0 is intentionally left as future work rather than being inferred from the
+built-in WorkBench.

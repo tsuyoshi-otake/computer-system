@@ -572,6 +572,38 @@ operations, and ESP/EBP access. `CS486OBJ` is not ELF or OMF; `CS486` is not DOS
 COM/EXE or native x86. Dynamic loading remains deliberately unsupported until
 this ABI has stable field evidence.
 
+The C-family frontend begins with the bounded token preprocessor in
+`cs486CPreprocessor.ts`. Include callbacks are injected by the shell and read
+only through the credentialed guest filesystem. Both direct shell compilation
+and deferred ComputerRuntime compilation must pass identical `-I/-D/-U` or DOS
+`/I,/D,/U` options, `INCLUDE` directories, source names, provenance, and work
+accounting. Never add a host include fallback. Macro rescan, conditional,
+include, source, token, and diagnostic limits must be checked before an array or
+recursive path grows. Unsupported syntax must terminate explicitly.
+
+C++ deliberately emits the same unmangled CS ABI as C. Individual `extern "C"`
+declarations are accepted as an explanatory spelling; linkage blocks, other
+linkages, parameters, member functions, overloads, and C++ name mangling are not
+implemented. ASM interoperation is therefore limited to the zero-argument
+EAX/void contract and optional `SIGNATURE`. Do not document MASM, near/far, OMF,
+DOS extender, or Microsoft library compatibility.
+
+CS-DOS Program Lists are parsed by `csDosProgramList.ts` and resolved again to
+canonical credentialed guest paths in `ShellCommandRuntime`. The parser bounds
+lines, sources, objects, includes, definitions, and paths. The runtime must
+repeat collision checks after path resolution because `APP.CSX` and `.\\APP.CSX`
+can name the same file. Per-unit fingerprints include source, transitive
+headers, options, and compiler identity. Generated objects, executable, listing,
+map, and `.CBR` ownership metadata commit in one DOS filesystem transaction;
+failure retains the last good artifact but the IDE marks Run Last stale. Clean
+trusts only a valid record for that exact project and never deletes authored or
+unowned paths. Deferred CS386SX builds remain one bounded foreground compile
+task with one finalization owner.
+
+CS QBASIC uses the same compiler/runtime only as a transient source-run path.
+F5, Ctrl+F5, Shift+F5, and `/RUN` must not install OBJ, CSX, or EXE output. Its
+menus and help must not imply Make or Debug capabilities.
+
 Computer System Python no longer uses a bytecode VM. `pythonCs486.ts` resolves a
 bounded module graph, compiles Python control flow to CS486 instructions, and
 uses the allowlisted `python` syscall for managed values and native modules.

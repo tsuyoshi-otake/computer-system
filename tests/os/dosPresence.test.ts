@@ -164,7 +164,7 @@ describe("CS-DOS OS presence", (): void => {
     });
 
     expect(restored.submit("DIR C:\\STAMP.TXT").stdout).toContain(
-      "01-02-26  03:04a",
+      "01-02-26   3:04a",
     );
   });
 

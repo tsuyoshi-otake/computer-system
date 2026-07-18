@@ -113,6 +113,18 @@ synchronized.
 - #20: State-backed OS Presence and lifecycle fidelity.
 - #21: Static GitHub Pages landing page and 16-chapter field manual.
 - #22: Scoped `CLAUDE.md` responsibility split.
+- #24: Web Terminal handoff deduplication, exact-session lifecycle, and
+  range-state stability.
+- #25: Complete CS-DOS 1.0 EDIT, Program Lists, C/C++ preprocessing, ABI help,
+  and QBASIC source-run development workflow.
+- #26: Configurable `vi` options, bounded vimrc loading, and guest-shell
+  commands.
+- #27: Lightweight `vi` syntax lexers, completion, symbol indexing, and
+  definition navigation.
+- #28: Shared DOS editor options, lightweight language services, navigation, and
+  guest-shell command integration.
+- #29: EDIT and Web Terminal responsiveness, bounded input admission, and
+  multi-session frame scaling.
 
 Use English commit messages with useful detail and reference every applicable
 Issue. Issue #4 remains relevant while Phase 2 work is in scope.

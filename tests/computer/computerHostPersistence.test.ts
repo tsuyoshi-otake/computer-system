@@ -253,7 +253,7 @@ describe("ComputerHost persistence bridge", (): void => {
     expect(host.runtime.powerOn(record.computerId).outcome).toBe("accepted");
     const post = record.terminal.snapshot().rows.join("\n");
     expect(post).toContain("Operating Sys. : Computer System DOS");
-    expect(post).toContain("Starting Computer System DOS 6.2 from Floppy A:");
+    expect(post).toContain("Starting Computer System DOS 1.0 from Floppy A:");
     for (let tick = 0; tick < 4; tick += 1) host.runTick();
 
     const version = host.runtime.executeDebugShellCommand(
@@ -263,7 +263,7 @@ describe("ComputerHost persistence bridge", (): void => {
     expect(version).toMatchObject({ outcome: "completed", exitCode: 0 });
     if (version.outcome !== "completed")
       throw new Error("VER did not complete");
-    expect(version.stdout).toContain("DOS Version 6.20");
+    expect(version.stdout).toContain("DOS Version 1.00");
     expect(
       host.runtime.executeDebugShellCommand(record.computerId, "C:"),
     ).toMatchObject({ outcome: "completed", exitCode: 1 });

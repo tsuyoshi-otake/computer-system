@@ -14,11 +14,14 @@ const previousLinuxImageId = "cs-linux-1.0-rootfs-v3";
 const recentLinuxImageId = "cs-linux-1.0-rootfs-v4";
 const formerLinuxImageId = "cs-linux-1.0-rootfs-v5";
 const linuxImageId = "cs-linux-1.0-rootfs-v6";
-const legacyDosImageId = "cs-dos-6.2-rootfs-v1";
-const previousDosImageId = "cs-dos-6.2-rootfs-v2";
-const recentDosImageId = "cs-dos-6.2-rootfs-v3";
-const formerDosImageId = "cs-dos-6.2-rootfs-v4";
-const dosImageId = "cs-dos-6.2-rootfs-v5";
+const currentLinuxImageId = "cs-linux-1.0-rootfs-v7";
+const legacyDosImageId = "cs-dos-1.0-rootfs-v1";
+const previousDosImageId = "cs-dos-1.0-rootfs-v2";
+const recentDosImageId = "cs-dos-1.0-rootfs-v3";
+const formerDosImageId = "cs-dos-1.0-rootfs-v4";
+const priorDosImageId = "cs-dos-1.0-rootfs-v5";
+const dosImageId = "cs-dos-1.0-rootfs-v6";
+const currentDosImageId = "cs-dos-1.0-rootfs-v7";
 
 const previousLinuxImageDirectories = Object.freeze([
   "/bin",
@@ -48,6 +51,11 @@ const linuxImageDirectories = Object.freeze([
   "/usr/share/man",
   "/var/lib",
   "/var/lib/cs-os",
+]);
+
+const currentLinuxImageDirectories = Object.freeze([
+  ...linuxImageDirectories,
+  "/usr/include",
 ]);
 
 // Immutable command set shipped under cs-linux-1.0-rootfs-v1. Keep this list
@@ -156,7 +164,7 @@ const legacyLinuxCommands = Object.freeze([
 
 // Immutable command snapshots shipped by the immediately previous images.
 // These cannot be derived from the live registry: persisted overlays may still
-// name v5/v4 after the current profile removes BASIC or adds QBASIC.
+// name v6/v5/v4 after the current profile adds the WorkBench or replaces BASIC with QBASIC.
 const formerLinuxCommands = Object.freeze([
   "[",
   "alias",
@@ -343,16 +351,29 @@ const formerDosCommands = Object.freeze([
   "vol",
 ]);
 
+const priorDosCommands = Object.freeze(
+  [
+    ...formerDosCommands.filter(
+      (command) => command !== "basic" && command !== "basicc",
+    ),
+    "qbasic",
+  ].sort(),
+);
+
 const toolchainCommands = new Set([
   "as",
   "basic",
   "basicc",
   "c++",
   "cc",
+  "csasm",
+  "cscc",
+  "cscpp",
   "csdb",
   "ld",
   "nm",
   "objdump",
+  "pwb",
   "run",
 ]);
 
@@ -382,6 +403,27 @@ const floppyCommands = new Set([
 ]);
 
 export const linuxFilesystemImage: FilesystemBaseImage = Object.freeze({
+  id: currentLinuxImageId,
+  directories: currentLinuxImageDirectories,
+  files: Object.freeze([
+    ...commandFiles("linux"),
+    dataFile("/boot/vmlinuz-cs486", "CS-Linux 1.0 kernel image", 786_432),
+    dataFile("/lib/libcs.so.1", "CS-Linux shared runtime", 393_216),
+    plainFile(
+      "/etc/motd",
+      "Welcome to CS-Linux 1.0. Type 'help' for commands or 'man cs-linux' for the field guide.\n",
+    ),
+    plainFile(
+      "/usr/share/man/README",
+      "CS-Linux manual pages are served by the versioned man/apropos command index.\n",
+    ),
+    plainFile("/var/log/messages", "", 0o640),
+    plainFile("/var/log/auth.log", "", 0o600),
+    ...cFamilyHeaders("linux"),
+  ]),
+});
+
+const priorLinuxFilesystemImage: FilesystemBaseImage = Object.freeze({
   id: linuxImageId,
   directories: linuxImageDirectories,
   files: Object.freeze([
@@ -482,15 +524,34 @@ const legacyLinuxFilesystemImage: FilesystemBaseImage = Object.freeze({
   ]),
 });
 
+const priorDosImageDirectories = Object.freeze([
+  "/drives",
+  "/drives/c",
+  "/drives/c/command",
+  "/drives/c/dos",
+  "/drives/c/temp",
+]);
+
+const currentDosImageDirectories = Object.freeze([
+  ...priorDosImageDirectories,
+  "/drives/c/include",
+]);
+
 export const dosFilesystemImage: FilesystemBaseImage = Object.freeze({
-  id: dosImageId,
-  directories: Object.freeze([
-    "/drives",
-    "/drives/c",
-    "/drives/c/command",
-    "/drives/c/dos",
-    "/drives/c/temp",
+  id: currentDosImageId,
+  directories: currentDosImageDirectories,
+  files: Object.freeze([
+    ...commandFiles("dos"),
+    imageFile("/drives/c/command.com", "command", 55_968),
+    dataFile("/drives/c/dos/himem.sys", "CS-DOS XMS manager", 14_592),
+    dataFile("/drives/c/dos/emm386.exe", "CS-DOS UMB manager", 22_528),
+    ...cFamilyHeaders("dos"),
   ]),
+});
+
+const preprocessorPriorDosFilesystemImage: FilesystemBaseImage = Object.freeze({
+  id: dosImageId,
+  directories: priorDosImageDirectories,
   files: Object.freeze([
     ...commandFiles("dos"),
     imageFile("/drives/c/command.com", "command", 55_968),
@@ -499,9 +560,20 @@ export const dosFilesystemImage: FilesystemBaseImage = Object.freeze({
   ]),
 });
 
+const priorDosFilesystemImage: FilesystemBaseImage = Object.freeze({
+  id: priorDosImageId,
+  directories: priorDosImageDirectories,
+  files: Object.freeze([
+    ...commandFiles("dos", priorDosCommands),
+    imageFile("/drives/c/command.com", "command", 55_968),
+    dataFile("/drives/c/dos/himem.sys", "CS-DOS XMS manager", 14_592),
+    dataFile("/drives/c/dos/emm386.exe", "CS-DOS UMB manager", 22_528),
+  ]),
+});
+
 const formerDosFilesystemImage: FilesystemBaseImage = Object.freeze({
   id: formerDosImageId,
-  directories: dosFilesystemImage.directories,
+  directories: priorDosImageDirectories,
   files: Object.freeze([
     ...commandFiles("dos", formerDosCommands),
     imageFile("/drives/c/command.com", "command", 55_968),
@@ -512,7 +584,7 @@ const formerDosFilesystemImage: FilesystemBaseImage = Object.freeze({
 
 const recentDosFilesystemImage: FilesystemBaseImage = Object.freeze({
   id: recentDosImageId,
-  directories: dosFilesystemImage.directories,
+  directories: priorDosImageDirectories,
   files: Object.freeze([
     ...commandFiles(
       "dos",
@@ -526,7 +598,7 @@ const recentDosFilesystemImage: FilesystemBaseImage = Object.freeze({
 
 const previousDosFilesystemImage: FilesystemBaseImage = Object.freeze({
   id: previousDosImageId,
-  directories: dosFilesystemImage.directories,
+  directories: priorDosImageDirectories,
   files: Object.freeze([
     ...commandFiles(
       "dos",
@@ -542,7 +614,7 @@ const previousDosFilesystemImage: FilesystemBaseImage = Object.freeze({
 
 const legacyDosFilesystemImage: FilesystemBaseImage = Object.freeze({
   id: legacyDosImageId,
-  directories: dosFilesystemImage.directories,
+  directories: priorDosImageDirectories,
   files: Object.freeze([
     ...commandFiles(
       "dos",
@@ -565,11 +637,14 @@ export function registerOsFilesystemImages(): void {
   registerFilesystemBaseImage(previousLinuxFilesystemImage);
   registerFilesystemBaseImage(recentLinuxFilesystemImage);
   registerFilesystemBaseImage(formerLinuxFilesystemImage);
+  registerFilesystemBaseImage(priorLinuxFilesystemImage);
   registerFilesystemBaseImage(linuxFilesystemImage);
   registerFilesystemBaseImage(legacyDosFilesystemImage);
   registerFilesystemBaseImage(previousDosFilesystemImage);
   registerFilesystemBaseImage(recentDosFilesystemImage);
   registerFilesystemBaseImage(formerDosFilesystemImage);
+  registerFilesystemBaseImage(priorDosFilesystemImage);
+  registerFilesystemBaseImage(preprocessorPriorDosFilesystemImage);
   registerFilesystemBaseImage(dosFilesystemImage);
 }
 
@@ -671,10 +746,45 @@ function plainFile(
   });
 }
 
+function cFamilyHeaders(
+  profile: ComputerOsProfile,
+): readonly FilesystemBaseImageFile[] {
+  const newline = profile === "dos" ? "\r\n" : "\n";
+  const directory = profile === "dos" ? "/drives/c/include" : "/usr/include";
+  const header = (
+    name: string,
+    lines: readonly string[],
+  ): FilesystemBaseImageFile =>
+    plainFile(`${directory}/${name}`, `${lines.join(newline)}${newline}`);
+  return Object.freeze([
+    header("stdio.h", [
+      "#ifndef CS_STDIO_H",
+      "#define CS_STDIO_H 1",
+      "/* CS C/C++ 1.0 supports the built-in printf integer subset. */",
+      "#endif",
+    ]),
+    header("cstdio", [
+      "#ifndef CS_CSTDIO",
+      "#define CS_CSTDIO 1",
+      "#include <stdio.h>",
+      "#endif",
+    ]),
+    header("iostream", [
+      "#ifndef CS_IOSTREAM",
+      "#define CS_IOSTREAM 1",
+      "/* CS C/C++ 1.0 supports integer std::cout and std::endl only. */",
+      "#endif",
+    ]),
+  ]);
+}
+
 function dosExecutableName(command: string): string {
   if (command === "c++") return "cpp.com";
   if (command === "csdb") return "debug.exe";
   if (command === "qbasic") return "qbasic.exe";
+  if (["csasm", "cscc", "cscpp", "pwb"].includes(command)) {
+    return `${command}.exe`;
+  }
   if (command === "systeminfo") return "sysinfo.com";
   return `${command.toLowerCase()}.com`;
 }

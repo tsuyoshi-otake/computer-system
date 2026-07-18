@@ -154,10 +154,14 @@ describe("GitHub Pages publication", () => {
     );
   });
 
-  it("keeps BASIC exclusive to the CS-DOS profile", () => {
-    expect(landing).toContain("Python, ASM, C, C++; no BASIC");
-    expect(occurrences(landing, "Python, ASM, C, C++; no BASIC")).toBe(2);
-    expect(landing).toContain("ASM, CS QBASIC, C, C++; no user Python");
+  it("keeps CS QBASIC 1.0 exclusive to the CS-DOS profile", () => {
+    const desktopLanguages = "Python, CS ASM 1.0, CS C/C++ 1.0; no BASIC";
+    expect(landing).toContain(desktopLanguages);
+    expect(occurrences(landing, desktopLanguages)).toBe(2);
+    expect(landing).toContain(
+      "CS ASM 1.0, CS C/C++ 1.0, CS QBASIC 1.0; no user Python",
+    );
+    expect(landing).toContain("C:\\&gt;PWB HELLO.CPP");
     expect(landing).toContain("C:\\&gt;QBASIC /RUN HELLO.BAS");
     expect(landing).not.toContain("Python, ASM, BASIC, C, C++");
     expect(landing).not.toContain("C:\\&gt;BASICC HELLO.BAS");

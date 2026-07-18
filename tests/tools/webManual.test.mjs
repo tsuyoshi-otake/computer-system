@@ -169,7 +169,7 @@ describe("Web terminal field manual", () => {
       "four-way unified L1",
       "unaligned dwords",
       "pipeline flushes",
-      "Assembly language",
+      "CS ASM 1.0",
       "MicroPython",
       "Computer System Bash",
       "Computer System Linux 1.0",
@@ -185,13 +185,13 @@ describe("Web terminal field manual", () => {
       "/proc/loadavg",
       "symbolic links",
       "hard-link",
-      "Computer System DOS 6.2",
-      "CS-DOS 6.2",
+      "Computer System DOS 1.0",
+      "CS-DOS 1.0",
       "ATTRIB",
       "CHKDSK</code> reports state without repair",
       "GOTO :EOF",
       "BASIC",
-      "C and C++",
+      "CS C/C++ 1.0",
       "CS486OBJ",
       "static linking",
       "Restricted inline assembly",
@@ -200,7 +200,20 @@ describe("Web terminal field manual", () => {
       "Amdahl / Gustafson",
       "Terminal control and source editing",
       "DOS-style EDIT",
+      "IBM VGA 8x16",
+      "#0000AA",
+      "#00AAAA",
+      "#AAAAAA",
+      "#000000",
+      "DOS Command, Repeat DOS Command, and Insert Command Output",
+      "F1 through F12",
+      "transparent keyboard textarea",
+      "parenthesized mnemonic suffix",
       "[No Name]",
+      ":syntax on",
+      ":set number rainbow list wrap",
+      ":r !command",
+      "C:\\_VIMRC",
       "Ctrl+Home / Ctrl+End",
       "PWR, HDD, and FDD indicators",
       "Save, Discard, or Cancel",
@@ -211,7 +224,7 @@ describe("Web terminal field manual", () => {
       "/?computer=NNNN",
       "out_of_range",
       "rotates the bearer token",
-      "Operating CS-DOS 6.2 on the CS386SX portable",
+      "Operating CS-DOS 1.0 on the CS386SX portable",
       "2000-02-29",
       "2038 boundary",
       "Build a signal threshold controller",
@@ -260,7 +273,7 @@ describe("Web terminal field manual", () => {
     );
   });
 
-  it("documents the bounded DOS 6.2-style runtime without claiming native emulation", () => {
+  it("documents the bounded CS-DOS 1.0 runtime without claiming native emulation", () => {
     const dos =
       manualChapters.find(({ id }) => id === "dos-profile")?.html ?? "";
 
@@ -279,7 +292,17 @@ describe("Web terminal field manual", () => {
       "strict 8.3 form",
       "C:\\&gt;",
       "%ERRORLEVEL%",
-      "C++",
+      "CS ASM 1.0",
+      "CS C/C++ 1.0",
+      "CS QBASIC 1.0",
+      "CSASM ANSWER.ASM",
+      "CSCC TOTAL.C",
+      "CSCPP ANSWER.CPP",
+      "PWB ANSWER.CPP",
+      "F7 builds one source or the selected Program List",
+      "F5/F8/F9 debug inside WorkBench",
+      "run source transiently and create no OBJ, CSX, or EXE",
+      "Microsoft C/C++ 7.0",
       "MicroPython commands",
       "BIOS interrupts",
       "TSR",
@@ -323,6 +346,11 @@ describe("Web terminal field manual", () => {
       "macro expansion depth 16",
       "100,000 expanded tokens",
       "ld fast.o -o fast -e start",
+      "CS ASM 1.0 for the active CS486/CS386 target",
+      "ASM /VERSION",
+      "CSASM FAST.ASM",
+      "PWB FAST.ASM",
+      "Shift+F5 builds and runs",
     ]) {
       expect(assembly).toContain(required);
     }
@@ -343,6 +371,18 @@ describe("Web terminal field manual", () => {
       "not Linux ELF or OMF",
       "native DOS <code>.COM</code>/<code>.EXE</code>",
       "Dynamic linking",
+      "CS C/C++ 1.0 for the active CS486/CS386 target",
+      "cc --version",
+      "CSCC PROGRAM.C",
+      "CSCPP PROGRAM.CPP",
+      "PWB PROGRAM.CPP",
+      "selected Program List",
+      "instruction debugger directly in WorkBench",
+      "CS PROGRAM LIST 1.0",
+      "#include",
+      'extern "C" int fast();',
+      "no MASM decoration",
+      "CS Windows 1.0 is future work",
     ]) {
       expect(cFamily).toContain(required);
     }
@@ -424,6 +464,7 @@ describe("Web terminal field manual", () => {
     }
     expect(storage).toContain("cold OS-runtime projection");
     expect(storage).toContain("never resurrect a stale process");
+    expect(storage).toContain("Web Terminal <b>Eject</b> button");
     expect(faults).toContain("identity pages are already current");
     expect(faults).toContain("must reload without fallback");
     expect(faults).toContain("previous manifest is corrupt");
@@ -442,6 +483,9 @@ describe("Web terminal field manual", () => {
       "ATTRIB +R +H SECRET.TXT",
       "DIR /A:H",
       "Cold DOS persistence preserves C:",
+      "current CS-DOS and CS-Linux images are both v7",
+      "guest C/C++ include roots",
+      "DOS v5 retains CS QBASIC 1.0 without the WorkBench launchers",
       "CHKDSK</code> reports state without repair",
       "FORMAT A: /S",
       "temporary A:-only DOS",

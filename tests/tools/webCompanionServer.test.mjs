@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
+  createCoalescedEventWriter,
   formatHttpOrigin,
   isPublishedAddressLocal,
   normalizePublicOrigin,
@@ -43,6 +44,63 @@ describe("Web companion HTTP server", () => {
     );
   });
 
+  it("coalesces blocked streams without letting keepalive overwrite terminal state", () => {
+    const response = new EventEmitter();
+    const writes = [];
+    let firstWrite = true;
+    response.write = (value) => {
+      writes.push(JSON.parse(value));
+      if (firstWrite) {
+        firstWrite = false;
+        return false;
+      }
+      return true;
+    };
+    response.end = () => undefined;
+    const writeEvent = createCoalescedEventWriter(response);
+
+    writeEvent({ type: "state", session: { mode: "writer" } });
+    writeEvent({ type: "terminal", terminal: { sequence: 1 } });
+    writeEvent({ type: "keepalive" });
+    writeEvent({ type: "terminal", terminal: { sequence: 2 } });
+
+    expect(writes).toEqual([{ type: "state", session: { mode: "writer" } }]);
+    response.emit("drain");
+    expect(writes).toEqual([
+      { type: "state", session: { mode: "writer" } },
+      { type: "terminal", terminal: { sequence: 2 } },
+    ]);
+  });
+
+  it("preserves control state and gives terminal replacement an explicit end", () => {
+    const response = new EventEmitter();
+    const writes = [];
+    let firstWrite = true;
+    let ended = 0;
+    response.write = (value) => {
+      writes.push(JSON.parse(value));
+      if (firstWrite) {
+        firstWrite = false;
+        return false;
+      }
+      return true;
+    };
+    response.end = () => {
+      ended += 1;
+    };
+    const writeEvent = createCoalescedEventWriter(response);
+
+    writeEvent({ type: "keepalive" });
+    writeEvent({ type: "state", session: { access: "out_of_range" } });
+    writeEvent({ type: "terminal", terminal: { sequence: 3 } });
+    writeEvent({ type: "replaced" });
+    writeEvent({ type: "terminal", terminal: { sequence: 4 } });
+    response.emit("drain");
+
+    expect(writes).toEqual([{ type: "keepalive" }, { type: "replaced" }]);
+    expect(ended).toBe(1);
+  });
+
   it("serves manual PNG illustrations with an image content type", async () => {
     const server = newTestWebCompanionServer({
       bds: new FakeBds(),
@@ -61,6 +119,25 @@ describe("Web companion HTTP server", () => {
       expect(response.headers.get("content-type")).toBe("image/png");
       expect((await response.arrayBuffer()).byteLength).toBeGreaterThan(1_000);
     }
+  });
+
+  it("serves the DOS VGA font with its WOFF content type", async () => {
+    const server = newTestWebCompanionServer({
+      bds: new FakeBds(),
+      port: 0,
+      assetRoot: path.resolve(import.meta.dirname, "../../web"),
+    });
+    servers.push(server);
+    const status = await server.start();
+
+    const response = await fetch(
+      `${status.origin}/fonts/WebPlus_IBM_VGA_8x16.woff`,
+    );
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe("font/woff");
+    const font = Buffer.from(await response.arrayBuffer());
+    expect(font.subarray(0, 4).toString("ascii")).toBe("wOFF");
+    expect(font.byteLength).toBeGreaterThan(20_000);
   });
 
   it("keeps browser opening disabled when explicitly disabled", async () => {
@@ -125,6 +202,111 @@ describe("Web companion HTTP server", () => {
       attempts: 1,
       opened: 1,
     });
+  });
+
+  it("does not launch or exchange a handoff before Bedrock reports ready", async () => {
+    const bds = new FakeBds({ autoReady: false });
+    const launches = [];
+    const server = newTestWebCompanionServer({
+      bds,
+      port: 0,
+      autoOpenBrowser: true,
+      browserOpener: async (url) => launches.push(url),
+    });
+    servers.push(server);
+    const status = await server.start();
+
+    bds.log(
+      'CS_WEB_SESSION_REQUEST {"requestId":"r1-1","playerId":"player-1","computerId":"c-000001"}',
+    );
+    await until(() => bds.commands.length === 1);
+    expect(launches).toEqual([]);
+    const waiting = await fetch(`${status.origin}/api/handoff`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Origin: status.origin,
+      },
+      body: JSON.stringify({ code: "0001" }),
+    });
+    expect(waiting.status).toBe(409);
+    expect(await waiting.json()).toMatchObject({ code: "not_ready" });
+
+    const sessionId = bds.commands[0].split(" ")[3];
+    bds.log(`CS_WEB_SESSION_READY ${JSON.stringify({ sessionId })}`);
+    await until(() => launches.length === 1);
+    expect((await exchangeHandoffUrl(launches[0])).response.status).toBe(200);
+  });
+
+  it("times out an unacknowledged Bedrock activation exactly once", async () => {
+    const bds = new FakeBds({ autoReady: false });
+    const server = newTestWebCompanionServer({
+      bds,
+      port: 0,
+      bedrockActivationTimeoutMs: 20,
+    });
+    servers.push(server);
+    await server.start();
+
+    bds.log(
+      'CS_WEB_SESSION_REQUEST {"requestId":"r1-1","playerId":"player-1","computerId":"c-000001"}',
+    );
+    await until(() =>
+      bds.commands.some((command) =>
+        command.includes("computer_system:web-close"),
+      ),
+    );
+    expect(
+      bds.commands.filter((command) =>
+        command.includes("computer_system:web-close"),
+      ),
+    ).toHaveLength(1);
+    expect(server.store.activeSessions()).toEqual([]);
+  });
+
+  it("keeps the replacement handoff when the superseded final arrives late", async () => {
+    const bds = new FakeBds({ autoReady: false });
+    const server = newTestWebCompanionServer({
+      bds,
+      port: 0,
+      bedrockActivationTimeoutMs: 2_000,
+    });
+    servers.push(server);
+    const status = await server.start();
+
+    bds.log(
+      'CS_WEB_SESSION_REQUEST {"requestId":"r1-1","playerId":"player-1","computerId":"c-000001"}',
+    );
+    await until(() => bds.commands.length === 1);
+    const firstSessionId = bds.commands[0].split(" ")[3];
+    bds.log(
+      'CS_WEB_SESSION_REQUEST {"requestId":"r1-2","playerId":"player-1","computerId":"c-000001"}',
+    );
+    await until(() => bds.commands.length === 3);
+    const secondResponse = bds.commands.find((command) =>
+      command.includes("computer_system:web-response r1-2"),
+    );
+    const secondSessionId = secondResponse.split(" ")[3];
+    bds.log(
+      `CS_WEB_SESSION_FINAL ${JSON.stringify({
+        sessionId: firstSessionId,
+        reason: "late_final",
+      })}`,
+    );
+    bds.log(
+      `CS_WEB_SESSION_READY ${JSON.stringify({
+        sessionId: secondSessionId,
+      })}`,
+    );
+    const exchanged = await fetch(`${status.origin}/api/handoff`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Origin: status.origin,
+      },
+      body: JSON.stringify({ code: "0001" }),
+    });
+    expect(exchanged.status).toBe(200);
   });
 
   it("does not automatically open a non-local published address", async () => {
@@ -222,7 +404,7 @@ describe("Web companion HTTP server", () => {
     await until(() => bds.commands.length === 1);
 
     expect(bds.commands[0]).toMatch(
-      /^scriptevent computer_system:web-response r1-1 [A-Za-z0-9_-]+ writer debug http:\/\//u,
+      /^scriptevent computer_system:web-response r1-1 [A-Za-z0-9_-]+ viewer debug http:\/\//u,
     );
     expect(server.status().rangeEnforcement).toBe("disabled_for_debug");
   });
@@ -281,11 +463,331 @@ describe("Web companion HTTP server", () => {
 
     expect(handoff).toMatchObject({
       computerId: "c-000001",
-      mode: "writer",
+      mode: "viewer",
     });
     expect(handoff.url).toBe(bds.commands[0].split(" ").at(-1));
     expect(handoff.expiresAt).toBeGreaterThan(Date.now());
     expect(launches).toEqual([]);
+  });
+
+  it("does not let a simultaneous Player handoff satisfy a debug-principal MCP wait", async () => {
+    const bds = new FakeBds();
+    const server = newTestWebCompanionServer({ bds, port: 0 });
+    servers.push(server);
+    await server.start();
+
+    const waiting = server.waitForHandoff({
+      computerId: "c-000001",
+      principalKind: "debug",
+      timeoutMs: 1_000,
+    });
+    bds.log(
+      'CS_WEB_SESSION_REQUEST {"requestId":"r1-1","playerId":"player-1","principalKind":"player","computerId":"c-000001"}',
+    );
+    await until(() => bds.commands.length === 1);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(server.pendingHandoffs.has("c-000001")).toBe(true);
+
+    bds.log(
+      'CS_WEB_SESSION_REQUEST {"requestId":"r1-2","playerId":"mcp-debug","principalKind":"debug","computerId":"c-000001"}',
+    );
+    await expect(waiting).resolves.toMatchObject({
+      computerId: "c-000001",
+      principalKind: "debug",
+    });
+    expect(server.pendingHandoffs.size).toBe(0);
+  });
+
+  it("opens an MCP-claimed handoff and observes the exact browser writer", async () => {
+    const bds = new FakeBds();
+    const launches = [];
+    const server = newTestWebCompanionServer({
+      bds,
+      port: 0,
+      autoOpenBrowser: true,
+      browserOpener: async (url) => {
+        launches.push(url);
+        await exchangeHandoffUrl(url);
+      },
+    });
+    servers.push(server);
+    await server.start();
+
+    const waiting = server.waitForHandoff({
+      computerId: "c-000001",
+      timeoutMs: 1_000,
+    });
+    bds.log(
+      'CS_WEB_SESSION_REQUEST {"requestId":"r1-1","playerId":"player-1","computerId":"c-000001"}',
+    );
+    const handoff = await waiting;
+    await expect(
+      server.openHandoffInBrowser(handoff, { timeoutMs: 1_000 }),
+    ).resolves.toMatchObject({
+      computerId: "c-000001",
+      mode: "writer",
+      state: "issued",
+    });
+    expect(launches).toHaveLength(1);
+    expect(server.store.activeSession(handoff.sessionId)).toMatchObject({
+      computerId: "c-000001",
+      mode: "writer",
+    });
+  });
+
+  it("captures, waits for, and drives the exact debug-owned TUI writer", async () => {
+    const bds = new FakeBds();
+    const server = newTestWebCompanionServer({ bds, port: 0 });
+    servers.push(server);
+    await server.start();
+    const handoff = await connectDebugWriter(server, bds);
+
+    bds.log(
+      `CS_WEB_TERMINAL ${JSON.stringify(tuiSnapshot(handoff.sessionId))}`,
+    );
+    await until(
+      () =>
+        server.store.activeSession(handoff.sessionId)?.terminalVersion === 1,
+    );
+    const captured = server.captureTuiScreen({
+      computerId: "c-000001",
+      sessionId: handoff.sessionId,
+      includeColors: true,
+    });
+    expect(captured).toMatchObject({
+      schema: 1,
+      computerId: "c-000001",
+      sessionId: handoff.sessionId,
+      principalKind: "debug",
+      mode: "writer",
+      access: "in_range",
+      snapshotVersion: 1,
+      surface: {
+        kind: "text",
+        schema: 1,
+        width: 8,
+        height: 2,
+        rows: ["EDIT    ", "File    "],
+        cursor: { x: 2, y: 1, blink: true },
+      },
+    });
+    expect(captured.surface.foreground).toEqual([
+      [7, 7, 7, 7, 7, 7, 7, 7],
+      [7, 7, 7, 7, 7, 7, 7, 7],
+    ]);
+    expect(captured.surface.background).toEqual([
+      [1, 1, 1, 1, 1, 1, 1, 1],
+      [1, 1, 1, 1, 1, 1, 1, 1],
+    ]);
+    for (const forbidden of [
+      "token",
+      "url",
+      "connectionCode",
+      "playerId",
+      "audio",
+      "storage",
+    ]) {
+      expect(captured).not.toHaveProperty(forbidden);
+    }
+
+    await expect(
+      server.sendTuiInput({
+        computerId: "c-000001",
+        sessionId: handoff.sessionId,
+        kind: "keys",
+        value: ["Alt+f"],
+      }),
+    ).resolves.toEqual({ outcome: "accepted" });
+    expect(bds.commands.at(-1)).toMatch(
+      /^scriptevent computer_system:web-input [A-Za-z0-9_-]+ [A-Za-z0-9_-]{6,20} keys /u,
+    );
+
+    const waiting = server.waitForTuiScreen({
+      computerId: "c-000001",
+      sessionId: handoff.sessionId,
+      contains: "Options",
+      afterVersion: captured.snapshotVersion,
+      timeoutMs: 1_000,
+    });
+    bds.log(
+      `CS_WEB_TERMINAL ${JSON.stringify(
+        tuiSnapshot(handoff.sessionId, {
+          rows: ["EDIT    ", "Options "],
+        }),
+      )}`,
+    );
+    await expect(waiting).resolves.toMatchObject({
+      snapshotVersion: 2,
+      surface: { rows: ["EDIT    ", "Options "] },
+    });
+    expect(server.pendingTuiWaits.size).toBe(0);
+
+    bds.log(
+      `CS_WEB_TERMINAL ${JSON.stringify(
+        tuiSnapshot(handoff.sessionId, { secretInput: true }),
+      )}`,
+    );
+    expect(() =>
+      server.captureTuiScreen({
+        computerId: "c-000001",
+        sessionId: handoff.sessionId,
+      }),
+    ).toThrow(/secret input/u);
+    await expect(
+      server.sendTuiInput({
+        computerId: "c-000001",
+        sessionId: handoff.sessionId,
+        kind: "line",
+        value: "must-not-enter-a-secret-prompt",
+      }),
+    ).rejects.toThrow(/non-secret terminal frame/u);
+  });
+
+  it("rejects Player-owned TUI sessions from the MCP inspection boundary", async () => {
+    const bds = new FakeBds();
+    const server = newTestWebCompanionServer({ bds, port: 0 });
+    servers.push(server);
+    await server.start();
+    bds.log(
+      'CS_WEB_SESSION_REQUEST {"requestId":"r1-1","playerId":"player-1","principalKind":"player","computerId":"c-000001"}',
+    );
+    await until(() => bds.commands.length === 1);
+    const sessionId = bds.commands[0].split(" ")[3];
+    await consumeResponse(bds.commands[0]);
+    bds.log(`CS_WEB_TERMINAL ${JSON.stringify(tuiSnapshot(sessionId))}`);
+
+    expect(() =>
+      server.captureTuiScreen({ computerId: "c-000001", sessionId }),
+    ).toThrow(/not owned by the MCP debug principal/u);
+  });
+
+  it("finalizes one event-driven TUI wait on writer closure and bounds wait capacity", async () => {
+    const bds = new FakeBds();
+    const server = newTestWebCompanionServer({ bds, port: 0 });
+    servers.push(server);
+    await server.start();
+    const handoff = await connectDebugWriter(server, bds);
+    bds.log(
+      `CS_WEB_TERMINAL ${JSON.stringify(tuiSnapshot(handoff.sessionId))}`,
+    );
+
+    const waiting = server.waitForTuiScreen({
+      computerId: "c-000001",
+      sessionId: handoff.sessionId,
+      contains: "never-present",
+      timeoutMs: 1_000,
+    });
+    expect(() =>
+      server.waitForTuiScreen({
+        computerId: "c-000001",
+        sessionId: handoff.sessionId,
+        contains: "duplicate",
+        timeoutMs: 1_000,
+      }),
+    ).toThrow(/already active/u);
+    bds.state("idle");
+    await expect(waiting).rejects.toThrow(/no longer active|BDS stopped/u);
+    expect(server.pendingTuiWaits.size).toBe(0);
+
+    const replacement = await connectDebugWriter(server, bds);
+    bds.log(
+      `CS_WEB_TERMINAL ${JSON.stringify(tuiSnapshot(replacement.sessionId))}`,
+    );
+    for (let index = 0; index < 8; index += 1) {
+      server.pendingTuiWaits.set(`occupied-${String(index)}`, {});
+    }
+    expect(() =>
+      server.waitForTuiScreen({
+        computerId: "c-000001",
+        sessionId: replacement.sessionId,
+        contains: "capacity",
+      }),
+    ).toThrow(/capacity/u);
+    server.pendingTuiWaits.clear();
+
+    await expect(
+      server.waitForTuiScreen({
+        computerId: "c-000001",
+        sessionId: replacement.sessionId,
+        contains: "still-never-present",
+        timeoutMs: 10,
+      }),
+    ).rejects.toThrow(/Timed out after 10 ms/u);
+    expect(server.pendingTuiWaits.size).toBe(0);
+    expect(() =>
+      server.waitForTuiScreen({
+        computerId: "c-000001",
+        sessionId: replacement.sessionId,
+        contains: "x".repeat(501),
+      }),
+    ).toThrow(/1 to 500/u);
+  });
+
+  it("rejects malformed TUI geometry, colors, and cursors instead of truncating", async () => {
+    const bds = new FakeBds();
+    const server = newTestWebCompanionServer({ bds, port: 0 });
+    servers.push(server);
+    await server.start();
+    const handoff = await connectDebugWriter(server, bds);
+    const identity = {
+      computerId: "c-000001",
+      sessionId: handoff.sessionId,
+    };
+
+    bds.log(
+      `CS_WEB_TERMINAL ${JSON.stringify(
+        tuiSnapshot(handoff.sessionId, {
+          width: 201,
+          rows: ["x".repeat(201), "y".repeat(201)],
+        }),
+      )}`,
+    );
+    expect(() => server.captureTuiScreen(identity)).toThrow(/text surface/u);
+
+    const invalidForeground = [
+      [16, 7, 7, 7, 7, 7, 7, 7],
+      [7, 7, 7, 7, 7, 7, 7, 7],
+    ];
+    bds.log(
+      `CS_WEB_TERMINAL ${JSON.stringify(
+        tuiSnapshot(handoff.sessionId, {
+          foreground: invalidForeground,
+        }),
+      )}`,
+    );
+    expect(() => server.captureTuiScreen(identity)).toThrow(/foreground/u);
+
+    bds.log(
+      `CS_WEB_TERMINAL ${JSON.stringify(
+        tuiSnapshot(handoff.sessionId, {
+          cursor: { x: 10, y: 1, blink: true },
+        }),
+      )}`,
+    );
+    expect(() => server.captureTuiScreen(identity)).toThrow(/cursor/u);
+  });
+
+  it("fails MCP browser opening explicitly when host auto-open is disabled", async () => {
+    const bds = new FakeBds();
+    const server = newTestWebCompanionServer({
+      bds,
+      port: 0,
+      autoOpenBrowser: false,
+    });
+    servers.push(server);
+    await server.start();
+
+    const waiting = server.waitForHandoff({
+      computerId: "c-000001",
+      timeoutMs: 1_000,
+    });
+    bds.log(
+      'CS_WEB_SESSION_REQUEST {"requestId":"r1-1","playerId":"player-1","computerId":"c-000001"}',
+    );
+    const handoff = await waiting;
+    await expect(
+      server.openHandoffInBrowser(handoff, { timeoutMs: 100 }),
+    ).rejects.toThrow(/explicitly_disabled/u);
   });
 
   it("bounds and finalizes computer-scoped handoff waits", async () => {
@@ -341,8 +843,7 @@ describe("Web companion HTTP server", () => {
     expect(launches[0]).toMatch(/^http:\/\/127\.0\.0\.1:/u);
     expect(bds.commands[0]).toContain("http://192.0.2.1:");
     const localOrigin = new URL(launches[0]).origin;
-    const handoff = await fetch(launches[0], { redirect: "manual" });
-    const token = handoffToken(handoff);
+    const { token } = await exchangeHandoffUrl(launches[0]);
     const input = await post(localOrigin, "/api/input", token, {
       kind: "line",
       value: "local-auto-open",
@@ -441,10 +942,30 @@ describe("Web companion HTTP server", () => {
     servers.push(server);
     const status = await server.start();
 
-    for (let attempt = 0; attempt < 8; attempt += 1) {
-      expect((await fetch(`${status.origin}/p/9999`)).status).toBe(401);
+    for (let attempt = 0; attempt < 9; attempt += 1) {
+      expect(
+        (
+          await fetch(`${status.origin}/p/9999`, {
+            redirect: "manual",
+          })
+        ).status,
+      ).toBe(302);
     }
-    expect((await fetch(`${status.origin}/p/9999`)).status).toBe(429);
+    const attempt = () =>
+      fetch(`${status.origin}/api/handoff`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Origin: status.origin,
+        },
+        body: JSON.stringify({ code: "9999" }),
+      });
+    for (let invalid = 0; invalid < 8; invalid += 1) {
+      expect((await attempt()).status).toBe(401);
+    }
+    const limited = await attempt();
+    expect(limited.status).toBe(429);
+    expect(Number(limited.headers.get("retry-after"))).toBeGreaterThan(0);
   });
 
   it("exchanges a four-digit code without leaving the stable entry page", async () => {
@@ -518,16 +1039,29 @@ describe("Web companion HTTP server", () => {
     );
     await until(() => bds.commands.length === 1);
     const responseCommand = bds.commands[0];
-    expect(responseCommand.split(" ").at(-2)).toBe("writer");
+    expect(responseCommand.split(" ").at(-2)).toBe("viewer");
     const handoffUrl = responseCommand.split(" ").at(-1);
     const handoff = await fetch(handoffUrl, { redirect: "manual" });
     expect(handoff.status).toBe(302);
     const location = handoff.headers.get("location");
-    expect(location).toMatch(/^\/\?computer=0001#[-_A-Za-z0-9]+$/u);
+    expect(location).toBe("/?computer=0001&handoff=1");
     const redirect = new URL(location, status.origin);
-    expect([...redirect.searchParams]).toEqual([["computer", "0001"]]);
-    const token = redirect.hash.slice(1);
-    expect((await fetch(handoffUrl, { redirect: "manual" })).status).toBe(401);
+    expect([...redirect.searchParams]).toEqual([
+      ["computer", "0001"],
+      ["handoff", "1"],
+    ]);
+    expect(redirect.hash).toBe("");
+    expect((await fetch(handoffUrl, { redirect: "manual" })).status).toBe(302);
+    const { token } = await exchangeHandoffUrl(handoffUrl);
+    const reused = await fetch(`${status.origin}/api/handoff`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Origin: status.origin,
+      },
+      body: JSON.stringify({ code: "0001" }),
+    });
+    expect(reused.status).toBe(401);
 
     expect((await fetch(`${status.origin}/api/session`)).status).toBe(401);
     const sessionResponse = await fetch(`${status.origin}/api/session`, {
@@ -551,7 +1085,7 @@ describe("Web companion HTTP server", () => {
     });
     expect(input.status).toBe(202);
     expect(bds.commands.at(-1)).toMatch(
-      /^scriptevent computer_system:web-input [A-Za-z0-9_-]+ line hello%20world$/u,
+      /^scriptevent computer_system:web-input [A-Za-z0-9_-]+ [A-Za-z0-9_-]{6,20} line hello%20world$/u,
     );
 
     const keys = await fetch(`${status.origin}/api/input`, {
@@ -565,7 +1099,7 @@ describe("Web companion HTTP server", () => {
     });
     expect(keys.status).toBe(202);
     expect(bds.commands.at(-1)).toMatch(
-      /^scriptevent computer_system:web-input [A-Za-z0-9_-]+ keys %5B%22i%22%2C%22x%22%2C%22Escape%22%5D$/u,
+      /^scriptevent computer_system:web-input [A-Za-z0-9_-]+ [A-Za-z0-9_-]{6,20} keys %5B%22i%22%2C%22x%22%2C%22Escape%22%5D$/u,
     );
 
     const mouse = await fetch(`${status.origin}/api/input`, {
@@ -582,7 +1116,7 @@ describe("Web companion HTTP server", () => {
     });
     expect(mouse.status).toBe(202);
     expect(bds.commands.at(-1)).toMatch(
-      /^scriptevent computer_system:web-input [A-Za-z0-9_-]+ mouse /u,
+      /^scriptevent computer_system:web-input [A-Za-z0-9_-]+ [A-Za-z0-9_-]{6,20} mouse /u,
     );
 
     const invalidMouse = await fetch(`${status.origin}/api/input`, {
@@ -664,6 +1198,224 @@ describe("Web companion HTTP server", () => {
     expect(invalidKeys.status).toBe(400);
   });
 
+  it("returns input success only after the matching Bedrock admission marker", async () => {
+    const bds = new FakeBds({ autoInputAck: false });
+    const server = newTestWebCompanionServer({ bds, port: 0 });
+    servers.push(server);
+    const status = await server.start();
+    bds.log(
+      'CS_WEB_SESSION_REQUEST {"requestId":"r1-1","playerId":"player-1","computerId":"c-000001"}',
+    );
+    await until(() => bds.commands.length === 1);
+    const connected = await consumeResponse(bds.commands[0]);
+
+    const pending = post(status.origin, "/api/input", connected.token, {
+      kind: "line",
+      value: "correlated",
+    });
+    await until(() =>
+      bds.commands.some((command) =>
+        command.includes("computer_system:web-input"),
+      ),
+    );
+    const command = bds.commands.find((value) =>
+      value.includes("computer_system:web-input"),
+    );
+    const [, , sessionId, requestId] = command.split(" ");
+    expect(server.pendingInputs.size).toBe(1);
+    bds.log(
+      `CS_WEB_INPUT ${JSON.stringify({
+        outcome: "accepted",
+        requestId,
+        sessionId: "wrong-session",
+      })}`,
+    );
+    expect(server.pendingInputs.size).toBe(1);
+
+    bds.log(
+      `CS_WEB_INPUT ${JSON.stringify({
+        outcome: "accepted",
+        requestId,
+        sessionId,
+      })}`,
+    );
+    const response = await pending;
+    expect(response.status).toBe(202);
+    expect(await response.json()).toEqual({ outcome: "accepted" });
+    expect(server.pendingInputs.size).toBe(0);
+  });
+
+  it("maps every rejected Bedrock input admission to an explicit HTTP result", async () => {
+    const bds = new FakeBds();
+    const server = newTestWebCompanionServer({ bds, port: 0 });
+    servers.push(server);
+    const status = await server.start();
+    bds.log(
+      'CS_WEB_SESSION_REQUEST {"requestId":"r1-1","playerId":"player-1","computerId":"c-000001"}',
+    );
+    await until(() => bds.commands.length === 1);
+    const connected = await consumeResponse(bds.commands[0]);
+
+    const cases = [
+      {
+        error: undefined,
+        outcome: "ignored",
+        reason: "not_running",
+        status: 409,
+        code: "input_ignored",
+      },
+      {
+        error: undefined,
+        outcome: "missing",
+        reason: undefined,
+        status: 410,
+        code: "input_missing",
+      },
+      {
+        error: "runtime failed",
+        outcome: "failed",
+        reason: undefined,
+        status: 503,
+        code: "input_failed",
+      },
+      {
+        error: "event limit exceeded",
+        outcome: "failed",
+        reason: undefined,
+        status: 429,
+        code: "input_busy",
+      },
+    ];
+    for (const testCase of cases) {
+      bds.inputError = testCase.error;
+      bds.inputOutcome = testCase.outcome;
+      bds.inputReason = testCase.reason;
+      const response = await post(
+        status.origin,
+        "/api/input",
+        connected.token,
+        {
+          kind: "line",
+          value: "bounded",
+        },
+      );
+      expect(response.status).toBe(testCase.status);
+      expect(await response.json()).toMatchObject({ code: testCase.code });
+      if (testCase.status === 429) {
+        expect(response.headers.get("retry-after")).toBe("1");
+      }
+      expect(server.pendingInputs.size).toBe(0);
+    }
+  });
+
+  it("times out input admission, cleans it once, and ignores a late marker", async () => {
+    const bds = new FakeBds({ autoInputAck: false });
+    const server = newTestWebCompanionServer({
+      bds,
+      inputTimeoutMs: 20,
+      port: 0,
+    });
+    servers.push(server);
+    const status = await server.start();
+    bds.log(
+      'CS_WEB_SESSION_REQUEST {"requestId":"r1-1","playerId":"player-1","computerId":"c-000001"}',
+    );
+    await until(() => bds.commands.length === 1);
+    const connected = await consumeResponse(bds.commands[0]);
+
+    const response = await post(status.origin, "/api/input", connected.token, {
+      kind: "line",
+      value: "timeout",
+    });
+    expect(response.status).toBe(504);
+    expect(await response.json()).toMatchObject({ code: "input_timeout" });
+    expect(server.pendingInputs.size).toBe(0);
+
+    const command = bds.commands.find((value) =>
+      value.includes("computer_system:web-input"),
+    );
+    const [, , sessionId, requestId] = command.split(" ");
+    bds.log(
+      `CS_WEB_INPUT ${JSON.stringify({
+        outcome: "accepted",
+        requestId,
+        sessionId,
+      })}`,
+    );
+    expect(server.pendingInputs.size).toBe(0);
+  });
+
+  it("bounds pending input admissions at capacity plus one and finalizes them on BDS failure", async () => {
+    const bds = new FakeBds({ autoInputAck: false });
+    const server = newTestWebCompanionServer({ bds, port: 0 });
+    servers.push(server);
+    await server.start();
+
+    const pending = Array.from({ length: 32 }, (_, index) =>
+      server
+        .requestInputAdmission("abcdefghijkl", "line", `value-${String(index)}`)
+        .then(
+          () => undefined,
+          (error) => error,
+        ),
+    );
+    expect(server.pendingInputs.size).toBe(32);
+    const overflow = await server
+      .requestInputAdmission("abcdefghijkl", "line", "overflow")
+      .then(
+        () => undefined,
+        (error) => error,
+      );
+    expect(overflow).toMatchObject({
+      code: "input_busy",
+      retryAfterSeconds: 1,
+      status: 429,
+    });
+    expect(server.pendingInputs.size).toBe(32);
+
+    bds.state("failed");
+    const results = await Promise.all(pending);
+    expect(results.every((error) => error?.code === "closed")).toBe(true);
+    expect(server.pendingInputs.size).toBe(0);
+
+    const [, , sessionId, requestId] = bds.commands[0].split(" ");
+    bds.log(
+      `CS_WEB_INPUT ${JSON.stringify({
+        outcome: "accepted",
+        requestId,
+        sessionId,
+      })}`,
+    );
+    expect(server.pendingInputs.size).toBe(0);
+  });
+
+  it("finalizes a pending input when the BDS relay itself fails", async () => {
+    const bds = new FakeBds();
+    const server = newTestWebCompanionServer({ bds, port: 0 });
+    servers.push(server);
+    const status = await server.start();
+    bds.log(
+      'CS_WEB_SESSION_REQUEST {"requestId":"r1-1","playerId":"player-1","computerId":"c-000001"}',
+    );
+    await until(() => bds.commands.length === 1);
+    const connected = await consumeResponse(bds.commands[0]);
+    const relay = bds.runWebRelay.bind(bds);
+    bds.runWebRelay = async (command) => {
+      if (command.includes("computer_system:web-input")) {
+        bds.commands.push(command);
+        throw new Error("relay unavailable");
+      }
+      return relay(command);
+    };
+
+    const response = await post(status.origin, "/api/input", connected.token, {
+      kind: "line",
+      value: "relay-failure",
+    });
+    expect(response.status).toBe(500);
+    expect(server.pendingInputs.size).toBe(0);
+  });
+
   it("accepts snapshots only for issued sessions and blocks cross-origin writes", async () => {
     const bds = new FakeBds();
     const server = newTestWebCompanionServer({ bds, port: 0 });
@@ -675,8 +1427,7 @@ describe("Web companion HTTP server", () => {
     await until(() => bds.commands.length === 1);
     const sessionId = bds.commands[0].split(" ")[3];
     const handoffUrl = bds.commands[0].split(" ").at(-1);
-    const handoff = await fetch(handoffUrl, { redirect: "manual" });
-    const token = handoffToken(handoff);
+    const { token } = await exchangeHandoffUrl(handoffUrl);
 
     bds.log(
       `CS_WEB_TERMINAL ${JSON.stringify({
@@ -786,6 +1537,63 @@ describe("Web companion HTTP server", () => {
     ).toBe(409);
   });
 
+  it("relays writer-only floppy eject and waits for an explicit terminal outcome", async () => {
+    const bds = new FakeBds();
+    const server = newTestWebCompanionServer({ bds, port: 0 });
+    servers.push(server);
+    const status = await server.start();
+    bds.log(
+      'CS_WEB_SESSION_REQUEST {"requestId":"r1-1","playerId":"player-1","computerId":"c-000001"}',
+    );
+    await until(() => bds.commands.length === 1);
+    const connected = await consumeResponse(bds.commands[0]);
+
+    const pending = post(
+      status.origin,
+      "/api/floppy/eject",
+      connected.token,
+      {},
+    );
+    await until(() =>
+      bds.commands.at(-1)?.includes("computer_system:web-floppy-eject"),
+    );
+    const [, , sessionId, requestId] = bds.commands.at(-1).split(" ");
+    bds.log(
+      `CS_WEB_FLOPPY_EJECT ${JSON.stringify({
+        outcome: "ejected",
+        requestId,
+        sessionId,
+      })}`,
+    );
+    expect(await pending.then((response) => response.json())).toMatchObject({
+      outcome: "ejected",
+    });
+
+    const empty = post(status.origin, "/api/floppy/eject", connected.token, {});
+    await until(() => bds.commands.at(-1)?.endsWith(" e00002"));
+    const [, , emptySessionId, emptyRequestId] = bds.commands.at(-1).split(" ");
+    bds.log(
+      `CS_WEB_FLOPPY_EJECT ${JSON.stringify({
+        outcome: "empty",
+        requestId: emptyRequestId,
+        sessionId: emptySessionId,
+      })}`,
+    );
+    expect(await empty.then((response) => response.json())).toMatchObject({
+      outcome: "empty",
+    });
+
+    bds.log(
+      'CS_WEB_SESSION_REQUEST {"requestId":"r1-2","playerId":"player-2","computerId":"c-000001"}',
+    );
+    await until(() => bds.commands.length === 5);
+    await consumeResponse(bds.commands[4]);
+    expect(
+      (await post(status.origin, "/api/floppy/eject", connected.token, {}))
+        .status,
+    ).toBe(409);
+  });
+
   it("gives the newest browser control and rejects the demoted writer", async () => {
     const bds = new FakeBds();
     const server = newTestWebCompanionServer({ bds, port: 0 });
@@ -800,9 +1608,9 @@ describe("Web companion HTTP server", () => {
     bds.log(
       'CS_WEB_SESSION_REQUEST {"requestId":"r1-2","playerId":"player-2","computerId":"c-000001"}',
     );
-    await until(() => bds.commands.length === 2);
-    expect(bds.commands[1].split(" ").at(-2)).toBe("writer");
-    const second = await consumeResponse(bds.commands[1]);
+    await until(() => bds.commands.length === 3);
+    expect(bds.commands[2].split(" ").at(-2)).toBe("viewer");
+    const second = await consumeResponse(bds.commands[2]);
 
     const rejected = await post(status.origin, "/api/input", second.token, {
       kind: "line",
@@ -842,7 +1650,7 @@ describe("Web companion HTTP server", () => {
         })
       ).status,
     ).toBe(409);
-    expect(bds.commands).toHaveLength(1);
+    expect(bds.commands).toHaveLength(2);
     const waiting = await fetch(`${status.origin}/api/reconnect`, {
       method: "POST",
       headers: {
@@ -960,9 +1768,20 @@ describe("Web companion HTTP server", () => {
 });
 
 class FakeBds {
-  constructor() {
+  constructor({
+    autoInputAck = true,
+    autoReady = true,
+    inputError,
+    inputOutcome = "accepted",
+    inputReason,
+  } = {}) {
     this.events = new EventEmitter();
     this.commands = [];
+    this.autoInputAck = autoInputAck;
+    this.autoReady = autoReady;
+    this.inputError = inputError;
+    this.inputOutcome = inputOutcome;
+    this.inputReason = inputReason;
   }
 
   onLog(listener) {
@@ -977,11 +1796,48 @@ class FakeBds {
 
   async runWebRelay(command) {
     this.commands.push(command);
+    const response =
+      /^scriptevent computer_system:web-response [^ ]+ ([A-Za-z0-9_-]+)/u.exec(
+        command,
+      );
+    if (response !== null && this.autoReady) {
+      queueMicrotask(() => {
+        this.log(
+          "CS_WEB_SESSION_READY " + JSON.stringify({ sessionId: response[1] }),
+        );
+      });
+    }
+    const input =
+      /^scriptevent computer_system:web-input ([A-Za-z0-9_-]+) ([A-Za-z0-9_-]{6,20}) (?:line|keys|mouse) /u.exec(
+        command,
+      );
+    if (input !== null && this.autoInputAck) {
+      queueMicrotask(() => {
+        this.log(
+          "CS_WEB_INPUT " +
+            JSON.stringify({
+              ...(this.inputError === undefined
+                ? {}
+                : { error: this.inputError }),
+              outcome: this.inputOutcome,
+              ...(this.inputReason === undefined
+                ? {}
+                : { reason: this.inputReason }),
+              requestId: input[2],
+              sessionId: input[1],
+            }),
+        );
+      });
+    }
     return { command };
   }
 
   log(line) {
     this.events.emit("log", { line });
+  }
+
+  state(value) {
+    this.events.emit("state", value);
   }
 }
 
@@ -995,17 +1851,77 @@ async function until(predicate) {
 }
 
 async function consumeResponse(command) {
-  const response = await fetch(command.split(" ").at(-1), {
-    redirect: "manual",
+  return exchangeHandoffUrl(command.split(" ").at(-1));
+}
+
+async function connectDebugWriter(server, bds, computerId = "c-000001") {
+  const waiting = server.waitForHandoff({
+    computerId,
+    principalKind: "debug",
+    timeoutMs: 1_000,
   });
+  bds.log(
+    `CS_WEB_SESSION_REQUEST ${JSON.stringify({
+      requestId: "r1-1",
+      playerId: "mcp-debug",
+      principalKind: "debug",
+      computerId,
+    })}`,
+  );
+  const handoff = await waiting;
+  await exchangeHandoffUrl(handoff.url);
+  return handoff;
+}
+
+function tuiSnapshot(sessionId, options = {}) {
+  const rows = options.rows ?? ["EDIT    ", "File    "];
+  const width = options.width ?? 8;
+  const height = options.height ?? rows.length;
+  const colorRow = Array.from({ length: width }, () => 7);
+  const backgroundRow = Array.from({ length: width }, () => 1);
   return {
-    token: handoffToken(response),
+    sessionId,
+    computerId: options.computerId ?? "c-000001",
+    label: "Debug Computer",
+    lifecycle: "running",
+    terminal: {
+      schema: 1,
+      width,
+      height,
+      rows,
+      foreground:
+        options.foreground ??
+        Array.from({ length: height }, () => [...colorRow]),
+      background:
+        options.background ??
+        Array.from({ length: height }, () => [...backgroundRow]),
+      cursor: options.cursor ?? { x: 2, y: 1, blink: true },
+      secretInput: options.secretInput ?? false,
+    },
   };
 }
 
-function handoffToken(response) {
-  const location = response.headers.get("location");
-  return new URL(location, "http://companion.invalid").hash.slice(1);
+async function exchangeHandoffUrl(url) {
+  const entry = await fetch(url, {
+    redirect: "manual",
+  });
+  const location = entry.headers.get("location");
+  const destination = new URL(location, url);
+  const code = destination.searchParams.get("computer");
+  const response = await fetch(new URL("/api/handoff", url), {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Origin: new URL(url).origin,
+    },
+    body: JSON.stringify({ code }),
+  });
+  const body = await response.json();
+  return {
+    entry,
+    response,
+    token: body.token,
+  };
 }
 
 function post(origin, pathname, token, body) {

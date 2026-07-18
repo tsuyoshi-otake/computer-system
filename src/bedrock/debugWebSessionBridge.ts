@@ -1,12 +1,15 @@
-import { world } from "@minecraft/server";
+import { ScriptEventSource } from "@minecraft/server";
 
 import { ensureComputer, identityService } from "./computerRegistry.js";
-import { requestWebComputerTerminal } from "./webTerminalBridge.js";
+import { requestDebugWebComputerTerminal } from "./webTerminalBridge.js";
 
 const responseMarker = "CS_DEBUG_WEB_REQUEST ";
 const requestPattern = /^(w[a-z0-9]+-[a-z0-9]+) (c-[0-9a-hjkmnp-tv-z]{6})$/u;
 
-export function handleDebugWebSessionRequest(message: string): void {
+export function handleDebugWebSessionRequest(
+  message: string,
+  sourceType: ScriptEventSource,
+): void {
   const match = requestPattern.exec(message);
   if (match === null) {
     emit({ status: "rejected", error: "invalid_request" });
@@ -15,22 +18,14 @@ export function handleDebugWebSessionRequest(message: string): void {
 
   const [, requestId, computerId] = match;
   try {
-    const players = world.getAllPlayers().filter((player) => player.isValid);
-    if (players.length !== 1) {
+    if (sourceType !== ScriptEventSource.Server) {
       emit({
         requestId,
         computerId,
-        status: "failed",
-        error:
-          players.length === 0
-            ? "Exactly one connected player is required; none are connected."
-            : "Exactly one connected player is required; multiple players are connected.",
+        status: "rejected",
+        error: "server_source_required",
       });
       return;
-    }
-    const player = players[0];
-    if (player === undefined) {
-      throw new Error("The connected debug player became unavailable.");
     }
 
     const observation = identityService().observation(computerId ?? "");
@@ -45,7 +40,7 @@ export function handleDebugWebSessionRequest(message: string): void {
     }
 
     const record = ensureComputer(observation.computerId, observation.family);
-    requestWebComputerTerminal(player, record);
+    requestDebugWebComputerTerminal(record);
     emit({
       requestId,
       computerId: record.computerId,

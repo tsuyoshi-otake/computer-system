@@ -324,6 +324,54 @@ describe("ComputerRuntime", (): void => {
     expect(cpp.cpuCycles).toBeLessThan(python.cpuCycles);
   });
 
+  it("preprocesses credentialed guest headers in deferred C compile jobs", (): void => {
+    const record = computer("c-000025", "import os\nos.pull_event()\n");
+    const runtime = runtimeWith(record);
+    runtime.powerOn(record.computerId);
+    record.filesystem.makeDirectory("/tmp/inc");
+    record.filesystem.writeFile("/tmp/inc/value.h", "#define HEADER_VALUE 2\n");
+    record.filesystem.writeFile(
+      "/tmp/preprocess.c",
+      [
+        "#include <stdio.h>",
+        "#include <value.h>",
+        "int main(){",
+        'printf("%d\\n", BASE_VALUE + HEADER_VALUE);',
+        "return 0;",
+        "}",
+        "",
+      ].join("\n"),
+    );
+
+    expect(
+      runtime.executeDebugShellCommand(
+        record.computerId,
+        "cc -I /tmp/inc -D BASE_VALUE=40 /tmp/preprocess.c -o /tmp/preprocess",
+      ),
+    ).toMatchObject({ outcome: "completed", exitCode: 0 });
+    expect(
+      runtime.executeDebugShellCommand(
+        record.computerId,
+        "run /tmp/preprocess",
+      ),
+    ).toMatchObject({ outcome: "completed", exitCode: 0, stdout: "42\n" });
+
+    record.filesystem.setMetadata("/tmp/inc/value.h", {
+      gid: 0,
+      mode: 0,
+      uid: 0,
+    });
+    const denied = runtime.executeDebugShellCommand(
+      record.computerId,
+      "cc -I /tmp/inc /tmp/preprocess.c -o /tmp/denied",
+    );
+    expect(denied).toMatchObject({ outcome: "completed", exitCode: 1 });
+    if (denied.outcome === "completed") {
+      expect(denied.stderr).toContain("include file is not readable");
+    }
+    expect(record.filesystem.exists("/tmp/denied")).toBe(false);
+  });
+
   it("imports a C object from Python through the MCP debug path", (): void => {
     const record = computer("c-000003", "import os\nos.pull_event()\n");
     const runtime = runtimeWith(record);

@@ -23,6 +23,59 @@ describe("Web terminal session store", () => {
     );
   });
 
+  it("tracks explicit debug ownership and publishes one observable terminal version per frame", () => {
+    const store = createStore();
+    const issued = store.issue(debugIdentity());
+    const { session } = store.consumeHandoff(issued.handoffCode);
+    const observer = vi.fn();
+    const observation = store.observe(session.sessionId, observer);
+
+    expect(observation.session).toMatchObject({
+      principalKind: "debug",
+      terminalVersion: 0,
+    });
+    expect(
+      store.updateTerminal(session.sessionId, {
+        computerId: "c-000001",
+        sessionId: session.sessionId,
+        terminal: { rows: ["screen"] },
+      }),
+    ).toBe(true);
+    expect(store.activeSession(session.sessionId)).toMatchObject({
+      principalKind: "debug",
+      terminalVersion: 1,
+    });
+    expect(observer).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "terminal",
+        session: expect.objectContaining({ terminalVersion: 1 }),
+      }),
+    );
+
+    expect(store.close(session.sessionId, "test_closed")).toBe(true);
+    expect(observer).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        type: "state",
+        session: expect.objectContaining({ finalReason: "test_closed" }),
+      }),
+    );
+    observation.unsubscribe();
+  });
+
+  it("rejects inconsistent debug-principal identities", () => {
+    const store = createStore();
+    expect(() =>
+      store.prepare({ ...identity(), principalKind: "debug" }),
+    ).toThrow(/Invalid browser session identity/u);
+    expect(() =>
+      store.prepare({
+        ...identity(),
+        playerId: "mcp-debug",
+        principalKind: "player",
+      }),
+    ).toThrow(/Invalid browser session identity/u);
+  });
+
   it("keeps a Computer code stable and rejects an active collision", () => {
     expect(permanentComputerCode("c-000001")).toBe("0001");
     expect(permanentComputerCode("computer-10001")).toBe("0001");
@@ -188,6 +241,54 @@ describe("Web terminal session store", () => {
     expect(reconnected.session.access).toBe("in_range");
     expect(store.isInRange(connected.session.sessionId)).toBe(true);
   });
+
+  it("keeps a prepared handoff unavailable until Bedrock accepts it", () => {
+    const store = createStore();
+    const prepared = store.prepare(identity());
+
+    expect(prepared).toMatchObject({ mode: "viewer", state: "pending" });
+    expect(() => store.consumeHandoff(prepared.handoffCode)).toThrow(
+      /not ready/u,
+    );
+    expect(() => store.takeControl(prepared.sessionId)).toThrow(/not ready/u);
+    const accepted = store.accept(prepared.sessionId, "viewer");
+    expect(accepted.state).toBe("issued");
+    expect(store.consumeHandoff(prepared.handoffCode).session).toMatchObject({
+      mode: "viewer",
+      sessionId: prepared.sessionId,
+    });
+  });
+
+  it("does not let a stale finalizer delete a replacement handoff", () => {
+    const store = createStore();
+    const first = store.prepare(identity());
+    const second = store.prepare({ ...identity(), requestId: "r1-2" });
+
+    expect(store.drainBedrockClosures()).toEqual([
+      {
+        computerId: "c-000001",
+        reason: "handoff_superseded",
+        sessionId: first.sessionId,
+      },
+    ]);
+    expect(store.close(first.sessionId, "late_bedrock_final")).toBe(false);
+    store.accept(second.sessionId, "viewer");
+    expect(store.consumeHandoff(second.handoffCode).session.sessionId).toBe(
+      second.sessionId,
+    );
+  });
+
+  it("restores an unclaimed handoff after a failed writer takeover", () => {
+    const store = createStore();
+    const prepared = store.prepare(identity());
+    store.accept(prepared.sessionId, "viewer");
+    const consumed = store.consumeHandoff(prepared.handoffCode);
+
+    expect(store.restoreHandoff(consumed.session.sessionId)).toBe(true);
+    expect(store.consumeHandoff(prepared.handoffCode).token).toBe(
+      consumed.token,
+    );
+  });
 });
 
 function createStore(options = {}) {
@@ -204,6 +305,14 @@ function identity() {
     requestId: "r1-1",
     playerId: "player-1",
     computerId: "c-000001",
+  };
+}
+
+function debugIdentity() {
+  return {
+    ...identity(),
+    playerId: "mcp-debug",
+    principalKind: "debug",
   };
 }
 

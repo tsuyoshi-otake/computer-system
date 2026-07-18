@@ -1,4 +1,11 @@
-import { hasCopySelection, insertPastedCommand } from "/terminal-input.js";
+import {
+  BoundedEditorKeyQueue,
+  editorKeyFromKeyboardEvent,
+  hasCopySelection,
+  insertPastedCommand,
+  isEditorTerminalScreen,
+  keyboardLockStatesFromEvent,
+} from "/terminal-input.js";
 import { manualChapters, manualParts, searchManual } from "/manual.js";
 import { calculateFixedGridFontSize } from "/terminal-layout.js";
 import { WebFloppyDriveAudio } from "/floppy-audio.js";
@@ -21,6 +28,12 @@ const palette = [
   "#cc4c4c",
   "#111111",
 ];
+const dosTuiPalette = [...palette];
+dosTuiPalette[0] = "#AAAAAA";
+dosTuiPalette[8] = "#AAAAAA";
+dosTuiPalette[9] = "#00AAAA";
+dosTuiPalette[11] = "#0000AA";
+dosTuiPalette[15] = "#000000";
 const manualApplicabilityLabels = {
   "cs-linux": "CS-Linux",
   "cs-dos": "CS-DOS",
@@ -65,10 +78,15 @@ const elements = {
   errorDismiss: document.querySelector("#error-dismiss"),
   inputState: document.querySelector("#input-state"),
   accessState: document.querySelector("#access-state"),
+  capsLockIndicator: document.querySelector("#caps-lock-indicator"),
+  numLockIndicator: document.querySelector("#num-lock-indicator"),
+  scrollLockIndicator: document.querySelector("#scroll-lock-indicator"),
   copyButton: document.querySelector("#copy-button"),
   powerIndicator: document.querySelector("#power-indicator"),
   hddIndicator: document.querySelector("#hdd-indicator"),
   fddIndicator: document.querySelector("#fdd-indicator"),
+  ejectButton: document.querySelector("#eject-button"),
+  ejectFeedback: document.querySelector("#eject-feedback"),
   powerButton: document.querySelector("#power-button"),
   powerFeedback: document.querySelector("#power-feedback"),
   manualButton: document.querySelector("#manual-button"),
@@ -86,9 +104,15 @@ const tokenStorageKey = "computer-system.web-terminal-token";
 const codeStorageKey = "computer-system.web-terminal-code";
 const hardwareTextColumns = 80;
 const hardwareTextRows = 25;
-const queryCode = new URLSearchParams(location.search).get("computer") ?? "";
+const initialSearch = new URLSearchParams(location.search);
+const queryCode = initialSearch.get("computer") ?? "";
+const handoffRequested = initialSearch.get("handoff") === "1";
 let token =
   location.hash.slice(1) || sessionStorage.getItem(tokenStorageKey) || "";
+if (handoffRequested) {
+  token = location.hash.slice(1);
+  sessionStorage.removeItem(tokenStorageKey);
+}
 let connectionCode = /^[0-9]{4}$/u.test(queryCode)
   ? queryCode
   : localStorage.getItem(codeStorageKey) || "";
@@ -98,6 +122,8 @@ let sessionClosed = false;
 let commandPending = false;
 let completionPending = false;
 let copyResetTimer = 0;
+let ejectPending = false;
+let floppyDriveState = "absent";
 let powerPending = false;
 let machineLifecycle = "unknown";
 let takeoverPending = false;
@@ -106,30 +132,50 @@ let accessMode = "unknown";
 let editorActive = false;
 let secretInput = false;
 let editorKeyPending = false;
+let editorInputGeneration = 0;
 let mouseRequestPending = false;
 let pendingMouseMove;
 let mouseSequence = Date.now() * 1_000;
 let historyCursor = 0;
 let historyDraft = "";
 let resizeFrame = 0;
+let terminalRenderFrame = 0;
+let pendingTerminalPayload;
+let renderedTerminalGeometry = "";
+let renderedTerminalMode = "";
+let renderedTerminalRowElements = [];
+let renderedTerminalRowSignatures = [];
 let hardwareTextModePending = false;
 let hardwareTextModeConfirmed = false;
 let manualChapterIndex = 0;
 let manualSectionId = "";
 const commandHistory = [];
-const editorKeyQueue = [];
+const editorKeyQueue = new BoundedEditorKeyQueue();
 const mouseTransitionQueue = [];
 const floppyAudio = new WebFloppyDriveAudio();
 
 const unlockFloppyAudio = () => void floppyAudio.unlock();
 window.addEventListener("pointerdown", unlockFloppyAudio, { passive: true });
 window.addEventListener("keydown", unlockFloppyAudio);
+window.addEventListener("keydown", updateKeyboardLockIndicators);
+window.addEventListener("keyup", updateKeyboardLockIndicators);
+window.addEventListener("blur", resetKeyboardLockIndicators);
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) resetKeyboardLockIndicators();
+});
 window.addEventListener("pagehide", () => void floppyAudio.close(), {
   once: true,
 });
 
 if (location.hash.length > 1) sessionStorage.setItem(tokenStorageKey, token);
-window.history.replaceState(null, "", `${location.pathname}${location.search}`);
+const stableUrl = new URL(location.href);
+stableUrl.hash = "";
+stableUrl.searchParams.delete("handoff");
+window.history.replaceState(
+  null,
+  "",
+  `${stableUrl.pathname}${stableUrl.search}`,
+);
 
 elements.commandForm.addEventListener("submit", (event) => {
   event.preventDefault();
@@ -145,7 +191,11 @@ elements.commandInput.addEventListener("keydown", (event) => {
       return;
     }
     event.preventDefault();
-    const key = editorKey(event);
+    if (event.key === "Alt") {
+      if (!event.repeat) queueEditorKeys(["F10"]);
+      return;
+    }
+    const key = editorKeyFromKeyboardEvent(event);
     if (key !== undefined) queueEditorKeys([key]);
     return;
   }
@@ -296,6 +346,9 @@ elements.copyButton.addEventListener("click", () => {
 elements.powerButton.addEventListener("click", () => {
   void requestPower();
 });
+elements.ejectButton.addEventListener("click", () => {
+  void requestFloppyEject();
+});
 elements.manualButton.addEventListener("click", () => {
   if (elements.manualDialog.open) return;
   elements.manualDialog.showModal();
@@ -326,7 +379,16 @@ if (typeof ResizeObserver === "function") {
 if (document.fonts?.ready !== undefined) {
   void document.fonts.ready.then(scheduleTerminalFit);
 }
-if (!/^[A-Za-z0-9_-]{20,}$/u.test(token) && /^[0-9]{4}$/u.test(queryCode)) {
+if (
+  !/^[A-Za-z0-9_-]{20,}$/u.test(token) &&
+  handoffRequested &&
+  /^[0-9]{4}$/u.test(queryCode)
+) {
+  void connectWithCode(queryCode, true);
+} else if (
+  !/^[A-Za-z0-9_-]{20,}$/u.test(token) &&
+  /^[0-9]{4}$/u.test(queryCode)
+) {
   void reconnectWithCode(queryCode);
 } else if (!/^[A-Za-z0-9_-]{20,}$/u.test(token)) {
   showHandoffPrompt(
@@ -582,9 +644,21 @@ async function consumeEvents(response, generation) {
       if (line.length === 0) continue;
       const event = JSON.parse(line);
       if (event.type === "replaced") {
+        const discarded = discardEditorKeys();
+        cancelPendingTerminalRender();
         token = "";
         sessionStorage.removeItem(tokenStorageKey);
-        void reconnectWithCode(connectionCode);
+        sessionClosed = true;
+        reconnectGeneration += 1;
+        setConnection("offline", "REPLACED");
+        setInputAvailable(false, "OPEN IN ANOTHER TAB");
+        showHandoffPrompt(
+          `This session moved to another browser tab. Activate the Computer again to use this tab.${
+            discarded === 0
+              ? ""
+              : ` ${String(discarded)} unacknowledged editor key(s) were discarded.`
+          }`,
+        );
         return;
       }
       if (event.type === "terminal") renderTerminal(event.terminal);
@@ -790,15 +864,40 @@ async function drainTerminalMouse() {
 
 function renderTerminal(payload) {
   floppyAudio.consume(payload?.audio);
+  pendingTerminalPayload = payload;
+  if (terminalRenderFrame !== 0) return;
+  terminalRenderFrame = requestAnimationFrame(() => {
+    terminalRenderFrame = 0;
+    const latest = pendingTerminalPayload;
+    pendingTerminalPayload = undefined;
+    renderTerminalNow(latest);
+  });
+}
+
+function cancelPendingTerminalRender() {
+  if (terminalRenderFrame !== 0) cancelAnimationFrame(terminalRenderFrame);
+  terminalRenderFrame = 0;
+  pendingTerminalPayload = undefined;
+}
+
+function renderTerminalNow(payload) {
   const terminal = payload?.terminal;
   if (!Array.isArray(terminal?.rows)) return;
-  editorActive =
-    terminal.rows.some((row) =>
-      /^-- (?:COMMAND|INSERT|NORMAL) --/u.test(row.trimStart()),
-    ) ||
-    /^ File\s+Edit\s+(?:(?:View\s+)?Search\s+(?:Run\s+Debug\s+)?)?Options\s+Help/u.test(
-      terminal.rows[0] ?? "",
-    );
+  const nextEditorActive = isEditorTerminalScreen(terminal.rows);
+  const nextMode = nextEditorActive ? "dos" : "default";
+  const nextGeometry = `${String(terminal.width)}x${String(terminal.height)}`;
+  const rebuildRows =
+    renderedTerminalMode !== nextMode ||
+    renderedTerminalGeometry !== nextGeometry ||
+    renderedTerminalRowElements.length !== terminal.rows.length;
+  if (
+    renderedTerminalMode !== nextMode ||
+    renderedTerminalGeometry !== nextGeometry
+  ) {
+    scheduleTerminalFit();
+  }
+  editorActive = nextEditorActive;
+  elements.terminalStage.classList.toggle("dos-editor-active", editorActive);
   secretInput = terminal.secretInput === true;
   elements.commandInput.classList.toggle("secret-input", secretInput);
   elements.commandInput.setAttribute(
@@ -815,8 +914,7 @@ function renderTerminal(payload) {
     payload.lifecycle ?? "unknown",
   ).toUpperCase();
   updateMachinePanel(payload);
-  elements.terminalSize.textContent = `${String(terminal.width)} × ${String(terminal.height)}`;
-  fitTerminal(hardwareTextColumns, hardwareTextRows);
+  elements.terminalSize.textContent = `${String(terminal.width)} \u00d7 ${String(terminal.height)}`;
   const cursorX = Number.isInteger(terminal.cursor?.x) ? terminal.cursor.x : 1;
   const cursorY = Number.isInteger(terminal.cursor?.y) ? terminal.cursor.y : 1;
   elements.commandForm.style.setProperty(
@@ -825,39 +923,94 @@ function renderTerminal(payload) {
   );
   elements.commandForm.style.setProperty(
     "--cursor-top",
-    `${String(Math.max(0, cursorY - 1) * 1.32)}em`,
+    `${String(Math.max(0, cursorY - 1) * (editorActive ? 1 : 1.32))}em`,
   );
   const colorX = Math.max(0, Math.min(terminal.width - 1, cursorX - 1));
   const colorY = Math.max(0, Math.min(terminal.height - 1, cursorY - 1));
   const inputForeground = terminal.foreground?.[colorY]?.[colorX] ?? 0;
+  const activePalette = editorActive ? dosTuiPalette : palette;
   elements.commandForm.style.setProperty(
     "--input-color",
-    palette[inputForeground] ?? palette[0],
+    activePalette[inputForeground] ?? activePalette[0],
   );
-  const fragment = document.createDocumentFragment();
+
+  const nextElements = new Array(terminal.rows.length);
+  const nextSignatures = new Array(terminal.rows.length);
   terminal.rows.forEach((row, y) => {
-    const line = document.createElement("div");
-    line.className = "terminal-row";
-    const characters = [...row];
-    let span;
-    let previousKey = "";
-    characters.forEach((character, x) => {
-      const foreground = terminal.foreground?.[y]?.[x] ?? 0;
-      const background = terminal.background?.[y]?.[x] ?? 15;
-      const key = `${String(foreground)}:${String(background)}`;
-      if (span === undefined || key !== previousKey) {
-        span = document.createElement("span");
-        span.style.color = palette[foreground] ?? palette[0];
-        span.style.backgroundColor = palette[background] ?? palette[15];
-        line.append(span);
-        previousKey = key;
-      }
-      span.append(document.createTextNode(character));
-    });
-    fragment.append(line);
+    const foreground = terminal.foreground?.[y] ?? [];
+    const background = terminal.background?.[y] ?? [];
+    const signature = terminalRowSignature(
+      row,
+      foreground,
+      background,
+      nextMode,
+    );
+    nextSignatures[y] = signature;
+    if (
+      !rebuildRows &&
+      signature === renderedTerminalRowSignatures[y] &&
+      renderedTerminalRowElements[y] !== undefined
+    ) {
+      nextElements[y] = renderedTerminalRowElements[y];
+      return;
+    }
+    const line = createTerminalRow(
+      row,
+      foreground,
+      background,
+      activePalette,
+      editorActive,
+    );
+    nextElements[y] = line;
+    if (!rebuildRows) renderedTerminalRowElements[y].replaceWith(line);
   });
-  elements.terminalScreen.replaceChildren(fragment);
-  elements.terminalStage.scrollTop = elements.terminalStage.scrollHeight;
+  if (rebuildRows) {
+    const fragment = document.createDocumentFragment();
+    for (const line of nextElements) fragment.append(line);
+    elements.terminalScreen.replaceChildren(fragment);
+  }
+  renderedTerminalGeometry = nextGeometry;
+  renderedTerminalMode = nextMode;
+  renderedTerminalRowElements = nextElements;
+  renderedTerminalRowSignatures = nextSignatures;
+}
+
+function terminalRowSignature(row, foreground, background, mode) {
+  return JSON.stringify([mode, row, foreground, background]);
+}
+
+const verticallyJoiningTerminalGlyphs = new Set(["\u2502", "\u2551", "\u2591"]);
+
+function createTerminalRow(
+  row,
+  foreground,
+  background,
+  activePalette,
+  editorMode,
+) {
+  const line = document.createElement("div");
+  line.className = "terminal-row";
+  const characters = [...row];
+  let span;
+  let previousKey = "";
+  characters.forEach((character, x) => {
+    const foregroundColor = foreground[x] ?? 0;
+    const backgroundColor = background[x] ?? 15;
+    const joinsVertically =
+      editorMode && verticallyJoiningTerminalGlyphs.has(character);
+    const key = `${String(foregroundColor)}:${String(backgroundColor)}:${joinsVertically ? "join-y" : "plain"}`;
+    if (span === undefined || key !== previousKey) {
+      span = document.createElement("span");
+      span.style.color = activePalette[foregroundColor] ?? activePalette[0];
+      span.style.backgroundColor =
+        activePalette[backgroundColor] ?? activePalette[15];
+      if (joinsVertically) span.classList.add("terminal-cell--join-y");
+      line.append(span);
+      previousKey = key;
+    }
+    span.append(document.createTextNode(character));
+  });
+  return line;
 }
 
 async function copyTerminalText() {
@@ -906,90 +1059,100 @@ function showCopyState(label) {
   }, 1_200);
 }
 
-function editorKey(event) {
-  if (event.metaKey) return undefined;
-  if (event.ctrlKey) {
-    if (event.key === "[") return "Ctrl+[";
-    if (
-      event.key === "Home" ||
-      event.key === "End" ||
-      event.key === "ArrowLeft" ||
-      event.key === "ArrowRight"
-    ) {
-      return `Ctrl+${event.key}`;
-    }
-    return [...event.key].length === 1
-      ? `Ctrl+${event.key.toLowerCase()}`
-      : undefined;
+function queueEditorKeys(keys) {
+  const admission = editorKeyQueue.enqueue(keys);
+  if (admission.outcome === "rejected") {
+    elements.inputState.textContent = "QUEUE FULL";
+    showError(
+      `Editor input queue is full. ${String(admission.requested)} key(s) were not queued; ${String(admission.available)} slot(s) remain.`,
+      "Editor input not queued",
+    );
+    return false;
   }
-  if (event.altKey) {
-    return [...event.key].length === 1
-      ? `Alt+${event.key.toLowerCase()}`
-      : undefined;
-  }
-  const named = new Set([
-    "ArrowDown",
-    "ArrowLeft",
-    "ArrowRight",
-    "ArrowUp",
-    "Backspace",
-    "Delete",
-    "End",
-    "Enter",
-    "Escape",
-    "Home",
-    "Insert",
-    "PageDown",
-    "PageUp",
-    "Tab",
-    "F1",
-    "F2",
-    "F3",
-    "F10",
-  ]);
-  if (named.has(event.key)) return event.key;
-  return [...event.key].length === 1 ? event.key : undefined;
+  void drainEditorKeys();
+  return true;
 }
 
-function queueEditorKeys(keys) {
-  const available = Math.max(0, 1_024 - editorKeyQueue.length);
-  editorKeyQueue.push(...keys.slice(0, available));
-  void drainEditorKeys();
+function discardEditorKeys() {
+  editorInputGeneration += 1;
+  return editorKeyQueue.discard();
 }
 
 async function drainEditorKeys() {
   if (editorKeyPending || sessionClosed || accessMode !== "writer") return;
+  const generation = editorInputGeneration;
   editorKeyPending = true;
+  let retry = 0;
   try {
     while (
       editorKeyQueue.length > 0 &&
       !sessionClosed &&
       accessMode === "writer"
     ) {
-      let count = Math.min(16, editorKeyQueue.length);
-      while (
-        count > 1 &&
-        encodeURIComponent(JSON.stringify(editorKeyQueue.slice(0, count)))
-          .length > 180
-      ) {
-        count -= 1;
+      const keys = editorKeyQueue.peekBatch();
+      if (keys.length === 0) break;
+      try {
+        await api("/api/input", {
+          method: "POST",
+          headers: {
+            ...authorizationHeaders(),
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ kind: "keys", value: keys }),
+        });
+      } catch (error) {
+        if (generation !== editorInputGeneration) return;
+        const retryable = error?.status === 429 || error?.code === "input_busy";
+        if (
+          !retryable ||
+          retry >= 5 ||
+          sessionClosed ||
+          accessMode !== "writer"
+        ) {
+          throw error;
+        }
+        retry += 1;
+        elements.inputState.textContent = `RETRY ${String(retry)}/5`;
+        const backoff = Math.min(4_000, 200 * 2 ** (retry - 1));
+        await wait(
+          Math.max(backoff, error?.retryAfterMs ?? 0) +
+            Math.floor(Math.random() * 125),
+        );
+        continue;
       }
-      const keys = editorKeyQueue.splice(0, count);
-      await api("/api/input", {
-        method: "POST",
-        headers: {
-          ...authorizationHeaders(),
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ kind: "keys", value: keys }),
-      });
+      if (generation !== editorInputGeneration) return;
+      editorKeyQueue.acknowledge(keys);
+      retry = 0;
+    }
+    if (editorActive && editorKeyQueue.length === 0) {
+      elements.inputState.textContent = "EDIT";
     }
   } catch (error) {
-    editorKeyQueue.length = 0;
-    setConnection("offline", "EDITOR INPUT FAILED");
-    showError(errorMessage(error));
+    if (generation !== editorInputGeneration) return;
+    if (error?.code === "read_only") {
+      accessMode = "viewer";
+      setInputAvailable(false, "VIEW ONLY");
+    } else if (error?.code === "out_of_range") {
+      setConnection("offline", "OUT OF RANGE");
+      setInputAvailable(false, "MOVE WITHIN 3 BLOCKS");
+    } else {
+      setInputAvailable(false, "EDITOR INPUT PAUSED");
+    }
+    showError(
+      `${errorMessage(error)} ${String(editorKeyQueue.length)} editor key(s) remain unacknowledged.`,
+      "Editor input paused",
+    );
   } finally {
+    const superseded = generation !== editorInputGeneration;
     editorKeyPending = false;
+    if (
+      superseded &&
+      editorKeyQueue.length > 0 &&
+      !sessionClosed &&
+      accessMode === "writer"
+    ) {
+      void drainEditorKeys();
+    }
   }
 }
 
@@ -1026,7 +1189,7 @@ function updateMachinePanel(payload) {
     machineLifecycle === "off"
       ? "off"
       : String(payload?.storage?.hdd?.state ?? "idle");
-  const fddState = String(payload?.storage?.fdd?.state ?? "absent");
+  floppyDriveState = String(payload?.storage?.fdd?.state ?? "absent");
   setHardwareIndicator(
     elements.hddIndicator,
     hddState,
@@ -1034,11 +1197,12 @@ function updateMachinePanel(payload) {
   );
   setHardwareIndicator(
     elements.fddIndicator,
-    fddState,
-    fddState === "absent"
+    floppyDriveState,
+    floppyDriveState === "absent"
       ? "Floppy disk not present"
-      : `Floppy disk ${fddState}`,
+      : `Floppy disk ${floppyDriveState}`,
   );
+  updateEjectButton();
   updatePowerButton();
 
   const wasInteractive = machineAcceptsInput(previousLifecycle);
@@ -1058,8 +1222,104 @@ function setHardwareIndicator(element, requestedState, label) {
   element.setAttribute("aria-label", label);
 }
 
+function updateKeyboardLockIndicators(event) {
+  const states = keyboardLockStatesFromEvent(event);
+  setKeyboardLockIndicator(
+    elements.capsLockIndicator,
+    "Caps Lock",
+    states.capsLock,
+  );
+  setKeyboardLockIndicator(
+    elements.numLockIndicator,
+    "Num Lock",
+    states.numLock,
+  );
+  setKeyboardLockIndicator(
+    elements.scrollLockIndicator,
+    "Scroll Lock",
+    states.scrollLock,
+  );
+}
+
+function resetKeyboardLockIndicators() {
+  setKeyboardLockIndicator(elements.capsLockIndicator, "Caps Lock", "unknown");
+  setKeyboardLockIndicator(elements.numLockIndicator, "Num Lock", "unknown");
+  setKeyboardLockIndicator(
+    elements.scrollLockIndicator,
+    "Scroll Lock",
+    "unknown",
+  );
+}
+
+function setKeyboardLockIndicator(element, label, requestedState) {
+  const state = ["on", "off", "unknown"].includes(requestedState)
+    ? requestedState
+    : "unknown";
+  const presentation = {
+    off: { glyph: "\u25cb", label: "off" },
+    on: { glyph: "\u25cf", label: "on" },
+    unknown: { glyph: "?", label: "status unknown" },
+  }[state];
+  element.dataset.state = state;
+  element.querySelector(".keyboard-lock-light").textContent =
+    presentation.glyph;
+  element.setAttribute("aria-label", `${label} ${presentation.label}`);
+}
+
 function machineAcceptsInput(lifecycle) {
   return ["running", "sleeping", "waiting_event"].includes(lifecycle);
+}
+
+function updateEjectButton() {
+  const available =
+    floppyDriveState !== "absent" &&
+    accessMode === "writer" &&
+    connectionState === "online" &&
+    !ejectPending &&
+    !sessionClosed;
+  elements.ejectButton.disabled = !available;
+  elements.ejectButton.setAttribute(
+    "aria-busy",
+    ejectPending ? "true" : "false",
+  );
+  elements.ejectButton.title =
+    floppyDriveState === "absent"
+      ? "No floppy disk is present"
+      : available
+        ? "Eject floppy disk to the connected player"
+        : "Floppy eject is unavailable";
+}
+
+async function requestFloppyEject() {
+  if (elements.ejectButton.disabled) return;
+  ejectPending = true;
+  elements.ejectFeedback.textContent = "Ejecting floppy disk.";
+  updateEjectButton();
+  try {
+    const response = await api("/api/floppy/eject", { method: "POST" });
+    const result = await response.json();
+    if (result.outcome === "failed" || result.outcome === "missing") {
+      throw new Error(
+        result.error ?? "Computer did not eject the floppy disk.",
+      );
+    }
+    floppyDriveState = "absent";
+    setHardwareIndicator(
+      elements.fddIndicator,
+      "absent",
+      "Floppy disk not present",
+    );
+    elements.ejectFeedback.textContent =
+      result.outcome === "empty"
+        ? "No floppy disk was present."
+        : "Floppy disk ejected to the connected player.";
+  } catch (error) {
+    elements.ejectFeedback.textContent = `Floppy eject failed: ${errorMessage(error)}`;
+    showError(errorMessage(error));
+  } finally {
+    ejectPending = false;
+    updateEjectButton();
+  }
 }
 
 function powerAction() {
@@ -1170,6 +1430,8 @@ function updateSession(session) {
     setInputAvailable(connectionState === "online", "INPUT");
   }
   if (session.state === "closed" || session.state === "expired") {
+    const discarded = discardEditorKeys();
+    cancelPendingTerminalRender();
     void floppyAudio.close();
     sessionClosed = true;
     sessionStorage.removeItem(tokenStorageKey);
@@ -1181,6 +1443,12 @@ function updateSession(session) {
     ).toUpperCase();
     setConnection("offline", session.state.toUpperCase());
     setInputAvailable(false, "OFFLINE");
+    if (discarded > 0) {
+      showError(
+        `The terminal session ended. ${String(discarded)} unacknowledged editor key(s) were discarded.`,
+        "Editor input discarded",
+      );
+    }
   }
 }
 
@@ -1227,6 +1495,7 @@ function setConnection(state, label) {
     state === "loading" ? "true" : "false",
   );
   updatePowerButton();
+  updateEjectButton();
 }
 
 function setInputAvailable(available, state) {
@@ -1250,6 +1519,7 @@ function setInputAvailable(available, state) {
     connectionState !== "online" || takeoverPending || sessionClosed;
   elements.inputState.textContent = accessMode === "viewer" ? "LOCKED" : state;
   updatePowerButton();
+  updateEjectButton();
   if (writable) elements.commandInput.focus();
 }
 
@@ -1320,6 +1590,8 @@ async function closeSession() {
   setInputAvailable(false, "CLOSING");
   try {
     await api("/api/close", { method: "POST" });
+    const discarded = discardEditorKeys();
+    cancelPendingTerminalRender();
     sessionClosed = true;
     reconnectGeneration += 1;
     streamGeneration += 1;
@@ -1330,6 +1602,12 @@ async function closeSession() {
     setConnection("offline", "CLOSED");
     elements.lifecycleState.textContent = "LOGOUT";
     elements.inputState.textContent = "OFFLINE";
+    if (discarded > 0) {
+      showError(
+        `The terminal was closed. ${String(discarded)} unacknowledged editor key(s) were discarded.`,
+        "Editor input discarded",
+      );
+    }
   } catch (error) {
     showError(errorMessage(error));
     const online = connectionState === "online";
@@ -1385,13 +1663,15 @@ function fitTerminal(columns, rows) {
   )
     return;
   const available = terminalContentSize();
+  const lineHeightRatio = editorActive ? 1 : 1.32;
+  const monospaceRatio = editorActive ? 0.5 : 0.61;
   const fitted = calculateFixedGridFontSize({
     availableHeight: available.height,
     availableWidth: available.width,
     columns,
-    lineHeightRatio: 1.32,
+    lineHeightRatio,
     maximumPixels: 48,
-    monospaceRatio: 0.61,
+    monospaceRatio,
     rows,
   });
   if (fitted.kind === "unmeasurable") return;
@@ -1434,14 +1714,21 @@ function showHandoffPrompt(message) {
   queueMicrotask(() => elements.handoffCode.focus());
 }
 
-async function connectWithCode() {
-  const code = elements.handoffCode.value;
+async function connectWithCode(
+  code = elements.handoffCode.value,
+  automatic = false,
+) {
+  elements.handoffCode.value = code;
   if (!/^[0-9]{4}$/u.test(code)) {
     elements.handoffCode.setAttribute("aria-invalid", "true");
     elements.handoffCode.focus();
     return;
   }
   elements.handoffCode.disabled = true;
+  if (automatic) {
+    setConnection("loading", "ACTIVATING");
+    setInputAvailable(false, "CONNECTING");
+  }
   try {
     const response = await fetch("/api/handoff", {
       method: "POST",
@@ -1458,15 +1745,21 @@ async function connectWithCode() {
       );
     }
     const body = await response.json();
-    acceptConnection(body.token, body.code ?? code);
+    const discarded = acceptConnection(body.token, body.code ?? code);
     elements.errorDialog.close();
     void bootstrap();
+    if (discarded > 0) {
+      showError(
+        `A new terminal session was activated. ${String(discarded)} unacknowledged editor key(s) were discarded.`,
+        "Editor input discarded",
+      );
+    }
   } catch (error) {
-    elements.errorMessage.textContent = errorMessage(error);
+    showHandoffPrompt(errorMessage(error));
     elements.handoffCode.select();
   } finally {
     elements.handoffCode.disabled = false;
-    elements.handoffCode.focus();
+    if (elements.errorDialog.open) elements.handoffCode.focus();
   }
 }
 
@@ -1474,13 +1767,18 @@ async function reconnectWithCode(code) {
   if (!/^[0-9]{4}$/u.test(code)) return;
   const generation = ++reconnectGeneration;
   const deadline = Date.now() + 30 * 60_000;
+  const maximumAttempts = 64;
   let attempt = 0;
   sessionClosed = false;
   rememberConnectionCode(code);
   if (elements.errorDialog.open) elements.errorDialog.close();
   setConnection("loading", "WAITING FOR RANGE");
   setInputAvailable(false, "MOVE WITHIN 3 BLOCKS");
-  while (generation === reconnectGeneration && Date.now() < deadline) {
+  while (
+    generation === reconnectGeneration &&
+    Date.now() < deadline &&
+    attempt < maximumAttempts
+  ) {
     attempt += 1;
     try {
       const response = await fetch("/api/reconnect", {
@@ -1491,15 +1789,51 @@ async function reconnectWithCode(code) {
       });
       if (!response.ok) throw await responseError(response);
       const body = await response.json();
-      acceptConnection(body.token, body.session?.connectionCode ?? code);
+      const discarded = acceptConnection(
+        body.token,
+        body.session?.connectionCode ?? code,
+      );
       updateSession(body.session ?? {});
       void bootstrap();
+      if (discarded > 0) {
+        showError(
+          `The terminal reconnected. ${String(discarded)} unacknowledged editor key(s) were discarded.`,
+          "Editor input discarded",
+        );
+      }
       return;
-    } catch {
+    } catch (error) {
       if (generation !== reconnectGeneration) return;
-      const delay = Math.min(10_000, 500 * 2 ** Math.min(attempt - 1, 5));
-      setConnection("loading", "WAITING FOR RANGE");
-      setInputAvailable(false, "MOVE WITHIN 3 BLOCKS");
+      if (
+        error?.status === 401 ||
+        error?.status === 410 ||
+        error?.code === "unauthorized" ||
+        error?.code === "gone" ||
+        error?.code === "handoff_required" ||
+        error?.code === "not_ready"
+      ) {
+        setConnection("offline", "ACTIVATION REQUIRED");
+        setInputAvailable(false, "OFFLINE");
+        showHandoffPrompt(
+          "Activate the Computer in Minecraft, then open its new link or enter its four-digit code.",
+        );
+        return;
+      }
+      const backoff = Math.min(10_000, 500 * 2 ** Math.min(attempt - 1, 5));
+      const delay =
+        error?.status === 429
+          ? Math.max(backoff, error.retryAfterMs ?? 0)
+          : backoff;
+      if (error?.status === 429) {
+        setConnection("loading", "RATE LIMITED");
+        setInputAvailable(false, "WAITING TO RETRY");
+      } else if (error?.code === "out_of_range") {
+        setConnection("loading", "WAITING FOR RANGE");
+        setInputAvailable(false, "MOVE WITHIN 3 BLOCKS");
+      } else {
+        setConnection("loading", "RETRYING");
+        setInputAvailable(false, "COMPANION UNAVAILABLE");
+      }
       await wait(delay + Math.floor(Math.random() * 250));
     }
   }
@@ -1515,12 +1849,14 @@ function acceptConnection(nextToken, code) {
   if (!/^[A-Za-z0-9_-]{20,}$/u.test(nextToken ?? "")) {
     throw new Error("The companion returned an invalid session token.");
   }
+  const discarded = discardEditorKeys();
   reconnectGeneration += 1;
   token = nextToken;
   hardwareTextModeConfirmed = false;
   sessionStorage.setItem(tokenStorageKey, token);
   rememberConnectionCode(code);
   sessionClosed = false;
+  return discarded;
 }
 
 function rememberConnectionCode(code) {
@@ -1546,11 +1882,18 @@ async function responseError(response) {
   const error = new Error(detail);
   error.status = response.status;
   error.code = errorCode;
+  const retryAfterSeconds = Number.parseInt(
+    response.headers.get("retry-after") ?? "",
+    10,
+  );
+  if (Number.isSafeInteger(retryAfterSeconds) && retryAfterSeconds > 0) {
+    error.retryAfterMs = retryAfterSeconds * 1_000;
+  }
   return error;
 }
 
-function showError(message) {
-  elements.errorTitle.textContent = "Terminal unavailable";
+function showError(message, title = "Terminal unavailable") {
+  elements.errorTitle.textContent = title;
   elements.errorMessage.textContent = message;
   elements.handoffForm.hidden = true;
   elements.errorDismiss.hidden = false;

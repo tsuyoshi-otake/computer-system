@@ -1,3 +1,5 @@
+import { inflateSync } from "node:zlib";
+
 import { describe, expect, it } from "vitest";
 
 import {
@@ -50,4 +52,35 @@ describe("machine block visual assets", () => {
       expect(texture[25]).toBe(6);
     }
   });
+
+  it("matches the item artwork's left-aligned drives and upper-right power control", () => {
+    const textures = createMachineBlockTextures();
+    const computer = textures[machineBlockTextureKeys.computer_front];
+    const advanced = textures[machineBlockTextureKeys.advanced_computer_front];
+
+    expect(pixelAt(computer, 1, 2)).toEqual([109, 106, 101, 255]);
+    expect(pixelAt(computer, 2, 3)).toEqual([43, 44, 43, 255]);
+    expect(pixelAt(advanced, 1, 2)).toEqual([109, 106, 101, 255]);
+    expect(pixelAt(advanced, 1, 6)).toEqual([109, 106, 101, 255]);
+    expect(pixelAt(computer, 13, 3)).toEqual([231, 224, 195, 255]);
+    expect(pixelAt(advanced, 13, 3)).toEqual([231, 224, 195, 255]);
+    expect(pixelAt(computer, 11, 8)).toEqual([211, 202, 187, 255]);
+    expect(pixelAt(advanced, 11, 10)).toEqual([211, 202, 187, 255]);
+  });
 });
+
+function pixelAt(texture, x, y) {
+  const compressed = [];
+  let offset = 8;
+  while (offset < texture.length) {
+    const length = texture.readUInt32BE(offset);
+    const type = texture.toString("ascii", offset + 4, offset + 8);
+    if (type === "IDAT") {
+      compressed.push(texture.subarray(offset + 8, offset + 8 + length));
+    }
+    offset += length + 12;
+  }
+  const scanlines = inflateSync(Buffer.concat(compressed));
+  const pixel = y * (16 * 4 + 1) + 1 + x * 4;
+  return [...scanlines.subarray(pixel, pixel + 4)];
+}
