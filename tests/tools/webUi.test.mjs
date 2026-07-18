@@ -58,7 +58,7 @@ describe("Web terminal UI", () => {
     expect(css).toContain("position: absolute");
     expect(html).toMatch(/<textarea\r?\n\s+id="command-input"/u);
     expect(css).toContain("text-indent: var(--cursor-left)");
-    expect(css).toContain("top: calc(14px + var(--cursor-top))");
+    expect(css).toContain("top: var(--cursor-top)");
     expect(css).toContain("outline: 0 solid transparent");
     expect(script).toContain('"--cursor-left"');
     expect(script).toContain('"--cursor-top"');
@@ -69,6 +69,50 @@ describe("Web terminal UI", () => {
     expect(script).toContain(
       "renderedTerminalRowElements[y].replaceWith(line)",
     );
+  });
+
+  it("centers one fixed display frame and toggles a static CRT presentation", async () => {
+    const [html, css, script] = await Promise.all([
+      source("web/index.html"),
+      source("web/styles.css"),
+      source("web/app.js"),
+    ]);
+
+    expect(html).toContain('id="crt-button"');
+    expect(html).toContain('aria-label="CRT filter"');
+    expect(html).toContain('aria-pressed="true"');
+    expect(html).toContain('class="terminal-stage crt-enabled"');
+    expect(html).toContain('id="terminal-display"');
+    expect(html.indexOf('id="terminal-display"')).toBeLessThan(
+      html.indexOf('id="terminal-screen"'),
+    );
+    expect(css).toMatch(
+      /\.terminal-stage\s*\{[^}]*display: grid;[^}]*place-items: center;[^}]*overflow: hidden;/su,
+    );
+    expect(css).toMatch(
+      /\.terminal-display\s*\{[^}]*width: var\(--terminal-frame-width\);[^}]*height: var\(--terminal-frame-height\);[^}]*overflow: hidden;/su,
+    );
+    expect(css).toMatch(
+      /\.terminal-display::before,[\s\S]*?\.terminal-display::after\s*\{[^}]*pointer-events: none;/su,
+    );
+    expect(css).toContain(
+      ".terminal-stage.crt-enabled .terminal-display::before",
+    );
+    expect(css).toContain(
+      ".terminal-stage.crt-enabled .terminal-display::after",
+    );
+    expect(css).toContain("repeating-linear-gradient(");
+    expect(css).toContain("mix-blend-mode: multiply");
+    expect(script).toContain("function setCrtEnabled(enabled)");
+    expect(script).toContain('classList.toggle("crt-enabled", enabled)');
+    expect(script).toContain('editorActive ? "EDIT" : "COMMAND"');
+    expect(script).toContain('"--terminal-frame-width"');
+    expect(script).toContain('"--terminal-frame-height"');
+    const rowRender =
+      /function renderTerminalNow\([\s\S]+?(?=function terminalRowSignature)/u.exec(
+        script,
+      )?.[0] ?? "";
+    expect(rowRender).not.toContain("crt-enabled");
   });
 
   it("keeps physical Enter, Ctrl+C, history, and textual focus feedback", async () => {

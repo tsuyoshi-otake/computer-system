@@ -758,28 +758,32 @@ terminal remains 51x19; each Web writer session normalizes the guest text mode
 to 80x25 once, then scales the same fixed grid to the available browser viewport
 without changing the Computer's cell geometry. The browser subtracts terminal
 padding and fits both rows and columns, so the terminal surface does not expose
-an internal scrollbar. The browser coalesces up to 16 keys per relay, while the
-BDS boundary rejects batches above 32 keys. Tab performs bounded command/path
-completion through the same writer-authorized relay.
+an internal scrollbar. The complete fixed-cell display frame stays centered on
+both axes at every viewport size. Its active-page **CRT** control defaults on
+and adds a static RGB aperture grille, scanline shading, and restrained phosphor
+bleed without changing cells, palettes, copied text, pointer mapping, or the
+bounded row-diff render path. The browser coalesces up to 16 keys per relay,
+while the BDS boundary rejects batches above 32 keys. Tab performs bounded
+command/path completion through the same writer-authorized relay.
 
-The Web Terminal top bar places equal-size **Copy** and **Manual** controls
-first, followed by the **PWR**, **HDD**, and **FDD** indicators plus explicit
-writer-only **Eject** and **Power** buttons. The indicators follow the real
-lifecycle and block-device state; FDD reports absent media only while no Floppy
-Disk item is loaded. Eject returns loaded media to the connected player and is
-disabled for viewers, offline sessions, and an empty drive. The footer shows
-Caps Lock, Num Lock, and Scroll Lock from browser keyboard events as filled/on,
-hollow/off, or unknown; losing page focus resets them to unknown rather than
-preserving a potentially stale claim. FDD insert, eject, motor start, seek,
-read, and write sounds are synthesized locally with Web Audio after a browser
-gesture; no Resource Pack sound file is required. Events use a per-Computer
-monotonic sequence, a 32-event ring, and an eight-per- second ceiling. Reconnect
-does not replay retained sounds, both writers and viewers can hear live
-activity, and leaving range or closing the session stops active voices. **Copy**
-copies an active terminal selection, or the visible fixed-cell screen when
-nothing is selected. It uses the Clipboard API when available and a synchronous
-browser copy fallback for LAN HTTP deployments; no polling or background
-clipboard work is performed.
+The Web Terminal top bar places equal-size **CRT**, **Copy**, and **Manual**
+controls first, followed by the **PWR**, **HDD**, and **FDD** indicators plus
+explicit writer-only **Eject** and **Power** buttons. The indicators follow the
+real lifecycle and block-device state; FDD reports absent media only while no
+Floppy Disk item is loaded. Eject returns loaded media to the connected player
+and is disabled for viewers, offline sessions, and an empty drive. The footer
+shows Caps Lock, Num Lock, and Scroll Lock from browser keyboard events as
+filled/on, hollow/off, or unknown; losing page focus resets them to unknown
+rather than preserving a potentially stale claim. FDD insert, eject, motor
+start, seek, read, and write sounds are synthesized locally with Web Audio after
+a browser gesture; no Resource Pack sound file is required. Events use a
+per-Computer monotonic sequence, a 32-event ring, and an eight-per- second
+ceiling. Reconnect does not replay retained sounds, both writers and viewers can
+hear live activity, and leaving range or closing the session stops active
+voices. **Copy** copies an active terminal selection, or the visible fixed-cell
+screen when nothing is selected. It uses the Clipboard API when available and a
+synchronous browser copy fallback for LAN HTTP deployments; no polling or
+background clipboard work is performed.
 
 Computer snapshots remain canonical in Bedrock World Dynamic Properties, which
 BDS stores in the world's LevelDB. Clean persistence checks compare O(1)
@@ -795,15 +799,26 @@ boundary. Portable, Desktop, and Advanced Desktop profiles expose 20 MiB, 40
 MiB, and 80 MiB fixed IDE disks respectively. A fresh CS-Linux image consumes
 roughly 2–4 MiB and a fresh CS-DOS image roughly 0.5–1 MiB. OS utilities are
 real executable files, so deleting `/usr/bin/ls` or `C:\COMMAND\EDIT.COM`
-removes that command until the file is restored. Guest shell I/O waits for
-deterministic controller, seek, rotation, transfer, and settle completion;
-WorkMonitor accounts the bounded host completion in its separate `block_io`
-lane. `quota` reports the enforced capacity, per-file, and entry limits; `du`
-computes bounded subtree usage from one filesystem snapshot. `date` defaults to
-wall UTC, with `date --game` and `date --virtual` for Minecraft and
-deterministic VM time. Both profiles keep four-digit UTC years without a
-two-digit-year pivot, represent the 2000 leap day correctly, and support
-timestamps beyond the signed 32-bit 2038 boundary.
+removes that command until the file is restored.
+
+Portable CS-DOS capacity uses an explicit FAT16-like policy: 2,048-byte data
+allocation units, a 59,392-byte fixed metadata/tail reserve for its 20 MiB
+layout, a 512-entry root directory, and 32-byte directory entries. File sizes
+shown by `DIR` remain logical bytes; free-space accounting rounds each non-empty
+file and growing subdirectory to clusters. The supplied 47 MB MS-DOS 6 reference
+image also uses 2,048-byte clusters, but remains reference evidence rather than
+an imported or byte-for-byte guest image.
+
+Guest shell I/O waits for deterministic controller, seek, rotation, transfer,
+and settle completion. Logical transfers larger than 64 KiB are conserved as a
+bounded sequential series of at-most-128-sector requests before one command
+completion is published; WorkMonitor accounts the bounded host completion in its
+separate `block_io` lane. `quota` reports the enforced capacity, per-file, and
+entry limits; `du` computes bounded subtree usage from one filesystem snapshot.
+`date` defaults to wall UTC, with `date --game` and `date --virtual` for
+Minecraft and deterministic VM time. Both profiles keep four-digit UTC years
+without a two-digit-year pivot, represent the 2000 leap day correctly, and
+support timestamps beyond the signed 32-bit 2038 boundary.
 
 The Computer snapshot also carries versioned cold OS-runtime state. Linux keeps
 bounded journals, last-login records, service and mount definitions, and offline
@@ -929,6 +944,15 @@ while keeping the region totals internally consistent. This is protected
 sandbox/v86 compatibility metadata, not native BIOS/DOS interrupt or `.COM` /
 `.EXE` emulation. RAM, persistent disk quota, collection size, and output bounds
 are independent limits.
+
+On the minimal portable boot, the shared transient RAM ledger reserves 64 KiB
+for DOS and drivers, so conventional memory reports 640 KiB total, 64 KiB used,
+and 576 KiB free. EDIT, CS QBASIC, and WorkBench reserve a coarse 256 KiB while
+open, `vi` reserves 192 KiB, and an admitted compiler, linker, or Program List
+job reserves 128 KiB. The validated CS process receives the ledger's remaining
+bytes, and every close, cancel, failure, disconnect, or shutdown owner releases
+its lease. These values model guest residency and are deliberately coarse; they
+are not byte-perfect measurements of the JavaScript host heap.
 
 The sandboxed CS486 toolchain adds real 32-bit `EAX` through `EBP` registers,
 checked little-endian linear memory, stack/call control flow, terminal CPU

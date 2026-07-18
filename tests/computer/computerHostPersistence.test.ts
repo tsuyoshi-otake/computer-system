@@ -189,6 +189,94 @@ describe("ComputerHost persistence bridge", (): void => {
     });
   });
 
+  it("charges all 196,608 QBASIC.EXE bytes as three sequential HDD requests", (): void => {
+    const host = hostWith(new MemoryRepository());
+    const record = new ComputerRecord("c-000419", "standard", {
+      displayProfileId: "portable-vga-256k",
+      osProfile: "dos",
+    });
+    host.register(record);
+    const queueEvent = vi.spyOn(host.runtime, "queueEvent");
+    const submittedBefore = host.blockIo.stats.submitted;
+    const completedBefore = host.blockIo.stats.completed;
+    const requestFilesystemIo = (
+      host as unknown as {
+        requestFilesystemIo(
+          computerId: string,
+          operation: "read" | "write",
+          bytes: number,
+        ): string | undefined;
+      }
+    ).requestFilesystemIo.bind(host);
+    const waitEvent = requestFilesystemIo(record.computerId, "read", 196_608);
+
+    expect(waitEvent).toMatch(/^block_io:fs-/u);
+    expect(host.blockIo.stats.submitted - submittedBefore).toBe(1);
+    let ticks = 0;
+    while (host.blockIo.stats.completed - completedBefore < 3 && ticks < 100) {
+      host.runTick();
+      ticks += 1;
+      if (host.blockIo.stats.completed - completedBefore < 3) {
+        expect(
+          queueEvent.mock.calls.filter((call) => call[1] === waitEvent),
+        ).toHaveLength(0);
+      }
+    }
+
+    expect(host.blockIo.stats.submitted - submittedBefore).toBe(3);
+    expect(host.blockIo.stats.completed - completedBefore).toBe(3);
+    expect(ticks).toBeLessThan(100);
+    expect(
+      queueEvent.mock.calls.filter((call) => call[1] === waitEvent),
+    ).toHaveLength(1);
+  });
+
+  it("stops a multi-part HDD job once without submitting later chunks", (): void => {
+    const host = hostWith(new MemoryRepository());
+    const record = new ComputerRecord("c-000420", "standard", {
+      displayProfileId: "portable-vga-256k",
+      osProfile: "dos",
+    });
+    host.register(record);
+    const queueEvent = vi.spyOn(host.runtime, "queueEvent");
+    const submittedBefore = host.blockIo.stats.submitted;
+    const completedBefore = host.blockIo.stats.completed;
+    const privateHost = host as unknown as {
+      requestFilesystemIo(
+        computerId: string,
+        operation: "read" | "write",
+        bytes: number,
+      ): string | undefined;
+      stopBlockDevices(computerId: string): void;
+    };
+    const waitEvent = privateHost.requestFilesystemIo(
+      record.computerId,
+      "read",
+      196_608,
+    );
+
+    let ticks = 0;
+    while (host.blockIo.stats.submitted - submittedBefore < 2 && ticks < 100) {
+      host.runTick();
+      ticks += 1;
+    }
+    expect(host.blockIo.stats.completed - completedBefore).toBe(1);
+    expect(host.blockIo.stats.submitted - submittedBefore).toBe(2);
+
+    privateHost.stopBlockDevices(record.computerId);
+    for (let tick = 0; tick < 5; tick += 1) host.runTick();
+
+    expect(host.blockIo.stats.submitted - submittedBefore).toBe(2);
+    const completions = queueEvent.mock.calls.filter(
+      (call) => call[1] === waitEvent,
+    );
+    expect(completions).toHaveLength(1);
+    expect(completions[0]?.slice(2)).toEqual([
+      "cancelled",
+      "device_powered_off",
+    ]);
+  });
+
   it("runs FORMAT A: /S through chunked mechanical FDD timing", (): void => {
     const host = hostWith(new MemoryRepository(), {
       saveFloppy: () => undefined,

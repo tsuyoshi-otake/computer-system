@@ -234,3 +234,10 @@
   plain EDIT's two leading menu cells did not match the one-cell WorkBench
   detector, so MCP Alt+F passed while browser Alt+F and primary mouse were both
   disabled until the detector consumed the real row shape.
+- Give each guest resource exactly one accounting owner: RAM through opaque
+  `GuestRamLedger` leases, persistent capacity through `InMemoryFilesystem`, and
+  modeled HDD time through `ComputerHost`. Acquire before mutation and release
+  in the lifecycle finalization owner; keep the RAM ledger derived and
+  transient. — Evidence: Issue #31 tests reconcile every lease, round FAT16
+  capacity to 2,048-byte clusters, reject full-disk writes atomically, and
+  charge a 196,608-byte executable as three sequential 64 KiB HDD requests.

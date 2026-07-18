@@ -12,6 +12,11 @@ import {
   type ShellRuntimeIdentityState,
 } from "./shellCommands.js";
 import type { ComputerOsProfile } from "../../domain/computer/computer.js";
+import type {
+  GuestRamOwner,
+  GuestRamSnapshot,
+  MemoryLease,
+} from "../../domain/computer/guestRamLedger.js";
 import {
   defaultComputerHardware,
   type ComputerHardwareProfile,
@@ -111,6 +116,10 @@ export interface ShellResult {
 }
 
 export interface ShellSessionOptions {
+  readonly acquireMemoryLease?: (
+    bytes: number,
+    owner: GuestRamOwner,
+  ) => MemoryLease;
   readonly clock?: ShellClockSource;
   readonly computerId?: number;
   readonly computerName?: string;
@@ -121,6 +130,7 @@ export interface ShellSessionOptions {
   readonly terminalWidth?: number;
   readonly hardware?: ComputerHardwareProfile;
   readonly memoryUsageBytes?: () => number;
+  readonly guestRamSnapshot?: () => GuestRamSnapshot | undefined;
   readonly requireLogin?: boolean;
   readonly passwordSalt?: () => string;
   readonly virtualDevices?: ReadonlyMap<string, VirtualDevice>;
@@ -148,6 +158,8 @@ const maximumScriptLines = 256;
 const maximumScriptLoopIterations = 1_024;
 const maximumDosConfigLines = 64;
 const maximumPipelineBuffer = 256_000;
+const dosEditorResidentBytes = 256 * 1_024;
+const viResidentBytes = 192 * 1_024;
 const maximumBackgroundCommandBytes = 512;
 const maximumAuthenticationFailures = 3;
 const maximumIdentityAliases = 128;
@@ -217,15 +229,19 @@ type LinuxConversation =
     };
 
 export class ShellSession {
+  private readonly acquireMemoryLease:
+    ShellSessionOptions["acquireMemoryLease"] | undefined;
   private readonly accounts: LinuxAccountDatabase | undefined;
   private readonly authentication: LinuxAuthentication | undefined;
   private readonly credentialContext: CredentialContext;
   private readonly guestFilesystem: GuestFilesystem;
   private editor: DosIdeSession | undefined;
+  private editorMemoryLease: MemoryLease | undefined;
   private pendingEditorArtifactPath: string | undefined;
   private pendingEditorCommand: DosIdeCommand | undefined;
   private pendingEditorOutputPrefix = "";
   private vi: ViSession | undefined;
+  private viMemoryLease: MemoryLease | undefined;
   private readonly commands: ShellCommandRuntime;
   private readonly frontend: ShellFrontend;
   private readonly hardware: ComputerHardwareProfile;
@@ -262,6 +278,7 @@ export class ShellSession {
     private readonly filesystem: InMemoryFilesystem,
     options: ShellSessionOptions = {},
   ) {
+    this.acquireMemoryLease = options.acquireMemoryLease;
     this.terminalWidth = options.terminalWidth ?? 51;
     this.terminalHeight = options.terminalHeight ?? 19;
     const profile = getOsProfile(options.osProfile ?? "linux");
@@ -352,6 +369,7 @@ export class ShellSession {
       ticksPerSecond,
       hardware: options.hardware ?? defaultComputerHardware,
       memoryUsageBytes: options.memoryUsageBytes ?? ((): number => 0),
+      guestRamSnapshot: options.guestRamSnapshot,
       virtualDevices: options.virtualDevices,
       peripherals: options.peripherals,
       deferGuestExecution: options.deferGuestExecution,
@@ -427,6 +445,8 @@ export class ShellSession {
   disconnect(): readonly string[] {
     if (this.disconnected) return [];
     this.disconnected = true;
+    this.releaseViMemory();
+    this.releaseEditorMemory();
     this.vi = undefined;
     this.editor = undefined;
     this.pendingEditorCommand = undefined;
@@ -582,6 +602,8 @@ export class ShellSession {
       this.suppressFilesystemWait = false;
     }
     if (this.vi !== undefined || this.editor !== undefined) {
+      this.releaseViMemory();
+      this.releaseEditorMemory();
       this.vi = undefined;
       this.editor = undefined;
       return resultFromStreams(
@@ -3216,21 +3238,27 @@ export class ShellSession {
       const sourceExists = this.filesystem.exists(path);
       const existing = sourceExists ? this.commands.readFile(path) : "";
       const editorConfiguration = this.readDosEditorConfiguration();
-      this.editor = new QBasicSession(
-        path,
-        existing,
-        this.terminalWidth,
-        this.terminalHeight,
-        untitled ? "UNTITLED" : this.commands.profile.pathDialect.display(path),
-        {
-          editorMode: true,
-          editorConfiguration,
-          externalContext: (request): readonly ViExternalDocument[] =>
-            this.viExternalDocuments(request),
-          fileDialog: ({ directory }): DosFileDialogSnapshot =>
-            this.commands.browseDosFiles(directory),
-          sourceExists,
-        },
+      this.editor = this.createEditorSession(
+        "dos-editor",
+        () =>
+          new QBasicSession(
+            path,
+            existing,
+            this.terminalWidth,
+            this.terminalHeight,
+            untitled
+              ? "UNTITLED"
+              : this.commands.profile.pathDialect.display(path),
+            {
+              editorMode: true,
+              editorConfiguration,
+              externalContext: (request): readonly ViExternalDocument[] =>
+                this.viExternalDocuments(request),
+              fileDialog: ({ directory }): DosFileDialogSnapshot =>
+                this.commands.browseDosFiles(directory),
+              sourceExists,
+            },
+          ),
       );
       return {
         exitCode: 0,
@@ -3239,6 +3267,7 @@ export class ShellSession {
         terminalScreen: this.editor.screen(),
       };
     } catch (error: unknown) {
+      this.releaseEditorMemory();
       return commandFailure("edit", message(error));
     }
   }
@@ -3258,25 +3287,32 @@ export class ShellSession {
       const sourceExists = this.filesystem.exists(path);
       const contents = sourceExists ? this.commands.readFile(path) : "";
       const editorConfiguration = this.readDosEditorConfiguration();
-      this.editor = new QBasicSession(
-        path,
-        contents,
-        this.terminalWidth,
-        this.terminalHeight,
-        untitled ? "Untitled" : this.commands.profile.pathDialect.display(path),
-        {
-          editorMode: false,
-          editorConfiguration,
-          externalContext: (request): readonly ViExternalDocument[] =>
-            this.viExternalDocuments(request),
-          fileDialog: ({ directory }): DosFileDialogSnapshot =>
-            this.commands.browseDosFiles(directory),
-          language: "basic",
-          product: "qbasic",
-          showWelcome: untitled,
-          sourceExists,
-          targetName: cpuModelSpecification(this.hardware.cpuModel).runtimeName,
-        },
+      this.editor = this.createEditorSession(
+        "dos-qbasic",
+        () =>
+          new QBasicSession(
+            path,
+            contents,
+            this.terminalWidth,
+            this.terminalHeight,
+            untitled
+              ? "Untitled"
+              : this.commands.profile.pathDialect.display(path),
+            {
+              editorMode: false,
+              editorConfiguration,
+              externalContext: (request): readonly ViExternalDocument[] =>
+                this.viExternalDocuments(request),
+              fileDialog: ({ directory }): DosFileDialogSnapshot =>
+                this.commands.browseDosFiles(directory),
+              language: "basic",
+              product: "qbasic",
+              showWelcome: untitled,
+              sourceExists,
+              targetName: cpuModelSpecification(this.hardware.cpuModel)
+                .runtimeName,
+            },
+          ),
       );
       const terminalScreen = this.editor.screen();
       if (!commandLine.run) {
@@ -3294,6 +3330,7 @@ export class ShellSession {
         ),
       };
     } catch (error: unknown) {
+      this.releaseEditorMemory();
       this.editor = undefined;
       return commandFailure(
         "qbasic",
@@ -3377,27 +3414,32 @@ export class ShellSession {
       const sourceExists = this.filesystem.exists(path);
       const contents = sourceExists ? this.commands.readFile(path) : "";
       const editorConfiguration = this.readDosEditorConfiguration();
-      this.editor = new DosIdeSession(
-        path,
-        contents,
-        this.terminalWidth,
-        this.terminalHeight,
-        sourceArgument === undefined
-          ? "Untitled"
-          : this.commands.profile.pathDialect.display(path),
-        {
-          editorMode: false,
-          editorConfiguration,
-          externalContext: (request): readonly ViExternalDocument[] =>
-            this.viExternalDocuments(request),
-          fileDialog: ({ directory }): DosFileDialogSnapshot =>
-            this.commands.browseDosFiles(directory),
-          language,
-          product: language === "asm" ? "cs-asm" : "cs-cpp",
-          showWelcome: true,
-          sourceExists,
-          targetName: cpuModelSpecification(this.hardware.cpuModel).runtimeName,
-        },
+      this.editor = this.createEditorSession(
+        "dos-toolchain-ide",
+        () =>
+          new DosIdeSession(
+            path,
+            contents,
+            this.terminalWidth,
+            this.terminalHeight,
+            sourceArgument === undefined
+              ? "Untitled"
+              : this.commands.profile.pathDialect.display(path),
+            {
+              editorMode: false,
+              editorConfiguration,
+              externalContext: (request): readonly ViExternalDocument[] =>
+                this.viExternalDocuments(request),
+              fileDialog: ({ directory }): DosFileDialogSnapshot =>
+                this.commands.browseDosFiles(directory),
+              language,
+              product: language === "asm" ? "cs-asm" : "cs-cpp",
+              showWelcome: true,
+              sourceExists,
+              targetName: cpuModelSpecification(this.hardware.cpuModel)
+                .runtimeName,
+            },
+          ),
       );
       return {
         exitCode: 0,
@@ -3406,6 +3448,7 @@ export class ShellSession {
         terminalScreen: this.editor.screen(),
       };
     } catch (error: unknown) {
+      this.releaseEditorMemory();
       this.editor = undefined;
       return {
         exitCode: 2,
@@ -3441,13 +3484,16 @@ export class ShellSession {
         }
         configuration = this.commands.readFile(configurationPath);
       }
-      this.vi = new ViSession(
-        path,
-        existing,
-        this.terminalWidth,
-        this.terminalHeight,
-        configuration,
-        (request) => this.viExternalDocuments(request),
+      this.vi = this.createViSession(
+        () =>
+          new ViSession(
+            path,
+            existing,
+            this.terminalWidth,
+            this.terminalHeight,
+            configuration,
+            (request) => this.viExternalDocuments(request),
+          ),
       );
       return {
         exitCode: 0,
@@ -3456,8 +3502,58 @@ export class ShellSession {
         terminalScreen: this.vi.screen(),
       };
     } catch (error: unknown) {
+      this.releaseViMemory();
+      this.vi = undefined;
       return commandFailure("vi", message(error));
     }
+  }
+
+  private createEditorSession(
+    owner: Extract<
+      GuestRamOwner,
+      "dos-editor" | "dos-qbasic" | "dos-toolchain-ide"
+    >,
+    create: () => DosIdeSession,
+  ): DosIdeSession {
+    if (this.editorMemoryLease !== undefined) {
+      throw new Error("Editor memory lease is already active");
+    }
+    const lease = this.acquireMemoryLease?.(dosEditorResidentBytes, owner);
+    try {
+      const editor = create();
+      this.editorMemoryLease = lease;
+      return editor;
+    } catch (error: unknown) {
+      lease?.release();
+      throw error;
+    }
+  }
+
+  private createViSession(create: () => ViSession): ViSession {
+    if (this.viMemoryLease !== undefined) {
+      throw new Error("vi memory lease is already active");
+    }
+    const lease = this.acquireMemoryLease?.(viResidentBytes, "vi");
+    try {
+      const vi = create();
+      this.viMemoryLease = lease;
+      return vi;
+    } catch (error: unknown) {
+      lease?.release();
+      throw error;
+    }
+  }
+
+  private releaseEditorMemory(): void {
+    const lease = this.editorMemoryLease;
+    this.editorMemoryLease = undefined;
+    lease?.release();
+  }
+
+  private releaseViMemory(): void {
+    const lease = this.viMemoryLease;
+    this.viMemoryLease = undefined;
+    lease?.release();
   }
 
   private readDosEditorConfiguration(): DosEditorConfiguration {
@@ -3521,6 +3617,7 @@ export class ShellSession {
       }
     }
     if (result.kind === "closed") {
+      this.releaseViMemory();
       this.vi = undefined;
       this.lastExitCode = 0;
       return {
@@ -3837,6 +3934,7 @@ export class ShellSession {
       }
     }
     if (result.kind === "closed") {
+      this.releaseEditorMemory();
       this.editor = undefined;
       this.pendingEditorArtifactPath = undefined;
       this.pendingEditorCommand = undefined;

@@ -33,6 +33,12 @@ import {
 import { FaceIoHardware } from "../io/faceIoHardware.js";
 
 const legacyDefaultClockHz = 20_000;
+const portableDosFat16Allocation = Object.freeze({
+  allocationUnitBytes: 2_048,
+  directoryEntryBytes: 32,
+  reservedBytes: 59_392,
+  rootDirectoryEntries: 512,
+});
 
 export type ComputerOsProfile = "dos" | "linux";
 
@@ -113,15 +119,18 @@ export class ComputerRecord {
     options: ComputerRecordOptions = {},
   ) {
     requireComputerId(computerId);
+    const portable = options.displayProfileId === "portable-vga-256k";
     this.filesystem = new InMemoryFilesystem(
       options.filesystemLimits ?? {
         ...defaultFilesystemLimits,
-        capacityBytes:
-          options.displayProfileId === "portable-vga-256k"
-            ? portableDiskProfile.capacityBytes
-            : family === "advanced"
-              ? advancedDiskProfile.capacityBytes
-              : desktopDiskProfile.capacityBytes,
+        capacityBytes: portable
+          ? portableDiskProfile.capacityBytes
+          : family === "advanced"
+            ? advancedDiskProfile.capacityBytes
+            : desktopDiskProfile.capacityBytes,
+        ...(portable && options.osProfile === "dos"
+          ? portableDosFat16Allocation
+          : {}),
       },
     );
     this.terminal = new TerminalBuffer(

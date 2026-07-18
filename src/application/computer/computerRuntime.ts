@@ -1,11 +1,11 @@
 import {
-  createNativeEnvironment,
+  createAccountedNativeEnvironment,
   renderTerminalScreen,
   writeTerminalLines,
   type BackgroundProcessStartResult,
   type ForegroundProcessStartResult,
   type JobControlStartResult,
-  type NativeModuleContext,
+  type AccountedNativeModuleContext,
 } from "../runtime/nativeModules.js";
 import { createPythonCs486Program } from "../runtime/pythonCs486.js";
 import {
@@ -27,6 +27,12 @@ import type {
   ComputerOsProfile,
   ComputerRecord,
 } from "../../domain/computer/computer.js";
+import {
+  GuestRamLedger,
+  type GuestRamOwner,
+  type GuestRamSnapshot,
+  type MemoryLease,
+} from "../../domain/computer/guestRamLedger.js";
 import { InMemoryFilesystem } from "../../domain/filesystem/inMemoryFilesystem.js";
 import { numericComputerId } from "../../domain/computer/identity.js";
 import type { RuntimeValue } from "../../domain/runtime/value.js";
@@ -219,6 +225,10 @@ export class ComputerRuntime {
 
   floppyDrive(computerId: string): FloppyDrive | undefined {
     return this.entries.get(computerId)?.floppyDrive;
+  }
+
+  guestMemoryStatus(computerId: string): GuestRamSnapshot | undefined {
+    return this.entries.get(computerId)?.guestRamLedger?.snapshot();
   }
 
   attachFloppyMedia(computerId: string, media: FloppyMedia): void {
@@ -738,7 +748,7 @@ export class ComputerRuntime {
           const executed = runCs486(request.executable, {
             cpuModel: entry.record.hardware.cpuModel,
             instructionLimit: 100_000,
-            memoryBytes: entry.record.hardware.memoryBytes,
+            memoryBytes: guestProcessMemoryBytes(entry),
           });
           const cpuCycles = Math.min(
             1_000_000,
@@ -917,7 +927,7 @@ export class ComputerRuntime {
     const source = inlineSource ?? filesystem.readFile(request.path);
     const terminal = new TerminalBuffer(80, 25);
     const runtimeId = this.nextRuntimeId++;
-    const environment = createNativeEnvironment({
+    const environment = createAccountedNativeEnvironment({
       clock: this.clock,
       computerId: numericComputerId(entry.record.computerId),
       computerName: entry.record.computerId,
@@ -930,6 +940,7 @@ export class ComputerRuntime {
       shell: entry.shell,
       terminal,
       hardware: entry.record.hardware,
+      guestRamLedger: requireGuestRamLedger(entry),
       memoryUsageBytes: () => entry.debugJob?.process.memoryUsageBytes ?? 0,
       currentTick: () => this.scheduler.tickNumber,
       ticksPerSecond: this.ticksPerSecond,
@@ -942,7 +953,7 @@ export class ComputerRuntime {
       cpuModel: entry.record.hardware.cpuModel,
       environment,
       filesystem,
-      memoryBytes: entry.record.hardware.memoryBytes,
+      memoryBytes: guestProcessMemoryBytes(entry),
       path: request.path,
       source,
     }).process;
@@ -975,7 +986,7 @@ export class ComputerRuntime {
         onComplete,
         process: new Cs486Process(request.executable, {
           cpuModel: entry.record.hardware.cpuModel,
-          memoryBytes: entry.record.hardware.memoryBytes,
+          memoryBytes: guestProcessMemoryBytes(entry),
         }),
         runtimeId: this.nextRuntimeId++,
         stats: request.stats,
@@ -1291,7 +1302,7 @@ export class ComputerRuntime {
     );
     const source = inlineSource ?? filesystem.readFile(request.path);
     const terminal = new TerminalBuffer(80, 25);
-    const environment = createNativeEnvironment({
+    const environment = createAccountedNativeEnvironment({
       clock: this.clock,
       computerId: numericComputerId(entry.record.computerId),
       computerName: entry.record.computerId,
@@ -1303,6 +1314,7 @@ export class ComputerRuntime {
       guestFilesystem: filesystem,
       terminal,
       hardware: entry.record.hardware,
+      guestRamLedger: requireGuestRamLedger(entry),
       memoryUsageBytes: () => 0,
       currentTick: () => this.scheduler.tickNumber,
       shell: entry.shell,
@@ -1316,7 +1328,7 @@ export class ComputerRuntime {
       cpuModel: entry.record.hardware.cpuModel,
       environment,
       filesystem,
-      memoryBytes: entry.record.hardware.memoryBytes,
+      memoryBytes: guestProcessMemoryBytes(entry),
       path: request.path,
       source,
     }).process;
@@ -1407,6 +1419,13 @@ export class ComputerRuntime {
         ? "dos"
         : entry.record.osProfile;
       entry.activeOsProfile = activeProfile;
+      entry.guestRamLedger = new GuestRamLedger(
+        entry.record.hardware.memoryBytes,
+      );
+      entry.residentMemoryLease =
+        activeProfile === "dos"
+          ? entry.guestRamLedger.acquire(64 * 1_024, "dos-resident")
+          : undefined;
       entry.osRuntimeState = floppyBoot
         ? OsRuntimeState.restore(entry.record.computerId, undefined)
         : entry.installedOsRuntimeState;
@@ -1476,7 +1495,7 @@ export class ComputerRuntime {
           volumeLabel: floppyMedia.volumeLabel,
         });
       }
-      const nativeContext: NativeModuleContext = {
+      const nativeContext: AccountedNativeModuleContext = {
         clock: this.clock,
         computerId: numericComputerId(entry.record.computerId),
         computerName: entry.record.computerId,
@@ -1494,10 +1513,11 @@ export class ComputerRuntime {
         guestFilesystem: startupFilesystem,
         terminal: entry.record.terminal,
         hardware: entry.record.hardware,
+        guestRamLedger: requireGuestRamLedger(entry),
         memoryUsageBytes: () =>
           entry.foreground?.process.memoryUsageBytes ??
           this.backgroundMemoryUsage(entry) ??
-          entry.vm?.memoryUsageBytes ??
+          (activeProfile === "dos" ? 0 : entry.vm?.memoryUsageBytes) ??
           0,
         redstone: entry.record.redstone,
         currentTick: () => this.scheduler.tickNumber,
@@ -1531,7 +1551,7 @@ export class ComputerRuntime {
         runHostWork: (lane, units, operation) =>
           this.runHostWork(lane, units, entry.record.computerId, operation),
       };
-      let environment = createNativeEnvironment(nativeContext);
+      let environment = createAccountedNativeEnvironment(nativeContext);
       if (activeProfile === "linux") {
         startupCredentials = linuxStartupCredentials(entry.record);
       }
@@ -1566,7 +1586,7 @@ export class ComputerRuntime {
         );
       }
       if (usesInternalBootProgram) {
-        environment = createNativeEnvironment({
+        environment = createAccountedNativeEnvironment({
           ...nativeContext,
           exposeShellModule: true,
           shell: environment.shell,
@@ -1576,7 +1596,7 @@ export class ComputerRuntime {
         cpuModel: entry.record.hardware.cpuModel,
         environment,
         filesystem: startupFilesystem,
-        memoryBytes: entry.record.hardware.memoryBytes,
+        memoryBytes: guestProcessMemoryBytes(entry),
         path: "/startup.py",
         source,
       }).process;
@@ -1629,6 +1649,7 @@ export class ComputerRuntime {
         kind: "fault",
         message: normalized.message.slice(0, 256) || "CSBIOS boot failure",
       });
+      this.finalizeGuestRam(entry);
       return { outcome: "failed", error: normalized };
     }
   }
@@ -1681,7 +1702,7 @@ export class ComputerRuntime {
             ? request.start()
             : new Cs486Process(request.executable, {
                 cpuModel: entry.record.hardware.cpuModel,
-                memoryBytes: entry.record.hardware.memoryBytes,
+                memoryBytes: guestProcessMemoryBytes(entry),
               });
       osPid = this.startOsProcess(entry, request.command, request.credentials);
       const foreground: ForegroundGuestProcess = {
@@ -1772,7 +1793,7 @@ export class ComputerRuntime {
             ? this.createBackgroundPythonProcess(entry, request, runtimeId)
             : new Cs486Process(request.executable, {
                 cpuModel: entry.record.hardware.cpuModel,
-                memoryBytes: entry.record.hardware.memoryBytes,
+                memoryBytes: guestProcessMemoryBytes(entry),
               });
       const parentPid =
         entry.shell.processId() !== undefined &&
@@ -1980,17 +2001,37 @@ export class ComputerRuntime {
         stderr: `${request.command}: a foreground process is already running\n`,
       };
     }
+    const guestRamLedger = entry.guestRamLedger;
+    if (guestRamLedger === undefined) {
+      return {
+        outcome: "failed",
+        exitCode: 1,
+        stderr: `${request.command}: guest RAM ledger is unavailable\n`,
+      };
+    }
+    let memoryLease: MemoryLease | undefined;
     try {
+      memoryLease = guestRamLedger.acquire(
+        128 * 1_024,
+        compileMemoryOwner(request),
+      );
       const completionEvent = `${foregroundCompletionEvent}:compile:${String(this.nextRuntimeId++)}`;
       const osPid = this.startOsProcess(
         entry,
         request.command,
         request.credentials,
       );
-      entry.compileJob = { completionEvent, onComplete, osPid, request };
+      entry.compileJob = {
+        completionEvent,
+        memoryLease,
+        onComplete,
+        osPid,
+        request,
+      };
       this.compileReady.add(entry);
       return { completionEvent, outcome: "started" };
     } catch (error: unknown) {
+      memoryLease?.release();
       const normalized =
         error instanceof Error ? error : new Error(String(error));
       return {
@@ -2053,6 +2094,7 @@ export class ComputerRuntime {
             "Program List produced an unsupported nested foreground request",
           );
         }
+        this.releaseCompileMemory(job);
         this.startCompiledForeground(
           entry,
           result.foreground.executable,
@@ -2214,6 +2256,7 @@ export class ComputerRuntime {
         );
       }
       if (job.onComplete !== undefined) {
+        this.releaseCompileMemory(job);
         this.startDebugJob(
           entry,
           {
@@ -2223,7 +2266,7 @@ export class ComputerRuntime {
             onComplete: job.onComplete,
             process: new Cs486Process(output, {
               cpuModel: entry.record.hardware.cpuModel,
-              memoryBytes: entry.record.hardware.memoryBytes,
+              memoryBytes: guestProcessMemoryBytes(entry),
             }),
             runtimeId: this.nextRuntimeId++,
             stats: false,
@@ -2235,6 +2278,7 @@ export class ComputerRuntime {
           },
         );
       } else {
+        this.releaseCompileMemory(job);
         this.startCompiledForeground(
           entry,
           output,
@@ -2275,7 +2319,7 @@ export class ComputerRuntime {
     const runtimeId = this.nextRuntimeId++;
     const process = new Cs486Process(executable, {
       cpuModel: entry.record.hardware.cpuModel,
-      memoryBytes: entry.record.hardware.memoryBytes,
+      memoryBytes: guestProcessMemoryBytes(entry),
     });
     const foreground: ForegroundGuestProcess = {
       command,
@@ -2320,6 +2364,7 @@ export class ComputerRuntime {
     if (job === undefined) return;
     this.compileReady.delete(entry);
     entry.compileJob = undefined;
+    this.releaseCompileMemory(job);
     this.completeOsProcess(entry, job.osPid, exitCode, cpuCycles, signal);
     const completionScreen = entry.shell?.completeForegroundProcess(
       exitCode,
@@ -2345,6 +2390,23 @@ export class ComputerRuntime {
     }
   }
 
+  private releaseCompileMemory(job: CompileJob): void {
+    if (!job.memoryLease.released) job.memoryLease.release();
+  }
+
+  private finalizeGuestRam(entry: RuntimeEntry): void {
+    const ledger = entry.guestRamLedger;
+    const resident = entry.residentMemoryLease;
+    entry.residentMemoryLease = undefined;
+    if (resident?.released === false) resident.release();
+    if (ledger !== undefined && ledger.usedBytes !== 0) {
+      throw new Error(
+        `Guest RAM finalization leaked ${String(ledger.usedBytes)} bytes`,
+      );
+    }
+    entry.guestRamLedger = undefined;
+  }
+
   private createForegroundPythonProcess(
     entry: RuntimeEntry,
     request: Extract<ShellForegroundRequest, { readonly kind: "python" }>,
@@ -2356,7 +2418,7 @@ export class ComputerRuntime {
       request.umask,
     );
     const source = filesystem.readFile(request.path);
-    const environment = createNativeEnvironment({
+    const environment = createAccountedNativeEnvironment({
       clock: this.clock,
       computerId: numericComputerId(entry.record.computerId),
       computerName: entry.record.computerId,
@@ -2368,6 +2430,7 @@ export class ComputerRuntime {
       guestFilesystem: filesystem,
       terminal: entry.record.terminal,
       hardware: entry.record.hardware,
+      guestRamLedger: requireGuestRamLedger(entry),
       memoryUsageBytes: () => entry.foreground?.process.memoryUsageBytes ?? 0,
       redstone: entry.record.redstone,
       currentTick: () => this.scheduler.tickNumber,
@@ -2388,7 +2451,7 @@ export class ComputerRuntime {
       cpuModel: entry.record.hardware.cpuModel,
       environment,
       filesystem,
-      memoryBytes: entry.record.hardware.memoryBytes,
+      memoryBytes: guestProcessMemoryBytes(entry),
       path: request.path,
       source,
     }).process;
@@ -2406,7 +2469,7 @@ export class ComputerRuntime {
     );
     const source = filesystem.readFile(request.path);
     const processHolder: { process?: Cs486Process } = {};
-    const environment = createNativeEnvironment({
+    const environment = createAccountedNativeEnvironment({
       clock: this.clock,
       computerId: numericComputerId(entry.record.computerId),
       computerName: entry.record.computerId,
@@ -2418,6 +2481,7 @@ export class ComputerRuntime {
       guestFilesystem: filesystem,
       terminal: entry.record.terminal,
       hardware: entry.record.hardware,
+      guestRamLedger: requireGuestRamLedger(entry),
       memoryUsageBytes: () => processHolder.process?.memoryUsageBytes ?? 0,
       redstone: entry.record.redstone,
       currentTick: () => this.scheduler.tickNumber,
@@ -2436,7 +2500,7 @@ export class ComputerRuntime {
       cpuModel: entry.record.hardware.cpuModel,
       environment,
       filesystem,
-      memoryBytes: entry.record.hardware.memoryBytes,
+      memoryBytes: guestProcessMemoryBytes(entry),
       path: request.path,
       source,
     }).process;
@@ -3621,6 +3685,7 @@ export class ComputerRuntime {
       const compileJob = entry.compileJob;
       this.compileReady.delete(entry);
       entry.compileJob = undefined;
+      this.releaseCompileMemory(compileJob);
       this.completeOsProcess(entry, compileJob.osPid, 130, 1, "SIGTERM");
       try {
         compileJob.onComplete?.({
@@ -3684,6 +3749,11 @@ export class ComputerRuntime {
     entry.activeFilesystem = undefined;
     entry.osRuntimeState = entry.installedOsRuntimeState;
     entry.transientDosRuntimeState = undefined;
+    try {
+      this.finalizeGuestRam(entry);
+    } catch (error: unknown) {
+      finalizationFailures.push(error);
+    }
     if (finalizationFailures.length > 0) {
       writeTerminalLines(entry.record.terminal, [
         `Runtime detach completed with ${String(finalizationFailures.length)} finalization error(s)`,
@@ -3768,6 +3838,8 @@ interface RuntimeEntry {
   osRuntimeState: OsRuntimeState;
   readonly dosRuntimeState?: DosRuntimeState;
   readonly floppyDrive: FloppyDrive;
+  guestRamLedger?: GuestRamLedger;
+  residentMemoryLease?: MemoryLease;
   activeFilesystem?: InMemoryFilesystem;
   activeOsProfile?: ComputerOsProfile;
   transientDosRuntimeState?: DosRuntimeState;
@@ -3828,12 +3900,30 @@ interface BackgroundGuestProcess {
 
 interface CompileJob {
   readonly completionEvent: string;
+  readonly memoryLease: MemoryLease;
   readonly onComplete?: (result: DebugShellCommandCompletion) => void;
   readonly osPid: number;
   readonly request: Extract<
     ShellForegroundRequest,
     { readonly kind: "compile" }
   >;
+}
+
+function compileMemoryOwner(
+  request: Extract<ShellForegroundRequest, { readonly kind: "compile" }>,
+): GuestRamOwner {
+  if (request.task.kind === "program-list") return "program-list";
+  if (request.task.kind === "link") return "linker";
+  switch (request.task.language) {
+    case "asm":
+      return "compiler-asm";
+    case "basic":
+      return "compiler-basic";
+    case "c":
+      return "compiler-c";
+    case "cpp":
+      return "compiler-cpp";
+  }
 }
 
 function currentCompileJob(entry: RuntimeEntry): CompileJob | undefined {
@@ -4171,6 +4261,23 @@ function guestFilesystemForEntry(
 
 function activeFilesystem(entry: RuntimeEntry): InMemoryFilesystem {
   return entry.activeFilesystem ?? entry.record.filesystem;
+}
+
+function guestProcessMemoryBytes(entry: RuntimeEntry): number {
+  const bytes =
+    entry.guestRamLedger?.availableBytes ?? entry.record.hardware.memoryBytes;
+  if (bytes <= 0) {
+    throw new Error("Out of Memory: no guest process memory remains");
+  }
+  return bytes;
+}
+
+function requireGuestRamLedger(entry: RuntimeEntry): GuestRamLedger {
+  const ledger = entry.guestRamLedger;
+  if (ledger === undefined) {
+    throw new Error("Guest RAM ledger is unavailable");
+  }
+  return ledger;
 }
 
 function activeOsProfile(entry: RuntimeEntry): ComputerOsProfile {

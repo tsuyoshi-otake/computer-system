@@ -4,17 +4,24 @@ import {
 } from "../runtime/transactionQuarantine.js";
 
 export interface FilesystemLimits {
+  readonly allocationUnitBytes?: number;
   readonly capacityBytes: number;
+  readonly directoryEntryBytes?: number;
   readonly maxEntries: number;
   readonly maxFileBytes: number;
   readonly maxPathLength: number;
+  readonly reservedBytes?: number;
+  readonly rootDirectoryEntries?: number;
 }
 
 export const defaultFilesystemLimits: FilesystemLimits = {
+  allocationUnitBytes: 1,
   capacityBytes: 40 * 1_048_576,
+  directoryEntryBytes: 0,
   maxEntries: 4_096,
   maxFileBytes: 1_048_576,
   maxPathLength: 255,
+  reservedBytes: 0,
 };
 
 export interface InMemoryFilesystemSnapshot {
@@ -257,14 +264,34 @@ export class InMemoryFilesystem {
   private readonly directories = new Set<string>(["/"]);
   private readonly children = new Map<string, Set<string>>([["/", new Set()]]);
   private revisionValue = 0;
-  private usedBytesValue = 0;
+  private usedBytesValue: number;
   private baseImage: FilesystemBaseImage | undefined;
 
   constructor(readonly limits: FilesystemLimits = defaultFilesystemLimits) {
-    for (const [name, value] of Object.entries(limits)) {
-      if (!Number.isInteger(value) || value <= 0)
+    for (const name of [
+      "capacityBytes",
+      "maxEntries",
+      "maxFileBytes",
+      "maxPathLength",
+    ] as const) {
+      const value = limits[name];
+      if (!Number.isSafeInteger(value) || value <= 0)
         throw new RangeError(`${name} must be positive`);
     }
+    requireOptionalPositive(limits.allocationUnitBytes, "allocationUnitBytes");
+    requireOptionalNonNegative(
+      limits.directoryEntryBytes,
+      "directoryEntryBytes",
+    );
+    requireOptionalNonNegative(limits.reservedBytes, "reservedBytes");
+    requireOptionalPositive(
+      limits.rootDirectoryEntries,
+      "rootDirectoryEntries",
+    );
+    if (this.reservedBytes >= limits.capacityBytes) {
+      throw new RangeError("reservedBytes must be smaller than capacityBytes");
+    }
+    this.usedBytesValue = this.reservedBytes;
     this.metadata.set("/", defaultMetadata(true));
   }
 
@@ -374,6 +401,10 @@ export class InMemoryFilesystem {
 
   attachBaseImage(image: FilesystemBaseImage): void {
     this.assertTransactionMutationAllowed();
+    if (activeFilesystemTransactions.at(-1)?.owner !== this) {
+      this.transaction(() => this.attachBaseImage(image));
+      return;
+    }
     if (this.baseImage?.id === image.id) return;
     const previousBase =
       this.baseImage === undefined ? undefined : baseImageState(this.baseImage);
@@ -455,7 +486,7 @@ export class InMemoryFilesystem {
         throw new FilesystemError("file_limit", "File is too large");
       plannedFilePaths.add(file.path);
       addedFiles += 1;
-      addedBytes += size;
+      addedBytes += this.allocatedDataBytes(size);
     }
     this.checkEntryCount(addedDirectories.size + addedFiles);
     if (
@@ -485,7 +516,14 @@ export class InMemoryFilesystem {
         const size = imageState.sizes.get(path)!;
         if (size > this.limits.maxFileBytes)
           throw new FilesystemError("file_limit", "File is too large");
-        if (size > 0 && this.usedBytesValue + size > this.limits.capacityBytes)
+        const allocatedSize = this.allocatedDataBytes(size);
+        if (
+          allocatedSize > 0 &&
+          this.usedBytesValue +
+            allocatedSize +
+            this.parentDirectoryGrowth(path) >
+            this.limits.capacityBytes
+        )
           throw new FilesystemError("capacity", "Filesystem capacity exceeded");
         this.requireParent(path);
         this.checkEntryCount(1);
@@ -495,7 +533,7 @@ export class InMemoryFilesystem {
         this.hardLinkCounts.set(inodeId, 1);
         this.metadata.set(path, imageState.metadata.get(path)!);
         this.addChild(path);
-        this.usedBytesValue += size;
+        this.usedBytesValue += allocatedSize;
         this.revisionValue += 1;
       }
     }
@@ -551,19 +589,23 @@ export class InMemoryFilesystem {
       throw new FilesystemError("invalid_path", "Link target contains NUL");
     const storedTarget = target.replaceAll("\\", "/");
     const targetBytes = utf8Size(storedTarget);
+    const allocatedTargetBytes = this.allocatedDataBytes(targetBytes);
     if (enforceCurrentLimits && targetBytes > this.limits.maxPathLength)
       throw new FilesystemError("path_limit", "Link target is too long");
     if (enforceCurrentLimits) this.checkEntryCount(1);
     if (
       enforceCurrentLimits &&
-      this.usedBytesValue + targetBytes > this.limits.capacityBytes
+      this.usedBytesValue +
+        allocatedTargetBytes +
+        this.parentDirectoryGrowth(normalized) >
+        this.limits.capacityBytes
     ) {
       throw new FilesystemError("capacity", "Filesystem capacity exceeded");
     }
     this.symbolicLinks.set(normalized, storedTarget);
     this.metadata.set(normalized, defaultMetadata(false, 0o777));
     this.addChild(normalized);
-    this.usedBytesValue += targetBytes;
+    this.usedBytesValue += allocatedTargetBytes;
     this.revisionValue += 1;
   }
 
@@ -577,6 +619,7 @@ export class InMemoryFilesystem {
       throw new FilesystemError("exists", `${path} already exists`);
     this.requireParent(destination);
     this.checkEntryCount(1);
+    this.assertCapacity(this.parentDirectoryGrowth(destination));
     const id = this.requireInodeId(source);
     this.files.set(destination, this.files.get(source)!);
     this.hardLinkIds.set(source, id);
@@ -628,6 +671,10 @@ export class InMemoryFilesystem {
 
   makeDirectory(path: string): void {
     this.assertTransactionMutationAllowed();
+    if (activeFilesystemTransactions.at(-1)?.owner !== this) {
+      this.transaction(() => this.makeDirectory(path));
+      return;
+    }
     const normalized = this.normalize(path);
     if (this.files.has(normalized))
       throw new FilesystemError("not_directory", `${path} is a file`);
@@ -654,9 +701,14 @@ export class InMemoryFilesystem {
     }
     this.checkEntryCount(additions.length);
     for (const addition of additions) {
+      const directoryBytes = this.directoryAllocatedBytes(addition, 0);
+      this.assertCapacity(
+        directoryBytes + this.parentDirectoryGrowth(addition),
+      );
       this.directories.add(addition);
       this.children.set(addition, new Set());
       this.metadata.set(addition, defaultMetadata(true));
+      this.usedBytesValue += directoryBytes;
       this.addChild(addition);
     }
     if (additions.length > 0) this.revisionValue += 1;
@@ -697,7 +749,9 @@ export class InMemoryFilesystem {
     if (!this.exists(normalized))
       throw new FilesystemError("not_found", `${path} does not exist`);
     if (this.symbolicLinks.has(normalized)) {
-      this.usedBytesValue -= utf8Size(this.symbolicLinks.get(normalized)!);
+      this.usedBytesValue -= this.allocatedDataBytes(
+        utf8Size(this.symbolicLinks.get(normalized)!),
+      );
       this.symbolicLinks.delete(normalized);
       this.metadata.delete(normalized);
       this.removeChild(normalized);
@@ -710,8 +764,8 @@ export class InMemoryFilesystem {
         const inodeId = this.requireInodeId(candidate);
         const count = this.hardLinkCounts.get(inodeId) ?? 1;
         if (count === 1) {
-          this.usedBytesValue -= utf8Size(
-            requireBlob(this.files.get(candidate)!),
+          this.usedBytesValue -= this.allocatedDataBytes(
+            utf8Size(requireBlob(this.files.get(candidate)!)),
           );
         }
         this.files.delete(candidate);
@@ -724,7 +778,9 @@ export class InMemoryFilesystem {
     }
     for (const candidate of [...this.symbolicLinks.keys()]) {
       if (candidate.startsWith(prefix)) {
-        this.usedBytesValue -= utf8Size(this.symbolicLinks.get(candidate)!);
+        this.usedBytesValue -= this.allocatedDataBytes(
+          utf8Size(this.symbolicLinks.get(candidate)!),
+        );
         this.symbolicLinks.delete(candidate);
         this.metadata.delete(candidate);
         this.removeChild(candidate);
@@ -737,6 +793,7 @@ export class InMemoryFilesystem {
       .sort((left, right) => right.length - left.length);
     for (const candidate of removedDirectories) {
       this.removeChild(candidate);
+      this.usedBytesValue -= this.directoryAllocatedBytes(candidate);
       this.children.delete(candidate);
       this.directories.delete(candidate);
       this.metadata.delete(candidate);
@@ -746,6 +803,10 @@ export class InMemoryFilesystem {
 
   copy(from: string, to: string): void {
     this.assertTransactionMutationAllowed();
+    if (activeFilesystemTransactions.at(-1)?.owner !== this) {
+      this.transaction(() => this.copy(from, to));
+      return;
+    }
     const source = this.normalize(from);
     const destination = this.normalize(to);
     const snapshot = this.subtreeSnapshot(source, from);
@@ -1062,7 +1123,9 @@ export class InMemoryFilesystem {
     const previous = this.files.get(path);
     if (previous === blobId) return;
     const previousSize =
-      previous === undefined ? 0 : utf8Size(requireBlob(previous));
+      previous === undefined
+        ? 0
+        : this.allocatedDataBytes(utf8Size(requireBlob(previous)));
     const linkId = this.hardLinkIds.get(path);
     const linkedPaths =
       linkId === undefined
@@ -1070,10 +1133,10 @@ export class InMemoryFilesystem {
         : [...this.hardLinkIds]
             .filter(([, candidate]) => candidate === linkId)
             .map(([candidate]) => candidate);
-    const delta = size - previousSize;
-    if (delta > 0 && this.usedBytesValue + delta > this.limits.capacityBytes) {
-      throw new FilesystemError("capacity", "Filesystem capacity exceeded");
-    }
+    const delta = this.allocatedDataBytes(size) - previousSize;
+    const directoryGrowth =
+      previous === undefined ? this.parentDirectoryGrowth(path) : 0;
+    this.assertCapacity(delta + directoryGrowth);
     if (!this.files.has(path)) {
       this.checkEntryCount(1);
       const inodeId = nextHardLinkId++;
@@ -1186,10 +1249,11 @@ export class InMemoryFilesystem {
             if (copiedInodes.has(inodeId)) return total;
             copiedInodes.add(inodeId);
           }
-          return total + utf8Size(contents);
+          return total + this.allocatedDataBytes(utf8Size(contents));
         }, 0) +
         snapshot.symbolicLinks.reduce(
-          (total, [, target]) => total + utf8Size(target),
+          (total, [, target]) =>
+            total + this.allocatedDataBytes(utf8Size(target)),
           0,
         );
       if (this.usedBytesValue + addedBytes > this.limits.capacityBytes) {
@@ -1255,6 +1319,8 @@ export class InMemoryFilesystem {
     if (sourceSiblings === undefined || destinationSiblings === undefined) {
       throw new Error("Filesystem child index is missing for move");
     }
+    const directoryDelta = this.directoryMoveDelta(source, destination);
+    this.assertCapacity(directoryDelta);
 
     const directories = snapshot.directories.map((path) => {
       const children = this.children.get(path);
@@ -1318,6 +1384,7 @@ export class InMemoryFilesystem {
 
     sourceSiblings.delete(baseName(source));
     destinationSiblings.add(baseName(destination));
+    this.usedBytesValue += directoryDelta;
     this.revisionValue += 1;
   }
 
@@ -1333,15 +1400,18 @@ export class InMemoryFilesystem {
 
   private rebuildUsedBytes(): void {
     const seen = new Set<number>();
-    let usedBytes = 0;
+    let usedBytes = this.reservedBytes;
     for (const [path, blobId] of this.files) {
       const inodeId = this.requireInodeId(path);
       if (seen.has(inodeId)) continue;
       seen.add(inodeId);
-      usedBytes += utf8Size(requireBlob(blobId));
+      usedBytes += this.allocatedDataBytes(utf8Size(requireBlob(blobId)));
     }
     for (const target of this.symbolicLinks.values()) {
-      usedBytes += utf8Size(target);
+      usedBytes += this.allocatedDataBytes(utf8Size(target));
+    }
+    for (const directory of this.directories) {
+      usedBytes += this.directoryAllocatedBytes(directory);
     }
     this.usedBytesValue = usedBytes;
   }
@@ -1418,12 +1488,114 @@ export class InMemoryFilesystem {
         `Parent directory ${parent} does not exist`,
       );
     }
+    const growth = this.parentDirectoryGrowth(path);
+    this.assertCapacity(growth);
     siblings.add(baseName(path));
+    this.usedBytesValue += growth;
   }
 
   private removeChild(path: string): void {
     if (path === "/") return;
-    this.children.get(parentPath(path))?.delete(baseName(path));
+    const parent = parentPath(path);
+    const siblings = this.children.get(parent);
+    if (siblings === undefined || !siblings.has(baseName(path))) return;
+    const before = this.directoryAllocatedBytes(parent, siblings.size);
+    siblings.delete(baseName(path));
+    const after = this.directoryAllocatedBytes(parent, siblings.size);
+    this.usedBytesValue -= before - after;
+  }
+
+  private get allocationUnitBytes(): number {
+    return this.limits.allocationUnitBytes ?? 1;
+  }
+
+  private get directoryEntryBytes(): number {
+    return this.limits.directoryEntryBytes ?? 0;
+  }
+
+  private get reservedBytes(): number {
+    return this.limits.reservedBytes ?? 0;
+  }
+
+  private allocatedDataBytes(logicalBytes: number): number {
+    if (logicalBytes === 0) return 0;
+    return (
+      Math.ceil(logicalBytes / this.allocationUnitBytes) *
+      this.allocationUnitBytes
+    );
+  }
+
+  private directoryAllocatedBytes(
+    path: string,
+    childCount = this.children.get(path)?.size ?? 0,
+  ): number {
+    if (path === "/" || this.directoryEntryBytes === 0) return 0;
+    return this.allocatedDataBytes((childCount + 2) * this.directoryEntryBytes);
+  }
+
+  private parentDirectoryGrowth(path: string): number {
+    const parent = parentPath(path);
+    const siblings = this.children.get(parent);
+    if (siblings === undefined) {
+      throw new FilesystemError(
+        "not_found",
+        `Parent directory ${parent} does not exist`,
+      );
+    }
+    const name = baseName(path);
+    if (siblings.has(name)) return 0;
+    const rootLimit = this.limits.rootDirectoryEntries;
+    if (
+      parent === "/" &&
+      rootLimit !== undefined &&
+      siblings.size >= rootLimit
+    ) {
+      throw new FilesystemError(
+        "entry_limit",
+        "FAT root-directory entry limit exceeded",
+      );
+    }
+    return (
+      this.directoryAllocatedBytes(parent, siblings.size + 1) -
+      this.directoryAllocatedBytes(parent, siblings.size)
+    );
+  }
+
+  private directoryMoveDelta(source: string, destination: string): number {
+    const sourceParent = parentPath(source);
+    const destinationParent = parentPath(destination);
+    if (sourceParent === destinationParent) return 0;
+    const sourceSiblings = this.children.get(sourceParent);
+    const destinationSiblings = this.children.get(destinationParent);
+    if (sourceSiblings === undefined || destinationSiblings === undefined) {
+      throw new Error("Filesystem child index is missing for move");
+    }
+    const rootLimit = this.limits.rootDirectoryEntries;
+    if (
+      destinationParent === "/" &&
+      rootLimit !== undefined &&
+      destinationSiblings.size >= rootLimit
+    ) {
+      throw new FilesystemError(
+        "entry_limit",
+        "FAT root-directory entry limit exceeded",
+      );
+    }
+    return (
+      this.directoryAllocatedBytes(sourceParent, sourceSiblings.size - 1) -
+      this.directoryAllocatedBytes(sourceParent, sourceSiblings.size) +
+      this.directoryAllocatedBytes(
+        destinationParent,
+        destinationSiblings.size + 1,
+      ) -
+      this.directoryAllocatedBytes(destinationParent, destinationSiblings.size)
+    );
+  }
+
+  private assertCapacity(delta: number): void {
+    if (delta > 0 && this.usedBytesValue + delta > this.limits.capacityBytes) {
+      throw new FilesystemError("capacity", "Filesystem capacity exceeded");
+    }
   }
 
   private assertTransactionMutationAllowed(): void {
@@ -1797,6 +1969,24 @@ function hardLinksAreValid(
     }
   }
   return true;
+}
+
+function requireOptionalPositive(
+  value: number | undefined,
+  name: string,
+): void {
+  if (value !== undefined && (!Number.isSafeInteger(value) || value <= 0)) {
+    throw new RangeError(`${name} must be positive`);
+  }
+}
+
+function requireOptionalNonNegative(
+  value: number | undefined,
+  name: string,
+): void {
+  if (value !== undefined && (!Number.isSafeInteger(value) || value < 0)) {
+    throw new RangeError(`${name} must be non-negative`);
+  }
 }
 
 function utf8Size(value: string): number {

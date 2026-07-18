@@ -58,6 +58,9 @@ rule into several files. If a change crosses scopes, read each applicable
   failure paths each need one finalization owner.
 - Preserve Computer identity and storage transactionally across block, item,
   portable, monitor, reload, migration, failure, and rollback paths.
+- New guest RAM, filesystem-capacity, or I/O-time consumers must account through
+  `GuestRamLedger`, `InMemoryFilesystem`, or the `ComputerHost` block-I/O owner;
+  do not add bypass counters or optional accounting calls.
 - Keep guest timing independent from host admission and wall-clock delay. Host
   elapsed time may control admission and observability but must never rewrite
   guest CPU, disk, memory, or wire timing.
@@ -125,6 +128,7 @@ synchronized.
   guest-shell command integration.
 - #29: EDIT and Web Terminal responsiveness, bounded input admission, and
   multi-session frame scaling.
+- #31: Structural guest disk-capacity, HDD-time, and RAM accounting.
 
 Use English commit messages with useful detail and reference every applicable
 Issue. Issue #4 remains relevant while Phase 2 work is in scope.

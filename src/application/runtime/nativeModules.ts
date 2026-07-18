@@ -28,6 +28,12 @@ import type { EditorScreen } from "../editor/editorScreen.js";
 import type { ComputerOsProfile } from "../../domain/computer/computer.js";
 import type { ShellClockSource } from "../os/clock.js";
 import type { ComputerHardwareProfile } from "../../domain/computer/hardware.js";
+import type {
+  GuestRamLedger,
+  GuestRamOwner,
+  GuestRamSnapshot,
+  MemoryLease,
+} from "../../domain/computer/guestRamLedger.js";
 import { formatOsIdentity, getOsIdentity } from "../os/osIdentity.js";
 import type {
   SerialEndpoint,
@@ -84,6 +90,7 @@ export interface NativeModuleContext {
   readonly ticksPerSecond?: number;
   readonly hardware?: ComputerHardwareProfile;
   readonly memoryUsageBytes?: () => number;
+  readonly guestRamLedger?: GuestRamLedger;
   readonly requireLinuxLogin?: boolean;
   readonly shell?: ShellSession;
   readonly startForegroundProcess?: (
@@ -111,6 +118,10 @@ export interface NativeModuleContext {
     deterministicUnits: number,
     operation: () => T,
   ) => T;
+}
+
+export interface AccountedNativeModuleContext extends NativeModuleContext {
+  readonly guestRamLedger: GuestRamLedger;
 }
 
 export type ForegroundProcessStartResult =
@@ -153,6 +164,12 @@ export interface NativeEnvironment {
   readonly shell: ShellSession;
 }
 
+export function createAccountedNativeEnvironment(
+  context: AccountedNativeModuleContext,
+): NativeEnvironment {
+  return createNativeEnvironment(context);
+}
+
 export function createNativeEnvironment(
   context: NativeModuleContext,
 ): NativeEnvironment {
@@ -184,6 +201,16 @@ export function createNativeEnvironment(
       ticksPerSecond: context.ticksPerSecond,
       hardware: context.hardware,
       memoryUsageBytes: context.memoryUsageBytes,
+      ...(context.guestRamLedger === undefined
+        ? {}
+        : {
+            acquireMemoryLease: (
+              bytes: number,
+              owner: GuestRamOwner,
+            ): MemoryLease => context.guestRamLedger!.acquire(bytes, owner),
+            guestRamSnapshot: (): GuestRamSnapshot =>
+              context.guestRamLedger!.snapshot(),
+          }),
       requireLogin: context.requireLinuxLogin,
       terminalHeight: context.terminal.height,
       terminalWidth: context.terminal.width,

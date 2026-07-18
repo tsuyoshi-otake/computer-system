@@ -81,6 +81,7 @@ const elements = {
   capsLockIndicator: document.querySelector("#caps-lock-indicator"),
   numLockIndicator: document.querySelector("#num-lock-indicator"),
   scrollLockIndicator: document.querySelector("#scroll-lock-indicator"),
+  crtButton: document.querySelector("#crt-button"),
   copyButton: document.querySelector("#copy-button"),
   powerIndicator: document.querySelector("#power-indicator"),
   hddIndicator: document.querySelector("#hdd-indicator"),
@@ -281,7 +282,7 @@ elements.commandInput.addEventListener("focus", () => {
 });
 elements.commandInput.addEventListener("blur", () => {
   if (!sessionClosed && accessMode === "writer") {
-    elements.inputState.textContent = "COMMAND";
+    elements.inputState.textContent = editorActive ? "EDIT" : "COMMAND";
   }
 });
 elements.terminalStage.addEventListener("click", () => {
@@ -342,6 +343,9 @@ elements.errorDismiss.addEventListener("click", () => {
 });
 elements.copyButton.addEventListener("click", () => {
   void copyTerminalText();
+});
+elements.crtButton.addEventListener("click", () => {
+  setCrtEnabled(elements.crtButton.getAttribute("aria-pressed") !== "true");
 });
 elements.powerButton.addEventListener("click", () => {
   void requestPower();
@@ -1013,6 +1017,14 @@ function createTerminalRow(
   return line;
 }
 
+function setCrtEnabled(enabled) {
+  elements.terminalStage.classList.toggle("crt-enabled", enabled);
+  elements.crtButton.setAttribute("aria-pressed", String(enabled));
+  elements.crtButton.title = enabled
+    ? "Disable CRT filter"
+    : "Enable CRT filter";
+}
+
 async function copyTerminalText() {
   const selection = window.getSelection();
   const selectedInsideTerminal =
@@ -1678,6 +1690,14 @@ function fitTerminal(columns, rows) {
   elements.terminalStage.style.setProperty(
     "--terminal-font-size",
     `${fitted.pixels.toFixed(2)}px`,
+  );
+  elements.terminalStage.style.setProperty(
+    "--terminal-frame-width",
+    `${(columns * monospaceRatio * fitted.pixels).toFixed(2)}px`,
+  );
+  elements.terminalStage.style.setProperty(
+    "--terminal-frame-height",
+    `${(rows * lineHeightRatio * fitted.pixels).toFixed(2)}px`,
   );
 }
 

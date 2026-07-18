@@ -20,6 +20,16 @@
           </div>
         </div>
         <div class="topbar-actions">
+          <button
+            id="crt-button"
+            class="topbar-button"
+            type="button"
+            aria-label="CRT filter"
+            aria-pressed="true"
+            title="Disable CRT filter"
+          >
+            CRT
+          </button>
           <button id="copy-button" class="topbar-button" type="button">
             Copy
           </button>
@@ -106,34 +116,36 @@
       </header>
 
       <section class="terminal-shell" aria-label="Computer terminal">
-        <div id="terminal-stage" class="terminal-stage">
-          <div
-            id="terminal-output"
-            class="terminal-output"
-            role="log"
-            aria-label="Terminal output"
-            aria-live="polite"
-          >
-            <div id="terminal-screen" class="terminal-screen">
-              <p class="system-line">Opening secure terminal session…</p>
-            </div>
-          </div>
-          <form id="command-form" class="command-line" autocomplete="off">
-            <label for="command-input" class="sr-only"
-              >Terminal command line</label
+        <div id="terminal-stage" class="terminal-stage crt-enabled">
+          <div id="terminal-display" class="terminal-display">
+            <div
+              id="terminal-output"
+              class="terminal-output"
+              role="log"
+              aria-label="Terminal output"
+              aria-live="polite"
             >
-            <textarea
-              id="command-input"
-              name="command"
-              rows="1"
-              maxlength="128"
-              spellcheck="false"
-              autocapitalize="off"
-              enterkeyhint="send"
-              aria-describedby="keyboard-help input-state access-state"
-              disabled
-            ></textarea>
-          </form>
+              <div id="terminal-screen" class="terminal-screen">
+                <p class="system-line">Opening secure terminal session…</p>
+              </div>
+            </div>
+            <form id="command-form" class="command-line" autocomplete="off">
+              <label for="command-input" class="sr-only"
+                >Terminal command line</label
+              >
+              <textarea
+                id="command-input"
+                name="command"
+                rows="1"
+                maxlength="128"
+                spellcheck="false"
+                autocapitalize="off"
+                enterkeyhint="send"
+                aria-describedby="keyboard-help input-state access-state"
+                disabled
+              ></textarea>
+            </form>
+          </div>
           <div
             id="completion-menu"
             class="completion-menu"

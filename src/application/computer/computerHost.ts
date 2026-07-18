@@ -83,6 +83,14 @@ interface PendingFloppyIoJob {
   nextPart: number;
 }
 
+interface PendingFilesystemIoJob {
+  readonly computerId: string;
+  readonly event: string;
+  readonly id: string;
+  readonly parts: readonly Omit<BlockRequest, "id">[];
+  nextPart: number;
+}
+
 export type HostRegistrationResult =
   | { readonly outcome: "registered"; readonly record: ComputerRecord }
   | { readonly outcome: "missing"; readonly computerId: string }
@@ -108,10 +116,11 @@ export class ComputerHost {
   private hostTick = 0;
   private filesystemIoSequence = 0;
   private floppyIoSequence = 0;
-  private readonly pendingFilesystemIo = new Map<
+  private readonly pendingFilesystemJobs = new Map<
     string,
-    { readonly computerId: string; readonly event: string }
+    PendingFilesystemIoJob
   >();
+  private readonly filesystemPartJobs = new Map<string, string>();
   private readonly pendingFloppyJobs = new Map<string, PendingFloppyIoJob>();
   private readonly floppyPartJobs = new Map<string, string>();
   private lastWorkSummaryValue: TickWorkSummary | undefined;
@@ -365,32 +374,60 @@ export class ComputerHost {
     bytes: number,
   ): string | undefined {
     const record = this.records.get(computerId);
-    if (record === undefined || bytes <= 0) return undefined;
+    if (record === undefined || !Number.isSafeInteger(bytes) || bytes <= 0)
+      return undefined;
     const devices = this.ensureBlockDevices(record);
-    const sectorCount = Math.max(
-      1,
-      Math.min(
-        devices.hdd.profile.maximumRequestSectors,
-        Math.ceil(bytes / devices.hdd.profile.sectorBytes),
-      ),
-    );
+    const totalSectors = Math.ceil(bytes / devices.hdd.profile.sectorBytes);
+    if (totalSectors > devices.hdd.profile.sectorCount) return undefined;
     this.filesystemIoSequence =
       this.filesystemIoSequence === Number.MAX_SAFE_INTEGER
         ? 1
         : this.filesystemIoSequence + 1;
-    const requestId = `fs-${computerId}-${this.filesystemIoSequence.toString(36)}`;
-    const result = this.submitBlockIo(computerId, "hdd", {
+    const id = `fs-${computerId}-${this.filesystemIoSequence.toString(36)}`;
+    const maximumStartLba = devices.hdd.profile.sectorCount - totalSectors;
+    const startLba =
+      maximumStartLba === 0
+        ? 0
+        : this.filesystemIoSequence % (maximumStartLba + 1);
+    const parts: Omit<BlockRequest, "id">[] = [];
+    let lba = startLba;
+    let remaining = totalSectors;
+    while (remaining > 0) {
+      const sectorCount = Math.min(
+        remaining,
+        devices.hdd.profile.maximumRequestSectors,
+      );
+      parts.push({ lba, operation, sectorCount });
+      lba += sectorCount;
+      remaining -= sectorCount;
+    }
+    const job: PendingFilesystemIoJob = {
+      computerId,
+      event: `block_io:${id}`,
+      id,
+      nextPart: 0,
+      parts: Object.freeze(parts.map((part) => Object.freeze({ ...part }))),
+    };
+    this.pendingFilesystemJobs.set(id, job);
+    if (!this.submitNextFilesystemPart(job)) {
+      this.pendingFilesystemJobs.delete(id);
+      return undefined;
+    }
+    return job.event;
+  }
+
+  private submitNextFilesystemPart(job: PendingFilesystemIoJob): boolean {
+    const part = job.parts[job.nextPart];
+    if (part === undefined) return false;
+    const requestId = `${job.id}-${job.nextPart.toString(36)}`;
+    const result = this.submitBlockIo(job.computerId, "hdd", {
+      ...part,
       id: requestId,
-      lba:
-        this.filesystemIoSequence %
-        (devices.hdd.profile.sectorCount - sectorCount),
-      operation,
-      sectorCount,
     });
-    if (result.outcome !== "accepted") return undefined;
-    const event = `block_io:${requestId}`;
-    this.pendingFilesystemIo.set(requestId, { computerId, event });
-    return event;
+    if (result.outcome !== "accepted") return false;
+    job.nextPart += 1;
+    this.filesystemPartJobs.set(requestId, job.id);
+    return true;
   }
 
   private requestFloppyIo(
@@ -464,6 +501,44 @@ export class ComputerHost {
 
   private deliverBlockIo(result: BlockIoTickResult): void {
     for (const { completion } of result.completions) {
+      const filesystemJobId = this.filesystemPartJobs.get(
+        completion.request.id,
+      );
+      if (filesystemJobId !== undefined) {
+        this.filesystemPartJobs.delete(completion.request.id);
+        const job = this.pendingFilesystemJobs.get(filesystemJobId);
+        if (job === undefined) continue;
+        if (completion.outcome !== "completed") {
+          this.pendingFilesystemJobs.delete(filesystemJobId);
+          this.runtime.queueEvent(
+            job.computerId,
+            job.event,
+            completion.outcome,
+            completion.code,
+          );
+          continue;
+        }
+        if (job.nextPart < job.parts.length) {
+          if (!this.submitNextFilesystemPart(job)) {
+            this.pendingFilesystemJobs.delete(filesystemJobId);
+            this.runtime.queueEvent(
+              job.computerId,
+              job.event,
+              "failed",
+              "io_queue_full",
+            );
+          }
+          continue;
+        }
+        this.pendingFilesystemJobs.delete(filesystemJobId);
+        this.runtime.queueEvent(
+          job.computerId,
+          job.event,
+          completion.outcome,
+          completion.code,
+        );
+        continue;
+      }
       const floppyJobId = this.floppyPartJobs.get(completion.request.id);
       if (floppyJobId !== undefined) {
         this.floppyPartJobs.delete(completion.request.id);
@@ -500,15 +575,6 @@ export class ComputerHost {
         );
         continue;
       }
-      const pending = this.pendingFilesystemIo.get(completion.request.id);
-      if (pending === undefined) continue;
-      this.pendingFilesystemIo.delete(completion.request.id);
-      this.runtime.queueEvent(
-        pending.computerId,
-        pending.event,
-        completion.outcome,
-        completion.code,
-      );
     }
   }
 

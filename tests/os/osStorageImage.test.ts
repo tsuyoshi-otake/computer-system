@@ -25,6 +25,12 @@ describe("OS filesystem images and disk profiles", (): void => {
     expect(desktop.filesystem.limits.capacityBytes).toBe(40 * 1_048_576);
     expect(advanced.filesystem.limits.capacityBytes).toBe(80 * 1_048_576);
     expect(portable.filesystem.limits.capacityBytes).toBe(20 * 1_048_576);
+    expect(portable.filesystem.limits).toMatchObject({
+      allocationUnitBytes: 2_048,
+      directoryEntryBytes: 32,
+      reservedBytes: 59_392,
+      rootDirectoryEntries: 512,
+    });
     const linuxUsed =
       desktop.filesystem.limits.capacityBytes -
       desktop.filesystem.getFreeSpace();

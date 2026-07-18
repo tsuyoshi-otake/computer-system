@@ -362,6 +362,68 @@ describe("in-memory filesystem", (): void => {
     expect(filesystem.exists("/d/overflow")).toBe(false);
   });
 
+  it("accounts FAT allocation units, metadata reserve, and directory clusters atomically", (): void => {
+    const filesystem = new InMemoryFilesystem({
+      allocationUnitBytes: 2_048,
+      capacityBytes: 8_192,
+      directoryEntryBytes: 32,
+      maxEntries: 128,
+      maxFileBytes: 4_096,
+      maxPathLength: 255,
+      reservedBytes: 2_048,
+      rootDirectoryEntries: 64,
+    });
+    expect(filesystem.getFreeSpace()).toBe(6_144);
+
+    filesystem.writeFile("/cluster.bin", "x");
+    expect(filesystem.getFreeSpace()).toBe(4_096);
+    filesystem.writeFile("/cluster.bin", "x".repeat(2_048));
+    expect(filesystem.getFreeSpace()).toBe(4_096);
+    filesystem.writeFile("/cluster.bin", "x".repeat(2_049));
+    expect(filesystem.getFreeSpace()).toBe(2_048);
+    filesystem.delete("/cluster.bin");
+    expect(filesystem.getFreeSpace()).toBe(6_144);
+
+    filesystem.makeDirectory("/entries");
+    for (let index = 0; index < 62; index += 1) {
+      filesystem.writeFile(`/entries/e${String(index)}`, "");
+    }
+    expect(filesystem.getFreeSpace()).toBe(4_096);
+    filesystem.writeFile("/entries/crosses-cluster", "");
+    expect(filesystem.getFreeSpace()).toBe(2_048);
+    filesystem.writeFile("/entries/fills-disk", "x".repeat(2_048));
+    expect(filesystem.getFreeSpace()).toBe(0);
+
+    const before = filesystem.snapshot();
+    const revision = filesystem.revision;
+    expect(() => filesystem.writeFile("/entries/rejected", "x")).toThrow(
+      /capacity/u,
+    );
+    expect(filesystem.snapshot()).toEqual(before);
+    expect(filesystem.revision).toBe(revision);
+    expect(filesystem.getFreeSpace()).toBe(0);
+
+    const rootBounded = new InMemoryFilesystem({
+      allocationUnitBytes: 2_048,
+      capacityBytes: 16_384,
+      directoryEntryBytes: 32,
+      maxEntries: 128,
+      maxFileBytes: 4_096,
+      maxPathLength: 255,
+      reservedBytes: 2_048,
+      rootDirectoryEntries: 2,
+    });
+    rootBounded.writeFile("/one", "");
+    rootBounded.writeFile("/two", "");
+    const rootBefore = rootBounded.snapshot();
+    const rootRevision = rootBounded.revision;
+    expect(() => rootBounded.writeFile("/rejected", "")).toThrow(
+      /root-directory entry limit/u,
+    );
+    expect(rootBounded.snapshot()).toEqual(rootBefore);
+    expect(rootBounded.revision).toBe(rootRevision);
+  });
+
   it("bounds and accounts for symbolic-link targets across copy, move, delete, and restore", (): void => {
     const symbolicLimits: FilesystemLimits = {
       capacityBytes: 16,

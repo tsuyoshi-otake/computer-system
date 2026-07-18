@@ -494,7 +494,11 @@ does not migrate the previous sequential `computer-N` registry.
    have independent writers.
 8. Repeat at a 390-pixel viewport and confirm the ownership state, takeover
    action, terminal, and status bar fit without page-level horizontal or
-   vertical scrolling.
+   vertical scrolling. At desktop and 390-pixel widths, confirm the complete
+   80x25 display frame is centered horizontally and vertically. Toggle **CRT**
+   off and on; confirm the RGB mask, scanlines, and phosphor treatment stay
+   clipped to that frame while selection, Copy, typing, and EDIT mouse input
+   remain unchanged.
 9. Start once with `WEB_COMPANION_AUTO_OPEN=0`, once with an unassigned
    published IP, and once with a custom public origin. Confirm no browser
    process is launched automatically and the printed two-minute fallback remains
@@ -1240,3 +1244,17 @@ fail explicitly without corrupting the paused process. Writable memory,
 source-variable reconstruction, native debugger emulation, dynamic linking,
 PIC/IRQ/IDT execution, and native interrupt delivery remain explicitly
 unsupported.
+
+## Issue #31 guest resource accounting
+
+`Verify:` On a freshly booted Portable with the default minimal CS-DOS
+configuration, run `MEM` before starting another program.
+
+`Expect:` Conventional memory is 640 KiB total, 64 KiB used, and 576 KiB free.
+Every displayed region and the total satisfy used plus free equals total.
+
+`Verify:` Record `CHKDSK`, write a one-byte file in `C:\`, run `CHKDSK` again,
+delete the file, and run it a third time.
+
+`Expect:` `DIR` shows one logical byte, allocated/free capacity changes by one
+2,048-byte unit, and deletion returns the capacity to its original value.

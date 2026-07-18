@@ -3,6 +3,7 @@ import type { SynchronousTransactionOperation } from "../../domain/filesystem/in
 import { DosPathError, type OsProfile } from "./osProfile.js";
 import type { ShellClockSource } from "./clock.js";
 import type { ComputerHardwareProfile } from "../../domain/computer/hardware.js";
+import type { GuestRamSnapshot } from "../../domain/computer/guestRamLedger.js";
 import type { VirtualDevice } from "./osProfile.js";
 import { formatOsIdentity } from "./osIdentity.js";
 import {
@@ -115,6 +116,7 @@ export interface ShellCommandRuntimeOptions {
   readonly ticksPerSecond: number;
   readonly hardware: ComputerHardwareProfile;
   readonly memoryUsageBytes: () => number;
+  readonly guestRamSnapshot?: () => GuestRamSnapshot | undefined;
   readonly virtualDevices?: ReadonlyMap<string, VirtualDevice>;
   readonly peripherals?: PeripheralBusBroker;
   readonly deferGuestExecution?: boolean;
@@ -5117,6 +5119,45 @@ export class ShellCommandRuntime {
     const upperTotal = umb ? Math.min(upperPhysical, 128 * kib) : 0;
     const commandBytes = 32 * kib;
     const runtimeBytes = this.guestRuntimeBytes();
+    const ledger = this.options.guestRamSnapshot?.();
+    if (ledger !== undefined) {
+      const systemBytes =
+        ledger.breakdown.find(({ owner }) => owner === "dos-resident")?.bytes ??
+        0;
+      const usedBytes = Math.min(totalBytes, ledger.usedBytes + runtimeBytes);
+      let remainingUsed = usedBytes;
+      const conventionalUsed = Math.min(conventionalTotal, remainingUsed);
+      remainingUsed -= conventionalUsed;
+      const upperUsed = Math.min(upperTotal, remainingUsed);
+      remainingUsed -= upperUsed;
+      const reservedTotal = upperPhysical - upperTotal;
+      const reservedUsed = Math.min(reservedTotal, remainingUsed);
+      remainingUsed -= reservedUsed;
+      const extendedUsed = Math.min(extendedTotal, remainingUsed);
+      const regions = {
+        conventional: memoryRegion(conventionalTotal, conventionalUsed),
+        upper: memoryRegion(upperTotal, upperUsed),
+        reserved: memoryRegion(reservedTotal, reservedUsed),
+        extended: memoryRegion(extendedTotal, extendedUsed),
+      };
+      return {
+        ...regions,
+        total: memoryRegion(
+          totalBytes,
+          regions.conventional.used +
+            regions.upper.used +
+            regions.reserved.used +
+            regions.extended.used,
+        ),
+        commandBytes,
+        dosHigh,
+        emm386,
+        runtimeBytes: Math.max(0, usedBytes - systemBytes),
+        systemBytes,
+        umb,
+        xms,
+      };
+    }
     const conventionalUsed = Math.min(
       conventionalTotal,
       runtimeBytes + (dosHigh ? 32 * kib : 64 * kib),
