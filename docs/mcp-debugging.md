@@ -244,7 +244,7 @@ disconnect, and interaction requirements.
 
 After `bds_open_web_terminal` succeeds, MCP retains a bounded internal binding
 from that exact Computer ID to the debug-owned writer session. It never follows
-a later Player-owned writer implicitly. Use the three TUI tools without copying
+a later Player-owned writer implicitly. Use the four TUI tools without copying
 the one-use URL or bearer token into another client:
 
 ```json
@@ -276,6 +276,39 @@ is driven by session events rather than log scans or fixed-interval polling.
 `snapshotVersion` counts accepted Web Terminal envelopes, so lifecycle or audio
 metadata can advance it without changing text; combine `afterVersion` with a
 literal `contains` value when verifying an input result.
+
+Use `bds_verify_tui_screen` after capture or an event-first wait when the result
+must be machine-checkable evidence rather than raw rows:
+
+```json
+{
+  "computerId": "c-xxxxxx",
+  "width": 80,
+  "height": 25,
+  "minimumVersion": 2,
+  "requireColors": true,
+  "containsAll": ["Display", "Foreground", "Background", "< OK >"],
+  "excludesAll": ["+---"],
+  "orderedContains": ["File", "Open...", "Save", "Exit"],
+  "sameRowGroups": [
+    ["Foreground", "Background"],
+    ["Scroll Bars", "Tab Stops"],
+    ["OK", "Cancel", "Help"]
+  ],
+  "verticalRuns": [
+    { "characters": "│", "minimumLength": 10, "minimumCount": 2 }
+  ]
+}
+```
+
+The verifier returns `verified`, exact writer/session/version correlation,
+geometry, cursor/color-grid validity, derived vertical-run counts, and bounded
+failure reasons. It deliberately returns no screen rows. Expectation mismatches
+are a successful MCP call with `verified: false`; malformed criteria, a missing
+debug writer, secret input, or an invalid surface remain explicit tool errors.
+Each literal list is capped at 32 entries, same-row groups at 16, vertical-run
+criteria at 16, and geometry at 200 by 100. Work is bounded by the captured cell
+count and criteria limits; the verifier performs no polling or log scan.
 
 MCP TUI tools require the session to remain active, in range under its debug
 policy, and the current writer. The Bedrock request envelope carries an explicit

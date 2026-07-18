@@ -217,6 +217,31 @@ and zero diagnostics through snapshot version 9. Served `app.js` and
 `styles.css` returned HTTP 200 with `Cache-Control: no-store`, all four exact
 colors, no old `#0100AB`/`#00AAA9`, and the vertical seam class.
 
+### MCP-native TUI verifier follow-up
+
+Verify: `npm run test:mcp`,
+`npm test -- tests/tools/tuiScreenVerifier.test.mjs tests/tools/bdsMcpServer.test.mjs tests/tools/webCompanionServer.test.mjs`,
+and `npm run validate`. On the preserved managed world, open the exact debug
+writer, enter EDIT Display through
+`bds_send_tui_input`/`bds_wait_for_tui_screen`, then call
+`bds_verify_tui_screen` with 80x25 geometry, required colors, Display literals,
+same-row groups, forbidden ASCII borders, ordered menu literals, and at least
+two 10-row `│` runs.
+
+Expect: The verifier returns `verified: true`, exact debug writer and snapshot
+correlation, valid geometry/cursor/color grids, bounded vertical-run evidence,
+zero failures, and no screen rows. Expectation mismatches return
+`verified: false`; malformed/capacity-plus-one input, secret prompts, missing
+writers, and invalid surfaces remain explicit tool errors.
+
+Result (2026-07-18): Pass — focused verifier/MCP/companion suites passed 52
+tests, the standard MCP gate passed 12 tests, and the complete gate passed 154
+files and 1,024 tests plus both production builds. Real preserved-world MCP-only
+acceptance returned `verified: true` at snapshot 5 for an 80x25 Display screen,
+valid cursor and color grids, five vertical runs with longest length 21, zero
+failures, and `screenRowsReturned: false`; Tab-to-OK, DIR, browser auto-open,
+ports 80/19142, and zero diagnostics also passed through snapshot 9.
+
 ## Residual risks
 
 - Editing one very long line still copies immutable strings/code-point arrays in

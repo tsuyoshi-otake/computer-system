@@ -11,6 +11,7 @@ import {
   parseOptionalBooleanFlag,
   WebCompanionServer,
 } from "./web-companion-server.mjs";
+import { verifyTuiScreen } from "./tui-screen-verifier.mjs";
 
 const protocolVersion = "2025-11-25";
 const maximumMcpWebSessions = 32;
@@ -318,6 +319,73 @@ const tools = [
     },
   },
   {
+    name: "bds_verify_tui_screen",
+    title: "Verify MCP Web Terminal TUI",
+    description:
+      "Capture the exact MCP debug-owned writer and return a bounded pass/fail report without returning screen text. Validates text geometry, cursor, optional 16-color grids, literal presence/absence/order, same-row groups, and continuous vertical character runs. Expectation mismatches return verified false with bounded reasons.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        computerId: {
+          type: "string",
+          pattern: "^c-[0-9a-hjkmnp-tv-z]{6}$",
+        },
+        width: { type: "integer", minimum: 1, maximum: 200 },
+        height: { type: "integer", minimum: 1, maximum: 100 },
+        minimumVersion: { type: "integer", minimum: 0 },
+        requireColors: { type: "boolean", default: true },
+        containsAll: tuiLiteralArraySchema(32),
+        excludesAll: tuiLiteralArraySchema(32),
+        orderedContains: tuiLiteralArraySchema(32),
+        sameRowGroups: {
+          type: "array",
+          maxItems: 16,
+          items: {
+            type: "array",
+            minItems: 2,
+            maxItems: 8,
+            items: tuiLiteralSchema(),
+          },
+        },
+        verticalRuns: {
+          type: "array",
+          maxItems: 16,
+          items: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              characters: {
+                type: "string",
+                minLength: 1,
+                maxLength: 16,
+              },
+              minimumLength: {
+                type: "integer",
+                minimum: 1,
+                maximum: 100,
+              },
+              minimumCount: {
+                type: "integer",
+                minimum: 1,
+                maximum: 200,
+                default: 1,
+              },
+            },
+            required: ["characters", "minimumLength"],
+          },
+        },
+      },
+      required: ["computerId"],
+    },
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  },
+  {
     name: "bds_wait_for_tui_screen",
     title: "Wait for MCP Web Terminal TUI",
     description:
@@ -501,7 +569,7 @@ async function handleLine(line) {
           capabilities: { tools: { listChanged: false } },
           serverInfo,
           instructions:
-            "Call bds_start before commands. Use bds_list_computers to resolve an exact placed Computer identity, then bds_open_web_terminal to activate its server-authorized debug principal and register the exact default-browser writer session. Use bds_get_tui_screen, bds_send_tui_input, and bds_wait_for_tui_screen to inspect and drive non-secret text surfaces entirely through MCP. Use bds_wait_for_log or bds_get_logs for supporting evidence, bds_issue_web_handoff only when the caller must own the one-use URL, and bds_stop when debugging is complete.",
+            "Call bds_start before commands. Use bds_list_computers to resolve an exact placed Computer identity, then bds_open_web_terminal to activate its server-authorized debug principal and register the exact default-browser writer session. Use bds_get_tui_screen, bds_verify_tui_screen, bds_send_tui_input, and bds_wait_for_tui_screen to inspect, verify, and drive non-secret text surfaces entirely through MCP. Use bds_wait_for_log or bds_get_logs for supporting evidence, bds_issue_web_handoff only when the caller must own the one-use URL, and bds_stop when debugging is complete.",
         });
         return;
       }
@@ -597,6 +665,50 @@ async function callTool(name, args) {
         webCompanion.captureTuiScreen({
           ...requireMcpWebSession(args.computerId),
           includeColors: args.includeColors,
+        }),
+      );
+    }
+    case "bds_verify_tui_screen": {
+      requireKeys(args, [
+        "computerId",
+        "width",
+        "height",
+        "minimumVersion",
+        "requireColors",
+        "containsAll",
+        "excludesAll",
+        "orderedContains",
+        "sameRowGroups",
+        "verticalRuns",
+      ]);
+      requireString(args.computerId, "computerId");
+      const {
+        computerId,
+        width,
+        height,
+        minimumVersion,
+        requireColors,
+        containsAll,
+        excludesAll,
+        orderedContains,
+        sameRowGroups,
+        verticalRuns,
+      } = args;
+      const screen = webCompanion.captureTuiScreen({
+        ...requireMcpWebSession(computerId),
+        includeColors: requireColors ?? true,
+      });
+      return toolSuccess(
+        verifyTuiScreen(screen, {
+          width,
+          height,
+          minimumVersion,
+          requireColors,
+          containsAll,
+          excludesAll,
+          orderedContains,
+          sameRowGroups,
+          verticalRuns,
         }),
       );
     }
@@ -718,6 +830,18 @@ function writeError(id, code, message) {
 
 function writeMessage(message) {
   process.stdout.write(`${JSON.stringify(message)}\n`);
+}
+
+function tuiLiteralSchema() {
+  return { type: "string", minLength: 1, maxLength: 500 };
+}
+
+function tuiLiteralArraySchema(maxItems) {
+  return {
+    type: "array",
+    maxItems,
+    items: tuiLiteralSchema(),
+  };
 }
 
 function emptyObjectSchema() {

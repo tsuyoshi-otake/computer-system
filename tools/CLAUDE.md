@@ -45,16 +45,20 @@ before effects.
   writer. Bedrock accepts this principal only from a `ScriptEventSource.Server`
   event; Entity, Block, and NPC sources fail explicitly. Normal player-owned
   sessions retain their proximity and disconnect rules. Use
-  `bds_get_tui_screen`, `bds_send_tui_input`, and `bds_wait_for_tui_screen` on
-  the registered exact debug writer to inspect cell rows/colors/cursor, drive a
-  bounded non-secret line/key/interrupt sequence, and wait event-first for the
-  expected literal screen. Never accept a Player-owned session, follow a writer
-  replacement implicitly, poll logs for frames, or admit MCP input while the
-  current runtime prompt is secret. The versioned screen result uses
-  `surface.kind: "text"`; future graphics use a distinct bounded pixel/tile
-  surface without turning text and VRAM into parallel truth. Use `bds_status`,
-  `bds_get_logs`, and `bds_wait_for_log` for supporting evidence; do not hand
-  the URL to a separate browser automation tool.
+  `bds_get_tui_screen`, `bds_verify_tui_screen`, `bds_send_tui_input`, and
+  `bds_wait_for_tui_screen` on the registered exact debug writer. Use the
+  verifier for bounded pass/fail evidence over geometry, cursor, color grids,
+  literal presence/absence/order, same-row groups, and continuous vertical
+  character runs without returning the screen text; use capture only when the
+  actual cells are needed. Drive a bounded non-secret line/key/interrupt
+  sequence and wait event-first for the expected literal screen. Never accept a
+  Player-owned session, follow a writer replacement implicitly, poll logs for
+  frames, or admit MCP input while the current runtime prompt is secret. The
+  versioned screen result uses `surface.kind: "text"`; future graphics use a
+  distinct bounded pixel/tile surface without turning text and VRAM into
+  parallel truth. Use `bds_status`, `bds_get_logs`, and `bds_wait_for_log` for
+  supporting evidence; do not hand the URL to a separate browser automation
+  tool.
 - `bds_open_web_terminal`, `bds_issue_web_handoff`, and
   `bds_wait_for_web_handoff` own at most one bounded wait per exact Computer.
   Install the waiter before issuing the one-use path and finalize every source

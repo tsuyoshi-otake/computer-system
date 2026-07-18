@@ -245,15 +245,18 @@ activate one selected exact Computer ID, opens the one-use path in the companion
 host's default browser, and verifies that exact writer connection without a
 connected Bedrock player or an exposed URL in its MCP result.
 `bds_get_tui_screen` reads that exact debug-owned writer's current authoritative
-text surface; `bds_send_tui_input` relays one bounded line, up to 32 keys, or an
-interrupt; and `bds_wait_for_tui_screen` waits event-first for a literal screen
-match or later snapshot version. The screen result preserves row-ending spaces,
-geometry, cursor, and optionally the exact 0-15 foreground/background grids,
-while excluding bearer tokens, one-use URLs, connection codes, player IDs,
-audio, and storage details. Both companion and Bedrock reject MCP input and
-inspection while a secret prompt is active. The versioned `surface.kind: "text"`
-contract leaves pixel/tile surfaces additive for a future CS Windows-style UI;
-it does not claim to verify browser CSS, VGA font pixels, or scaling.
+text surface; `bds_verify_tui_screen` returns a bounded pass/fail report for
+geometry, cursor, color grids, literal presence/absence/order, same-row groups,
+and continuous vertical character runs without returning the screen text;
+`bds_send_tui_input` relays one bounded line, up to 32 keys, or an interrupt;
+and `bds_wait_for_tui_screen` waits event-first for a literal screen match or
+later snapshot version. The screen result preserves row-ending spaces, geometry,
+cursor, and optionally the exact 0-15 foreground/background grids, while
+excluding bearer tokens, one-use URLs, connection codes, player IDs, audio, and
+storage details. Both companion and Bedrock reject MCP input and inspection
+while a secret prompt is active. The versioned `surface.kind: "text"` contract
+leaves pixel/tile surfaces additive for a future CS Windows-style UI; it does
+not claim to verify browser CSS, VGA font pixels, or scaling.
 `bds_issue_web_handoff` returns the one-use URL only when the caller explicitly
 needs to own it. `bds_wait_for_web_handoff` remains available when an operator
 will trigger the interaction separately. Both paths prevent browser auto-open

@@ -42,6 +42,7 @@ describe("BDS MCP stdio server", () => {
       "bds_list_computers",
       "bds_open_web_terminal",
       "bds_get_tui_screen",
+      "bds_verify_tui_screen",
       "bds_wait_for_tui_screen",
       "bds_send_tui_input",
       "bds_issue_web_handoff",
@@ -69,6 +70,20 @@ describe("BDS MCP stdio server", () => {
     });
     expect(captureTool?.description).toContain("exact MCP debug-owned writer");
     expect(captureTool?.description).toContain("optional 16-color cell grids");
+    const verifyTool = listed.tools.find(
+      (tool) => tool.name === "bds_verify_tui_screen",
+    );
+    expect(verifyTool).toMatchObject({
+      annotations: { readOnlyHint: true, idempotentHint: true },
+      inputSchema: {
+        additionalProperties: false,
+        required: ["computerId"],
+      },
+    });
+    expect(verifyTool?.inputSchema.properties.containsAll.maxItems).toBe(32);
+    expect(verifyTool?.inputSchema.properties.sameRowGroups.maxItems).toBe(16);
+    expect(verifyTool?.inputSchema.properties.verticalRuns.maxItems).toBe(16);
+    expect(verifyTool?.description).toContain("without returning screen text");
     const waitTool = listed.tools.find(
       (tool) => tool.name === "bds_wait_for_tui_screen",
     );
@@ -123,6 +138,14 @@ describe("BDS MCP stdio server", () => {
     });
     expect(noWriter.isError).toBe(true);
     expect(noWriter.structuredContent.error).toMatch(
+      /Call bds_open_web_terminal first/u,
+    );
+    const noVerifiedWriter = await client.request("tools/call", {
+      name: "bds_verify_tui_screen",
+      arguments: { computerId: "c-000001", containsAll: ["EDIT"] },
+    });
+    expect(noVerifiedWriter.isError).toBe(true);
+    expect(noVerifiedWriter.structuredContent.error).toMatch(
       /Call bds_open_web_terminal first/u,
     );
   });

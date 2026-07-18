@@ -234,6 +234,14 @@
   plain EDIT's two leading menu cells did not match the one-cell WorkBench
   detector, so MCP Alt+F passed while browser Alt+F and primary mouse were both
   disabled until the detector consumed the real row shape.
+- Machine-checkable MCP TUI acceptance should bind to the exact debug-owned
+  writer and return derived, bounded evidence rather than duplicating screen
+  text. Treat expectation mismatch as an explicit `verified: false` result, but
+  keep malformed criteria, capacity overflow, secret input, missing ownership,
+  and invalid surfaces as tool errors. — Evidence: real preserved-world EDIT
+  Display verification proved 80x25 geometry, cursor/color grids, literal and
+  same-row constraints, and five continuous vertical runs without returning a
+  single screen row.
 - Give each guest resource exactly one accounting owner: RAM through opaque
   `GuestRamLedger` leases, persistent capacity through `InMemoryFilesystem`, and
   modeled HDD time through `ComputerHost`. Acquire before mutation and release
