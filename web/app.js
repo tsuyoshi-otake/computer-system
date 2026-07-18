@@ -8,6 +8,13 @@ import {
 } from "/terminal-input.js";
 import { manualChapters, manualParts, searchManual } from "/manual.js";
 import { calculateFixedGridFontSize } from "/terminal-layout.js";
+import {
+  DEFAULT_TERMINAL_PRESENTATION,
+  curvatureScaleFromPercent,
+  normalizeTerminalPresentation,
+  terminalCellFromDisplayPoint,
+  terminalPresentationAttributes,
+} from "/terminal-presentation.js";
 import { WebFloppyDriveAudio } from "/floppy-audio.js";
 
 const palette = [
@@ -54,6 +61,16 @@ const manualSearchTypeLabels = {
   error: "Error",
   concept: "Concept",
 };
+const crtProfileLabels = {
+  arcade: "Arcade CRT",
+  off: "CRT off",
+  "shadow-mask": "Shadow Mask CRT",
+  subtle: "Subtle CRT",
+};
+const screenShapeLabels = {
+  curved: "Curved Glass screen",
+  flat: "Flat screen",
+};
 
 const elements = {
   computerName: document.querySelector("#computer-name"),
@@ -61,6 +78,7 @@ const elements = {
   statusLight: document.querySelector("#status-light"),
   statusText: document.querySelector("#status-text"),
   terminalStage: document.querySelector("#terminal-stage"),
+  terminalDisplay: document.querySelector("#terminal-display"),
   terminalOutput: document.querySelector("#terminal-output"),
   terminalScreen: document.querySelector("#terminal-screen"),
   terminalSize: document.querySelector("#terminal-size"),
@@ -81,7 +99,17 @@ const elements = {
   capsLockIndicator: document.querySelector("#caps-lock-indicator"),
   numLockIndicator: document.querySelector("#num-lock-indicator"),
   scrollLockIndicator: document.querySelector("#scroll-lock-indicator"),
-  crtButton: document.querySelector("#crt-button"),
+  optionsButton: document.querySelector("#options-button"),
+  displayOptionsDialog: document.querySelector("#display-options-dialog"),
+  curvatureDisplacement: document.querySelector(
+    "#terminal-curvature-displacement",
+  ),
+  curvatureStrength: document.querySelector("#curvature-strength"),
+  curvatureValue: document.querySelector("#curvature-value"),
+  crtProfileInputs: [...document.querySelectorAll('input[name="crt-profile"]')],
+  screenShapeInputs: [
+    ...document.querySelectorAll('input[name="screen-shape"]'),
+  ],
   copyButton: document.querySelector("#copy-button"),
   powerIndicator: document.querySelector("#power-indicator"),
   hddIndicator: document.querySelector("#hdd-indicator"),
@@ -131,6 +159,7 @@ let takeoverPending = false;
 let connectionState = "loading";
 let accessMode = "unknown";
 let editorActive = false;
+let terminalPresentation = DEFAULT_TERMINAL_PRESENTATION;
 let secretInput = false;
 let editorKeyPending = false;
 let editorInputGeneration = 0;
@@ -344,8 +373,29 @@ elements.errorDismiss.addEventListener("click", () => {
 elements.copyButton.addEventListener("click", () => {
   void copyTerminalText();
 });
-elements.crtButton.addEventListener("click", () => {
-  setCrtEnabled(elements.crtButton.getAttribute("aria-pressed") !== "true");
+elements.optionsButton.addEventListener("click", openDisplayOptions);
+elements.displayOptionsDialog.addEventListener("change", (event) => {
+  if (!(event.target instanceof HTMLInputElement)) return;
+  if (event.target.name === "crt-profile") {
+    applyTerminalPresentation({
+      ...terminalPresentation,
+      profile: event.target.value,
+    });
+  } else if (event.target.name === "screen-shape") {
+    applyTerminalPresentation({
+      ...terminalPresentation,
+      shape: event.target.value,
+    });
+  }
+});
+elements.curvatureStrength.addEventListener("input", () => {
+  applyTerminalPresentation({
+    ...terminalPresentation,
+    curvaturePercent: elements.curvatureStrength.valueAsNumber,
+  });
+});
+elements.displayOptionsDialog.addEventListener("close", () => {
+  if (document.visibilityState !== "hidden") elements.optionsButton.focus();
 });
 elements.powerButton.addEventListener("click", () => {
   void requestPower();
@@ -375,6 +425,7 @@ elements.manualDialog.addEventListener("keydown", (event) => {
     renderManualChapter(manualChapterIndex + 1, true);
   }
 });
+applyTerminalPresentation(DEFAULT_TERMINAL_PRESENTATION);
 renderManualNavigation();
 window.addEventListener("resize", scheduleTerminalFit);
 if (typeof ResizeObserver === "function") {
@@ -796,21 +847,13 @@ function terminalMousePoint(event) {
   if (bounds.width <= 0 || bounds.height <= 0) return undefined;
   const relativeX = (event.clientX - bounds.left) / bounds.width;
   const relativeY = (event.clientY - bounds.top) / bounds.height;
-  if (relativeX < 0 || relativeX >= 1 || relativeY < 0 || relativeY >= 1)
-    return undefined;
-  return {
-    x: Math.max(
-      1,
-      Math.min(
-        hardwareTextColumns,
-        Math.floor(relativeX * hardwareTextColumns) + 1,
-      ),
-    ),
-    y: Math.max(
-      1,
-      Math.min(hardwareTextRows, Math.floor(relativeY * hardwareTextRows) + 1),
-    ),
-  };
+  return terminalCellFromDisplayPoint({
+    columns: hardwareTextColumns,
+    curvaturePercent: terminalPresentation.curvaturePercent,
+    point: { x: relativeX, y: relativeY },
+    rows: hardwareTextRows,
+    shape: terminalPresentation.shape,
+  });
 }
 
 function pointerMoveButton(buttons) {
@@ -1017,12 +1060,53 @@ function createTerminalRow(
   return line;
 }
 
-function setCrtEnabled(enabled) {
-  elements.terminalStage.classList.toggle("crt-enabled", enabled);
-  elements.crtButton.setAttribute("aria-pressed", String(enabled));
-  elements.crtButton.title = enabled
-    ? "Disable CRT filter"
-    : "Enable CRT filter";
+function openDisplayOptions() {
+  if (elements.displayOptionsDialog.open) return;
+  const selected =
+    elements.crtProfileInputs.find((input) => input.checked) ??
+    elements.crtProfileInputs[0];
+  elements.displayOptionsDialog.showModal();
+  requestAnimationFrame(() => selected?.focus());
+}
+
+function applyTerminalPresentation(value) {
+  terminalPresentation = normalizeTerminalPresentation(value);
+  for (const [attribute, attributeValue] of Object.entries(
+    terminalPresentationAttributes(terminalPresentation),
+  )) {
+    elements.terminalDisplay.setAttribute(attribute, attributeValue);
+  }
+  for (const input of elements.crtProfileInputs) {
+    input.checked = input.value === terminalPresentation.profile;
+  }
+  for (const input of elements.screenShapeInputs) {
+    input.checked = input.value === terminalPresentation.shape;
+  }
+  const curvatureText = String(terminalPresentation.curvaturePercent) + "%";
+  const curved = terminalPresentation.shape === "curved";
+  elements.curvatureStrength.value = String(
+    terminalPresentation.curvaturePercent,
+  );
+  elements.curvatureStrength.disabled = !curved;
+  elements.curvatureStrength.setAttribute(
+    "aria-valuetext",
+    curvatureText + " curvature",
+  );
+  elements.curvatureValue.textContent = curvatureText;
+  elements.curvatureDisplacement.setAttribute(
+    "scale",
+    String(curvatureScaleFromPercent(terminalPresentation.curvaturePercent)),
+  );
+  const summary =
+    crtProfileLabels[terminalPresentation.profile] +
+    ", " +
+    screenShapeLabels[terminalPresentation.shape] +
+    (curved ? " at " + curvatureText + " curvature" : "");
+  elements.optionsButton.setAttribute(
+    "aria-label",
+    "Display options, " + summary,
+  );
+  elements.optionsButton.title = "Display options: " + summary;
 }
 
 async function copyTerminalText() {

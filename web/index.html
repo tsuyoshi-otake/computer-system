@@ -21,14 +21,15 @@
         </div>
         <div class="topbar-actions">
           <button
-            id="crt-button"
+            id="options-button"
             class="topbar-button"
             type="button"
-            aria-label="CRT filter"
-            aria-pressed="true"
-            title="Disable CRT filter"
+            aria-haspopup="dialog"
+            aria-controls="display-options-dialog"
+            aria-label="Display options, Arcade CRT, Flat screen"
+            title="Display options: Arcade CRT, Flat screen"
           >
-            CRT
+            Options
           </button>
           <button id="copy-button" class="topbar-button" type="button">
             Copy
@@ -116,35 +117,43 @@
       </header>
 
       <section class="terminal-shell" aria-label="Computer terminal">
-        <div id="terminal-stage" class="terminal-stage crt-enabled">
-          <div id="terminal-display" class="terminal-display">
-            <div
-              id="terminal-output"
-              class="terminal-output"
-              role="log"
-              aria-label="Terminal output"
-              aria-live="polite"
-            >
-              <div id="terminal-screen" class="terminal-screen">
-                <p class="system-line">Opening secure terminal session…</p>
-              </div>
-            </div>
-            <form id="command-form" class="command-line" autocomplete="off">
-              <label for="command-input" class="sr-only"
-                >Terminal command line</label
+        <div id="terminal-stage" class="terminal-stage">
+          <div
+            id="terminal-display"
+            class="terminal-display"
+            data-curvature-percent="5"
+            data-crt-profile="arcade"
+            data-screen-shape="flat"
+          >
+            <div id="terminal-optical-source" class="terminal-optical-source">
+              <div
+                id="terminal-output"
+                class="terminal-output"
+                role="log"
+                aria-label="Terminal output"
+                aria-live="polite"
               >
-              <textarea
-                id="command-input"
-                name="command"
-                rows="1"
-                maxlength="128"
-                spellcheck="false"
-                autocapitalize="off"
-                enterkeyhint="send"
-                aria-describedby="keyboard-help input-state access-state"
-                disabled
-              ></textarea>
-            </form>
+                <div id="terminal-screen" class="terminal-screen">
+                  <p class="system-line">Opening secure terminal session…</p>
+                </div>
+              </div>
+              <form id="command-form" class="command-line" autocomplete="off">
+                <label for="command-input" class="sr-only"
+                  >Terminal command line</label
+                >
+                <textarea
+                  id="command-input"
+                  name="command"
+                  rows="1"
+                  maxlength="128"
+                  spellcheck="false"
+                  autocapitalize="off"
+                  enterkeyhint="send"
+                  aria-describedby="keyboard-help input-state access-state"
+                  disabled
+                ></textarea>
+              </form>
+            </div>
           </div>
           <div
             id="completion-menu"
@@ -219,6 +228,155 @@
         >
       </footer>
     </main>
+
+    <svg
+      class="terminal-filter-definitions"
+      width="0"
+      height="0"
+      aria-hidden="true"
+      focusable="false"
+    >
+      <defs>
+        <filter
+          id="terminal-curved-glass"
+          x="0"
+          y="0"
+          width="1"
+          height="1"
+          filterUnits="objectBoundingBox"
+          primitiveUnits="objectBoundingBox"
+          color-interpolation-filters="sRGB"
+        >
+          <feImage
+            href="/crt-curvature-map.png"
+            crossorigin="anonymous"
+            x="0"
+            y="0"
+            width="1"
+            height="1"
+            preserveAspectRatio="none"
+            result="curvature-map"
+          ></feImage>
+          <feDisplacementMap
+            id="terminal-curvature-displacement"
+            in="SourceGraphic"
+            in2="curvature-map"
+            scale="0.05"
+            xChannelSelector="R"
+            yChannelSelector="G"
+          ></feDisplacementMap>
+        </filter>
+      </defs>
+    </svg>
+
+    <dialog
+      id="display-options-dialog"
+      class="display-options-dialog"
+      aria-labelledby="display-options-title"
+      aria-describedby="display-options-description"
+    >
+      <form class="display-options-form" method="dialog">
+        <header class="display-options-header">
+          <div class="dialog-code">DISPLAY PROCESSOR</div>
+          <h2 id="display-options-title">Terminal display options</h2>
+          <p id="display-options-description">
+            Choose a phosphor profile and the physical glass shape. Changes
+            apply immediately to this tab only.
+          </p>
+        </header>
+
+        <fieldset class="display-options-fieldset">
+          <legend>CRT profile</legend>
+          <div class="display-option-grid">
+            <label class="display-option">
+              <input type="radio" name="crt-profile" value="off" />
+              <span>
+                <strong>Off</strong>
+                <small>Clean guest colors without a phosphor mask.</small>
+              </span>
+            </label>
+            <label class="display-option">
+              <input type="radio" name="crt-profile" value="subtle" />
+              <span>
+                <strong>Subtle</strong>
+                <small>The original restrained RGB grille and scanlines.</small>
+              </span>
+            </label>
+            <label class="display-option">
+              <input type="radio" name="crt-profile" value="arcade" checked />
+              <span>
+                <strong>Arcade</strong>
+                <small
+                  >Strong aperture grille, scanlines, and phosphor bloom.</small
+                >
+              </span>
+            </label>
+            <label class="display-option">
+              <input type="radio" name="crt-profile" value="shadow-mask" />
+              <span>
+                <strong>Shadow Mask</strong>
+                <small
+                  >Softer staggered phosphor dots with a warmer glow.</small
+                >
+              </span>
+            </label>
+          </div>
+        </fieldset>
+
+        <fieldset class="display-options-fieldset">
+          <legend>Screen shape</legend>
+          <div class="display-option-grid display-option-grid--shape">
+            <label class="display-option">
+              <input type="radio" name="screen-shape" value="flat" checked />
+              <span>
+                <strong>Flat</strong>
+                <small>Exact rectangular text geometry.</small>
+              </span>
+            </label>
+            <label class="display-option">
+              <input type="radio" name="screen-shape" value="curved" />
+              <span>
+                <strong>Curved Glass</strong>
+                <small
+                  >Bounded barrel distortion with corrected TUI input.</small
+                >
+              </span>
+            </label>
+          </div>
+          <div class="curvature-control">
+            <div class="curvature-control-heading">
+              <label for="curvature-strength">Curvature</label>
+              <output id="curvature-value" for="curvature-strength">5%</output>
+            </div>
+            <input
+              id="curvature-strength"
+              name="curvature-percent"
+              type="range"
+              min="0"
+              max="30"
+              step="1"
+              value="5"
+              aria-describedby="curvature-help"
+              aria-valuetext="5% curvature"
+              disabled
+            />
+            <div class="curvature-range-labels" aria-hidden="true">
+              <span>0%</span>
+              <span>30%</span>
+            </div>
+            <p id="curvature-help">
+              Available with Curved Glass. Display warp and TUI pointer
+              correction always use this same value.
+            </p>
+          </div>
+        </fieldset>
+
+        <footer class="display-options-footer">
+          <p>Defaults return when this page is reloaded.</p>
+          <button type="submit" value="close">Close</button>
+        </footer>
+      </form>
+    </dialog>
 
     <dialog
       id="manual-dialog"

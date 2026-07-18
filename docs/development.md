@@ -116,18 +116,23 @@ the combined managed runtime with `npm run dev:bds:web`; see
 [the MCP debugging guide](mcp-debugging.md) for network and security settings.
 The browser derives the display-frame width, height, and font size from one
 bounded 80x25 fit, then centers that complete frame on both axes. The
-active-page CRT control adds only static, pointer-transparent CSS layers over
-that frame; it does not add per-snapshot JavaScript, mutate the logical palette,
-or create a second screen representation. The companion-host one-action workflow
-is automatic when the published host is a literal IP assigned to the server and
-no custom public origin is configured. Use `WEB_COMPANION_AUTO_OPEN=0` to
-disable it or `1` to enable it explicitly while retaining the local-listener
-requirement. Interacting with a Desktop or Advanced Desktop Computer System, or
-using a Portable Computer System, opens its activated path through loopback in
-the host's default browser. This checks the server address rather than the
-initiating player's IP. Remote players receive the detected LAN entry page and
-the Computer's permanent four-digit number. An interaction activates that number
-once for two minutes; invalid guesses and active collisions are bounded.
+active-page Options dialog applies one of four bounded CRT profiles and an
+independent Flat or Curved Glass shape to a single optical wrapper. Curvature is
+0-30% with a 5% page default; the same normalized value sets the SVG
+displacement scale and the inverse TUI pointer transform. Presentation state
+remains in memory, does not add per-snapshot work, does not mutate the logical
+palette, and does not create a second screen representation. The fixed browser
+surface has no internal scrollbar, while guest-rendered editor scrollbars remain
+canonical cells. The companion-host one-action workflow is automatic when the
+published host is a literal IP assigned to the server and no custom public
+origin is configured. Use `WEB_COMPANION_AUTO_OPEN=0` to disable it or `1` to
+enable it explicitly while retaining the local-listener requirement. Interacting
+with a Desktop or Advanced Desktop Computer System, or using a Portable Computer
+System, opens its activated path through loopback in the host's default browser.
+This checks the server address rather than the initiating player's IP. Remote
+players receive the detected LAN entry page and the Computer's permanent
+four-digit number. An interaction activates that number once for two minutes;
+invalid guesses and active collisions are bounded.
 
 Terminal output remains mouse-selectable. Ctrl+C copies when either output or
 command text is selected and otherwise performs the bounded terminal interrupt.

@@ -492,13 +492,18 @@ does not migrate the previous sequential `computer-N` registry.
    `terminal_closed` record is emitted.
 7. Open a second Computer alongside the first and confirm both Computers can
    have independent writers.
-8. Repeat at a 390-pixel viewport and confirm the ownership state, takeover
-   action, terminal, and status bar fit without page-level horizontal or
-   vertical scrolling. At desktop and 390-pixel widths, confirm the complete
-   80x25 display frame is centered horizontally and vertically. Toggle **CRT**
-   off and on; confirm the RGB mask, scanlines, and phosphor treatment stay
-   clipped to that frame while selection, Copy, typing, and EDIT mouse input
-   remain unchanged.
+8. At desktop width, confirm the complete 80x25 display frame is centered
+   horizontally and vertically in both CLI and TUI states. Open **Options** and
+   select Off, Subtle, Arcade, and Shadow Mask; confirm each profile remains
+   clipped to that frame. Confirm Curvature is disabled for Flat, becomes
+   enabled for Curved Glass, starts at 5%, and updates the visible warp
+   immediately at 0% and 30%. Exercise EDIT corner and center clicks at both
+   bounds; expect the intended 80x25 cells. Reload and confirm Arcade, Flat, and
+   the 5% slider value return. Selection, Copy, typing, guest-rendered
+   scrollbars, and the bounded row-diff path must remain unchanged. As an
+   existing responsive regression smoke only, repeat at 390 pixels and confirm
+   there is no page-level horizontal overflow; no mobile profile-parity pass is
+   required.
 9. Start once with `WEB_COMPANION_AUTO_OPEN=0`, once with an unassigned
    published IP, and once with a custom public origin. Confirm no browser
    process is launched automatically and the printed two-minute fallback remains

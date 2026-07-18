@@ -761,15 +761,21 @@ terminal remains 51x19; each Web writer session normalizes the guest text mode
 to 80x25 once, then scales the same fixed grid to the available browser viewport
 without changing the Computer's cell geometry. The browser subtracts terminal
 padding and fits both rows and columns, so the terminal surface does not expose
-an internal scrollbar. The complete fixed-cell display frame stays centered on
-both axes at every viewport size. Its active-page **CRT** control defaults on
-and adds a static RGB aperture grille, scanline shading, and restrained phosphor
-bleed without changing cells, palettes, copied text, pointer mapping, or the
-bounded row-diff render path. The browser coalesces up to 16 keys per relay,
-while the BDS boundary rejects batches above 32 keys. Tab performs bounded
-command/path completion through the same writer-authorized relay.
+an internal browser scrollbar. Guest-rendered EDIT, vi, and WorkBench scrollbars
+remain cells in that same snapshot and are not removed by the centered wrapper.
+The complete fixed-cell display frame stays centered on both axes in CLI and TUI
+states. Its active-page **Options** dialog selects **Off**, **Subtle**,
+**Arcade**, or **Shadow Mask** CRT profiles independently from **Flat** or
+**Curved Glass** shape. A new page starts at Arcade and Flat; the bounded
+Curvature slider is enabled only for Curved Glass, spans 0-30%, and starts at
+5%. The selected percentage drives both the SVG displacement and inverse TUI
+pointer mapping. These tab-only presentation settings do not change cells,
+palettes, copied text, or the bounded row-diff render path. The browser
+coalesces up to 16 keys per relay, while the BDS boundary rejects batches above
+32 keys. Tab performs bounded command/path completion through the same
+writer-authorized relay.
 
-The Web Terminal top bar places equal-size **CRT**, **Copy**, and **Manual**
+The Web Terminal top bar places equal-size **Options**, **Copy**, and **Manual**
 controls first, followed by the **PWR**, **HDD**, and **FDD** indicators plus
 explicit writer-only **Eject** and **Power** buttons. The indicators follow the
 real lifecycle and block-device state; FDD reports absent media only while no

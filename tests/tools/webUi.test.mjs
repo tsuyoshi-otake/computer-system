@@ -71,21 +71,65 @@ describe("Web terminal UI", () => {
     );
   });
 
-  it("centers one fixed display frame and toggles a static CRT presentation", async () => {
-    const [html, css, script] = await Promise.all([
+  it("centers one fixed display frame and exposes bounded display options", async () => {
+    const [html, css, script, presentation] = await Promise.all([
       source("web/index.html"),
       source("web/styles.css"),
       source("web/app.js"),
+      source("web/terminal-presentation.js"),
     ]);
 
-    expect(html).toContain('id="crt-button"');
-    expect(html).toContain('aria-label="CRT filter"');
-    expect(html).toContain('aria-pressed="true"');
-    expect(html).toContain('class="terminal-stage crt-enabled"');
+    expect(html).toContain('id="options-button"');
+    expect(html).toContain('aria-haspopup="dialog"');
+    expect(html).toContain('aria-controls="display-options-dialog"');
+    const optionsButton =
+      /<button[\s\S]*?id="options-button"[\s\S]*?<\/button>/u.exec(html)?.[0] ??
+      "";
+    expect(optionsButton).not.toContain("aria-pressed");
+    expect(html).toContain('id="display-options-dialog"');
+    expect(html).toContain('aria-labelledby="display-options-title"');
+    expect(html).toContain("<legend>CRT profile</legend>");
+    expect(html).toContain("<legend>Screen shape</legend>");
+    for (const value of ["off", "subtle", "arcade", "shadow-mask"]) {
+      expect(html).toContain('name="crt-profile" value="' + value + '"');
+    }
+    for (const value of ["flat", "curved"]) {
+      expect(html).toContain('name="screen-shape" value="' + value + '"');
+    }
+    expect(html).toMatch(/Changes\s+apply immediately to this tab only\./u);
+    expect(html).toContain('data-crt-profile="arcade"');
+    expect(html).toContain('data-screen-shape="flat"');
+    expect(html).toContain('data-curvature-percent="5"');
+    expect(html).toContain('id="curvature-strength"');
+    expect(html).toContain('name="curvature-percent"');
+    const curvatureInputStart = html.indexOf('id="curvature-strength"');
+    const curvatureInput = html.slice(
+      curvatureInputStart,
+      html.indexOf("/>", curvatureInputStart) + 2,
+    );
+    for (const attribute of [
+      'type="range"',
+      'min="0"',
+      'max="30"',
+      'step="1"',
+      'value="5"',
+      "disabled",
+    ]) {
+      expect(curvatureInput).toContain(attribute);
+    }
+    expect(html).toContain('id="curvature-value"');
     expect(html).toContain('id="terminal-display"');
+    expect(html).toContain('id="terminal-optical-source"');
     expect(html.indexOf('id="terminal-display"')).toBeLessThan(
+      html.indexOf('id="terminal-optical-source"'),
+    );
+    expect(html.indexOf('id="terminal-optical-source"')).toBeLessThan(
       html.indexOf('id="terminal-screen"'),
     );
+    expect(html).toContain('id="terminal-curved-glass"');
+    expect(html).toContain('id="terminal-curvature-displacement"');
+    expect(html).toContain('href="/crt-curvature-map.png"');
+    expect(html).toContain('color-interpolation-filters="sRGB"');
     expect(css).toMatch(
       /\.terminal-stage\s*\{[^}]*display: grid;[^}]*place-items: center;[^}]*overflow: hidden;/su,
     );
@@ -93,26 +137,39 @@ describe("Web terminal UI", () => {
       /\.terminal-display\s*\{[^}]*width: var\(--terminal-frame-width\);[^}]*height: var\(--terminal-frame-height\);[^}]*overflow: hidden;/su,
     );
     expect(css).toMatch(
-      /\.terminal-display::before,[\s\S]*?\.terminal-display::after\s*\{[^}]*pointer-events: none;/su,
+      /\.terminal-optical-source::before,[\s\S]*?\.terminal-optical-source::after\s*\{[^}]*pointer-events: none;/su,
     );
-    expect(css).toContain(
-      ".terminal-stage.crt-enabled .terminal-display::before",
-    );
-    expect(css).toContain(
-      ".terminal-stage.crt-enabled .terminal-display::after",
-    );
+    expect(css).toContain('.terminal-display[data-crt-profile="subtle"]');
+    expect(css).toContain('.terminal-display[data-crt-profile="arcade"]');
+    expect(css).toContain('.terminal-display[data-crt-profile="shadow-mask"]');
+    expect(css).toContain('.terminal-display[data-screen-shape="curved"]');
+    expect(css).toContain('.curvature-control input[type="range"]');
     expect(css).toContain("repeating-linear-gradient(");
     expect(css).toContain("mix-blend-mode: multiply");
-    expect(script).toContain("function setCrtEnabled(enabled)");
-    expect(script).toContain('classList.toggle("crt-enabled", enabled)');
+    expect(script).toContain("function applyTerminalPresentation(value)");
+    expect(script).toContain(
+      'elements.curvatureStrength.addEventListener("input"',
+    );
+    expect(script).toContain('"scale"');
+    expect(script).toContain(
+      "curvatureScaleFromPercent(terminalPresentation.curvaturePercent)",
+    );
+    expect(script).toContain("terminalCellFromDisplayPoint({");
+    expect(script).toContain(
+      "curvaturePercent: terminalPresentation.curvaturePercent",
+    );
     expect(script).toContain('editorActive ? "EDIT" : "COMMAND"');
     expect(script).toContain('"--terminal-frame-width"');
     expect(script).toContain('"--terminal-frame-height"');
+    expect(presentation).not.toContain("localStorage");
+    expect(presentation).not.toContain("sessionStorage");
+    expect(presentation).toContain("MAX_CURVATURE_PERCENT = 30");
     const rowRender =
       /function renderTerminalNow\([\s\S]+?(?=function terminalRowSignature)/u.exec(
         script,
       )?.[0] ?? "";
-    expect(rowRender).not.toContain("crt-enabled");
+    expect(rowRender).not.toContain("terminalPresentation");
+    expect(rowRender).not.toContain("data-crt-profile");
   });
 
   it("keeps physical Enter, Ctrl+C, history, and textual focus feedback", async () => {
@@ -191,7 +248,7 @@ describe("Web terminal UI", () => {
     expect(inputHelpers).toContain('replace(/\\r\\n?|\\n/gu, " ")');
   });
 
-  it("places equal-size Copy and Manual controls before the hardware controls", async () => {
+  it("places equal-size Options, Copy, and Manual controls before the hardware controls", async () => {
     const [html, css, script] = await Promise.all([
       source("web/index.html"),
       source("web/styles.css"),
@@ -209,6 +266,9 @@ describe("Web terminal UI", () => {
     ]) {
       expect(html).toContain(`id="${id}"`);
     }
+    expect(html.indexOf('id="options-button"')).toBeLessThan(
+      html.indexOf('id="copy-button"'),
+    );
     expect(html.indexOf('id="copy-button"')).toBeLessThan(
       html.indexOf('id="manual-button"'),
     );
