@@ -20,12 +20,12 @@
 ## Computer identity and interaction
 
 - Preserve one Computer identity through block placement/breaking, items,
-  Portable held/placed use, Monitor attachment, reload, disconnect, rollback,
-  and dimension changes.
-- Desktop and Advanced Desktop Web access requires exactly one physically
-  adjacent Monitor. A bare desktop, zero adjacent identities, or multiple
-  adjacent identities must fail explicitly. Portable has a built-in display and
-  retains its CS386SX/CS-DOS profile through item/block round trips.
+  Portable held/placed use, integrated-display access, reload, disconnect,
+  rollback, and dimension changes.
+- Desktop and Advanced Desktop Web access resolves directly from the touched
+  all-in-one Computer with its built-in CRT. Do not reintroduce a standalone
+  display block or adjacency gate. Portable has a built-in display and retains
+  its CS386SX/CS-DOS profile through item/block round trips.
 - Placed-machine Web sessions require the player to remain within three blocks
   in the same dimension. Pause as `out_of_range` and resume the same live stream
   on return; do not mint a parallel guest session.

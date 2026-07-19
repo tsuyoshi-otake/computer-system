@@ -2,11 +2,11 @@
 
 ## Child scopes
 
-| Child scope                       | Responsibility                                          |
-| --------------------------------- | ------------------------------------------------------- |
-| [`machines/`](machines/CLAUDE.md) | Four authored isometric Computer/Monitor plates         |
-| [`cpu/`](cpu/CLAUDE.md)           | Authored CS386SX/CS486DX/CS486DX2 identification plates |
-| [`manual/`](manual/CLAUDE.md)     | Manual-only explanatory machine illustrations           |
+| Child scope                       | Responsibility                                           |
+| --------------------------------- | -------------------------------------------------------- |
+| [`machines/`](machines/CLAUDE.md) | Three authored isometric desktop/portable machine plates |
+| [`cpu/`](cpu/CLAUDE.md)           | Authored CS386SX/CS486DX/CS486DX2 identification plates  |
+| [`manual/`](manual/CLAUDE.md)     | Manual-only explanatory machine illustrations            |
 
 - These are authored source images served by the live manual and copied through
   the static Pages allowlist. They are not generated `dist/` output.

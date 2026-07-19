@@ -3,6 +3,7 @@ import type { Cs486Executable } from "../../domain/cpu/cs486.js";
 import type { Cs486Object } from "../../domain/cpu/cs486Object.js";
 import type { CpuProcess } from "../../domain/runtime/cpuProcess.js";
 import type { ProcessCredentials } from "./linuxCredentials.js";
+import type { GuestToolchainResult } from "../toolchain/guestToolchainTranscript.js";
 
 interface ShellProcessContext {
   /** Immutable credentials captured when the shell admits the process. */
@@ -73,7 +74,7 @@ export type ShellCompileTask =
        * bounded to guest-only ShellCommandRuntime state captured by its owning
        * session and must return one terminal result.
        */
-      readonly execute: () => ShellCommandResult;
+      readonly execute: () => ShellToolchainCommandResult;
       readonly kind: "program-list";
     }
   | {
@@ -94,6 +95,10 @@ export type ShellForegroundRequest =
   | ShellForegroundCs486
   | ShellForegroundDebugger
   | ShellForegroundPython;
+
+export interface ShellToolchainCommandResult extends GuestToolchainResult {
+  readonly foreground?: ShellForegroundRequest;
+}
 
 /**
  * A background task admitted by the interactive Linux shell.

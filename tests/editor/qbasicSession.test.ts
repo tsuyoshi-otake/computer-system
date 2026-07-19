@@ -4,16 +4,27 @@ import {
   DosIdeSession,
   parseTerminalMouseEvent,
   QBasicSession,
+  type QBasicSessionOptions,
 } from "../../src/application/editor/qbasicSession.js";
 import {
   parseQBasicCommandLine,
   QBasicCommandLineError,
 } from "../../src/application/os/qbasicCommandLine.js";
 import { ShellSession } from "../../src/application/os/shellSession.js";
+import {
+  createGuestToolchainTranscript,
+  guestToolchainTranscriptFromStreams,
+} from "../../src/application/toolchain/guestToolchainTranscript.js";
 import { InMemoryFilesystem } from "../../src/domain/filesystem/inMemoryFilesystem.js";
 
 function text(row: readonly { readonly character: string }[]): string {
   return row.map(({ character }) => character).join("");
+}
+
+function screenText(screen: {
+  readonly rows: readonly (readonly { readonly character: string }[])[];
+}): string {
+  return screen.rows.map((row) => text(row)).join("\n");
 }
 
 describe("CS QBASIC command line", (): void => {
@@ -182,6 +193,220 @@ describe("QBasicSession", (): void => {
     ).toBe(true);
   });
 
+  it("characterizes WorkBench content and overlays before state refactoring", (): void => {
+    const workbench = new DosIdeSession(
+      "C:\\WORK\\MAIN.C",
+      "int main(){return 0;}",
+      80,
+      25,
+      "C:\\WORK\\MAIN.C",
+      {
+        language: "c",
+        product: "cs-cpp",
+        showWelcome: false,
+      },
+    );
+
+    workbench.completeCommand(
+      "build",
+      1,
+      guestToolchainTranscriptFromStreams("OUTPUT-SENTINEL", ""),
+    );
+    expect(screenText(workbench.screen())).toContain("OUTPUT-SENTINEL");
+
+    const menuFromOutput = workbench.key("F10");
+    expect(screenText(menuFromOutput.screen)).toContain("New");
+    expect(screenText(menuFromOutput.screen)).not.toContain("OUTPUT-SENTINEL");
+    workbench.key("Escape");
+
+    workbench.completeDebuggerCommand(
+      "debug-start",
+      0,
+      "Paused at 00000000\nDEBUG-SENTINEL",
+    );
+    expect(screenText(workbench.screen())).toContain("CS Debugger 1.0");
+    expect(screenText(workbench.screen())).toContain("DEBUG-SENTINEL");
+
+    const menuFromDebugger = workbench.key("F10");
+    expect(screenText(menuFromDebugger.screen)).toContain("New");
+
+    const restoredDebugger = workbench.key("Escape");
+    expect(screenText(restoredDebugger.screen)).toContain("CS Debugger 1.0");
+    expect(screenText(restoredDebugger.screen)).not.toContain("New");
+
+    workbench.key("Alt+m");
+    const programListOverDebugger = workbench.key("p");
+    expect(screenText(programListOverDebugger.screen)).toContain(
+      "CS Debugger 1.0",
+    );
+    expect(screenText(programListOverDebugger.screen)).toContain(
+      "Set Program List",
+    );
+
+    const cancelledProgramList = workbench.key("Escape");
+    expect(screenText(cancelledProgramList.screen)).toContain(
+      "CS Debugger 1.0",
+    );
+    expect(screenText(cancelledProgramList.screen)).not.toContain(
+      "Set Program List",
+    );
+  });
+
+  it("characterizes command boundaries for all four editor profiles", (): void => {
+    const profiles: readonly {
+      readonly expectedAltF7: "compile-file" | "continue";
+      readonly expectedCtrlF7: "rebuild" | "continue";
+      readonly expectedF5: "build-run" | "continue" | "debug-start";
+      readonly expectedF7: "build" | "continue";
+      readonly menuIncludes: readonly string[];
+      readonly menuOmits: readonly string[];
+      readonly name: string;
+      readonly options: QBasicSessionOptions;
+    }[] = [
+      {
+        expectedAltF7: "continue",
+        expectedCtrlF7: "continue",
+        expectedF5: "continue",
+        expectedF7: "continue",
+        menuIncludes: ["File", "Edit", "Search", "Options", "Help"],
+        menuOmits: ["View", "Make", "Run", "Debug"],
+        name: "EDIT",
+        options: { editorMode: true },
+      },
+      {
+        expectedAltF7: "continue",
+        expectedCtrlF7: "continue",
+        expectedF5: "build-run",
+        expectedF7: "continue",
+        menuIncludes: ["File", "Edit", "View", "Search", "Run", "Options"],
+        menuOmits: ["Make", "Debug"],
+        name: "QBASIC",
+        options: { language: "basic", product: "qbasic" },
+      },
+      {
+        expectedAltF7: "compile-file",
+        expectedCtrlF7: "rebuild",
+        expectedF5: "debug-start",
+        expectedF7: "build",
+        menuIncludes: ["File", "View", "Make", "Run", "Debug", "Options"],
+        menuOmits: [],
+        name: "CSASM",
+        options: { language: "asm", product: "cs-asm" },
+      },
+      {
+        expectedAltF7: "compile-file",
+        expectedCtrlF7: "rebuild",
+        expectedF5: "debug-start",
+        expectedF7: "build",
+        menuIncludes: ["File", "View", "Make", "Run", "Debug", "Options"],
+        menuOmits: [],
+        name: "PWB",
+        options: { language: "c", product: "cs-cpp" },
+      },
+    ];
+
+    for (const profile of profiles) {
+      const createSession = (): DosIdeSession =>
+        new DosIdeSession(
+          "C:\\WORK\\MAIN.C",
+          "int main(){return 0;}",
+          80,
+          25,
+          "C:\\WORK\\MAIN.C",
+          { ...profile.options, showWelcome: false },
+        );
+      const menu = text(createSession().screen().rows[0]!);
+      for (const label of profile.menuIncludes) {
+        expect(menu, profile.name + " menu").toContain(label);
+      }
+      for (const label of profile.menuOmits) {
+        expect(menu, profile.name + " menu").not.toContain(label);
+      }
+
+      const f5 = createSession().key("F5");
+      expect(
+        f5.kind === "command" ? f5.command : f5.kind,
+        profile.name + " F5",
+      ).toBe(profile.expectedF5);
+      const f7 = createSession().key("F7");
+      expect(
+        f7.kind === "command" ? f7.command : f7.kind,
+        profile.name + " F7",
+      ).toBe(profile.expectedF7);
+      const altF7 = createSession().key("Alt+F7");
+      expect(
+        altF7.kind === "command" ? altF7.command : altF7.kind,
+        profile.name + " Alt+F7",
+      ).toBe(profile.expectedAltF7);
+      const ctrlF7 = createSession().key("Ctrl+F7");
+      expect(
+        ctrlF7.kind === "command" ? ctrlF7.command : ctrlF7.kind,
+        profile.name + " Ctrl+F7",
+      ).toBe(profile.expectedCtrlF7);
+    }
+  });
+
+  it("brings editor dialogs in front of the debugger view", (): void => {
+    const workbench = new DosIdeSession(
+      "C:\\WORK\\MAIN.C",
+      "int main(){return 0;}",
+      80,
+      25,
+      "C:\\WORK\\MAIN.C",
+      {
+        language: "c",
+        product: "cs-cpp",
+        showWelcome: false,
+      },
+    );
+    workbench.completeDebuggerCommand(
+      "debug-start",
+      0,
+      "Paused at 00000000\nDEBUG-SENTINEL",
+    );
+
+    workbench.key("Alt+o");
+    const options = workbench.key("Enter");
+    expect(screenText(options.screen)).toContain("Display Options");
+    expect(screenText(options.screen)).not.toContain("DEBUG-SENTINEL");
+
+    const closed = workbench.key("Escape");
+    expect(screenText(closed.screen)).not.toContain("Display Options");
+    expect(screenText(closed.screen)).not.toContain("DEBUG-SENTINEL");
+  });
+
+  it("keeps WorkBench panel hints aligned with active keys", (): void => {
+    const workbench = new DosIdeSession(
+      "C:\\WORK\\MAIN.C",
+      "int main(){return 0;}",
+      80,
+      25,
+      "C:\\WORK\\MAIN.C",
+      {
+        language: "c",
+        product: "cs-cpp",
+        showWelcome: false,
+      },
+    );
+    workbench.completeCommand(
+      "build",
+      1,
+      guestToolchainTranscriptFromStreams("", "build failed\r\n"),
+    );
+
+    const output = workbench.screen();
+    expect(text(output.rows.at(-1)!)).toContain("F1=Help");
+    expect(screenText(workbench.key("F1").screen)).toContain("WorkBench Help");
+    workbench.key("Escape");
+
+    workbench.key("Alt+m");
+    const programList = workbench.key("p").screen;
+    const footer = text(programList.rows.at(-1)!);
+    expect(footer).toContain("Enter=Set Program List");
+    expect(footer).not.toContain("F1=");
+    expect(footer).not.toContain("Tab=");
+  });
+
   it("runs QBASIC source transiently without build or debugger commands", (): void => {
     const qbasic = new QBasicSession(
       "C:\\DEMO.BAS",
@@ -202,7 +427,11 @@ describe("QBasicSession", (): void => {
       kind: "command",
     });
 
-    qbasic.completeCommand("build-run", 0, "42\n");
+    qbasic.completeCommand(
+      "build-run",
+      0,
+      guestToolchainTranscriptFromStreams("42\n", ""),
+    );
     expect(
       text(qbasic.screen().rows.at(-1)!).includes(
         "no executable was installed",
@@ -389,12 +618,35 @@ describe("QBasicSession", (): void => {
     workbench.completeCommand(
       "build",
       1,
-      [
-        "C:\\ONE.C(2,2): error CSCC001: first",
-        "C:\\TWO.CPP(7,3): error CSCC001: second",
-        "",
-      ].join("\r\n"),
+      createGuestToolchainTranscript([
+        {
+          diagnostic: {
+            code: "CSCC001",
+            column: 2,
+            line: 2,
+            message: "first",
+            notes: [{ message: "first note" }],
+            severity: "error",
+            source: "C:\\ONE.C",
+          },
+          kind: "diagnostic",
+        },
+        {
+          diagnostic: {
+            code: "CSCC001",
+            column: 3,
+            line: 7,
+            message: "second",
+            notes: [],
+            severity: "error",
+            source: "C:\\TWO.CPP",
+          },
+          kind: "diagnostic",
+        },
+      ]),
     );
+    expect(screenText(workbench.screen())).toContain("error CSCC001: first");
+    expect(screenText(workbench.screen())).toContain("note: first note");
 
     const next = workbench.key("F3");
     expect(next).toMatchObject({
@@ -417,6 +669,25 @@ describe("QBasicSession", (): void => {
       kind: "diagnostic",
       line: 2,
     });
+  });
+
+  it("keeps real synchronous compiler codes and notes navigable", (): void => {
+    const filesystem = new InMemoryFilesystem();
+    const shell = new ShellSession(filesystem, { osProfile: "dos" });
+    filesystem.writeFile(
+      "/drives/c/bad.asm",
+      [".CODE", "foo:", "foo:", "ret", ""].join("\r\n"),
+    );
+    shell.submit("CSASM C:\\BAD.ASM");
+    shell.keys(["Enter"]);
+
+    const failed = shell.keys(["F7"]).terminalScreen!;
+    const failedText = screenText(failed);
+    expect(failedText).toContain("C:\\BAD.ASM(3,1): error CSASM001");
+    expect(failedText).toContain("C:\\BAD.ASM(2,1): note:");
+    expect(failedText).toContain("foo was first defined here");
+    const navigated = shell.keys(["F3"]).terminalScreen!;
+    expect(navigated.cursor).toEqual({ x: 2, y: 5 });
   });
 
   it("builds, reuses, rolls back, runs, and cleans a mixed Program List", (): void => {

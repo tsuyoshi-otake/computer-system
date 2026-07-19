@@ -1,3 +1,5 @@
+import { maximumEditorDocumentLines } from "./editorDocumentLimits.js";
+
 export type NanoEditorState = "editing" | "closed";
 
 export interface NanoEditorSnapshot {
@@ -43,6 +45,9 @@ export class NanoEditorSession {
   constructor(fileName: string, contents: string) {
     this.#fileName = fileName;
     this.#lines = contents.replaceAll("\r\n", "\n").split("\n");
+    if (this.#lines.length > maximumEditorDocumentLines) {
+      throw new Error("nano document line limit exceeded");
+    }
     if (this.#lines.length === 0) this.#lines.push("");
   }
 
@@ -112,7 +117,13 @@ export class NanoEditorSession {
       this.#lines[this.#currentLine] = value;
       this.#dirty = true;
     }
-    if (this.#currentLine === this.#lines.length - 1) this.#lines.push("");
+    if (this.#currentLine === this.#lines.length - 1) {
+      if (this.#lines.length >= maximumEditorDocumentLines) {
+        this.#status = "Document line limit reached.";
+        return { kind: "continue", snapshot: this.snapshot };
+      }
+      this.#lines.push("");
+    }
     this.#currentLine += 1;
     this.#status = `Editing line ${this.#currentLine + 1}`;
     return { kind: "continue", snapshot: this.snapshot };

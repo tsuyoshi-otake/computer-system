@@ -27,8 +27,6 @@ import {
   createPortableComputerBlock,
   portableComputerBlockIdentifier,
 } from "./portable-computer-block.mjs";
-import { createMonitorBlock } from "./monitor-block.mjs";
-import { createMonitorItem } from "./monitor-item.mjs";
 import { createFloppyItem } from "./floppy-item.mjs";
 import {
   createMachineBlockGeometry,
@@ -73,11 +71,6 @@ await mkdir(path.join(resourceOutput, "models", "blocks"), {
   recursive: true,
 });
 await writeFile(
-  path.join(generatedBlocksDirectory, "monitor.json"),
-  `${JSON.stringify(createMonitorBlock(), null, 2)}\n`,
-  "utf8",
-);
-await writeFile(
   path.join(
     generatedBlocksDirectory,
     `${portableComputerBlockIdentifier.split(":")[1]}.json`,
@@ -110,11 +103,6 @@ await Promise.all(
 await writeFile(
   path.join(generatedItemsDirectory, "portable_computer.json"),
   `${JSON.stringify(createPortableComputerItem(), null, 2)}\n`,
-  "utf8",
-);
-await writeFile(
-  path.join(generatedItemsDirectory, "monitor.json"),
-  `${JSON.stringify(createMonitorItem(), null, 2)}\n`,
   "utf8",
 );
 await writeFile(

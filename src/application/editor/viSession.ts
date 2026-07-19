@@ -28,6 +28,16 @@ import {
   parseViConfiguration,
   type ViOptions,
 } from "./viOptions.js";
+import {
+  editorLineNumberDigits,
+  maximumEditorDocumentLines,
+} from "./editorDocumentLimits.js";
+import {
+  createTerminalInteractionDescriptor,
+  type TerminalInteractionContext,
+  type TerminalInteractionDescriptor,
+  type TerminalInteractionHint,
+} from "../terminal/terminalInteraction.js";
 
 export type ViMode = "command" | "insert" | "normal";
 export type ViState = "closed" | "editing";
@@ -137,8 +147,7 @@ export class ViSession {
     if (widthValue < 20 || heightValue < 6)
       throw new RangeError("vi terminal is too small");
     this.fileNameValue = fileName;
-    this.lines = contents.replaceAll("\r\n", "\n").split("\n");
-    if (this.lines.length === 0) this.lines.push("");
+    this.lines = normalizeViContents(contents);
     this.optionsValue = parseViConfiguration(configuration);
   }
 
@@ -164,6 +173,50 @@ export class ViSession {
 
   get state(): ViState {
     return this.stateValue;
+  }
+
+  terminalInteraction(): TerminalInteractionDescriptor {
+    if (this.stateValue === "closed") {
+      return createTerminalInteractionDescriptor({
+        context: "unavailable",
+        helpTopicId: "vi",
+        inputMode: "none",
+        interrupt: false,
+        pointer: "none",
+        presentation: "terminal",
+        secretInput: false,
+      });
+    }
+    const context: TerminalInteractionContext =
+      this.output !== undefined ? "vi-output" : `vi-${this.modeValue}`;
+    let hints: readonly TerminalInteractionHint[];
+    if (this.output !== undefined) {
+      hints = [{ key: "Any key", label: "Return to editor" }];
+    } else if (this.modeValue === "insert") {
+      hints = [{ key: "Esc", label: "Normal mode" }];
+    } else if (this.modeValue === "command") {
+      hints = [
+        { key: "Enter", label: "Run command" },
+        { key: "Esc", label: "Cancel" },
+      ];
+    } else {
+      hints = [
+        { key: "i", label: "Insert mode" },
+        { key: ":", label: "Command mode" },
+        { key: ":w", label: "Save" },
+        { key: ":q", label: "Quit" },
+      ];
+    }
+    return createTerminalInteractionDescriptor({
+      context,
+      helpTopicId: "vi",
+      hints,
+      inputMode: "keys",
+      interrupt: false,
+      pointer: "none",
+      presentation: "dos-tui",
+      secretInput: false,
+    });
   }
 
   get contents(): string {
@@ -263,14 +316,17 @@ export class ViSession {
     line: number,
     column: number,
   ): ViResult {
+    let lines: string[];
+    try {
+      lines = normalizeViContents(contents);
+    } catch (error) {
+      return this.failNavigation(
+        error instanceof Error ? error.message : String(error),
+      );
+    }
     this.pendingNavigation = undefined;
     this.fileNameValue = path;
-    this.lines.splice(
-      0,
-      this.lines.length,
-      ...contents.replaceAll("\r\n", "\n").split("\n"),
-    );
-    if (this.lines.length === 0) this.lines.push("");
+    this.lines.splice(0, this.lines.length, ...lines);
     this.cursorLine = line;
     this.cursorColumn = column;
     this.dirty = false;
@@ -324,6 +380,9 @@ export class ViSession {
       return this.continue(
         `Command output exceeds ${String(maximumInsertedCommandLines)} lines or ${String(maximumInsertedCommandCharacters)} characters`,
       );
+    }
+    if (this.lines.length + inserted.length > maximumEditorDocumentLines) {
+      return this.continue("Command output exceeds document line limit");
     }
     if (inserted.length > 0) {
       this.remember({
@@ -380,6 +439,8 @@ export class ViSession {
       return this.continue("INSERT");
     }
     if (key === "o") {
+      if (this.lines.length >= maximumEditorDocumentLines)
+        return this.continue("Document line limit reached");
       const indent = this.optionsValue.autoindent
         ? (/^\s*/u.exec(this.lines[this.cursorLine] ?? "")?.[0] ?? "")
         : "";
@@ -397,6 +458,8 @@ export class ViSession {
       return this.continue("INSERT");
     }
     if (key === "O") {
+      if (this.lines.length >= maximumEditorDocumentLines)
+        return this.continue("Document line limit reached");
       const indent = this.optionsValue.autoindent
         ? (/^\s*/u.exec(this.lines[this.cursorLine] ?? "")?.[0] ?? "")
         : "";
@@ -536,6 +599,8 @@ export class ViSession {
       return this.normalKey(key);
     }
     if (key === "Enter") {
+      if (this.lines.length >= maximumEditorDocumentLines)
+        return this.continue("Document line limit reached");
       const original = this.lines[this.cursorLine] ?? "";
       const characters = this.currentCharacters();
       const before = characters.slice(0, this.cursorColumn).join("");
@@ -1138,7 +1203,7 @@ export class ViSession {
   }
 
   private get numberDigits(): number {
-    return Math.max(3, String(this.lines.length).length);
+    return editorLineNumberDigits;
   }
 
   private showOutput(value: string, prompt: string, exitCode?: number): void {
@@ -1227,4 +1292,12 @@ export class ViSession {
     if (this.stateValue !== "editing")
       throw new Error("vi session is already closed");
   }
+}
+
+function normalizeViContents(contents: string): string[] {
+  const lines = contents.replaceAll("\r\n", "\n").split("\n");
+  if (lines.length > maximumEditorDocumentLines) {
+    throw new Error("vi document line limit exceeded");
+  }
+  return lines.length === 0 ? [""] : lines;
 }

@@ -427,7 +427,6 @@ function verifySessions(first, second, bundleBytes) {
   const firstRuntime = requirePassingRecord(first.records, "runtime");
   const firstTurtle = requirePassingRecord(first.records, "turtle");
   const firstIdentity = requirePassingRecord(first.records, "item_identity");
-  const firstMonitor = requirePassingRecord(first.records, "monitor");
   const firstSpeaker = requirePassingRecord(first.records, "speaker");
   const firstRedstone = requirePassingRecord(first.records, "redstone");
   const firstComputer = requirePassingRecord(
@@ -438,7 +437,6 @@ function verifySessions(first, second, bundleBytes) {
   const secondRuntime = requirePassingRecord(second.records, "runtime");
   const secondTurtle = requirePassingRecord(second.records, "turtle");
   const secondIdentity = requirePassingRecord(second.records, "item_identity");
-  const secondMonitor = requirePassingRecord(second.records, "monitor");
   const secondSpeaker = requirePassingRecord(second.records, "speaker");
   const secondRedstone = requirePassingRecord(second.records, "redstone");
   const secondComputer = requirePassingRecord(
@@ -520,21 +518,6 @@ function verifySessions(first, second, bundleBytes) {
   }
 
   for (const [name, record] of [
-    ["first monitor", firstMonitor],
-    ["second monitor", secondMonitor],
-  ]) {
-    if (
-      record.details.tilesDiscovered !== 6 ||
-      record.details.cellsWide !== 51 ||
-      record.details.cellsHigh !== 18 ||
-      record.details.coalescedUpdate !== true ||
-      record.details.flushBudgetRespected !== true
-    ) {
-      throw new Error(`${name} did not verify the bounded 3x2 surface.`);
-    }
-  }
-
-  for (const [name, record] of [
     ["first turtle", firstTurtle],
     ["second turtle", secondTurtle],
   ]) {
@@ -592,8 +575,6 @@ function verifySessions(first, second, bundleBytes) {
     runtimeMaximum: secondRuntime.details.maximum,
     itemIdentityPersisted: secondIdentity.details.previousIdentityPresent,
     computerSnapshotPersisted: secondComputer.details.loadedSnapshot,
-    monitorTiles: secondMonitor.details.tilesDiscovered,
-    monitorCells: `${String(secondMonitor.details.cellsWide)}x${String(secondMonitor.details.cellsHigh)}`,
     redstoneInputFaces: secondRedstone.details.inputFacesVerified,
     redstoneOutputMasks: secondRedstone.details.digitalMasksVerified,
     redstoneAnalogLevels: secondRedstone.details.analogLevelsVerified,

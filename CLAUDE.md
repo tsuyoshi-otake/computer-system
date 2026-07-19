@@ -57,7 +57,7 @@ rule into several files. If a change crosses scopes, read each applicable
   Cancel, disconnect, skip, retry, rollback, competing form, server close, and
   failure paths each need one finalization owner.
 - Preserve Computer identity and storage transactionally across block, item,
-  portable, monitor, reload, migration, failure, and rollback paths.
+  portable, integrated display, reload, migration, failure, and rollback paths.
 - New guest RAM, filesystem-capacity, or I/O-time consumers must account through
   `GuestRamLedger`, `InMemoryFilesystem`, or the `ComputerHost` block-I/O owner;
   do not add bypass counters or optional accounting calls.
@@ -129,6 +129,9 @@ synchronized.
 - #29: EDIT and Web Terminal responsiveness, bounded input admission, and
   multi-session frame scaling.
 - #31: Structural guest disk-capacity, HDD-time, and RAM accounting.
+- #33: Compile RAM lease finalization across completion, disconnect, and detach.
+- #34: DOS memory architecture v2, atomic CONFIG, address allocation, MEM
+  snapshots, and declared process grants.
 
 Use English commit messages with useful detail and reference every applicable
 Issue. Issue #4 remains relevant while Phase 2 work is in scope.

@@ -23,7 +23,7 @@ describe("CSBIOS POST", (): void => {
     expect(post).toContain("System Memory     : 8192 KB");
     expect(post).toContain("Video Adapter    : CS-VGA/2");
     expect(post).toContain("Video Memory     : 512 KB");
-    expect(post).toContain("Display Panel    : 640x480 Monitor");
+    expect(post).toContain("Display Panel    : 640x480 built-in CRT");
     expect(post).toContain("Maximum Graphics: 640x480");
     expect(post).toContain("Cache: L1 8 KB, L2 256 KB, 16 byte line");
     expect(post).toContain("Memory Modules: 2 x 4 MiB 72-pin SIMM DRAM");

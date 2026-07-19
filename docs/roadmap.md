@@ -54,6 +54,7 @@ Major components:
 - [ ] Computer
 - [ ] Advanced Computer
 - [ ] Command Computer
+- [x] Built-in Desktop/Advanced CRT display
 
 ### Peripherals and media
 
@@ -63,8 +64,6 @@ Major components:
 - [ ] Ender Modem
 - [ ] Wired Modem
 - [ ] Networking Cable
-- [ ] Monitor
-- [ ] Advanced Monitor
 - [ ] Speaker
 - [ ] Printer
 - [ ] Printed Page
@@ -216,6 +215,8 @@ suppressed error may leave a device accidentally marked as running.
 - [Phase 5: Implement turtles and upgrades](https://github.com/tsuyoshi-otake/computer-system/issues/7)
 - [Phase 6: Add command computers, hidden content, and release hardening](https://github.com/tsuyoshi-otake/computer-system/issues/8)
 - [OS Presence v1: connect guest runtime, lifecycle, Linux state, and DOS drive/FAT/BAT behavior](https://github.com/tsuyoshi-otake/computer-system/issues/20)
+- [Compile RAM lease finalization](https://github.com/tsuyoshi-otake/computer-system/issues/33)
+- [DOS memory architecture v2](https://github.com/tsuyoshi-otake/computer-system/issues/34)
 
 ### M1: Repository and host-side runtime
 
@@ -250,6 +251,8 @@ suppressed error may leave a device accidentally marked as running.
       without claiming a guest NIC, packet routing, or network commands
 - [x] DOS A:/C: drive state, wildcard/FAT metadata utilities, and bounded BAT
       control flow (operator floppy insertion remains M3)
+- [x] boot-scoped DOS address map, atomic CONFIG planning, snapshot-driven MEM,
+      and exact declared CS executable v3 memory grants
 
 ### M3: Redstone and local peripherals
 
@@ -257,7 +260,7 @@ suppressed error may leave a device accidentally marked as running.
 - [ ] Peripheral Bus
 - [ ] Redstone Interface
 - [ ] Disk Drive and Floppy Disk
-- [ ] Monitor and Advanced Monitor
+- [x] Integrated Computer/Advanced CRT presentation (no standalone display item)
 - [ ] Speaker
 - [ ] Printer and printed media
 

@@ -23,11 +23,11 @@ describe("Web Terminal presentation", () => {
     expect(CRT_PROFILES).toEqual(["off", "subtle", "arcade", "shadow-mask"]);
     expect(SCREEN_SHAPES).toEqual(["flat", "curved"]);
     expect(MIN_CURVATURE_PERCENT).toBe(0);
-    expect(DEFAULT_CURVATURE_PERCENT).toBe(5);
+    expect(DEFAULT_CURVATURE_PERCENT).toBe(2);
     expect(MAX_CURVATURE_PERCENT).toBe(30);
     expect(DEFAULT_TERMINAL_PRESENTATION).toEqual({
-      curvaturePercent: 5,
-      profile: "arcade",
+      curvaturePercent: 2,
+      profile: "subtle",
       shape: "flat",
     });
     expect(Object.isFrozen(DEFAULT_TERMINAL_PRESENTATION)).toBe(true);
@@ -35,27 +35,27 @@ describe("Web Terminal presentation", () => {
 
   it("normalizes malformed and partial state without storage", () => {
     expect(normalizeTerminalPresentation(undefined)).toEqual({
-      curvaturePercent: 5,
-      profile: "arcade",
+      curvaturePercent: 2,
+      profile: "subtle",
       shape: "flat",
     });
     expect(
       normalizeTerminalPresentation({ profile: "subtle", shape: "fishbowl" }),
-    ).toEqual({ curvaturePercent: 5, profile: "subtle", shape: "flat" });
+    ).toEqual({ curvaturePercent: 2, profile: "subtle", shape: "flat" });
     expect(
       terminalPresentationAttributes({
         profile: "shadow-mask",
         shape: "curved",
       }),
     ).toEqual({
-      "data-curvature-percent": "5",
+      "data-curvature-percent": "2",
       "data-crt-profile": "shadow-mask",
       "data-screen-shape": "curved",
     });
   });
 
   it("clamps and rounds curvature to one bounded slider step", () => {
-    expect(normalizeCurvaturePercent(undefined)).toBe(5);
+    expect(normalizeCurvaturePercent(undefined)).toBe(2);
     expect(normalizeCurvaturePercent("12.6")).toBe(13);
     expect(normalizeCurvaturePercent(-50)).toBe(0);
     expect(normalizeCurvaturePercent(80)).toBe(30);

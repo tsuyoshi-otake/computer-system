@@ -29,17 +29,28 @@ export const cs486NominalClockHz = computerNominalClockHz;
 export { cs486RegisterNames };
 export type { Cs486Instruction, Cs486Operand, Cs486Register };
 
-/** The bounded function ABI currently carried by v2 symbol metadata. */
+/** The bounded function ABI carried by v2 and v3 symbol metadata. */
 export type Cs486FunctionSignature = "()->i32" | "()->void";
 
-export interface Cs486Executable {
+export const cs486Flat32AlignmentBytes = 4;
+export const defaultCs486StackBytes = 64 * 1_024;
+export const maximumCs486LinearAddressSpaceBytes = 16 * 1_048_576;
+export const maximumCs486AuxiliaryResidentBytes = 16 * 1_048_576;
+
+export interface Cs486Flat32MemoryMetadata {
+  readonly auxiliaryResidentBytes: number;
+  readonly heapBytes: number;
+  readonly model: "cs-flat32-v1";
+  readonly stackBytes: number;
+}
+
+interface Cs486ExecutableBase {
   readonly dataBytes?: number;
   readonly format: "cs486-executable";
   readonly initialData?: readonly {
     readonly bytes: readonly number[];
     readonly offset: number;
   }[];
-  readonly version: 1 | 2;
   readonly instructions: readonly Cs486Instruction[];
   readonly symbols?: readonly {
     readonly address: number;
@@ -48,6 +59,52 @@ export interface Cs486Executable {
     readonly section?: "bss" | "data" | "rodata" | "text";
     readonly type?: "function" | "notype" | "object";
   }[];
+}
+
+export interface Cs486LegacyExecutable extends Cs486ExecutableBase {
+  readonly memory?: never;
+  readonly version: 1 | 2;
+}
+
+export interface Cs486ExecutableV3 extends Cs486ExecutableBase {
+  readonly memory: Cs486Flat32MemoryMetadata;
+  readonly version: 3;
+}
+
+export type Cs486Executable = Cs486LegacyExecutable | Cs486ExecutableV3;
+
+export type Cs486ExecutableMemoryRequirements =
+  | {
+      readonly kind: "legacy";
+      readonly version: 1 | 2;
+    }
+  | {
+      readonly alignedDataBytes: number;
+      readonly auxiliaryResidentBytes: number;
+      readonly heapBytes: number;
+      readonly kind: "declared";
+      readonly linearAddressSpaceBytes: number;
+      readonly model: "cs-flat32-v1";
+      readonly physicalReservationBytes: number;
+      readonly stackBytes: number;
+      readonly version: 3;
+    };
+
+export function createCs486Flat32MemoryMetadata(
+  options: {
+    readonly auxiliaryResidentBytes?: number;
+    readonly heapBytes?: number;
+    readonly stackBytes?: number;
+  } = {},
+): Cs486Flat32MemoryMetadata {
+  const metadata: Cs486Flat32MemoryMetadata = {
+    auxiliaryResidentBytes: options.auxiliaryResidentBytes ?? 0,
+    heapBytes: options.heapBytes ?? 0,
+    model: "cs-flat32-v1",
+    stackBytes: options.stackBytes ?? defaultCs486StackBytes,
+  };
+  validateCs486Flat32MemoryMetadata(metadata);
+  return Object.freeze(metadata);
 }
 
 export interface Cs486RunResult {
@@ -167,25 +224,40 @@ export class Cs486Process implements CpuProcess {
       readonly syscallHandler?: Cs486SyscallHandler;
     },
   ) {
-    validateCs486Executable(executable);
+    const requirements = cs486ExecutableMemoryRequirements(executable);
     this.cpuModel = options.cpuModel ?? defaultCpuModel;
     this.memoryHierarchy = new CpuMemoryHierarchy(this.cpuModel);
-    this.memoryBytes = Math.min(
+    const availableMemoryBytes = Math.min(
       options.memoryBytes,
-      16 * 1_024 * 1_024,
+      maximumCs486LinearAddressSpaceBytes,
       cpuModelSpecification(this.cpuModel).maximumMemoryBytes,
     );
     if (
-      !Number.isSafeInteger(this.memoryBytes) ||
-      this.memoryBytes < 64 * 1_024
+      requirements.kind === "declared" &&
+      availableMemoryBytes < requirements.linearAddressSpaceBytes
+    )
+      throw new Cs486Fault(
+        "MemoryAccessError",
+        "executable linear memory requirement exceeds available RAM",
+      );
+    if (
+      !Number.isSafeInteger(availableMemoryBytes) ||
+      availableMemoryBytes < defaultCs486StackBytes
     )
       throw new RangeError("CS486 requires at least 64 KiB RAM");
+    this.memoryBytes =
+      requirements.kind === "declared"
+        ? requirements.linearAddressSpaceBytes
+        : availableMemoryBytes;
     if ((executable.dataBytes ?? 0) > this.memoryBytes)
       throw new Cs486Fault(
         "MemoryAccessError",
         "executable data exceeds available RAM",
       );
-    this.stackFloorBytes = Math.ceil((executable.dataBytes ?? 0) / 4) * 4;
+    this.stackFloorBytes =
+      requirements.kind === "declared"
+        ? requirements.alignedDataBytes + requirements.heapBytes
+        : alignCs486Flat32(executable.dataBytes ?? 0);
     this.memory = new DataView(new ArrayBuffer(this.memoryBytes));
     for (const segment of executable.initialData ?? [])
       new Uint8Array(this.memory.buffer).set(segment.bytes, segment.offset);
@@ -786,10 +858,20 @@ export function validateCs486Executable(
 ): asserts value is Cs486Executable {
   if (typeof value !== "object" || value === null)
     throw new Cs486Fault("ExecutableFormatError", "invalid executable");
-  const candidate = value as Partial<Cs486Executable>;
+  const candidate = value as {
+    readonly dataBytes?: unknown;
+    readonly format?: unknown;
+    readonly initialData?: unknown;
+    readonly instructions?: unknown;
+    readonly memory?: unknown;
+    readonly symbols?: unknown;
+    readonly version?: unknown;
+  };
   if (
     candidate.format !== "cs486-executable" ||
-    (candidate.version !== 1 && candidate.version !== 2) ||
+    (candidate.version !== 1 &&
+      candidate.version !== 2 &&
+      candidate.version !== 3) ||
     !Array.isArray(candidate.instructions)
   )
     throw new Cs486Fault(
@@ -804,15 +886,32 @@ export function validateCs486Executable(
   if (
     candidate.dataBytes !== undefined &&
     (!Number.isSafeInteger(candidate.dataBytes) ||
-      candidate.dataBytes < 0 ||
-      candidate.dataBytes > 16 * 1_048_576)
+      (candidate.dataBytes as number) < 0 ||
+      (candidate.dataBytes as number) > maximumCs486LinearAddressSpaceBytes)
   )
     throw new Cs486Fault("ExecutableFormatError", "invalid data size");
+  if (candidate.version === 3) {
+    validateCs486Flat32MemoryMetadata(candidate.memory);
+    flat32MemoryRequirements(
+      candidate.dataBytes === undefined ? 0 : (candidate.dataBytes as number),
+      candidate.memory,
+    );
+  } else if (candidate.memory !== undefined) {
+    throw new Cs486Fault(
+      "ExecutableFormatError",
+      "legacy executable cannot declare memory metadata",
+    );
+  }
   if (
     candidate.version === 1
       ? candidate.initialData !== undefined
       : candidate.initialData !== undefined &&
-        !isValidInitialData(candidate.initialData, candidate.dataBytes ?? 0)
+        !isValidInitialData(
+          candidate.initialData,
+          candidate.dataBytes === undefined
+            ? 0
+            : (candidate.dataBytes as number),
+        )
   )
     throw new Cs486Fault("ExecutableFormatError", "invalid initial data");
   if (
@@ -843,13 +942,17 @@ export function validateCs486Executable(
             symbol.type !== "notype" &&
             symbol.type !== "object") ||
           (symbol.functionSignature !== undefined &&
-            (candidate.version !== 2 ||
+            (candidate.version === 1 ||
               symbol.type !== "function" ||
               (symbol.functionSignature !== "()->i32" &&
                 symbol.functionSignature !== "()->void"))) ||
           (section === "text"
-            ? (symbol.address as number) >= candidate.instructions!.length
-            : (symbol.address as number) >= (candidate.dataBytes ?? 0)) ||
+            ? (symbol.address as number) >=
+              (candidate.instructions as readonly unknown[]).length
+            : (symbol.address as number) >=
+              (candidate.dataBytes === undefined
+                ? 0
+                : (candidate.dataBytes as number))) ||
           (candidate.version === 1 &&
             (symbol.section !== undefined ||
               symbol.type !== undefined ||
@@ -917,6 +1020,138 @@ export function validateCs486Executable(
         `invalid ${String(op)} instruction`,
       );
   }
+}
+
+export function cs486ExecutableMemoryRequirements(
+  value: unknown,
+): Cs486ExecutableMemoryRequirements {
+  validateCs486Executable(value);
+  if (value.version !== 3)
+    return Object.freeze({ kind: "legacy", version: value.version });
+  const requirements = flat32MemoryRequirements(
+    value.dataBytes ?? 0,
+    value.memory,
+  );
+  return Object.freeze({
+    ...requirements,
+    kind: "declared",
+    model: value.memory.model,
+    version: 3,
+  });
+}
+
+function validateCs486Flat32MemoryMetadata(
+  value: unknown,
+): asserts value is Cs486Flat32MemoryMetadata {
+  if (typeof value !== "object" || value === null)
+    throw new Cs486Fault(
+      "ExecutableFormatError",
+      "missing cs-flat32-v1 memory metadata",
+    );
+  const candidate = value as {
+    readonly auxiliaryResidentBytes?: unknown;
+    readonly heapBytes?: unknown;
+    readonly model?: unknown;
+    readonly stackBytes?: unknown;
+  };
+  if (candidate.model !== "cs-flat32-v1")
+    throw new Cs486Fault(
+      "ExecutableFormatError",
+      "unsupported executable memory model",
+    );
+  if (
+    !isBoundedMemorySize(
+      candidate.stackBytes,
+      maximumCs486LinearAddressSpaceBytes,
+    ) ||
+    candidate.stackBytes <= 0 ||
+    candidate.stackBytes % cs486Flat32AlignmentBytes !== 0
+  )
+    throw new Cs486Fault(
+      "ExecutableFormatError",
+      "invalid or unaligned cs-flat32 stack size",
+    );
+  if (
+    !isBoundedMemorySize(
+      candidate.heapBytes,
+      maximumCs486LinearAddressSpaceBytes,
+    ) ||
+    candidate.heapBytes % cs486Flat32AlignmentBytes !== 0
+  )
+    throw new Cs486Fault(
+      "ExecutableFormatError",
+      "invalid or unaligned cs-flat32 heap size",
+    );
+  if (
+    !isBoundedMemorySize(
+      candidate.auxiliaryResidentBytes,
+      maximumCs486AuxiliaryResidentBytes,
+    )
+  )
+    throw new Cs486Fault(
+      "ExecutableFormatError",
+      "invalid auxiliary resident size",
+    );
+}
+
+function flat32MemoryRequirements(
+  dataBytes: number,
+  memory: Cs486Flat32MemoryMetadata,
+): Omit<
+  Extract<Cs486ExecutableMemoryRequirements, { readonly kind: "declared" }>,
+  "kind" | "model" | "version"
+> {
+  const alignedDataBytes = alignCs486Flat32(dataBytes);
+  const declaredLinearBytes = checkedMemorySum(
+    [alignedDataBytes, memory.heapBytes, memory.stackBytes],
+    "linear address-space size overflow",
+  );
+  const linearAddressSpaceBytes = Math.max(
+    defaultCs486StackBytes,
+    declaredLinearBytes,
+  );
+  if (linearAddressSpaceBytes > maximumCs486LinearAddressSpaceBytes)
+    throw new Cs486Fault(
+      "ExecutableFormatError",
+      "cs-flat32 linear address-space limit exceeded",
+    );
+  const physicalReservationBytes = checkedMemorySum(
+    [linearAddressSpaceBytes, memory.auxiliaryResidentBytes],
+    "physical reservation size overflow",
+  );
+  return {
+    alignedDataBytes,
+    auxiliaryResidentBytes: memory.auxiliaryResidentBytes,
+    heapBytes: memory.heapBytes,
+    linearAddressSpaceBytes,
+    physicalReservationBytes,
+    stackBytes: memory.stackBytes,
+  };
+}
+
+function checkedMemorySum(values: readonly number[], message: string): number {
+  let total = 0;
+  for (const value of values) {
+    if (!Number.isSafeInteger(value) || !Number.isSafeInteger(total + value))
+      throw new Cs486Fault("ExecutableFormatError", message);
+    total += value;
+  }
+  return total;
+}
+
+function isBoundedMemorySize(value: unknown, maximum: number): value is number {
+  return (
+    Number.isSafeInteger(value) &&
+    (value as number) >= 0 &&
+    (value as number) <= maximum
+  );
+}
+
+function alignCs486Flat32(value: number): number {
+  const remainder = value % cs486Flat32AlignmentBytes;
+  return remainder === 0
+    ? value
+    : value + cs486Flat32AlignmentBytes - remainder;
 }
 
 function isValidInitialData(value: unknown, dataBytes: number): boolean {

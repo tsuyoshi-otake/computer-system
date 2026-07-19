@@ -80,6 +80,11 @@ describe("DosEditSession", (): void => {
         ({ background }) => background === dosTuiColor.status,
       ),
     ).toBe(true);
+    expect(
+      screen.rows[18]!.every(
+        ({ foreground }) => foreground === dosTuiColor.black,
+      ),
+    ).toBe(true);
   });
 
   it("edits, joins lines, undoes, toggles overwrite, and resizes the viewport", (): void => {
@@ -372,19 +377,11 @@ describe("DosEditSession", (): void => {
     editor.key("Alt+o");
     const displayed = editor.key("d");
     const lines = displayed.screen.rows.map((row) => text(row));
-    const whiteRow = lines.findIndex((line) => line.includes("White"));
-    const blueRow = lines.findIndex((line) => line.includes("Blue"));
-    const whiteColumn = lines[whiteRow]!.indexOf("White");
-    const blueColumns = [...lines[blueRow]!.matchAll(/Blue/gu)].map(
-      ({ index }) => index,
-    );
 
     expect(lines.join("\n")).toContain("Display");
-    expect(lines.join("\n")).toContain("Colors");
-    expect(lines.join("\n")).toContain("Foreground");
-    expect(lines.join("\n")).toContain("Background");
-    expect(lines.join("\n")).toContain("Set colors for");
-    expect(lines.join("\n")).toContain("the CS-DOS text");
+    expect(lines.join("\n")).not.toContain("Colors");
+    expect(lines.join("\n")).not.toContain("Foreground");
+    expect(lines.join("\n")).not.toContain("Background");
     expect(lines.join("\n")).toContain("[X] Scroll Bars");
     expect(lines.join("\n")).toContain("Tab Stops: 8");
     expect(lines.join("\n")).not.toContain("Syntax");
@@ -392,22 +389,6 @@ describe("DosEditSession", (): void => {
     expect(lines.join("\n")).toContain("\u2502");
     expect(lines.join("\n")).toContain("\u2514");
     expect(lines.join("\n")).not.toContain("+---");
-    expect(
-      displayed.screen.rows[whiteRow]!.slice(
-        whiteColumn,
-        whiteColumn + "White".length,
-      ).every(({ background }) => background === dosTuiColor.black),
-    ).toBe(true);
-    expect(blueColumns).toHaveLength(2);
-    expect(
-      displayed.screen.rows[blueRow]!.slice(
-        blueColumns[1],
-        blueColumns[1]! + "Blue".length,
-      ).every(({ background }) => background === dosTuiColor.black),
-    ).toBe(true);
-
-    editor.key("Tab");
-    editor.key("Tab");
     editor.key("Tab");
     const okFocused = editor.key("Tab");
     const okLines = okFocused.screen.rows.map((row) => text(row));
@@ -427,8 +408,6 @@ describe("DosEditSession", (): void => {
 
     editor.key("Alt+o");
     editor.key("d");
-    editor.key("Tab");
-    editor.key("Tab");
     editor.key("Tab");
     editor.key("ArrowRight");
     expect(editor.options.tabstop).toBe(9);
@@ -450,7 +429,7 @@ describe("DosEditSession", (): void => {
       (line) => line.includes("\u2502") && line.includes("Display") === false,
     );
 
-    expect(dialogRows.length).toBeGreaterThan(10);
+    expect(dialogRows.length).toBeGreaterThan(0);
     expect(dialogRows.every((line) => line.includes("\u2502"))).toBe(true);
     const applied = editor.pointerDown(okColumn + 2, okRow + 1);
     expect(editor.mode).toBe("editing");
@@ -753,7 +732,7 @@ describe("DosEditSession", (): void => {
 
   it("keeps batch redraw work independent of the maximum document line count", () => {
     const document = Array.from(
-      { length: 4_096 },
+      { length: 999 },
       (_, index) => `row-${String(index)}`,
     ).join("\n");
     const editor = new DosEditSession("MAXLINES.TXT", document);
@@ -770,6 +749,23 @@ describe("DosEditSession", (): void => {
     expect(editor.cursor).toEqual({ column: 32, line: 0 });
     expect(text(screen.rows[2]!)).toContain(
       "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxrow-0",
+    );
+  });
+
+  it("accepts 999 document lines and rejects line 1000", (): void => {
+    const maximum = Array.from({ length: 999 }, (_, index) =>
+      String(index + 1),
+    ).join("\n");
+    const editor = new DosEditSession("MAXLINES.TXT", maximum);
+
+    editor.key("Ctrl+End");
+    const rejected = editor.key("Enter");
+    expect(editor.contents.split("\n")).toHaveLength(999);
+    expect(text(rejected.screen.rows.at(-1)!)).toContain("Line limit reached");
+
+    const oversized = Array.from({ length: 1_000 }, () => "line").join("\n");
+    expect(() => new DosEditSession("TOO-MANY.TXT", oversized)).toThrow(
+      "document line limit exceeded",
     );
   });
 });

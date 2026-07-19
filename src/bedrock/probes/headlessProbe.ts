@@ -6,7 +6,6 @@ import { inspectAlwaysDayState } from "../daylightController.js";
 import { computerStorageReady } from "../computerRegistry.js";
 import { executeItemIdentityProbe } from "./itemIdentityProbe.js";
 import { executeComputerVerticalProbe } from "./computerVerticalProbe.js";
-import { executeMonitorProbe } from "./monitorProbe.js";
 import { executeRedstoneProbe } from "./redstoneProbe.js";
 import {
   scheduleRuntimeProbe,
@@ -102,14 +101,8 @@ async function executeSuite(runId: string): Promise<void> {
       await prepareProbeArena(dimension);
       arenaReady = true;
     } catch (error: unknown) {
-      failures += 5;
-      for (const probe of [
-        "turtle",
-        "item_identity",
-        "monitor",
-        "speaker",
-        "redstone",
-      ]) {
+      failures += 4;
+      for (const probe of ["turtle", "item_identity", "speaker", "redstone"]) {
         emitFailure(runId, probe, error, "arena_setup");
       }
     }
@@ -129,14 +122,6 @@ async function executeSuite(runId: string): Promise<void> {
       } catch (error: unknown) {
         failures += 1;
         emitFailure(runId, "item_identity", error);
-      }
-
-      try {
-        const monitor = executeMonitorProbe(dimension);
-        emit(runId, "monitor", "PASS", { ...monitor });
-      } catch (error: unknown) {
-        failures += 1;
-        emitFailure(runId, "monitor", error);
       }
 
       try {

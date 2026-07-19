@@ -2,8 +2,8 @@ import { machineTextureKeys } from "./machine-textures.mjs";
 
 export const computerItemFamilies = ["computer", "advanced_computer"];
 export const computerItemDisplayNames = {
-  computer: "Desktop Computer System",
-  advanced_computer: "Advanced Desktop Computer System",
+  computer: "Computer System Deskpro 486DX",
+  advanced_computer: "Computer System Deskpro 486DX2",
 };
 
 export function computerItemIdentifier(family) {

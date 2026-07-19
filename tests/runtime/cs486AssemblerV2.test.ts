@@ -72,7 +72,7 @@ describe("CS486 assembler v2", (): void => {
       { bytes: [42, 0, 0, 0], offset: 0 },
     ]);
     expect(executable.dataBytes).toBe(8);
-    expect(runCs486(executable, { memoryBytes: 65_536 }).output).toBe("42");
+    expect(runCs486(executable, { memoryBytes: 65_544 }).output).toBe("42");
   });
 
   it("serializes and validates optional zero-argument function signatures", (): void => {
@@ -144,7 +144,7 @@ describe("CS486 assembler v2", (): void => {
       entry: "_start",
     });
 
-    expect(runCs486(executable, { memoryBytes: 65_536 }).output).toBe("42");
+    expect(runCs486(executable, { memoryBytes: 131_072 }).output).toBe("42");
     expect(consumer.relocations).toContainEqual(
       expect.objectContaining({
         field: "address",

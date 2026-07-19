@@ -8,7 +8,10 @@ import {
   serializeDosEditorConfiguration,
   updateDosEditorProfile,
 } from "../../src/application/editor/dosEditorOptions.js";
-import { DosEditSession } from "../../src/application/editor/dosEditSession.js";
+import {
+  DosEditSession,
+  dosTuiColor,
+} from "../../src/application/editor/dosEditSession.js";
 import type { ViExternalDocument } from "../../src/application/editor/viCompletion.js";
 import { QBasicSession } from "../../src/application/editor/qbasicSession.js";
 import {
@@ -116,6 +119,12 @@ describe("DOS editor options and language services", (): void => {
     );
 
     expect(text(editor.screen().rows[2]!)).toMatch(/^│\s*1\s{3}int/u);
+    expect(
+      editor
+        .screen()
+        .rows[2]!.slice(1, 5)
+        .every(({ foreground }) => foreground === dosTuiColor.activeLineNumber),
+    ).toBe(true);
     editor.key("End");
     editor.key("Enter");
     expect(editor.cursor.column).toBe(2);
@@ -248,6 +257,245 @@ describe("DOS editor options and language services", (): void => {
     expect(csasm.editorOptions).toMatchObject({ filetype: "asm", list: true });
   });
 
+  it.each([
+    {
+      fileName: "C:\\A.BAS",
+      language: "basic",
+      product: "qbasic",
+      source: "PRINT 1",
+    },
+    {
+      fileName: "C:\\A.CPP",
+      language: "cpp",
+      product: "cs-cpp",
+      source: "int x;",
+    },
+    {
+      fileName: "C:\\A.ASM",
+      language: "asm",
+      product: "cs-asm",
+      source: "start:",
+    },
+  ] as const)(
+    "applies shared Options through the $product menu wrapper",
+    ({ fileName, language, product, source }): void => {
+      const session = new QBasicSession(fileName, source, 51, 19, fileName, {
+        language,
+        product,
+      });
+
+      session.key("Alt+o");
+      session.key("e");
+      session.key(" ");
+      session.key("Shift+Tab");
+      session.key("ArrowLeft");
+      session.key("Enter");
+
+      expect(session.editorOptions.syntax).toBe(false);
+    },
+  );
+
+  it.each([
+    { height: 19, width: 51 },
+    { height: 25, width: 80 },
+  ])(
+    "renders every Editing option and explicit terminal action at $width x $height",
+    ({ height, width }): void => {
+      const editor = new DosEditSession(
+        "C:\\WORK\\DEMO.C",
+        "int main(void) {}",
+        width,
+        height,
+      );
+      const opened = editor.invoke("editing-options");
+      const lines = opened.screen.rows.map((row) => text(row));
+      const visible = lines.join("\n");
+
+      expect(lines).toHaveLength(height);
+      expect(lines.every((line) => line.length === width)).toBe(true);
+      expect(visible).toContain("Syntax Highlight");
+      expect(visible).toContain("Line Numbers");
+      expect(visible).toContain("Rainbow Indent");
+      expect(visible).toContain("Whitespace Marks");
+      expect(visible).toContain("Line Wrapping");
+      expect(visible).toContain("Auto Indent");
+      expect(visible).toContain("Expand Tabs");
+      expect(visible).toContain("Tab Width");
+      expect(visible).toContain("Indent Width");
+      expect(visible).toContain("< OK >");
+      expect(visible).toContain("< Cancel >");
+    },
+  );
+
+  it("keeps the compact Display dialog on its single bounded OK/Cancel path", (): void => {
+    const editor = new DosEditSession("C:\\WORK\\DEMO.TXT", "", 51, 19);
+    const opened = editor.invoke("display-options");
+    const visible = opened.screen.rows.map((row) => text(row)).join("\n");
+
+    expect(visible.match(/\bOK\s+Apply\b/gu) ?? []).toHaveLength(1);
+    expect(visible.match(/\bCancel\s+Revert\b/gu) ?? []).toHaveLength(1);
+    expect(visible).not.toContain("< OK >");
+    expect(visible).not.toContain("< Cancel >");
+    editor.key("Tab");
+    editor.key("ArrowRight");
+    editor.key("Tab");
+    const applied = editor.key("Enter");
+    expect(editor.mode).toBe("editing");
+    expect(editor.options.tabstop).toBe(9);
+    expect(text(applied.screen.rows.at(-1)!)).toContain(
+      "Display options applied",
+    );
+  });
+
+  it("applies and cancels every generic Options page by keyboard and pointer", (): void => {
+    const editor = new DosEditSession(
+      "C:\\WORK\\DEMO.C",
+      "int main(void) {}",
+      51,
+      19,
+    );
+
+    editor.invoke("editing-options");
+    for (const key of [
+      " ",
+      "ArrowDown",
+      " ",
+      "ArrowDown",
+      " ",
+      "ArrowDown",
+      " ",
+      "ArrowDown",
+      " ",
+      "ArrowDown",
+      " ",
+      "ArrowDown",
+      " ",
+      "ArrowDown",
+      "ArrowRight",
+      "ArrowDown",
+      "ArrowLeft",
+      "ArrowDown",
+    ]) {
+      editor.key(key);
+    }
+    const editingApplied = editor.key("Enter");
+    expect(editor.mode).toBe("editing");
+    expect(text(editingApplied.screen.rows.at(-1)!)).toContain(
+      "Editing options applied",
+    );
+    expect(editor.options).toMatchObject({
+      autoindent: true,
+      expandtab: false,
+      list: true,
+      number: true,
+      rainbow: true,
+      shiftwidth: 3,
+      syntax: false,
+      tabstop: 9,
+      wrap: true,
+    });
+
+    editor.invoke("editing-options");
+    editor.key(" ");
+    const editingCancelled = editor.key("Escape");
+    expect(text(editingCancelled.screen.rows.at(-1)!)).toContain(
+      "Options cancelled",
+    );
+    expect(editor.options.syntax).toBe(false);
+
+    editor.invoke("completion-options");
+    editor.key(" ");
+    editor.key("Shift+Tab");
+    editor.key("ArrowLeft");
+    editor.key("Enter");
+    expect(editor.options.complete).toBe(false);
+
+    editor.invoke("language-options");
+    const languageChanged = editor.key("ArrowRight");
+    const languageLines = languageChanged.screen.rows.map((row) => text(row));
+    const okRow = languageLines.findIndex((line) => line.includes("< OK >"));
+    const okColumn = languageLines[okRow]!.indexOf("< OK >");
+    editor.pointerDown(okColumn + 1, okRow + 1);
+    expect(editor.mode).toBe("editing");
+    expect(editor.options.filetype).toBe("text");
+
+    editor.invoke("language-options");
+    const languageCancelled = editor.key("ArrowRight");
+    const cancelLines = languageCancelled.screen.rows.map((row) => text(row));
+    const cancelRow = cancelLines.findIndex((line) =>
+      line.includes("< Cancel >"),
+    );
+    const cancelColumn = cancelLines[cancelRow]!.indexOf("< Cancel >");
+    editor.pointerDown(cancelColumn + 1, cancelRow + 1);
+    expect(editor.mode).toBe("editing");
+    expect(editor.options.filetype).toBe("text");
+  });
+
+  it("commits and serializes Options independently for all four products", (): void => {
+    for (const profile of ["edit", "qbasic", "pwb", "csasm"] as const) {
+      const editor = new DosEditSession(
+        "C:\\WORK\\DEMO.TXT",
+        "",
+        51,
+        19,
+        "DEMO.TXT",
+        true,
+        undefined,
+        { profile },
+      );
+      editor.invoke("editing-options");
+      editor.key("ArrowDown");
+      editor.key(" ");
+      for (let index = 0; index < 8; index += 1) editor.key("Tab");
+      editor.key("Enter");
+      const request = editor.invoke("save-settings");
+
+      expect(request.kind).toBe("settings-save");
+      if (request.kind === "settings-save") {
+        const saved = parseDosEditorConfiguration(request.contents);
+        expect(resolveDosEditorOptions(saved, profile).number).toBe(true);
+        for (const other of ["edit", "qbasic", "pwb", "csasm"] as const) {
+          if (other !== profile) {
+            expect(resolveDosEditorOptions(saved, other).number).toBe(false);
+          }
+        }
+      }
+    }
+  });
+
+  it("reloads persisted settings and keeps Restore Defaults session-scoped until save", (): void => {
+    const configured = parseDosEditorConfiguration(
+      "[edit]\r\nsyntax=off\r\nnumber=on\r\n",
+    );
+    const editor = new DosEditSession(
+      "C:\\WORK\\DEMO.TXT",
+      "",
+      51,
+      19,
+      "DEMO.TXT",
+      true,
+      undefined,
+      { configuration: configured, profile: "edit" },
+    );
+
+    editor.invoke("default-settings");
+    expect(editor.options).toMatchObject({ number: false, syntax: true });
+    expect(editor.invoke("reload-settings").kind).toBe("settings-reload");
+    editor.completeSettingsReload(configured);
+    expect(editor.options).toMatchObject({ number: true, syntax: false });
+
+    editor.invoke("default-settings");
+    const request = editor.invoke("save-settings");
+    expect(request.kind).toBe("settings-save");
+    if (request.kind === "settings-save") {
+      const saved = parseDosEditorConfiguration(request.contents);
+      expect(resolveDosEditorOptions(saved, "edit")).toMatchObject({
+        number: false,
+        syntax: true,
+      });
+    }
+  });
+
   it("emits bounded settings and guest-command requests", (): void => {
     const editor = new DosEditSession("C:\\WORK\\DEMO.TXT", "before");
     const settings = editor.invoke("save-settings");
@@ -276,7 +524,7 @@ describe("DOS editor options and language services", (): void => {
     const shell = new ShellSession(filesystem, { osProfile: "dos" });
     filesystem.writeFile(
       "/drives/c/editor.ini",
-      "[edit]\r\nnumber=on\r\nsyntax=on\r\n",
+      "[edit]\r\nnumber=on\r\nsyntax=on\r\n\r\n[qbasic]\r\nrainbow=on\r\n",
     );
     filesystem.writeFile("/drives/c/demo.c", "int main() {}\r\n");
 
@@ -284,12 +532,25 @@ describe("DOS editor options and language services", (): void => {
     expect(text(opened.terminalScreen?.rows[2] ?? [])).toMatch(/^│\s*1\s+int/u);
     shell.keys([
       "Alt+o",
-      "d",
-      "Tab",
-      "Tab",
-      "Tab",
+      "e",
+      " ",
+      "ArrowDown",
+      " ",
+      "ArrowDown",
+      " ",
+      "ArrowDown",
+      " ",
+      "ArrowDown",
+      " ",
+      "ArrowDown",
+      " ",
+      "ArrowDown",
+      " ",
+      "ArrowDown",
       "ArrowRight",
-      "Tab",
+      "ArrowDown",
+      "ArrowLeft",
+      "ArrowDown",
       "Enter",
     ]);
     shell.keys(["Alt+o", "s"]);
@@ -297,9 +558,28 @@ describe("DOS editor options and language services", (): void => {
       filesystem.readFile("/drives/c/editor.ini"),
     );
     expect(resolveDosEditorOptions(saved, "edit")).toMatchObject({
-      number: true,
+      autoindent: true,
+      expandtab: false,
+      list: true,
+      number: false,
+      rainbow: true,
+      shiftwidth: 3,
+      syntax: false,
       tabstop: 9,
+      wrap: true,
     });
+    expect(resolveDosEditorOptions(saved, "qbasic").rainbow).toBe(true);
+
+    shell.keys(["Alt+f", "x"]);
+    shell.submit("EDIT C:\\DEMO.C");
+    const reopened = shell.keys(["Alt+o", "e"]);
+    const reopenedText = reopened.terminalScreen?.rows
+      .map((row) => text(row))
+      .join("\n");
+    expect(reopenedText).toContain("Syntax Highlight       Off");
+    expect(reopenedText).toContain("Line Numbers           Off");
+    expect(reopenedText).toContain("Rainbow Indent         On");
+    expect(reopenedText).toContain("Tab Width              9");
   });
 
   it("runs only bounded guest DOS commands and inserts undoable output", (): void => {

@@ -26,8 +26,8 @@
             type="button"
             aria-haspopup="dialog"
             aria-controls="display-options-dialog"
-            aria-label="Display options, Arcade CRT, Flat screen"
-            title="Display options: Arcade CRT, Flat screen"
+            aria-label="Display options, Subtle CRT, Flat screen"
+            title="Display options: Subtle CRT, Flat screen"
           >
             Options
           </button>
@@ -121,38 +121,41 @@
           <div
             id="terminal-display"
             class="terminal-display"
-            data-curvature-percent="5"
-            data-crt-profile="arcade"
+            data-curvature-percent="2"
+            data-crt-profile="subtle"
+            data-raster-kind="text"
             data-screen-shape="flat"
           >
             <div id="terminal-optical-source" class="terminal-optical-source">
-              <div
-                id="terminal-output"
-                class="terminal-output"
-                role="log"
-                aria-label="Terminal output"
-                aria-live="polite"
-              >
-                <div id="terminal-screen" class="terminal-screen">
-                  <p class="system-line">Opening secure terminal session…</p>
-                </div>
-              </div>
-              <form id="command-form" class="command-line" autocomplete="off">
-                <label for="command-input" class="sr-only"
-                  >Terminal command line</label
+              <div id="terminal-raster-content" class="terminal-raster-content">
+                <div
+                  id="terminal-output"
+                  class="terminal-output"
+                  role="log"
+                  aria-label="Terminal output"
+                  aria-live="polite"
                 >
-                <textarea
-                  id="command-input"
-                  name="command"
-                  rows="1"
-                  maxlength="128"
-                  spellcheck="false"
-                  autocapitalize="off"
-                  enterkeyhint="send"
-                  aria-describedby="keyboard-help input-state access-state"
-                  disabled
-                ></textarea>
-              </form>
+                  <div id="terminal-screen" class="terminal-screen">
+                    <p class="system-line">Opening secure terminal session…</p>
+                  </div>
+                </div>
+                <form id="command-form" class="command-line" autocomplete="off">
+                  <label for="command-input" class="sr-only"
+                    >Terminal command line</label
+                  >
+                  <textarea
+                    id="command-input"
+                    name="command"
+                    rows="1"
+                    maxlength="128"
+                    spellcheck="false"
+                    autocapitalize="off"
+                    enterkeyhint="send"
+                    aria-describedby="keyboard-help input-state access-state"
+                    disabled
+                  ></textarea>
+                </form>
+              </div>
             </div>
           </div>
           <div
@@ -166,13 +169,13 @@
       </section>
 
       <footer class="statusbar">
-        <p id="keyboard-help">
-          <kbd>Enter</kbd> run <span aria-hidden="true">·</span>
-          <kbd>Tab</kbd> complete <span aria-hidden="true">·</span>
-          <kbd>Ctrl</kbd>+<kbd>C</kbd> interrupt
-          <span aria-hidden="true">·</span> <kbd>Ctrl</kbd>+<kbd>U</kbd> clear
-          <span aria-hidden="true">·</span> <kbd>Ctrl</kbd>+<kbd>D</kbd> logout
-          <span aria-hidden="true">·</span> <kbd>↑</kbd><kbd>↓</kbd> history
+        <p
+          id="keyboard-help"
+          role="status"
+          aria-live="polite"
+          aria-atomic="true"
+        >
+          Waiting for terminal interaction details.
         </p>
         <div class="keyboard-locks" aria-label="Keyboard lock status">
           <span
@@ -296,14 +299,14 @@
               </span>
             </label>
             <label class="display-option">
-              <input type="radio" name="crt-profile" value="subtle" />
+              <input type="radio" name="crt-profile" value="subtle" checked />
               <span>
                 <strong>Subtle</strong>
                 <small>The original restrained RGB grille and scanlines.</small>
               </span>
             </label>
             <label class="display-option">
-              <input type="radio" name="crt-profile" value="arcade" checked />
+              <input type="radio" name="crt-profile" value="arcade" />
               <span>
                 <strong>Arcade</strong>
                 <small
@@ -346,7 +349,7 @@
           <div class="curvature-control">
             <div class="curvature-control-heading">
               <label for="curvature-strength">Curvature</label>
-              <output id="curvature-value" for="curvature-strength">5%</output>
+              <output id="curvature-value" for="curvature-strength">2%</output>
             </div>
             <input
               id="curvature-strength"
@@ -355,9 +358,9 @@
               min="0"
               max="30"
               step="1"
-              value="5"
+              value="2"
               aria-describedby="curvature-help"
-              aria-valuetext="5% curvature"
+              aria-valuetext="2% curvature"
               disabled
             />
             <div class="curvature-range-labels" aria-hidden="true">

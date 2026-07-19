@@ -94,16 +94,17 @@ function expectSingleLineFrameAndShadow(screen: EditorScreen): void {
     lines.slice(top + 1, bottom).every((line) => line[right] === "\u2502"),
   ).toBe(true);
 
-  const shadowColumn = right + 1;
-  expect(
-    screen.rows
-      .slice(top + 1, bottom + 2)
-      .every(
-        (row) =>
-          row[shadowColumn]?.foreground === dosTuiColor.black &&
-          row[shadowColumn]?.background === dosTuiColor.black,
-      ),
-  ).toBe(true);
+  for (const shadowColumn of [right + 1, right + 2]) {
+    expect(
+      screen.rows
+        .slice(top + 1, bottom + 2)
+        .every(
+          (row) =>
+            row[shadowColumn]?.foreground === dosTuiColor.black &&
+            row[shadowColumn]?.background === dosTuiColor.black,
+        ),
+    ).toBe(true);
+  }
   expect(
     screen.rows[bottom + 1]!.slice(
       left + 2,
@@ -150,14 +151,12 @@ describe("shared DOS TUI theme", (): void => {
       const dialog = displayed.screen.rows
         .map((row) => cellsText(row))
         .join("\n");
-      expect(dialog).toContain("Foreground");
-      expect(dialog).toContain("Background");
+      expect(dialog).not.toContain("Foreground");
+      expect(dialog).not.toContain("Background");
       expect(dialog).toContain("[X] Scroll Bars");
       expect(dialog).toContain("Tab Stops: 4");
       expectSingleLineFrameAndShadow(displayed.screen);
 
-      ide.key("Tab");
-      ide.key("Tab");
       ide.key("Tab");
       ide.key("Tab");
       const applied = ide.key("Enter");

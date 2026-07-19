@@ -23,7 +23,7 @@ describe("computer block generator", () => {
       permutation("east", -90),
     ]);
     const geometries = createMachineBlockGeometry()["minecraft:geometry"];
-    expect(geometries).toHaveLength(4);
+    expect(geometries).toHaveLength(3);
     for (const geometry of geometries) {
       expect(geometry.bones).toHaveLength(1);
       expect(geometry.bones[0].rotation).toEqual([0, 180, 0]);
@@ -63,6 +63,10 @@ describe("computer block generator", () => {
         expect(
           block.components["minecraft:material_instances"][front].texture,
         ).toBe(machineBlockTextureKeys[front]);
+        expect(
+          block.components["minecraft:material_instances"].desktop_screen
+            .texture,
+        ).toBe(machineBlockTextureKeys.desktop_screen);
       }
     }
   });

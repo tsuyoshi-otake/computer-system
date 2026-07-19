@@ -270,12 +270,6 @@ function handleInteraction(event: BlockComponentPlayerInteractEvent): void {
   const record = ensureComputer(observation.computerId, observation.family);
   if (handleFloppyInteraction(event, record)) return;
   selectComputerTerminal(player.id, observation.computerId);
-  if (!hasAdjacentMonitor(event.block)) {
-    player.sendMessage(
-      "Computer selected. Place a Monitor next to it to open Web Terminal.",
-    );
-    return;
-  }
   system.run((): void => {
     if (!player.isValid) return;
     try {
@@ -286,25 +280,6 @@ function handleInteraction(event: BlockComponentPlayerInteractEvent): void {
       }
     }
   });
-}
-
-export function adjacentDesktopComputers(
-  block: Block,
-): readonly ReturnType<typeof ensureComputer>[] {
-  const records = new Map<string, ReturnType<typeof ensureComputer>>();
-  for (const adjacentBlock of adjacentBlocks(block)) {
-    if (adjacentBlock === undefined || !isComputerBlock(adjacentBlock.typeId))
-      continue;
-    const observation = identityService().atPhysicalKey(
-      blockKey(adjacentBlock),
-    );
-    if (observation === undefined) continue;
-    records.set(
-      observation.computerId,
-      ensureComputer(observation.computerId, observation.family),
-    );
-  }
-  return [...records.values()];
 }
 
 function handleRedstoneUpdate(event: BlockComponentRedstoneUpdateEvent): void {
@@ -427,12 +402,6 @@ function isComputerBlock(typeId: string): boolean {
   return (
     typeId.startsWith("computer_system:computer_") ||
     typeId.startsWith("computer_system:advanced_computer_")
-  );
-}
-
-function hasAdjacentMonitor(block: Block): boolean {
-  return adjacentBlocks(block).some(
-    (candidate) => candidate?.typeId === "computer_system:monitor",
   );
 }
 

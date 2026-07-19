@@ -3,14 +3,12 @@ import { deflateSync, inflateSync } from "node:zlib";
 export const machineTextureSources = {
   advanced_computer: "cs-advanced-computer.png",
   computer: "cs-computer.png",
-  monitor: "cs-monitor.png",
   portable_computer: "cs-portable-computer.png",
 };
 
 export const machineTextureKeys = {
   advanced_computer: "computer_system:advanced_computer",
   computer: "computer_system:computer",
-  monitor: "computer_system:monitor",
   portable_computer: "computer_system:portable_computer",
 };
 export const floppyTextureKey = "computer_system:floppy_disk";

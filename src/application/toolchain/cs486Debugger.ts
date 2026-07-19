@@ -612,11 +612,11 @@ class Cs486DebuggerExecutionAdapter implements Cs486DebuggerExecution {
 }
 
 function cloneExecutable(executable: Cs486Executable): Cs486Executable {
-  return {
+  const cloned = {
     ...(executable.dataBytes === undefined
       ? {}
       : { dataBytes: executable.dataBytes }),
-    format: "cs486-executable",
+    format: "cs486-executable" as const,
     ...(executable.initialData === undefined
       ? {}
       : {
@@ -631,8 +631,14 @@ function cloneExecutable(executable: Cs486Executable): Cs486Executable {
       : {
           symbols: executable.symbols.map((symbol) => ({ ...symbol })),
         }),
-    version: executable.version,
   };
+  return executable.version === 3
+    ? {
+        ...cloned,
+        memory: Object.freeze({ ...executable.memory }),
+        version: 3,
+      }
+    : { ...cloned, version: executable.version };
 }
 
 function cloneInstruction(instruction: Cs486Instruction): Cs486Instruction {

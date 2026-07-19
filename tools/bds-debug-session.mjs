@@ -39,7 +39,6 @@ const allowedPlayerProbes = new Set([
   "compete",
   "computer",
   "help",
-  "monitor",
   "portable",
   "runtime",
   "speaker",

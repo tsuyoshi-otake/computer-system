@@ -28,8 +28,19 @@ describe("machine block visual assets", () => {
     );
     expect(desktop.bones[0].cubes[0]).toMatchObject({
       origin: [-7.75, 0, -7.25],
-      size: [15.5, 16, 14.5],
+      size: [15.5, 6, 14.5],
     });
+    expect(desktop.bones[0].cubes[2]).toMatchObject({
+      origin: [-7, 5, -6.5],
+      size: [14, 11, 13],
+    });
+    expect(desktop.bones[0].cubes[3]).toMatchObject({
+      origin: [-6, 6.25, -6.5625],
+      size: [12, 9, 0.0625],
+    });
+    expect(Object.values(machineBlockGeometryIds)).not.toContain(
+      "geometry.computer_system.monitor",
+    );
   });
 
   it("generates a complete terrain atlas and opaque 16px pixel-art textures", () => {
@@ -53,17 +64,21 @@ describe("machine block visual assets", () => {
     }
   });
 
-  it("matches the item artwork's left-aligned drives and upper-right power control", () => {
+  it("matches the integrated desktop artwork with compact 3.5-inch drives", () => {
     const textures = createMachineBlockTextures();
     const computer = textures[machineBlockTextureKeys.computer_front];
     const advanced = textures[machineBlockTextureKeys.advanced_computer_front];
 
-    expect(pixelAt(computer, 1, 2)).toEqual([109, 106, 101, 255]);
-    expect(pixelAt(computer, 2, 3)).toEqual([43, 44, 43, 255]);
-    expect(pixelAt(advanced, 1, 2)).toEqual([109, 106, 101, 255]);
-    expect(pixelAt(advanced, 1, 6)).toEqual([109, 106, 101, 255]);
-    expect(pixelAt(computer, 13, 3)).toEqual([231, 224, 195, 255]);
-    expect(pixelAt(advanced, 13, 3)).toEqual([231, 224, 195, 255]);
+    expect(pixelAt(computer, 5, 2)).toEqual([109, 106, 101, 255]);
+    expect(pixelAt(computer, 6, 3)).toEqual([43, 44, 43, 255]);
+    expect(pixelAt(advanced, 5, 2)).toEqual([109, 106, 101, 255]);
+    expect(pixelAt(advanced, 5, 6)).toEqual([109, 106, 101, 255]);
+    expect(pixelAt(computer, 1, 3)).toEqual([231, 224, 195, 255]);
+    expect(pixelAt(advanced, 1, 3)).toEqual([231, 224, 195, 255]);
+    expect(pixelAt(computer, 3, 4)).toEqual([79, 91, 72, 255]);
+    expect(pixelAt(advanced, 3, 4)).toEqual([79, 91, 72, 255]);
+    expect(pixelAt(computer, 2, 2)).toEqual([211, 202, 187, 255]);
+    expect(pixelAt(advanced, 2, 6)).toEqual([211, 202, 187, 255]);
     expect(pixelAt(computer, 11, 8)).toEqual([211, 202, 187, 255]);
     expect(pixelAt(advanced, 11, 10)).toEqual([211, 202, 187, 255]);
   });

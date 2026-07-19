@@ -94,7 +94,7 @@ describe("ViSession", (): void => {
     const vi = new ViSession(
       "large.py",
       Array.from(
-        { length: 10_000 },
+        { length: 999 },
         (_, index) => `line_${index} = ${index}`,
       ).join("\n"),
     );
@@ -494,6 +494,31 @@ describe("ViSession", (): void => {
     expect(screenText(shell.keys([]))).toContain("helper.py");
     shell.keys(["Ctrl+O"]);
     expect(screenText(shell.keys([]))).toContain("main.py");
+  });
+
+  it("keeps line numbers at three digits and rejects line 1000", (): void => {
+    const maximum = Array.from({ length: 999 }, (_, index) =>
+      String(index + 1),
+    ).join("\n");
+    const vi = new ViSession("/home/cs/max.txt", maximum, 51, 19, "set number");
+
+    vi.key("G");
+    const active = vi
+      .screen()
+      .rows.find((row) => rowText(row).startsWith("999 "));
+    expect(
+      active?.slice(0, 4).every(({ foreground }) => foreground === 0),
+    ).toBe(true);
+    vi.key("A");
+    expect(screenRowsText(vi.key("Enter").screen)).toContain(
+      "Document line limit reached",
+    );
+    expect(vi.contents.split("\n")).toHaveLength(999);
+
+    const oversized = Array.from({ length: 1_000 }, () => "line").join("\n");
+    expect(() => new ViSession("/home/cs/too-many.txt", oversized)).toThrow(
+      "vi document line limit exceeded",
+    );
   });
 });
 

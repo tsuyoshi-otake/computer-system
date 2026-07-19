@@ -287,11 +287,10 @@ must be machine-checkable evidence rather than raw rows:
   "height": 25,
   "minimumVersion": 2,
   "requireColors": true,
-  "containsAll": ["Display", "Foreground", "Background", "< OK >"],
+  "containsAll": ["Display", "Scroll Bars", "Tab Stops", "< OK >"],
   "excludesAll": ["+---"],
   "orderedContains": ["File", "Open...", "Save", "Exit"],
   "sameRowGroups": [
-    ["Foreground", "Background"],
     ["Scroll Bars", "Tab Stops"],
     ["OK", "Cancel", "Help"]
   ],

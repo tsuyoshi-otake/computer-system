@@ -40,7 +40,7 @@ export function renderCsBiosPost(
   const panel =
     displayProfile.panel.kind === "integrated_lcd"
       ? `${String(displayProfile.panel.width)}x480 LCD`
-      : "640x480 Monitor";
+      : "640x480 built-in CRT";
   const lines = [
     border(),
     row("CSBIOS System Configuration (C) 1992 Computer System"),

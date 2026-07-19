@@ -19,7 +19,7 @@ describe("portable computer item", () => {
     expect(item.components["minecraft:display_name"]).toEqual({
       value: portableComputerDisplayName,
     });
-    expect(portableComputerDisplayName).toBe("Portable Computer System");
+    expect(portableComputerDisplayName).toBe("Computer System LTE 386SX");
     expect(item.components).not.toHaveProperty("minecraft:use_animation");
     expect(item.components).not.toHaveProperty("minecraft:use_modifiers");
     expect(item.components["computer_system:portable_computer"]).toEqual({});

@@ -21,7 +21,7 @@ describe("CS486 bounded debugger core", (): void => {
         "halt",
       ].join("\n"),
     );
-    const debugger_ = Cs486Debugger.load(executable, { memoryBytes: 65_536 });
+    const debugger_ = Cs486Debugger.load(executable, { memoryBytes: 131_072 });
 
     expect(debugger_.state).toMatchObject({
       address: 0,
@@ -32,13 +32,13 @@ describe("CS486 bounded debugger core", (): void => {
       instructionAddress: 0,
       registers: {
         eax: 0,
-        ebp: 65_536,
+        ebp: 65_540,
         ebx: 0,
         ecx: 0,
         edi: 0,
         edx: 0,
         esi: 0,
-        esp: 65_536,
+        esp: 65_540,
       },
     });
     const memory = debugger_.readMemory(0, 4);
@@ -68,7 +68,7 @@ describe("CS486 bounded debugger core", (): void => {
   it("pauses at breakpoints, steps through them, and halts explicitly", (): void => {
     const debugger_ = Cs486Debugger.load(
       assembleCs486("mov eax, 1\nadd eax, 2\nhalt"),
-      { memoryBytes: 65_536 },
+      { memoryBytes: 131_072 },
     );
     expect(debugger_.setBreakpoint(1)).toBe(true);
     expect(debugger_.setBreakpoint(1)).toBe(false);
@@ -111,7 +111,7 @@ describe("CS486 bounded debugger core", (): void => {
 
   it("returns a resumable limit outcome for bounded continue", (): void => {
     const debugger_ = Cs486Debugger.load(assembleCs486("again:\njmp again"), {
-      memoryBytes: 65_536,
+      memoryBytes: 131_072,
     });
 
     expect(debugger_.continue(5)).toMatchObject({
@@ -130,7 +130,7 @@ describe("CS486 bounded debugger core", (): void => {
 
   it("reports a stable explicit fault outcome", (): void => {
     const debugger_ = Cs486Debugger.load(assembleCs486("div eax, 0\nhalt"), {
-      memoryBytes: 65_536,
+      memoryBytes: 131_072,
     });
 
     expect(debugger_.step()).toMatchObject({
@@ -151,7 +151,7 @@ describe("CS486 bounded debugger core", (): void => {
 
   it("faults a one-past-end RET during the RET step", (): void => {
     const debugger_ = Cs486Debugger.load(assembleCs486("push 2\nret"), {
-      memoryBytes: 65_536,
+      memoryBytes: 131_072,
     });
 
     expect(debugger_.step()).toMatchObject({
@@ -177,7 +177,7 @@ describe("CS486 bounded debugger core", (): void => {
   it("runs continue as resumable CPU slices and prevents overlap", (): void => {
     const debugger_ = Cs486Debugger.load(
       assembleCs486("mov eax, 1\nadd eax, 2\nhalt"),
-      { memoryBytes: 65_536 },
+      { memoryBytes: 131_072 },
     );
     debugger_.setBreakpoint(1);
     const execution = debugger_.startContinueExecution(10);
@@ -211,7 +211,7 @@ describe("CS486 bounded debugger core", (): void => {
 
   it("drains cycle debt before step, limit, halt, and fault outcomes", (): void => {
     const stepping = Cs486Debugger.load(assembleCs486("mov eax, 7\nhalt"), {
-      memoryBytes: 65_536,
+      memoryBytes: 131_072,
     });
     const step = stepping.startStepExecution();
     expect(step.runCpuSlice(1, 1).state.kind).toBe("ready");
@@ -225,7 +225,7 @@ describe("CS486 bounded debugger core", (): void => {
     });
 
     const limited = Cs486Debugger.load(assembleCs486("again:\njmp again"), {
-      memoryBytes: 65_536,
+      memoryBytes: 131_072,
     });
     const limit = limited.startContinueExecution(3);
     runExecution(limit);
@@ -237,7 +237,7 @@ describe("CS486 bounded debugger core", (): void => {
     });
 
     const halting = Cs486Debugger.load(assembleCs486("halt"), {
-      memoryBytes: 65_536,
+      memoryBytes: 131_072,
     });
     const halt = halting.startContinueExecution(10);
     runExecution(halt);
@@ -248,7 +248,7 @@ describe("CS486 bounded debugger core", (): void => {
     });
 
     const faulting = Cs486Debugger.load(assembleCs486("div eax, 0\nhalt"), {
-      memoryBytes: 65_536,
+      memoryBytes: 131_072,
     });
     const fault = faulting.startContinueExecution(10);
     runExecution(fault);
@@ -264,7 +264,7 @@ describe("CS486 bounded debugger core", (): void => {
     try {
       const debugger_ = Cs486Debugger.load(
         assembleCs486("load eax, [0]\nhalt"),
-        { memoryBytes: 65_536 },
+        { memoryBytes: 131_072 },
       );
       const step = debugger_.startStepExecution();
 
@@ -296,7 +296,7 @@ describe("CS486 bounded debugger core", (): void => {
           "halt",
         ].join("\n"),
       ),
-      { memoryBytes: 65_536 },
+      { memoryBytes: 131_072 },
     );
     debugger_.setBreakpoint(1);
     const execution = debugger_.startContinueExecution(10);
@@ -329,9 +329,9 @@ describe("CS486 bounded debugger core", (): void => {
       ].join("\n"),
     );
     const synchronous = Cs486Debugger.load(executable, {
-      memoryBytes: 65_536,
+      memoryBytes: 131_072,
     });
-    const scheduled = Cs486Debugger.load(executable, { memoryBytes: 65_536 });
+    const scheduled = Cs486Debugger.load(executable, { memoryBytes: 131_072 });
 
     const synchronousOutcome = synchronous.step();
     const execution = scheduled.startStepExecution();
@@ -355,7 +355,7 @@ describe("CS486 bounded debugger core", (): void => {
   it("interrupts only the adapter after debt drains and preserves the debuggee", (): void => {
     const debugger_ = Cs486Debugger.load(
       assembleCs486("load eax, [0]\nadd eax, 1\nhalt"),
-      { memoryBytes: 65_536 },
+      { memoryBytes: 131_072 },
     );
     const execution = debugger_.startContinueExecution(10);
     expect(execution.runCpuSlice(1, 1)).toMatchObject({
@@ -398,12 +398,12 @@ describe("CS486 bounded debugger core", (): void => {
           instructions: [{ op: "unknown" }],
           version: 2,
         },
-        { memoryBytes: 65_536 },
+        { memoryBytes: 131_072 },
       ),
     ).toThrow(/invalid unknown instruction/u);
 
     const debugger_ = Cs486Debugger.load(assembleCs486("halt"), {
-      memoryBytes: 65_536,
+      memoryBytes: 131_072,
     });
     expect(() => debugger_.readMemory(-1, 1)).toThrow(/address/u);
     expect(() =>

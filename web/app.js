@@ -3,11 +3,14 @@ import {
   editorKeyFromKeyboardEvent,
   hasCopySelection,
   insertPastedCommand,
-  isEditorTerminalScreen,
   keyboardLockStatesFromEvent,
+  terminalInteractionFromTerminal,
 } from "/terminal-input.js";
 import { manualChapters, manualParts, searchManual } from "/manual.js";
-import { calculateFixedGridFontSize } from "/terminal-layout.js";
+import {
+  calculateFixedGridFontSize,
+  calculateTextRasterPresentation,
+} from "/terminal-layout.js";
 import {
   DEFAULT_TERMINAL_PRESENTATION,
   curvatureScaleFromPercent,
@@ -18,7 +21,7 @@ import {
 import { WebFloppyDriveAudio } from "/floppy-audio.js";
 
 const palette = [
-  "#f0f0f0",
+  "#a8a8a8",
   "#f2b233",
   "#e57fd8",
   "#99b2f2",
@@ -36,8 +39,9 @@ const palette = [
   "#111111",
 ];
 const dosTuiPalette = [...palette];
-dosTuiPalette[0] = "#AAAAAA";
-dosTuiPalette[8] = "#AAAAAA";
+dosTuiPalette[0] = "#a8a8a8";
+dosTuiPalette[6] = "#FFFFFF";
+dosTuiPalette[8] = "#a8a8a8";
 dosTuiPalette[9] = "#00AAAA";
 dosTuiPalette[11] = "#0000AA";
 dosTuiPalette[15] = "#000000";
@@ -96,6 +100,7 @@ const elements = {
   errorDismiss: document.querySelector("#error-dismiss"),
   inputState: document.querySelector("#input-state"),
   accessState: document.querySelector("#access-state"),
+  keyboardHelp: document.querySelector("#keyboard-help"),
   capsLockIndicator: document.querySelector("#caps-lock-indicator"),
   numLockIndicator: document.querySelector("#num-lock-indicator"),
   scrollLockIndicator: document.querySelector("#scroll-lock-indicator"),
@@ -148,6 +153,7 @@ let connectionCode = /^[0-9]{4}$/u.test(queryCode)
 let streamGeneration = 0;
 let reconnectGeneration = 0;
 let sessionClosed = false;
+let interactionProtocolReload = false;
 let commandPending = false;
 let completionPending = false;
 let copyResetTimer = 0;
@@ -158,9 +164,9 @@ let machineLifecycle = "unknown";
 let takeoverPending = false;
 let connectionState = "loading";
 let accessMode = "unknown";
-let editorActive = false;
+let terminalInteraction;
+let dosTuiPresentation = false;
 let terminalPresentation = DEFAULT_TERMINAL_PRESENTATION;
-let secretInput = false;
 let editorKeyPending = false;
 let editorInputGeneration = 0;
 let mouseRequestPending = false;
@@ -212,7 +218,7 @@ elements.commandForm.addEventListener("submit", (event) => {
   void sendLine();
 });
 elements.commandInput.addEventListener("keydown", (event) => {
-  if (editorActive) {
+  if (terminalInteraction?.inputMode === "keys") {
     if (
       event.ctrlKey &&
       event.key.toLowerCase() === "c" &&
@@ -236,7 +242,7 @@ elements.commandInput.addEventListener("keydown", (event) => {
   }
   if (event.key === "Tab" && !event.isComposing) {
     event.preventDefault();
-    if (!secretInput) void completeCommandLine();
+    if (terminalInteraction?.secretInput !== true) void completeCommandLine();
     return;
   }
   if (event.ctrlKey) {
@@ -244,8 +250,10 @@ elements.commandInput.addEventListener("keydown", (event) => {
     if (key === "c") {
       if (hasCopySelection(elements.commandInput, window.getSelection()))
         return;
-      event.preventDefault();
-      void sendInput({ kind: "interrupt" });
+      if (terminalInteraction?.interrupt === true) {
+        event.preventDefault();
+        void sendInput({ kind: "interrupt" });
+      }
       return;
     }
     if (key === "a" || key === "e") {
@@ -268,15 +276,18 @@ elements.commandInput.addEventListener("keydown", (event) => {
   }
   if (event.key === "ArrowUp") {
     event.preventDefault();
-    if (!secretInput) moveHistory(-1);
+    if (terminalInteraction?.secretInput !== true) moveHistory(-1);
   } else if (event.key === "ArrowDown") {
     event.preventDefault();
-    if (!secretInput) moveHistory(1);
+    if (terminalInteraction?.secretInput !== true) moveHistory(1);
   }
 });
 elements.commandInput.addEventListener("input", () => {
   hideCompletions();
-  if (!secretInput && historyCursor === commandHistory.length) {
+  if (
+    terminalInteraction?.secretInput !== true &&
+    historyCursor === commandHistory.length
+  ) {
     historyDraft = elements.commandInput.value;
   }
   elements.commandInput.removeAttribute("aria-invalid");
@@ -284,7 +295,7 @@ elements.commandInput.addEventListener("input", () => {
 elements.commandInput.addEventListener("paste", (event) => {
   const pastedText = event.clipboardData?.getData("text/plain");
   if (pastedText === undefined || elements.commandInput.disabled) return;
-  if (editorActive) {
+  if (terminalInteraction?.inputMode === "keys") {
     event.preventDefault();
     queueEditorKeys(
       [...pastedText.replaceAll("\r\n", "\n")].map((key) =>
@@ -307,11 +318,11 @@ elements.commandInput.addEventListener("paste", (event) => {
 });
 elements.commandInput.addEventListener("focus", () => {
   if (!elements.commandInput.disabled)
-    elements.inputState.textContent = "INPUT";
+    elements.inputState.textContent = interactionStateLabel();
 });
 elements.commandInput.addEventListener("blur", () => {
   if (!sessionClosed && accessMode === "writer") {
-    elements.inputState.textContent = editorActive ? "EDIT" : "COMMAND";
+    elements.inputState.textContent = interactionStateLabel();
   }
 });
 elements.terminalStage.addEventListener("click", () => {
@@ -368,6 +379,10 @@ elements.handoffForm.addEventListener("submit", (event) => {
   void connectWithCode();
 });
 elements.errorDismiss.addEventListener("click", () => {
+  if (interactionProtocolReload) {
+    location.reload();
+    return;
+  }
   elements.errorDialog.close();
 });
 elements.copyButton.addEventListener("click", () => {
@@ -640,6 +655,10 @@ async function bootstrap() {
     scheduleTerminalFit();
     await connectStream();
   } catch (error) {
+    if (error?.code === "interaction_protocol_mismatch") {
+      failInteractionProtocol(errorMessage(error));
+      return;
+    }
     if (/^[0-9]{4}$/u.test(connectionCode)) {
       void reconnectWithCode(connectionCode);
     } else {
@@ -662,8 +681,12 @@ async function connectStream() {
       await consumeEvents(response, generation);
       if (sessionClosed || generation !== streamGeneration) return;
       throw new Error("Terminal event stream ended.");
-    } catch {
+    } catch (error) {
       if (sessionClosed || generation !== streamGeneration) return;
+      if (error?.code === "interaction_protocol_mismatch") {
+        failInteractionProtocol(errorMessage(error));
+        return;
+      }
       retry += 1;
       if (retry > 5) {
         setConnection("offline", "DISCONNECTED");
@@ -725,8 +748,9 @@ async function consumeEvents(response, generation) {
 
 async function sendLine() {
   hideCompletions();
+  if (terminalInteraction?.inputMode !== "line") return;
   const line = elements.commandInput.value;
-  const submittedSecret = secretInput;
+  const submittedSecret = terminalInteraction.secretInput;
   if (commandPending || elements.commandInput.disabled) return;
   const accepted = await sendInput({ kind: "line", value: line });
   if (accepted) {
@@ -745,8 +769,8 @@ async function completeCommandLine() {
     completionPending ||
     commandPending ||
     sessionClosed ||
-    editorActive ||
-    secretInput ||
+    terminalInteraction?.inputMode !== "line" ||
+    terminalInteraction.secretInput ||
     elements.commandInput.disabled
   )
     return;
@@ -835,7 +859,7 @@ async function sendInput(payload) {
 
 function terminalMouseAvailable() {
   return (
-    editorActive &&
+    terminalInteraction?.pointer === "cell" &&
     !sessionClosed &&
     connectionState === "online" &&
     accessMode === "writer"
@@ -930,8 +954,15 @@ function cancelPendingTerminalRender() {
 function renderTerminalNow(payload) {
   const terminal = payload?.terminal;
   if (!Array.isArray(terminal?.rows)) return;
-  const nextEditorActive = isEditorTerminalScreen(terminal.rows);
-  const nextMode = nextEditorActive ? "dos" : "default";
+  let nextInteraction;
+  try {
+    nextInteraction = terminalInteractionFromTerminal(terminal);
+  } catch (error) {
+    failInteractionProtocol(errorMessage(error));
+    return;
+  }
+  const nextDosTuiPresentation = nextInteraction.presentation === "dos-tui";
+  const nextMode = nextDosTuiPresentation ? "dos" : "default";
   const nextGeometry = `${String(terminal.width)}x${String(terminal.height)}`;
   const rebuildRows =
     renderedTerminalMode !== nextMode ||
@@ -943,17 +974,36 @@ function renderTerminalNow(payload) {
   ) {
     scheduleTerminalFit();
   }
-  editorActive = nextEditorActive;
-  elements.terminalStage.classList.toggle("dos-editor-active", editorActive);
-  secretInput = terminal.secretInput === true;
-  elements.commandInput.classList.toggle("secret-input", secretInput);
+  if (
+    terminalInteraction?.inputMode === "keys" &&
+    nextInteraction.inputMode !== "keys"
+  ) {
+    discardEditorKeys();
+  }
+  terminalInteraction = nextInteraction;
+  dosTuiPresentation = nextDosTuiPresentation;
+  elements.terminalStage.classList.toggle(
+    "dos-editor-active",
+    dosTuiPresentation,
+  );
+  elements.commandInput.classList.toggle(
+    "secret-input",
+    terminalInteraction.secretInput,
+  );
+  elements.commandInput.readOnly = terminalInteraction.inputMode === "none";
   elements.commandInput.setAttribute(
     "aria-label",
-    secretInput ? "Secret terminal input" : "Terminal command line",
+    terminalInteraction.secretInput
+      ? "Secret terminal input"
+      : terminalInteraction.inputMode === "keys"
+        ? "Terminal key input"
+        : terminalInteraction.inputMode === "none"
+          ? "Terminal input unavailable"
+          : "Terminal command line",
   );
-  if (editorActive) {
+  renderInteractionHints(terminalInteraction);
+  if (terminalInteraction.inputMode === "keys") {
     elements.commandInput.value = "";
-    elements.inputState.textContent = "EDIT";
   }
   elements.computerName.textContent = payload.label ?? payload.computerId;
   elements.computerId.textContent = payload.computerId;
@@ -970,12 +1020,12 @@ function renderTerminalNow(payload) {
   );
   elements.commandForm.style.setProperty(
     "--cursor-top",
-    `${String(Math.max(0, cursorY - 1) * (editorActive ? 1 : 1.32))}em`,
+    `${String(Math.max(0, cursorY - 1))}em`,
   );
   const colorX = Math.max(0, Math.min(terminal.width - 1, cursorX - 1));
   const colorY = Math.max(0, Math.min(terminal.height - 1, cursorY - 1));
   const inputForeground = terminal.foreground?.[colorY]?.[colorX] ?? 0;
-  const activePalette = editorActive ? dosTuiPalette : palette;
+  const activePalette = dosTuiPresentation ? dosTuiPalette : palette;
   elements.commandForm.style.setProperty(
     "--input-color",
     activePalette[inputForeground] ?? activePalette[0],
@@ -1006,7 +1056,7 @@ function renderTerminalNow(payload) {
       foreground,
       background,
       activePalette,
-      editorActive,
+      dosTuiPresentation,
     );
     nextElements[y] = line;
     if (!rebuildRows) renderedTerminalRowElements[y].replaceWith(line);
@@ -1020,6 +1070,7 @@ function renderTerminalNow(payload) {
   renderedTerminalMode = nextMode;
   renderedTerminalRowElements = nextElements;
   renderedTerminalRowSignatures = nextSignatures;
+  setInputAvailable(connectionState === "online", interactionStateLabel());
 }
 
 function terminalRowSignature(row, foreground, background, mode) {
@@ -1156,6 +1207,7 @@ function showCopyState(label) {
 }
 
 function queueEditorKeys(keys) {
+  if (terminalInteraction?.inputMode !== "keys") return false;
   const admission = editorKeyQueue.enqueue(keys);
   if (admission.outcome === "rejected") {
     elements.inputState.textContent = "QUEUE FULL";
@@ -1183,7 +1235,8 @@ async function drainEditorKeys() {
     while (
       editorKeyQueue.length > 0 &&
       !sessionClosed &&
-      accessMode === "writer"
+      accessMode === "writer" &&
+      terminalInteraction?.inputMode === "keys"
     ) {
       const keys = editorKeyQueue.peekBatch();
       if (keys.length === 0) break;
@@ -1220,8 +1273,11 @@ async function drainEditorKeys() {
       editorKeyQueue.acknowledge(keys);
       retry = 0;
     }
-    if (editorActive && editorKeyQueue.length === 0) {
-      elements.inputState.textContent = "EDIT";
+    if (
+      terminalInteraction?.inputMode === "keys" &&
+      editorKeyQueue.length === 0
+    ) {
+      elements.inputState.textContent = interactionStateLabel();
     }
   } catch (error) {
     if (generation !== editorInputGeneration) return;
@@ -1501,6 +1557,12 @@ async function requestPower() {
 }
 
 function updateSession(session) {
+  if (session.finalReason === "interaction_protocol_mismatch") {
+    failInteractionProtocol(
+      "The behavior pack, Web Terminal companion, and browser use incompatible interaction schemas. Restart the companion and reload this page.",
+    );
+    return;
+  }
   if (/^[0-9]{4}$/u.test(session.connectionCode ?? "")) {
     rememberConnectionCode(session.connectionCode);
   }
@@ -1549,7 +1611,12 @@ function updateSession(session) {
 }
 
 function moveHistory(offset) {
-  if (secretInput || commandHistory.length === 0) return;
+  if (
+    terminalInteraction?.inputMode !== "line" ||
+    terminalInteraction.secretInput ||
+    commandHistory.length === 0
+  )
+    return;
   if (historyCursor === commandHistory.length && offset < 0) {
     historyDraft = elements.commandInput.value;
   }
@@ -1578,7 +1645,10 @@ async function api(path, options = {}) {
 }
 
 function authorizationHeaders() {
-  return { Authorization: `Bearer ${token}` };
+  return {
+    Authorization: `Bearer ${token}`,
+    "X-Computer-System-Interaction-Schema": "1",
+  };
 }
 
 function setConnection(state, label) {
@@ -1595,14 +1665,19 @@ function setConnection(state, label) {
 }
 
 function setInputAvailable(available, state) {
+  const interactionAvailable =
+    terminalInteraction?.inputMode !== undefined &&
+    (terminalInteraction.inputMode !== "none" || terminalInteraction.interrupt);
   const writable =
     available &&
+    interactionAvailable &&
     accessMode === "writer" &&
     machineAcceptsInput(machineLifecycle) &&
     !commandPending &&
     !takeoverPending &&
     !sessionClosed;
   elements.commandInput.disabled = !writable;
+  elements.commandInput.readOnly = terminalInteraction?.inputMode === "none";
   elements.accessState.dataset.mode = accessMode;
   elements.accessState.textContent =
     accessMode === "writer"
@@ -1613,10 +1688,45 @@ function setInputAvailable(available, state) {
   elements.takeControlButton.hidden = sessionClosed || accessMode !== "viewer";
   elements.takeControlButton.disabled =
     connectionState !== "online" || takeoverPending || sessionClosed;
-  elements.inputState.textContent = accessMode === "viewer" ? "LOCKED" : state;
+  elements.inputState.textContent =
+    accessMode === "viewer"
+      ? "LOCKED"
+      : writable
+        ? interactionStateLabel()
+        : state;
   updatePowerButton();
   updateEjectButton();
   if (writable) elements.commandInput.focus();
+}
+
+function interactionStateLabel() {
+  if (terminalInteraction === undefined) return "WAIT";
+  if (terminalInteraction.inputMode === "keys") return "EDIT";
+  if (terminalInteraction.secretInput) return "SECRET";
+  if (terminalInteraction.context === "login") return "LOGIN";
+  if (terminalInteraction.inputMode === "line") return "COMMAND";
+  return terminalInteraction.interrupt ? "INTERRUPT" : "WAIT";
+}
+
+function renderInteractionHints(interaction) {
+  const fragment = document.createDocumentFragment();
+  if (interaction.hints.length === 0) {
+    fragment.append(document.createTextNode("Input unavailable"));
+  } else {
+    interaction.hints.forEach((hint, index) => {
+      if (index > 0) {
+        const separator = document.createElement("span");
+        separator.setAttribute("aria-hidden", "true");
+        separator.textContent = " \u00b7 ";
+        fragment.append(separator);
+      }
+      const key = document.createElement("kbd");
+      key.textContent = hint.key;
+      fragment.append(key, document.createTextNode(` ${hint.label}`));
+    });
+  }
+  elements.keyboardHelp.dataset.helpTopicId = interaction.helpTopicId ?? "";
+  elements.keyboardHelp.replaceChildren(fragment);
 }
 
 async function takeControl() {
@@ -1759,16 +1869,17 @@ function fitTerminal(columns, rows) {
   )
     return;
   const available = terminalContentSize();
-  const lineHeightRatio = editorActive ? 1 : 1.32;
-  const monospaceRatio = editorActive ? 0.5 : 0.61;
+  const lineHeightRatio = 1;
+  const raster = calculateTextRasterPresentation({ columns, rows });
+  elements.terminalDisplay.dataset.rasterKind = "text";
   const fitted = calculateFixedGridFontSize({
     availableHeight: available.height,
     availableWidth: available.width,
     columns,
     lineHeightRatio,
     maximumPixels: 48,
-    monospaceRatio,
-    rows,
+    monospaceRatio: raster.physicalCellRatio,
+    rows: raster.fittedRows,
   });
   if (fitted.kind === "unmeasurable") return;
   elements.terminalStage.style.setProperty(
@@ -1777,11 +1888,19 @@ function fitTerminal(columns, rows) {
   );
   elements.terminalStage.style.setProperty(
     "--terminal-frame-width",
-    `${(columns * monospaceRatio * fitted.pixels).toFixed(2)}px`,
+    `${(columns * raster.physicalCellRatio * fitted.pixels).toFixed(2)}px`,
   );
   elements.terminalStage.style.setProperty(
     "--terminal-frame-height",
-    `${(rows * lineHeightRatio * fitted.pixels).toFixed(2)}px`,
+    `${(raster.fittedRows * lineHeightRatio * fitted.pixels).toFixed(2)}px`,
+  );
+  elements.terminalStage.style.setProperty(
+    "--terminal-raster-margin",
+    `${String(raster.rasterMarginRows)}em`,
+  );
+  elements.terminalStage.style.setProperty(
+    "--terminal-horizontal-scale",
+    raster.horizontalScale.toFixed(6),
   );
 }
 
@@ -1807,6 +1926,34 @@ function fail(message) {
   elements.inputState.textContent = "OFFLINE";
   setConnection("offline", "UNAVAILABLE");
   showHandoffPrompt(message);
+}
+
+function failInteractionProtocol(message) {
+  const discarded = discardEditorKeys();
+  cancelPendingTerminalRender();
+  sessionClosed = true;
+  streamGeneration += 1;
+  sessionStorage.removeItem(tokenStorageKey);
+  token = "";
+  terminalInteraction = undefined;
+  dosTuiPresentation = false;
+  elements.terminalStage.classList.remove("dos-editor-active");
+  elements.commandInput.disabled = true;
+  elements.commandInput.readOnly = true;
+  elements.inputState.textContent = "OFFLINE";
+  elements.keyboardHelp.dataset.helpTopicId = "";
+  elements.keyboardHelp.textContent =
+    "Reload after the companion and Computer have been updated.";
+  setConnection("offline", "RELOAD REQUIRED");
+  showError(
+    `${message}${
+      discarded === 0
+        ? ""
+        : ` ${String(discarded)} unacknowledged editor key(s) were discarded.`
+    }`,
+    "Web Terminal update required",
+    true,
+  );
 }
 
 function showHandoffPrompt(message) {
@@ -1996,12 +2143,21 @@ async function responseError(response) {
   return error;
 }
 
-function showError(message, title = "Terminal unavailable") {
+function showError(
+  message,
+  title = "Terminal unavailable",
+  reloadRequired = false,
+) {
+  interactionProtocolReload = reloadRequired;
   elements.errorTitle.textContent = title;
   elements.errorMessage.textContent = message;
   elements.handoffForm.hidden = true;
   elements.errorDismiss.hidden = false;
+  elements.errorDismiss.textContent = reloadRequired
+    ? "Reload page"
+    : "Dismiss";
   if (!elements.errorDialog.open) elements.errorDialog.showModal();
+  queueMicrotask(() => elements.errorDismiss.focus());
 }
 
 function errorMessage(error) {

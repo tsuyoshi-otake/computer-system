@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import { createPythonCs486Program } from "../../src/application/runtime/pythonCs486.js";
+import {
+  createPythonCs486Program,
+  preparePythonCs486Program,
+} from "../../src/application/runtime/pythonCs486.js";
 import { createNativeEnvironment } from "../../src/application/runtime/nativeModules.js";
 import { RoundRobinScheduler } from "../../src/application/runtime/scheduler.js";
 import { compileCs486Object } from "../../src/application/toolchain/highLevelCompilers.js";
@@ -8,6 +11,75 @@ import { InMemoryFilesystem } from "../../src/domain/filesystem/inMemoryFilesyst
 import { TerminalBuffer } from "../../src/domain/terminal/terminalBuffer.js";
 
 describe("Computer System Python CS486 backend", (): void => {
+  it("prepares v3 once and constructs runtime state only after an exact grant", (): void => {
+    const filesystem = new InMemoryFilesystem();
+    const environment = createNativeEnvironment({
+      computerId: 1,
+      filesystem,
+      terminal: new TerminalBuffer(40, 8),
+    });
+    const prepared = preparePythonCs486Program({
+      environment,
+      filesystem: environment.filesystem,
+      managedRuntimeMemoryBytes: 131_072,
+      path: "/main.py",
+      source: "answer = 6 * 7\n",
+    });
+
+    expect(prepared.executable).toMatchObject({
+      memory: {
+        auxiliaryResidentBytes: 131_072,
+        model: "cs-flat32-v1",
+      },
+      version: 3,
+    });
+    expect(prepared.requirements.physicalReservationBytes).toBe(
+      prepared.requirements.linearAddressSpaceBytes + 131_072,
+    );
+    expect(() =>
+      prepared.create(prepared.requirements.linearAddressSpaceBytes - 1),
+    ).toThrow(/linear memory requirement exceeds available RAM/u);
+
+    const program = prepared.create(
+      prepared.requirements.linearAddressSpaceBytes,
+    );
+    expect(program.executable).toBe(prepared.executable);
+    run(program.process);
+    expect(program.runtime.globals.get("answer")).toBe(42);
+  });
+
+  it("can include a bounded managed runtime inside an owning composite process grant", (): void => {
+    const filesystem = new InMemoryFilesystem();
+    const environment = createNativeEnvironment({
+      computerId: 2,
+      filesystem,
+      terminal: new TerminalBuffer(40, 8),
+    });
+    const prepared = preparePythonCs486Program({
+      environment,
+      filesystem: environment.filesystem,
+      managedRuntimeMemoryBytes: 64 * 1_024,
+      managedRuntimeResidentBytes: 0,
+      path: "/system.py",
+      source: "pass\n",
+    });
+
+    expect(prepared.executable.memory.auxiliaryResidentBytes).toBe(0);
+    expect(prepared.requirements.physicalReservationBytes).toBe(
+      prepared.requirements.linearAddressSpaceBytes,
+    );
+    expect(() =>
+      preparePythonCs486Program({
+        environment,
+        filesystem: environment.filesystem,
+        managedRuntimeMemoryBytes: 64 * 1_024,
+        managedRuntimeResidentBytes: 64 * 1_024 + 1,
+        path: "/invalid.py",
+        source: "pass\n",
+      }),
+    ).toThrow(/managedRuntimeResidentBytes/u);
+  });
+
   it("executes functions, branches, loops, and collections on CS486", (): void => {
     const fixture = createFixture(`
 def sum_to(stop):

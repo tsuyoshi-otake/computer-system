@@ -114,25 +114,32 @@ browser and positions its semantic input at the terminal cursor, preserving
 physical Enter, Ctrl+C, and history without a separate visible text field. Start
 the combined managed runtime with `npm run dev:bds:web`; see
 [the MCP debugging guide](mcp-debugging.md) for network and security settings.
-The browser derives the display-frame width, height, and font size from one
-bounded 80x25 fit, then centers that complete frame on both axes. The
-active-page Options dialog applies one of four bounded CRT profiles and an
-independent Flat or Curved Glass shape to a single optical wrapper. Curvature is
-0-30% with a 5% page default; the same normalized value sets the SVG
-displacement scale and the inverse TUI pointer transform. Presentation state
-remains in memory, does not add per-snapshot work, does not mutate the logical
-palette, and does not create a second screen representation. The fixed browser
-surface has no internal scrollbar, while guest-rendered editor scrollbars remain
-canonical cells. The companion-host one-action workflow is automatic when the
-published host is a literal IP assigned to the server and no custom public
-origin is configured. Use `WEB_COMPANION_AUTO_OPEN=0` to disable it or `1` to
-enable it explicitly while retaining the local-listener requirement. Interacting
-with a Desktop or Advanced Desktop Computer System, or using a Portable Computer
-System, opens its activated path through loopback in the host's default browser.
-This checks the server address rather than the initiating player's IP. Remote
-players receive the detected LAN entry page and the Computer's permanent
-four-digit number. An interaction activates that number once for two minutes;
-invalid guesses and active collisions are bounded.
+The browser derives the display-surface width, height, and IBM VGA 9x16 font
+size from one bounded fit of the 80x25 guest grid plus one blank raster row at
+each vertical edge, then centers that bezel-free surface on both axes. The
+blanking rows remain outside the guest screen and therefore do not alter cursor
+or TUI pointer coordinates. The shared active-raster wrapper treats the 9x16
+80x25 text/TUI surface as 720x400 logical pixels and applies a 0.8 horizontal
+correction so the complete 27-row glass area is exactly 4:3. The pure layout
+helper keeps correction mode-specific: 640x480 VGA is 1.0 and 320x200 is 5/6. No
+CS Windows graphics surface is implemented yet. The active-page Options dialog
+applies one of four bounded CRT profiles and an independent Flat or Curved Glass
+shape to a single optical wrapper. Curvature is 0-30% with a 2% page default;
+the same normalized value sets the SVG displacement scale and the inverse TUI
+pointer transform. Presentation state remains in memory, does not add
+per-snapshot work, does not mutate the logical palette, and does not create a
+second screen representation. The fixed browser surface has no internal
+scrollbar, while guest-rendered editor scrollbars remain canonical cells. The
+companion-host one-action workflow is automatic when the published host is a
+literal IP assigned to the server and no custom public origin is configured. Use
+`WEB_COMPANION_AUTO_OPEN=0` to disable it or `1` to enable it explicitly while
+retaining the local-listener requirement. Interacting with a Desktop or Advanced
+Desktop Computer System, or using a Portable Computer System, opens its
+activated path through loopback in the host's default browser. This checks the
+server address rather than the initiating player's IP. Remote players receive
+the detected LAN entry page and the Computer's permanent four-digit number. An
+interaction activates that number once for two minutes; invalid guesses and
+active collisions are bounded.
 
 Terminal output remains mouse-selectable. Ctrl+C copies when either output or
 command text is selected and otherwise performs the bounded terminal interrupt.
@@ -163,25 +170,33 @@ resume/close event. If delivery fails, the machine shuts down explicitly rather
 than retaining an unreachable privileged session. Different Computers have
 independent writer leases.
 
-The Web Terminal sends `terminal_line`; DOS `EDIT` and cross-profile `vi`
-additionally use bounded `terminal_keys` batches. Writer-only `web-complete`
-provides command/path completion. The compatibility `web-resize` boundary
-accepts only 80x25 and normalizes that fixed hardware text mode once per writer
-session; later browser resizes change CSS scale, never guest cell geometry.
-CS-Linux 1.0 parses a bounded Computer System Bash language with pipelines,
-redirects, control operators, quoting, variables, positional parameters,
-conditionals, loops, and functions. Production first boot sets the initial `cs`
-password twice; later boots ask for a username and that account's password. The
-salted record is stored in root-readable `/etc/shadow`, while secret Web input
-is masked and excluded from history and completion. `cs` owns UID/GID 1000 and
-`/home/cs`, belongs to `sudo`, and may add bounded users and groups through
-authenticated elevation. UID/GID 0 root starts password-locked. UID 1000 is the
-protected boot-service account: its name and home may change only while it is
-inactive, but it cannot be deleted. Desktop boot creates the existing-file
-boundary `/startup.py` as mode 0644 and owned by that account, without making
-the root directory writable. A blank file runs the built-in shell program;
-non-empty saved source runs on later boots with the account database's current
-UID 1000 groups.
+Every terminal frame carries a schema-1 `TerminalInteractionDescriptor` derived
+from authoritative guest state. It selects `terminal_line`, bounded
+`terminal_keys`, or disabled input and separately declares pointer admission,
+secret masking, interrupt availability, presentation, help, and contextual key
+hints. The browser and companion must never infer those semantics from rendered
+rows. Writer-only `web-complete` provides command/path completion. Input before
+the first descriptor fails with `409 terminal_not_ready`; a missing or
+unsupported schema fails with `426 interaction_protocol_mismatch`, exposes
+`RELOAD REQUIRED`, and requires the behavior pack, companion, and cached Web
+client to be updated together before reload. There is no heuristic compatibility
+fallback. The compatibility `web-resize` boundary accepts only 80x25 and
+normalizes that fixed hardware text mode once per writer session; later browser
+resizes change CSS scale, never guest cell geometry. CS-Linux 1.0 parses a
+bounded Computer System Bash language with pipelines, redirects, control
+operators, quoting, variables, positional parameters, conditionals, loops, and
+functions. Production first boot sets the initial `cs` password twice; later
+boots ask for a username and that account's password. The salted record is
+stored in root-readable `/etc/shadow`, while secret Web input is masked and
+excluded from history and completion. `cs` owns UID/GID 1000 and `/home/cs`,
+belongs to `sudo`, and may add bounded users and groups through authenticated
+elevation. UID/GID 0 root starts password-locked. UID 1000 is the protected
+boot-service account: its name and home may change only while it is inactive,
+but it cannot be deleted. Desktop boot creates the existing-file boundary
+`/startup.py` as mode 0644 and owned by that account, without making the root
+directory writable. A blank file runs the built-in shell program; non-empty
+saved source runs on later boots with the account database's current UID 1000
+groups.
 
 The legacy `computer` name is permanently reserved in both user and group
 namespaces; current account creation and rename paths may never recreate it.
@@ -313,8 +328,8 @@ unrelated whole-filesystem snapshot.
 ### Preserved-world storage migration
 
 The Bedrock startup path owns one bounded migration before it enables Computer,
-Portable, Monitor, or Web Terminal behavior. The paged-store reader recognizes
-both schema-1 indexed pages (`:page:<generation>:<index>`) and schema-2
+Portable, or Web Terminal behavior. The paged-store reader recognizes both
+schema-1 indexed pages (`:page:<generation>:<index>`) and schema-2
 content-addressed blobs. It always validates the current head first, including
 the manifest, page bounds, checksum, JSON, and payload type, and falls back only
 to the immediately previous generation when the current generation is not
@@ -445,36 +460,39 @@ directly in the manual's stable `architecture` chapter (published as Chapter
 09). During `npm run build`, `tools/machine-textures.mjs` validates each machine
 source as a bounded, non-interlaced 4-bit indexed PNG, removes its pure-white
 canvas, and scales the visible content into a transparent 256 by 256 RGBA item
-icon. The work is O(source pixels + 256 squared) for each of the fixed four
+icon. The work is O(source pixels + 256 squared) for each of the fixed three
 machine assets, and malformed, oversized, or unsupported inputs fail the build
 explicitly.
 
 Do not map the isometric machine plates directly onto block faces: they are
 manual and inventory artwork, not six-face UV textures.
 `tools/machine-block-assets.mjs` instead generates bounded custom geometry and
-purpose-built 16 px block textures for Desktop, Advanced Desktop, Monitor, and
-the open-laptop Portable Computer System. It also generates the terrain atlas.
-All four blocks use `minecraft:placement_direction` and cardinal transformation
-permutations. Programmatic Computer and Portable placement sets the same state,
-and redstone mask swaps preserve it. Desktop bodies occupy 15.5 by 16 by 14.5
-model units so they read as larger base units beneath the Monitor. Resource
-artwork changes require a Resource Pack version increment so connected clients
-fetch the new files.
+purpose-built 16 px block textures for the all-in-one Desktop, all-in-one
+Advanced Desktop, and open-laptop Portable Computer System. It also generates
+the terrain atlas. All three blocks use `minecraft:placement_direction` and
+cardinal transformation permutations. Programmatic Computer and Portable
+placement sets the same state, and redstone mask swaps preserve it. Desktop
+bodies occupy one block and combine the system base, square CRT housing, and
+built-in screen. The upper housing is a rectangular cuboid with a flat top,
+vertical rear/side faces, and crisp 90-degree physical corners; Computer has one
+right-mounted 3.5-inch drive and Advanced has two. Resource artwork changes
+require a Resource Pack version increment so connected clients fetch the new
+files.
 
-Desktop Web Terminal requests require exactly one physically adjacent Monitor.
-Touching a connected Monitor resolves its adjacent desktop rather than a stale
-global target; zero and multiple candidates terminate with explicit messages.
-Placed access is valid only within a three-block Euclidean radius of the touched
-Computer, Monitor, or Portable block. Range or dimension failure transitions the
-bounded session to `out_of_range` and rejects input without finalizing it;
-returning transitions it to `in_range` and requests one eager snapshot. The
-existing bounded round-robin scheduler performs the proximity check, and the
-bridge emits work only when the access state changes. Permanent four-digit codes
-are indexed for O(1) lookup. Browser bookmark retries are deduplicated, use
-exponential backoff with jitter capped at ten seconds, and stop at the session's
-30-minute deadline. Portable Computer System items can be used directly or
-placed as `computer_system:portable_computer_block`; the item/block round trip
-must retain the same identity and the portable CS386SX/CS-DOS profile.
+Desktop Web Terminal requests resolve directly from the touched all-in-one
+Computer or Advanced Computer. There is no standalone Monitor block, item, or
+adjacency topology. Placed access is valid only within a three-block Euclidean
+radius of the touched Computer or Portable block. Range or dimension failure
+transitions the bounded session to `out_of_range` and rejects input without
+finalizing it; returning transitions it to `in_range` and requests one eager
+snapshot. The existing bounded round-robin scheduler performs the proximity
+check, and the bridge emits work only when the access state changes. Permanent
+four-digit codes are indexed for O(1) lookup. Browser bookmark retries are
+deduplicated, use exponential backoff with jitter capped at ten seconds, and
+stop at the session's 30-minute deadline. Portable Computer System items can be
+used directly or placed as `computer_system:portable_computer_block`; the
+item/block round trip must retain the same identity and the portable
+CS386SX/CS-DOS profile.
 
 After activating both packs in a test world, run:
 

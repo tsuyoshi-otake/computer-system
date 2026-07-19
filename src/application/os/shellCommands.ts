@@ -3,7 +3,10 @@ import type { SynchronousTransactionOperation } from "../../domain/filesystem/in
 import { DosPathError, type OsProfile } from "./osProfile.js";
 import type { ShellClockSource } from "./clock.js";
 import type { ComputerHardwareProfile } from "../../domain/computer/hardware.js";
-import type { GuestRamSnapshot } from "../../domain/computer/guestRamLedger.js";
+import type {
+  DosGuestMemoryRegionSnapshot,
+  DosGuestMemorySnapshot,
+} from "./dosGuestMemoryManager.js";
 import type { VirtualDevice } from "./osProfile.js";
 import { formatOsIdentity } from "./osIdentity.js";
 import {
@@ -60,7 +63,17 @@ import type {
   ShellAction,
   ShellCommandResult,
   ShellCompletionResult,
+  ShellToolchainCommandResult,
 } from "./shellTypes.js";
+import {
+  concatGuestToolchainTranscripts,
+  createGuestToolchainTranscript,
+  emptyGuestToolchainTranscript,
+  guestToolchainTranscriptFromCompileError,
+  guestToolchainTranscriptFromFailure,
+  guestToolchainTranscriptFromStreams,
+  renderGuestToolchainTranscript,
+} from "../toolchain/guestToolchainTranscript.js";
 import type { PeripheralBusBroker } from "../io/peripheralBusBroker.js";
 import {
   machineFaceAt,
@@ -116,7 +129,8 @@ export interface ShellCommandRuntimeOptions {
   readonly ticksPerSecond: number;
   readonly hardware: ComputerHardwareProfile;
   readonly memoryUsageBytes: () => number;
-  readonly guestRamSnapshot?: () => GuestRamSnapshot | undefined;
+  readonly dosMemorySnapshot?: () => DosGuestMemorySnapshot;
+  readonly admitProcessMemory?: ShellProcessMemoryAdmission;
   readonly virtualDevices?: ReadonlyMap<string, VirtualDevice>;
   readonly peripherals?: PeripheralBusBroker;
   readonly deferGuestExecution?: boolean;
@@ -136,6 +150,23 @@ export interface ShellCommandRuntimeOptions {
   readonly dosRuntime?: DosRuntimeState;
   readonly onDosRuntimeChanged?: (state: DosRuntimeState) => void;
 }
+
+export interface ShellProcessMemoryAdmissionRequest {
+  readonly displayName: string;
+  readonly executable: Cs486Executable;
+  readonly kind: "debugger" | "execution";
+  readonly moduleId: string;
+}
+
+export interface ShellProcessMemoryGrant {
+  readonly memoryBytes: number;
+  readonly released: boolean;
+  release(): void;
+}
+
+export type ShellProcessMemoryAdmission = (
+  request: ShellProcessMemoryAdmissionRequest,
+) => ShellProcessMemoryGrant;
 
 interface CFamilyCommandOptions {
   readonly arguments: readonly string[];
@@ -176,18 +207,16 @@ interface MemoryRegion {
 }
 
 interface DosMemoryLayout {
-  readonly commandBytes: number;
   readonly conventional: MemoryRegion;
-  readonly dosHigh: boolean;
-  readonly emm386: boolean;
   readonly extended: MemoryRegion;
+  readonly largestConventionalBlockBytes: number;
+  readonly largestUpperBlockBytes: number;
   readonly reserved: MemoryRegion;
   readonly runtimeBytes: number;
+  readonly snapshot: DosGuestMemorySnapshot;
   readonly systemBytes: number;
   readonly total: MemoryRegion;
-  readonly umb: boolean;
   readonly upper: MemoryRegion;
-  readonly xms: boolean;
 }
 
 interface DosDirectoryGroup {
@@ -232,6 +261,7 @@ export class ShellCommandRuntime {
   private ioReadBytes = 0;
   private ioWriteBytes = 0;
   private cs486Debugger: Cs486Debugger | undefined;
+  private cs486DebuggerMemoryGrant: ShellProcessMemoryGrant | undefined;
   private readonly cs486DebuggerSymbols = new Map<string, number>();
   private cs486DebuggerOutputCursor = 0;
   private readonly dosRuntime: DosRuntimeState | undefined;
@@ -597,6 +627,9 @@ export class ShellCommandRuntime {
     this.cs486Debugger = undefined;
     this.cs486DebuggerSymbols.clear();
     this.cs486DebuggerOutputCursor = 0;
+    const grant = this.cs486DebuggerMemoryGrant;
+    this.cs486DebuggerMemoryGrant = undefined;
+    if (grant !== undefined && !grant.released) grant.release();
   }
 
   private loginDirectoryProblem(home: string): string | undefined {
@@ -869,6 +902,91 @@ export class ShellCommandRuntime {
         ? requestedCommand || "as"
         : `${error.source}:${String(error.line ?? 1)}:${String(error.column ?? 1)}`;
     return `${location}: error ${error.code}: ${error.detail}${newline}`;
+  }
+
+  renderToolchainCommandResult(
+    result: ShellToolchainCommandResult,
+  ): ShellCommandResult {
+    const rendered = renderGuestToolchainTranscript(result.transcript, {
+      displaySource: (source) =>
+        this.options.profile.pathDialect.display(source),
+      profile: this.options.profile.id,
+    });
+    return {
+      exitCode: result.exitCode,
+      stderr: rendered.stderr,
+      stdout: rendered.stdout,
+      ...(result.cpuCycles === undefined
+        ? {}
+        : { cpuCycles: result.cpuCycles }),
+      ...(result.foreground === undefined
+        ? {}
+        : { foreground: result.foreground }),
+    };
+  }
+
+  private captureToolchainResult(
+    execute: () => ShellCommandResult,
+    command: string,
+    fallbackSource: string,
+  ): ShellToolchainCommandResult {
+    try {
+      const result = execute();
+      return {
+        exitCode: result.exitCode,
+        transcript: guestToolchainTranscriptFromStreams(
+          result.stdout,
+          result.stderr,
+        ),
+        ...(result.cpuCycles === undefined
+          ? {}
+          : { cpuCycles: result.cpuCycles }),
+        ...(result.foreground === undefined
+          ? {}
+          : { foreground: result.foreground }),
+      };
+    } catch (error: unknown) {
+      return this.toolchainErrorResult(error, command, fallbackSource);
+    }
+  }
+
+  private toolchainErrorResult(
+    error: unknown,
+    command: string,
+    fallbackSource: string,
+  ): ShellToolchainCommandResult {
+    if (error instanceof Cs486CompileError) {
+      return {
+        exitCode: 1,
+        transcript: guestToolchainTranscriptFromCompileError(
+          error,
+          fallbackSource,
+        ),
+      };
+    }
+    if (error instanceof Cs486LinkError) {
+      return {
+        exitCode: 1,
+        transcript: createGuestToolchainTranscript([
+          {
+            diagnostic: {
+              code: "CSLINK001",
+              message: error.message,
+              notes: [],
+              severity: "error",
+              source: this.options.profile.id === "dos" ? "LINK" : command,
+            },
+            kind: "diagnostic",
+          },
+        ]),
+      };
+    }
+    return {
+      exitCode: 1,
+      transcript: guestToolchainTranscriptFromFailure(
+        `${this.displayName(command)}: ${message(error)}${this.textPolicy.newline}`,
+      ),
+    };
   }
 
   resolvePath(path: string): string {
@@ -1426,6 +1544,19 @@ export class ShellCommandRuntime {
     return this.buildDosIdeSource("basic", sourceName, source, undefined, true);
   }
 
+  runQBasicSourceForEditor(
+    sourceName: string,
+    source: string,
+  ): ShellToolchainCommandResult {
+    return this.buildDosIdeSourceForEditor(
+      "basic",
+      sourceName,
+      source,
+      undefined,
+      true,
+    );
+  }
+
   runToolchainIdeSource(
     language: "asm" | "c" | "cpp",
     sourceName: string,
@@ -1552,12 +1683,62 @@ export class ShellCommandRuntime {
     };
   }
 
+  buildDosIdeSourceForEditor(
+    language: "asm" | "basic" | "c" | "cpp",
+    sourceName: string,
+    source: string,
+    outputPath: string | undefined,
+    runAfterCompile: boolean,
+  ): ShellToolchainCommandResult {
+    return this.captureToolchainResult(
+      () =>
+        this.buildDosIdeSource(
+          language,
+          sourceName,
+          source,
+          outputPath,
+          runAfterCompile as true,
+        ),
+      language === "basic" ? "qbasic" : language,
+      sourceName,
+    );
+  }
+
+  compileDosIdeFileForEditor(
+    language: "asm" | "c" | "cpp",
+    sourceName: string,
+    outputPath: string,
+  ): ShellToolchainCommandResult {
+    return this.captureToolchainResult(
+      () =>
+        this.compileExecutable(language, [sourceName, "-c", "-o", outputPath]),
+      language === "asm" ? "as" : language,
+      sourceName,
+    );
+  }
+
   buildDosProgramList(
     projectInput: string,
     rebuildAll = false,
     runAfterBuild = false,
     executeDeferred = false,
   ): ShellCommandResult {
+    return this.renderToolchainCommandResult(
+      this.buildDosProgramListForEditor(
+        projectInput,
+        rebuildAll,
+        runAfterBuild,
+        executeDeferred,
+      ),
+    );
+  }
+
+  buildDosProgramListForEditor(
+    projectInput: string,
+    rebuildAll = false,
+    runAfterBuild = false,
+    executeDeferred = false,
+  ): ShellToolchainCommandResult {
     if (this.options.deferGuestExecution === true && !executeDeferred) {
       return {
         exitCode: 0,
@@ -1566,8 +1747,8 @@ export class ShellCommandRuntime {
           credentials: this.options.credentials(),
           kind: "compile",
           task: {
-            execute: (): ShellCommandResult => {
-              const built = this.buildDosProgramList(
+            execute: (): ShellToolchainCommandResult => {
+              const built = this.buildDosProgramListForEditor(
                 projectInput,
                 rebuildAll,
                 false,
@@ -1577,19 +1758,23 @@ export class ShellCommandRuntime {
               const { outputPath } = this.inspectDosProgramList(projectInput);
               const run = this.execute(["run", outputPath], "");
               return {
-                ...run,
                 cpuCycles:
                   (built.cpuCycles ?? 0) + (run.cpuCycles ?? 0) || undefined,
-                stderr: `${built.stderr}${run.stderr}`,
-                stdout: `${built.stdout}${run.stdout}`,
+                exitCode: run.exitCode,
+                ...(run.foreground === undefined
+                  ? {}
+                  : { foreground: run.foreground }),
+                transcript: concatGuestToolchainTranscripts([
+                  built.transcript,
+                  guestToolchainTranscriptFromStreams(run.stdout, run.stderr),
+                ]),
               };
             },
             kind: "program-list",
           },
           umask: this.filesystem.getUmask(),
         },
-        stderr: "",
-        stdout: "",
+        transcript: emptyGuestToolchainTranscript(),
       };
     }
     try {
@@ -1821,9 +2006,15 @@ export class ShellCommandRuntime {
       results.push(
         `Linked ${this.options.profile.pathDialect.display(outputPath)} fingerprint ${fingerprint.slice(0, 12)}`,
       );
-      return success(`${results.join("\r\n")}\r\n`);
+      return {
+        exitCode: 0,
+        transcript: guestToolchainTranscriptFromStreams(
+          `${results.join("\r\n")}\r\n`,
+          "",
+        ),
+      };
     } catch (error: unknown) {
-      return this.toolchainFailure("PWB", message(error));
+      return this.toolchainErrorResult(error, "PWB", projectInput);
     }
   }
 
@@ -4228,14 +4419,38 @@ export class ShellCommandRuntime {
         stdout: "",
       };
     }
-    const result = runCs486(executable, {
-      cpuModel: this.options.hardware.cpuModel,
-      // Keep guest execution bounded, but allow medium-sized benchmark and
-      // compiled workloads to complete in the same 100k-instruction envelope
-      // used by the core CS486 runner.
-      instructionLimit: 100_000,
-      memoryBytes: this.options.hardware.memoryBytes,
+    const admit = this.options.admitProcessMemory;
+    if (admit === undefined) {
+      throw new Error("process memory admission is unavailable");
+    }
+    const grant = admit({
+      displayName: "CS486 process",
+      executable,
+      kind: "execution",
+      moduleId: "cs486-process",
     });
+    let result;
+    try {
+      if (
+        !Number.isSafeInteger(grant.memoryBytes) ||
+        grant.memoryBytes <= 0 ||
+        grant.released
+      ) {
+        throw new TypeError(
+          "process memory admission returned an invalid grant",
+        );
+      }
+      result = runCs486(executable, {
+        cpuModel: this.options.hardware.cpuModel,
+        // Keep guest execution bounded, but allow medium-sized benchmark and
+        // compiled workloads to complete in the same 100k-instruction envelope
+        // used by the core CS486 runner.
+        instructionLimit: 100_000,
+        memoryBytes: grant.memoryBytes,
+      });
+    } finally {
+      if (!grant.released) grant.release();
+    }
     const runtimeName = cpuModelSpecification(
       this.options.hardware.cpuModel,
     ).runtimeName;
@@ -4325,17 +4540,45 @@ export class ShellCommandRuntime {
           return this.debuggerFailure("invalid executable encoding");
         }
         validateCs486Executable(executable);
-        this.cs486Debugger = Cs486Debugger.load(executable, {
-          cpuModel: this.options.hardware.cpuModel,
-          memoryBytes: this.options.hardware.memoryBytes,
+        this.closeDebugger();
+        const admit = this.options.admitProcessMemory;
+        if (admit === undefined) {
+          throw new Error("process memory admission is unavailable");
+        }
+        const grant = admit({
+          displayName: "CS486 debugger",
+          executable,
+          kind: "debugger",
+          moduleId: "cs486-debugger",
         });
+        let debugger_: Cs486Debugger;
+        try {
+          if (
+            !Number.isSafeInteger(grant.memoryBytes) ||
+            grant.memoryBytes <= 0 ||
+            grant.released
+          ) {
+            throw new TypeError(
+              "process memory admission returned an invalid grant",
+            );
+          }
+          debugger_ = Cs486Debugger.load(executable, {
+            cpuModel: this.options.hardware.cpuModel,
+            memoryBytes: grant.memoryBytes,
+          });
+        } catch (error: unknown) {
+          if (!grant.released) grant.release();
+          throw error;
+        }
+        this.cs486Debugger = debugger_;
+        this.cs486DebuggerMemoryGrant = grant;
         this.cs486DebuggerOutputCursor = 0;
         this.cs486DebuggerSymbols.clear();
         for (const symbol of executable.symbols ?? []) {
           if ((symbol.section ?? "text") === "text")
             this.cs486DebuggerSymbols.set(symbol.name, symbol.address);
         }
-        const first = this.cs486Debugger.disassemble(0, 1)[0];
+        const first = debugger_.disassemble(0, 1)[0];
         const displayPath = dos
           ? this.options.profile.pathDialect.display(this.resolvePath(path))
           : this.resolvePath(path);
@@ -4760,7 +5003,11 @@ export class ShellCommandRuntime {
       return usage("MEM [/C | /D | /F | /P]");
     if (option === "/P")
       return failure("MEM", "/P paging is not supported by this terminal", 2);
+    if (this.options.dosMemorySnapshot === undefined) {
+      return failure("MEM", "DOS memory manager is unavailable", 2);
+    }
     const layout = this.dosMemoryLayout();
+    const snapshot = layout.snapshot;
     const lines = [
       `${formatOsIdentity(this.options.profile.identity)} Memory`,
       "",
@@ -4773,41 +5020,78 @@ export class ShellCommandRuntime {
       "----------------  ----------  ----------  ----------",
       this.dosMemoryRow("Total memory", layout.total),
       "",
-      `${String(this.options.hardware.memoryBytes).padStart(12)} bytes total memory`,
+      `${String(snapshot.physical.totalBytes).padStart(12)} bytes total memory`,
       `${String(layout.systemBytes).padStart(12)} bytes DOS system and drivers`,
       `${String(layout.runtimeBytes).padStart(12)} bytes guest runtime`,
-      `${String(layout.conventional.free).padStart(12)} bytes largest executable program size`,
-      `${String(layout.upper.free).padStart(12)} bytes largest free upper memory block`,
+      `${String(layout.largestConventionalBlockBytes).padStart(12)} bytes largest executable program size`,
+      `${String(layout.largestUpperBlockBytes).padStart(12)} bytes largest free upper memory block`,
     ];
     if (option === "/C") {
       lines.push(
         "",
         "Modules using memory below 1 MB:",
-        `DOS KERNEL     ${String(16 * 1_024).padStart(10)}  Conventional`,
-        `COMMAND        ${String(layout.commandBytes).padStart(10)}  ${layout.dosHigh ? "Upper" : "Conventional"}`,
-        `HIMEM/EMM386   ${String(16 * 1_024).padStart(10)}  Conventional`,
-        `CS-RUNTIME     ${String(layout.runtimeBytes).padStart(10)}  Conventional`,
+        "Category/Module              Name                     Bytes  Placement",
       );
+      for (const module of snapshot.modules) {
+        const allocations = module.allocations.filter(
+          ({ placement }) => placement !== "extended",
+        );
+        if (allocations.length === 0) continue;
+        const bytes = allocations.reduce(
+          (total, allocation) => total + allocation.size,
+          0,
+        );
+        const placements = new Set(
+          allocations.map(({ placement }) => placement),
+        );
+        const placement =
+          placements.size === 1 ? titleCase([...placements][0]!) : "Mixed";
+        lines.push(
+          `${`${module.category}/${module.moduleId}`.padEnd(28)} ${module.displayName.padEnd(20)} ${String(bytes).padStart(10)}  ${placement}`,
+        );
+      }
     }
     if (option === "/D") {
+      const flags = snapshot.flags;
       lines.push(
         "",
+        `Memory manager state: ${snapshot.state}`,
         "CPU mode: protected sandbox",
         "DOS compatibility mode: virtual-8086 model",
         "Paging: unavailable",
-        `XMS driver (HIMEM.SYS): ${layout.xms ? "installed" : "not installed"}`,
-        `UMB provider (EMM386.EXE): ${layout.emm386 ? "installed" : "not installed"}`,
-        `DOS high: ${layout.dosHigh ? "enabled" : "disabled"}`,
-        `UMB link: ${layout.umb ? "enabled" : "disabled"}`,
+        `XMS driver (HIMEM.SYS): ${flags.himem ? "installed" : "not installed"}`,
+        `XMS service: ${flags.xms ? "available" : "unavailable"}`,
+        `HMA size: ${String(flags.hmaBytes)} bytes`,
+        `UMB provider (EMM386.EXE): ${flags.emm386NoEms ? "installed (NOEMS)" : "not installed"}`,
+        `DOS high requested: ${flags.dosHighRequested ? "yes" : "no"}`,
+        `DOS high: ${flags.dosHigh ? "enabled" : "disabled"}`,
+        `UMB link: ${flags.umb ? "enabled" : "disabled"}`,
       );
+      for (const diagnostic of snapshot.diagnostics) {
+        lines.push(
+          `Diagnostic ${diagnostic.code}${diagnostic.lineNumber === null ? "" : ` (line ${String(diagnostic.lineNumber)})`}: ${diagnostic.message}`,
+        );
+      }
     }
     if (option === "/F") {
+      lines.push("", "Free memory blocks:");
+      this.appendDosFreeExtents(
+        lines,
+        "Conventional",
+        snapshot.regions.conventional,
+      );
+      this.appendDosFreeExtents(lines, "Upper", snapshot.regions.upper);
+      this.appendDosFreeExtents(
+        lines,
+        "Extended (XMS)",
+        snapshot.regions.extended,
+      );
       lines.push(
         "",
-        "Free memory blocks:",
-        `Conventional      ${String(layout.conventional.free).padStart(10)} bytes`,
-        `Upper             ${String(layout.upper.free).padStart(10)} bytes`,
-        `Extended (XMS)    ${String(layout.extended.free).padStart(10)} bytes`,
+        "Largest free blocks:",
+        `Conventional      ${String(snapshot.regions.conventional.largestFreeBlockBytes).padStart(10)} bytes`,
+        `Upper             ${String(snapshot.regions.upper.largestFreeBlockBytes).padStart(10)} bytes`,
+        `Extended (XMS)    ${String(snapshot.regions.extended.largestFreeBlockBytes).padStart(10)} bytes`,
       );
     }
     return success(`${lines.join("\r\n")}\r\n`);
@@ -5106,92 +5390,66 @@ export class ShellCommandRuntime {
   }
 
   private dosMemoryLayout(): DosMemoryLayout {
-    const kib = 1_024;
-    const totalBytes = this.options.hardware.memoryBytes;
-    const conventionalTotal = Math.min(totalBytes, 640 * kib);
-    const lowMemoryTotal = Math.min(totalBytes, 1_024 * kib);
-    const upperPhysical = Math.max(0, lowMemoryTotal - conventionalTotal);
-    const extendedTotal = Math.max(0, totalBytes - lowMemoryTotal);
-    const xms = this.environment.get("CONFIG_XMS") === "ON";
-    const emm386 = this.environment.get("CONFIG_EMM386") === "ON";
-    const umb = emm386 && this.environment.get("CONFIG_UMB") === "ON";
-    const dosHigh = xms && this.environment.get("CONFIG_DOS_HIGH") === "ON";
-    const upperTotal = umb ? Math.min(upperPhysical, 128 * kib) : 0;
-    const commandBytes = 32 * kib;
-    const runtimeBytes = this.guestRuntimeBytes();
-    const ledger = this.options.guestRamSnapshot?.();
-    if (ledger !== undefined) {
-      const systemBytes =
-        ledger.breakdown.find(({ owner }) => owner === "dos-resident")?.bytes ??
-        0;
-      const usedBytes = Math.min(totalBytes, ledger.usedBytes + runtimeBytes);
-      let remainingUsed = usedBytes;
-      const conventionalUsed = Math.min(conventionalTotal, remainingUsed);
-      remainingUsed -= conventionalUsed;
-      const upperUsed = Math.min(upperTotal, remainingUsed);
-      remainingUsed -= upperUsed;
-      const reservedTotal = upperPhysical - upperTotal;
-      const reservedUsed = Math.min(reservedTotal, remainingUsed);
-      remainingUsed -= reservedUsed;
-      const extendedUsed = Math.min(extendedTotal, remainingUsed);
-      const regions = {
-        conventional: memoryRegion(conventionalTotal, conventionalUsed),
-        upper: memoryRegion(upperTotal, upperUsed),
-        reserved: memoryRegion(reservedTotal, reservedUsed),
-        extended: memoryRegion(extendedTotal, extendedUsed),
-      };
-      return {
-        ...regions,
-        total: memoryRegion(
-          totalBytes,
-          regions.conventional.used +
-            regions.upper.used +
-            regions.reserved.used +
-            regions.extended.used,
-        ),
-        commandBytes,
-        dosHigh,
-        emm386,
-        runtimeBytes: Math.max(0, usedBytes - systemBytes),
-        systemBytes,
-        umb,
-        xms,
-      };
-    }
-    const conventionalUsed = Math.min(
-      conventionalTotal,
-      runtimeBytes + (dosHigh ? 32 * kib : 64 * kib),
+    const snapshot = this.options.dosMemorySnapshot!();
+    const conventional = memoryRegion(
+      snapshot.regions.conventional.totalBytes,
+      snapshot.regions.conventional.usedBytes,
     );
-    const upperUsed = Math.min(upperTotal, dosHigh ? commandBytes : 0);
-    const extendedUsed = Math.min(extendedTotal, dosHigh ? 64 * kib : 0);
-    const reservedTotal = upperPhysical - upperTotal;
-    const regions = {
-      conventional: memoryRegion(conventionalTotal, conventionalUsed),
-      upper: memoryRegion(upperTotal, upperUsed),
-      reserved: memoryRegion(reservedTotal, reservedTotal),
-      extended: memoryRegion(extendedTotal, extendedUsed),
-    };
+    const upper = memoryRegion(
+      snapshot.regions.upper.totalBytes,
+      snapshot.regions.upper.usedBytes,
+    );
+    const extended = memoryRegion(
+      snapshot.regions.extended.totalBytes,
+      snapshot.regions.extended.usedBytes,
+    );
+    const reserved = memoryRegion(
+      snapshot.physical.reservedUnavailableBytes,
+      snapshot.physical.reservedUnavailableBytes,
+    );
+    const systemBytes = snapshot.modules
+      .filter(({ category }) => category === "os" || category === "driver")
+      .reduce((total, module) => total + module.residentBytes, 0);
+    const runtimeBytes = snapshot.modules
+      .filter(({ category }) => category !== "os" && category !== "driver")
+      .reduce((total, module) => total + module.residentBytes, 0);
     return {
-      ...regions,
-      total: memoryRegion(
-        totalBytes,
-        regions.conventional.used +
-          regions.upper.used +
-          regions.reserved.used +
-          regions.extended.used,
-      ),
-      commandBytes,
-      dosHigh,
-      emm386,
+      conventional,
+      extended,
+      largestConventionalBlockBytes:
+        snapshot.regions.conventional.largestFreeBlockBytes,
+      largestUpperBlockBytes: snapshot.regions.upper.largestFreeBlockBytes,
+      reserved,
       runtimeBytes,
-      systemBytes:
-        regions.conventional.used -
-        runtimeBytes +
-        regions.upper.used +
-        regions.extended.used,
-      umb,
-      xms,
+      snapshot,
+      systemBytes,
+      total: memoryRegion(
+        snapshot.physical.totalBytes,
+        snapshot.physical.usedBytes,
+      ),
+      upper,
     };
+  }
+
+  private appendDosFreeExtents(
+    lines: string[],
+    name: string,
+    region: DosGuestMemoryRegionSnapshot,
+  ): void {
+    if (region.freeExtents.length === 0) {
+      lines.push(`${name.padEnd(18)} none`);
+      return;
+    }
+    for (const extent of region.freeExtents) {
+      const start = extent.start.toString(16).toUpperCase().padStart(8, "0");
+      const end = (extent.endExclusive - 1)
+        .toString(16)
+        .toUpperCase()
+        .padStart(8, "0");
+      lines.push(
+        `${name.padEnd(18)} ${start}-${end}  ${String(extent.size).padStart(10)} bytes`,
+      );
+    }
   }
 
   private dosMemoryRow(name: string, region: MemoryRegion): string {
@@ -6970,6 +7228,12 @@ function memoryRegion(total: number, used: number): MemoryRegion {
     total: boundedTotal,
     used: boundedUsed,
   };
+}
+
+function titleCase(value: string): string {
+  return value.length === 0
+    ? value
+    : `${value[0]!.toUpperCase()}${value.slice(1)}`;
 }
 
 function normalizeGuestProgramOutput(

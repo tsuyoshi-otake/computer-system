@@ -1,8 +1,8 @@
 # Phase 0 compatibility test guidance
 
 - Phase 0 facades still have production consumers. Tests preserve their bounded
-  lease, transaction, monitor, portable-session, redstone, terminal, probe, and
-  scheduler contracts while modern owners evolve.
+  lease, transaction, portable-session, redstone, terminal, probe, and scheduler
+  contracts while modern owners evolve.
 - Do not add new production policy to make a compatibility test pass. Prove the
   facade delegates or remains behaviorally equivalent to the current owner.
 - Cover commit/rollback exactly once, capacity-plus-one, cancellation, conflict,

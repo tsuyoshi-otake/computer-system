@@ -13,17 +13,18 @@ Parent: #1 Blocked by: #4
       bootable CS-DOS system disks, modeled I/O timing, and Web Terminal FDD
       sounds.
 - [ ] Implement the generic Disk Drive and `/disk`, `/disk2` mount behavior.
-- [ ] Implement Monitor and Advanced Monitor using the validated rendering
-      adapter.
+- [x] Retire the standalone display peripheral; Desktop and Advanced now use a
+      built-in CRT in their one-block all-in-one chassis.
 - [ ] Implement Speaker notes and registered sounds within validated limits.
 - [ ] Implement Printer, Printed Page, Printed Pages, and Printed Book.
 - [ ] Implement `peripheral`, `disk`, `colors`, and relevant terminal APIs.
 
 ## Acceptance rubric
 
-`Verify:` Attach and detach every peripheral, mount multiple disks, render and
-interact with a connected monitor, play notes, print and reopen a multipage
-document, and produce independent analog output through two interfaces.
+`Verify:` Attach and detach every peripheral, mount multiple disks, interact
+directly with both integrated Desktop CRT machines, play notes, print and reopen
+a multipage document, and produce independent analog output through two
+interfaces.
 
 `Expect:` Events are delivered once, resources remain bounded, saved media
 survives reload, and unsupported behavior returns an explicit error.

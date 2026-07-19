@@ -6,8 +6,20 @@ import {
   compileCs486Source,
 } from "../../src/application/toolchain/highLevelCompilers.js";
 import { linkCs486Objects } from "../../src/application/toolchain/cs486Linker.js";
-import { runCs486 } from "../../src/domain/cpu/cs486.js";
+import {
+  cs486ExecutableMemoryRequirements,
+  runCs486,
+  type Cs486Executable,
+} from "../../src/domain/cpu/cs486.js";
 import { InMemoryFilesystem } from "../../src/domain/filesystem/inMemoryFilesystem.js";
+
+function declaredLinearMemoryBytes(executable: Cs486Executable): number {
+  const requirements = cs486ExecutableMemoryRequirements(executable);
+  if (requirements.kind !== "declared") {
+    throw new Error("toolchain writer produced a legacy executable");
+  }
+  return requirements.linearAddressSpaceBytes;
+}
 
 describe("CS486DX shell toolchain", (): void => {
   it("assembles, inspects, and executes a CS486 program", (): void => {
@@ -74,9 +86,11 @@ describe("CS486DX shell toolchain", (): void => {
       "basic",
       filesystem.readFile("/work/sum.bas"),
     );
-    expect(runCs486(basicExecutable, { memoryBytes: 65_536 }).output).toBe(
-      "15\n",
-    );
+    expect(
+      runCs486(basicExecutable, {
+        memoryBytes: declaredLinearMemoryBytes(basicExecutable),
+      }).output,
+    ).toBe("15\n");
     expect(shell.submit("basic /work/sum.bas").exitCode).toBe(127);
     expect(shell.submit("basicc /work/sum.bas").exitCode).toBe(127);
     expect(shell.submit("cc /work/sum.c -o /work/sum-c").exitCode).toBe(0);
@@ -101,7 +115,9 @@ describe("CS486DX shell toolchain", (): void => {
         "}",
       ].join("\n"),
     );
-    const result = runCs486(executable, { memoryBytes: 65_536 });
+    const result = runCs486(executable, {
+      memoryBytes: declaredLinearMemoryBytes(executable),
+    });
 
     expect(result.output).toBe("15\n");
     expect(result.registers.esp).toBe(65_536);
@@ -152,7 +168,9 @@ describe("CS486DX shell toolchain", (): void => {
       ].join("\n"),
     );
     const executable = linkCs486Objects([object]);
-    const result = runCs486(executable, { memoryBytes: 65_536 });
+    const result = runCs486(executable, {
+      memoryBytes: declaredLinearMemoryBytes(executable),
+    });
     const frameOffsets = [
       ...object.assembly.matchAll(/^sub ecx, (\d+)$/gmu),
     ].map((match) => Number(match[1]));
@@ -451,14 +469,14 @@ describe("CS486DX shell toolchain", (): void => {
         ),
       );
 
-      const result = runCs486(
-        compileCs486Source(
-          language,
-          ["int helper();", main, definition].join("\n"),
-          { sourceName },
-        ),
-        { memoryBytes: 65_536 },
+      const executable = compileCs486Source(
+        language,
+        ["int helper();", main, definition].join("\n"),
+        { sourceName },
       );
+      const result = runCs486(executable, {
+        memoryBytes: declaredLinearMemoryBytes(executable),
+      });
       expect(result.registers.eax).toBe(42);
       expect(result.registers.esp).toBe(65_536);
     },

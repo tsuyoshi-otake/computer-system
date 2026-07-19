@@ -41,6 +41,8 @@ const maximumTuiWaitMs = 120_000;
 const maximumTuiWidth = 200;
 const maximumTuiHeight = 100;
 const maximumTuiContainsLength = 500;
+const browserInteractionSchema = "1";
+const browserInteractionSchemaHeader = "x-computer-system-interaction-schema";
 const maximumHandoffFailuresPerWindow = 8;
 const maximumHandoffFailureClients = 256;
 const handoffFailureWindowMs = 60_000;
@@ -284,7 +286,15 @@ export class WebCompanionServer {
     if (snapshot !== undefined) {
       const payload = JSON.parse(snapshot);
       if (typeof payload.sessionId === "string") {
-        this.store.updateTerminal(payload.sessionId, payload);
+        try {
+          requirePublishedTerminalInteraction(payload);
+          this.store.updateTerminal(payload.sessionId, payload);
+        } catch {
+          this.store.close(payload.sessionId, "interaction_protocol_mismatch", {
+            relayToBedrock: true,
+          });
+          await this.flushBedrockClosures();
+        }
       }
       return;
     }
@@ -824,7 +834,8 @@ export class WebCompanionServer {
     }
     return this.serializeComputerOperation(identity.computerId, async () => {
       const session = this.requireTuiSession(identity);
-      if (session.terminal?.terminal?.secretInput !== false) {
+      const interaction = requireSessionTerminalInteraction(session);
+      if (interaction.secretInput) {
         throw new Error(
           "MCP TUI input is unavailable until a non-secret terminal frame is active.",
         );
@@ -1004,17 +1015,18 @@ export class WebCompanionServer {
       return;
     }
     if (request.method === "GET" && url.pathname === "/api/session") {
-      const session = this.store.authenticate(bearerToken(request));
+      const session = this.authenticateBrowserSession(request);
       writeJson(response, 200, this.store.publicSession(session));
       return;
     }
     if (request.method === "GET" && url.pathname === "/api/events") {
-      this.streamEvents(request, response);
+      const session = this.authenticateBrowserSession(request);
+      this.streamEvents(request, response, session);
       return;
     }
     if (request.method === "POST" && url.pathname === "/api/input") {
       requireSameOrigin(request, this.allowedOrigins);
-      const session = this.store.authenticate(bearerToken(request));
+      const session = this.authenticateBrowserSession(request);
       const body = await readJson(request, 4_096);
       const result = await this.relayInput(session, body);
       writeJson(response, 202, result);
@@ -1022,7 +1034,7 @@ export class WebCompanionServer {
     }
     if (request.method === "POST" && url.pathname === "/api/complete") {
       requireSameOrigin(request, this.allowedOrigins);
-      const session = this.store.authenticate(bearerToken(request));
+      const session = this.authenticateBrowserSession(request);
       const body = await readJson(request, 4_096);
       const completion = await this.completeInput(session, body);
       writeJson(response, 200, completion);
@@ -1030,7 +1042,7 @@ export class WebCompanionServer {
     }
     if (request.method === "POST" && url.pathname === "/api/resize") {
       requireSameOrigin(request, this.allowedOrigins);
-      const session = this.store.authenticate(bearerToken(request));
+      const session = this.authenticateBrowserSession(request);
       const body = await readJson(request, 4_096);
       await this.resizeTerminal(session, body);
       writeJson(response, 202, { outcome: "accepted" });
@@ -1038,14 +1050,14 @@ export class WebCompanionServer {
     }
     if (request.method === "POST" && url.pathname === "/api/take-control") {
       requireSameOrigin(request, this.allowedOrigins);
-      const session = this.store.authenticate(bearerToken(request));
+      const session = this.authenticateBrowserSession(request);
       const controlled = await this.takeControl(session);
       writeJson(response, 200, { outcome: "writer", session: controlled });
       return;
     }
     if (request.method === "POST" && url.pathname === "/api/power") {
       requireSameOrigin(request, this.allowedOrigins);
-      const session = this.store.authenticate(bearerToken(request));
+      const session = this.authenticateBrowserSession(request);
       const body = await readJson(request, 1_024);
       const result = await this.requestPower(session, body);
       writeJson(response, 200, result);
@@ -1053,14 +1065,14 @@ export class WebCompanionServer {
     }
     if (request.method === "POST" && url.pathname === "/api/floppy/eject") {
       requireSameOrigin(request, this.allowedOrigins);
-      const session = this.store.authenticate(bearerToken(request));
+      const session = this.authenticateBrowserSession(request);
       const result = await this.requestFloppyEject(session);
       writeJson(response, 200, result);
       return;
     }
     if (request.method === "POST" && url.pathname === "/api/close") {
       requireSameOrigin(request, this.allowedOrigins);
-      const session = this.store.authenticate(bearerToken(request));
+      const session = this.authenticateBrowserSession(request);
       await this.closeSession(session);
       writeJson(response, 200, { outcome: "closed" });
       return;
@@ -1072,10 +1084,15 @@ export class WebCompanionServer {
     throw new WebSessionError("route", "Route not found.", 404);
   }
 
-  streamEvents(request, response) {
-    const token = bearerToken(request);
+  authenticateBrowserSession(request) {
+    const session = this.store.authenticate(bearerToken(request));
+    requireBrowserInteractionSchema(request);
+    return session;
+  }
+
+  streamEvents(request, response, session) {
     const writeEvent = createCoalescedEventWriter(response);
-    const subscription = this.store.subscribe(token, writeEvent);
+    const subscription = this.store.subscribe(session.token, writeEvent);
     response.writeHead(200, {
       "Content-Type": "application/x-ndjson; charset=utf-8",
       "Cache-Control": "no-store",
@@ -1114,7 +1131,9 @@ export class WebCompanionServer {
         409,
       );
     }
+    const interaction = requireSessionTerminalInteraction(active);
     if (body?.kind === "interrupt") {
+      requireInteractionInput(interaction, "interrupt");
       await this.bds.runWebRelay(
         `scriptevent computer_system:web-interrupt ${active.sessionId}`,
       );
@@ -1153,6 +1172,7 @@ export class WebCompanionServer {
           "Encoded terminal mouse event is too long.",
         );
       }
+      requireInteractionInput(interaction, "mouse");
       return this.requestInputAdmission(
         active.sessionId,
         "mouse",
@@ -1178,6 +1198,7 @@ export class WebCompanionServer {
           "Encoded terminal keys are too long.",
         );
       }
+      requireInteractionInput(interaction, "keys");
       return this.requestInputAdmission(active.sessionId, "keys", encodedKeys);
     }
     if (body?.kind !== "line" || typeof body.value !== "string") {
@@ -1200,6 +1221,7 @@ export class WebCompanionServer {
         "Encoded terminal input is too long for the BDS relay.",
       );
     }
+    requireInteractionInput(interaction, "line");
     return this.requestInputAdmission(active.sessionId, "line", encoded);
   }
 
@@ -1282,6 +1304,15 @@ export class WebCompanionServer {
         throw new WebSessionError(
           "read_only",
           "This browser terminal is view only. Take control before completing input.",
+          409,
+        );
+      }
+      const interaction = requireSessionTerminalInteraction(active);
+      requireInteractionInput(interaction, "line");
+      if (interaction?.secretInput === true) {
+        throw new WebSessionError(
+          "secret_input",
+          "Completion is unavailable while secret input is active.",
           409,
         );
       }
@@ -1848,6 +1879,121 @@ export function parseOptionalBooleanFlag(value, name) {
   return parseBooleanFlag(value, name);
 }
 
+function requireBrowserInteractionSchema(request) {
+  if (
+    request.headers[browserInteractionSchemaHeader] === browserInteractionSchema
+  )
+    return;
+  throw new WebSessionError(
+    "interaction_protocol_mismatch",
+    "This browser uses an incompatible Web Terminal interaction schema. Reload the page after restarting the companion.",
+    426,
+  );
+}
+
+function requireSessionTerminalInteraction(session) {
+  const interaction = optionalSessionTerminalInteraction(session);
+  if (interaction === undefined) {
+    throw new WebSessionError(
+      "terminal_not_ready",
+      "The Computer has not published an interaction-ready terminal frame.",
+      409,
+    );
+  }
+  return interaction;
+}
+
+function optionalSessionTerminalInteraction(session) {
+  if (session.terminal === null || session.terminal === undefined)
+    return undefined;
+  try {
+    return requirePublishedTerminalInteraction(session.terminal);
+  } catch {
+    throw new WebSessionError(
+      "interaction_protocol_mismatch",
+      "The Computer published an incompatible terminal interaction schema.",
+      426,
+    );
+  }
+}
+
+function requirePublishedTerminalInteraction(payload) {
+  const interaction = payload?.terminal?.interaction;
+  if (
+    interaction === null ||
+    typeof interaction !== "object" ||
+    Array.isArray(interaction) ||
+    interaction.schema !== 1 ||
+    !["keys", "line", "none"].includes(interaction.inputMode) ||
+    !["cell", "none"].includes(interaction.pointer) ||
+    !["dos-tui", "terminal"].includes(interaction.presentation) ||
+    ![
+      "busy",
+      "csasm",
+      "edit",
+      "login",
+      "pwb",
+      "qbasic",
+      "secret",
+      "shell",
+      "unavailable",
+      "vi-command",
+      "vi-insert",
+      "vi-normal",
+      "vi-output",
+    ].includes(interaction.context) ||
+    typeof interaction.secretInput !== "boolean" ||
+    typeof interaction.interrupt !== "boolean" ||
+    (interaction.helpTopicId !== undefined &&
+      !boundedInteractionText(interaction.helpTopicId, 64)) ||
+    !Array.isArray(interaction.hints) ||
+    interaction.hints.length > 5 ||
+    interaction.hints.some(
+      (hint) =>
+        hint === null ||
+        typeof hint !== "object" ||
+        Array.isArray(hint) ||
+        !boundedInteractionText(hint.key, 32) ||
+        !boundedInteractionText(hint.label, 64),
+    ) ||
+    (interaction.pointer === "cell" &&
+      (interaction.inputMode !== "keys" ||
+        interaction.presentation !== "dos-tui")) ||
+    (interaction.secretInput &&
+      interaction.inputMode !== "line" &&
+      interaction.inputMode !== "none")
+  ) {
+    throw new Error("Invalid terminal interaction schema.");
+  }
+  return interaction;
+}
+
+function boundedInteractionText(value, maximumLength) {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= maximumLength &&
+    !/[\0\r\n]/u.test(value)
+  );
+}
+
+function requireInteractionInput(interaction, kind) {
+  const allowed =
+    kind === "interrupt"
+      ? interaction.interrupt
+      : kind === "mouse"
+        ? interaction.pointer === "cell"
+        : kind === "keys"
+          ? interaction.inputMode === "keys"
+          : interaction.inputMode === "line";
+  if (allowed) return;
+  throw new WebSessionError(
+    "input_mode_changed",
+    "The terminal input mode changed before this input was admitted.",
+    409,
+  );
+}
+
 function retryableInputBusy(detail) {
   const error = new WebSessionError("input_busy", detail, 429);
   error.retryAfterSeconds = 1;
@@ -1978,11 +2124,11 @@ function serializeTuiScreen(session, includeColors) {
     terminal.foreground.length !== terminal.height ||
     !Array.isArray(terminal.background) ||
     terminal.background.length !== terminal.height ||
-    typeof terminal.secretInput !== "boolean"
+    requirePublishedTerminalInteraction(payload).schema !== 1
   ) {
     throw new Error("The Web Terminal published an invalid text surface.");
   }
-  if (terminal.secretInput) {
+  if (payload.terminal.interaction.secretInput) {
     throw new Error(
       "TUI inspection is unavailable while secret input is active.",
     );

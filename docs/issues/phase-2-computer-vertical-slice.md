@@ -2,6 +2,11 @@
 
 Parent: #1 Blocked by: #2 and #3
 
+> Superseded hardware note: later work replaced the standalone Monitor fallback
+> with a built-in CRT in each one-block Desktop/Advanced machine. Sections below
+> that mention Monitor adjacency are retained only as historical acceptance
+> evidence.
+
 ## Scope
 
 - [x] Create installable Behavior Pack and Resource Pack artifacts.
@@ -15,8 +20,7 @@ Parent: #1 Blocked by: #2 and #3
       add bounded core utilities, Bash builtins, Linux-formatted system output,
       and dynamic `/proc` identity, uptime, load, and mount files.
 - [x] Replace the Phase 0 probe implementation with a production terminal view
-      coordinator shared by Desktop and Portable Computer Systems and the
-      Monitor fallback.
+      coordinator shared by Desktop and Portable Computer Systems.
 - [ ] Verify the dedicated ComputerCraft-inspired terminal view on the supported
       GDK client at the reference resolution.
 - [x] Model and render 51x19 fixed cells, monospace rows, cursor state, and all

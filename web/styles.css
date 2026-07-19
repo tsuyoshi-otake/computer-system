@@ -1,6 +1,6 @@
 @font-face {
-  font-family: "IBM VGA 8x16";
-  src: url("/fonts/WebPlus_IBM_VGA_8x16.woff") format("woff");
+  font-family: "IBM VGA 9x16";
+  src: url("/fonts/WebPlus_IBM_VGA_9x16.woff") format("woff");
   font-style: normal;
   font-weight: 400;
   font-display: block;
@@ -25,6 +25,7 @@
   --terminal-font:
     "Cascadia Mono", "IBM Plex Mono", "SFMono-Regular", Consolas,
     "Liberation Mono", monospace;
+  --terminal-screen-font: "IBM VGA 9x16", var(--terminal-font);
 }
 
 * {
@@ -52,6 +53,10 @@ input,
 select,
 textarea {
   font: inherit;
+}
+
+[hidden] {
+  display: none !important;
 }
 
 .handoff-form {
@@ -307,8 +312,10 @@ h1 {
 }
 
 .terminal-stage {
-  --terminal-frame-width: 683.2px;
-  --terminal-frame-height: 462px;
+  --terminal-frame-width: 504px;
+  --terminal-frame-height: 378px;
+  --terminal-horizontal-scale: 0.8;
+  --terminal-raster-margin: 1em;
   position: relative;
   display: grid;
   width: 100%;
@@ -330,15 +337,17 @@ h1 {
   max-height: 100%;
   overflow: hidden;
   background: var(--terminal-screen-bg);
-  box-shadow:
-    0 0 0 1px var(--line-strong),
-    0 0 0 5px #050708,
-    0 12px 34px rgb(0 0 0 / 0.48);
+  box-shadow: none;
+  font-family: var(--terminal-screen-font);
   font-size: var(--terminal-font-size);
-  line-height: 1.32;
-  transition:
-    border-radius var(--motion-fast),
-    box-shadow var(--motion-fast);
+  font-style: normal;
+  font-weight: 400;
+  font-synthesis: none;
+  line-height: 1;
+  letter-spacing: 0;
+  -webkit-font-smoothing: none;
+  text-rendering: geometricprecision;
+  transition: border-radius var(--motion-fast);
 }
 
 .terminal-filter-definitions {
@@ -352,10 +361,18 @@ h1 {
 .terminal-optical-source {
   position: absolute;
   z-index: 1;
-  inset: 0;
+  inset: var(--terminal-raster-margin) 0;
   overflow: hidden;
   background: var(--terminal-screen-bg);
   transform: translateZ(0);
+}
+
+.terminal-raster-content {
+  position: absolute;
+  inset: 0;
+  width: calc(100% / var(--terminal-horizontal-scale));
+  transform: scaleX(var(--terminal-horizontal-scale));
+  transform-origin: left top;
 }
 
 .terminal-display::before,
@@ -367,11 +384,6 @@ h1 {
   content: "";
 }
 
-.terminal-display::before {
-  border: 1px solid rgb(237 241 235 / 0.08);
-  box-shadow: inset 0 0 0 1px rgb(0 0 0 / 0.7);
-}
-
 .terminal-display::after {
   background: linear-gradient(
     118deg,
@@ -379,7 +391,6 @@ h1 {
     transparent 19% 78%,
     rgb(0 0 0 / 0.08)
   );
-  box-shadow: inset 0 0 22px rgb(0 0 0 / 0.2);
 }
 
 .terminal-optical-source::before,
@@ -476,10 +487,7 @@ h1 {
 
 .terminal-display[data-screen-shape="curved"] {
   border-radius: min(3vw, 22px);
-  box-shadow:
-    0 0 0 1px var(--line-strong),
-    0 0 0 6px #050708,
-    0 14px 38px rgb(0 0 0 / 0.56);
+  box-shadow: none;
 }
 
 .terminal-display[data-screen-shape="curved"] .terminal-optical-source {
@@ -495,7 +503,6 @@ h1 {
       rgb(0 0 0 / 0.12)
     ),
     radial-gradient(ellipse at center, transparent 58%, rgb(0 0 0 / 0.38) 100%);
-  box-shadow: inset 0 0 28px rgb(0 0 0 / 0.3);
 }
 
 .terminal-output {
@@ -506,7 +513,7 @@ h1 {
   min-width: 0;
   min-height: 0;
   font-size: inherit;
-  line-height: 1.32;
+  line-height: 1;
   font-variant-ligatures: none;
   cursor: text;
   user-select: text;
@@ -520,9 +527,9 @@ h1 {
 
 .terminal-row,
 .system-line {
-  height: 1.32em;
+  height: 1em;
   margin: 0;
-  line-height: 1.32em;
+  line-height: 1em;
   white-space: pre;
 }
 
@@ -544,18 +551,18 @@ h1 {
   top: var(--cursor-top);
   right: 0;
   left: 0;
-  min-height: 1.32em;
+  min-height: 1em;
   margin: 0;
   padding: 0;
   pointer-events: none;
   font-size: inherit;
-  line-height: 1.32;
+  line-height: 1;
 }
 
 .command-line textarea {
   width: 100%;
-  min-height: 1.32em;
-  max-height: 3.96em;
+  min-height: 1em;
+  max-height: 3em;
   margin: 0;
   padding: 0;
   border: 0;
@@ -565,7 +572,7 @@ h1 {
   caret-color: var(--input-color, var(--text));
   pointer-events: auto;
   field-sizing: content;
-  line-height: 1.32;
+  line-height: 1;
   font-variant-ligatures: none;
   overflow: hidden;
   overflow-wrap: anywhere;
@@ -579,40 +586,13 @@ h1 {
   opacity: 0.45;
 }
 
-.terminal-stage.dos-editor-active .terminal-output,
-.terminal-stage.dos-editor-active .command-line,
-.terminal-stage.dos-editor-active .terminal-display {
-  font-family: "IBM VGA 8x16", "Lucida Console", monospace;
-  font-style: normal;
-  font-weight: 400;
-  font-synthesis: none;
-  line-height: 1;
-  letter-spacing: 0;
-  -webkit-font-smoothing: none;
-  text-rendering: geometricprecision;
-}
-
-.terminal-stage.dos-editor-active .terminal-row,
-.terminal-stage.dos-editor-active .system-line {
-  height: 1em;
-  line-height: 1em;
-}
-
 .terminal-stage.dos-editor-active .terminal-cell--join-y {
   position: relative;
   z-index: 1;
   text-shadow: 0 1px currentcolor;
 }
 
-.terminal-stage.dos-editor-active .command-line {
-  min-height: 1em;
-  line-height: 1;
-}
-
 .terminal-stage.dos-editor-active .command-line textarea {
-  min-height: 1em;
-  max-height: 3em;
-  line-height: 1;
   pointer-events: none;
 }
 
@@ -627,18 +607,14 @@ h1 {
 .terminal-display[data-crt-profile="subtle"] .terminal-row > span,
 .terminal-display[data-crt-profile="subtle"] .system-line,
 .terminal-display[data-crt-profile="subtle"] .command-line textarea {
-  text-shadow:
-    -0.22px 0 currentcolor,
-    0.22px 0 currentcolor,
-    0 0 3px color-mix(in srgb, currentcolor 22%, transparent);
+  text-shadow: 0 0 2px color-mix(in srgb, currentcolor 16%, transparent);
 }
 
 .terminal-stage.dos-editor-active
   .terminal-display[data-crt-profile="subtle"]
   .terminal-cell--join-y {
   text-shadow:
-    -0.22px 0 currentcolor,
-    0.22px 0 currentcolor,
+    0 0 2px color-mix(in srgb, currentcolor 16%, transparent),
     0 1px currentcolor;
 }
 
@@ -784,6 +760,14 @@ h1 {
 kbd {
   color: var(--text);
   font-family: inherit;
+}
+
+#keyboard-help kbd {
+  padding: 1px 3px;
+  border: 1px solid var(--line-strong);
+  background: var(--black);
+  color: var(--green);
+  font-size: 0.9em;
 }
 
 button {
@@ -1964,17 +1948,23 @@ dialog form {
     display: none;
   }
 
-  .mark,
-  .statusbar p {
+  .mark {
     display: none;
   }
 
   .statusbar {
-    justify-content: flex-end;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto auto;
     gap: 8px;
   }
 
+  .statusbar p {
+    display: block;
+    grid-column: 1 / -1;
+  }
+
   .keyboard-locks {
+    grid-column: 2;
     margin-inline: 0;
   }
 
@@ -1983,10 +1973,13 @@ dialog form {
   }
 
   .status-actions {
+    grid-column: 3;
     margin-inline: 0;
   }
 
   .status-summary {
+    grid-column: 1;
+    grid-row: 2;
     min-width: 0;
     flex: 1 1 auto;
     overflow: hidden;

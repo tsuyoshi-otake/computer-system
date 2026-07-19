@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 
 import { assembleCs486 } from "../../src/application/toolchain/cs486Assembler.js";
-import { runCs486, type Cs486RunResult } from "../../src/domain/cpu/cs486.js";
+import {
+  cs486ExecutableMemoryRequirements,
+  runCs486,
+  type Cs486RunResult,
+} from "../../src/domain/cpu/cs486.js";
 import { cpuModelSpecification } from "../../src/domain/cpu/models.js";
 
 describe("CS386SX and CS486 memory hierarchy", (): void => {
@@ -112,5 +116,11 @@ function run(
   source: string,
   cpuModel: "cs386sx" | "cs486dx" | "cs486dx2",
 ): Cs486RunResult {
-  return runCs486(assembleCs486(source), { cpuModel, memoryBytes: 65_536 });
+  const executable = assembleCs486(source);
+  const requirements = cs486ExecutableMemoryRequirements(executable);
+  if (requirements.kind !== "declared") throw new Error("expected v3");
+  return runCs486(executable, {
+    cpuModel,
+    memoryBytes: requirements.linearAddressSpaceBytes,
+  });
 }

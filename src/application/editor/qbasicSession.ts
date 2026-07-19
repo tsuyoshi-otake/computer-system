@@ -16,6 +16,17 @@ import type {
   DosEditorOptions,
   DosEditorProfile,
 } from "./dosEditorOptions.js";
+import {
+  createTerminalInteractionDescriptor,
+  type TerminalInteractionDescriptor,
+  type TerminalInteractionHint,
+} from "../terminal/terminalInteraction.js";
+import {
+  guestToolchainTranscriptFromStreams,
+  renderGuestToolchainTranscript,
+  type GuestToolchainTranscript,
+  type NavigableGuestDiagnostic,
+} from "../toolchain/guestToolchainTranscript.js";
 
 export type DosIdeLanguage = "asm" | "basic" | "c" | "cpp";
 export type DosIdeProduct = "cs-asm" | "cs-cpp" | "qbasic";
@@ -58,6 +69,7 @@ export type QBasicSessionResult =
     };
 
 export interface QBasicSessionOptions {
+  readonly diagnosticSourceDisplay?: (source: string) => string;
   readonly editorConfiguration?: DosEditorConfiguration;
   readonly editorMode?: boolean;
   readonly externalContext?: ViExternalContextProvider;
@@ -88,6 +100,21 @@ type WorkBenchMenuName =
   | "search"
   | "view";
 type WorkBenchMode = "about" | "editing" | "help" | "menu" | "program-list";
+type WorkBenchOverlay =
+  "about" | "help" | "menu" | "none" | "program-list" | "welcome";
+type WorkBenchViewState =
+  | {
+      readonly overlay: WorkBenchOverlay;
+      readonly primary: "source";
+    }
+  | {
+      readonly overlay: "none";
+      readonly primary: "output";
+    }
+  | {
+      readonly overlay: "menu" | "none" | "program-list";
+      readonly primary: "debugger";
+    };
 type WorkBenchAction =
   | DosEditAction
   | "about"
@@ -117,11 +144,10 @@ interface WorkBenchMenuEntry {
   readonly shortcut: string;
 }
 
-interface OutputDiagnostic {
-  readonly column: number;
-  readonly fileName: string;
-  readonly line: number;
-  readonly outputLine: number;
+interface DosIdeCommandCatalog {
+  readonly menuOrder: readonly WorkBenchMenuName[];
+  readonly sourceRunOnly: boolean;
+  readonly supportedCommands: readonly DosIdeCommand[];
 }
 
 const workBenchMenuOrder = [
@@ -155,6 +181,44 @@ const qBasicMenuOrder = [
   "options",
   "help",
 ] as const;
+const fullWorkBenchCommands: readonly DosIdeCommand[] = [
+  "build",
+  "build-run",
+  "clean",
+  "compile-file",
+  "debug-clear-breakpoint",
+  "debug-continue",
+  "debug-set-breakpoint",
+  "debug-start",
+  "debug-step",
+  "debug-stop",
+  "rebuild",
+  "run",
+];
+const dosIdeCommandCatalogs: Readonly<
+  Record<DosEditorProfile, DosIdeCommandCatalog>
+> = {
+  csasm: {
+    menuOrder: workBenchMenuOrder,
+    sourceRunOnly: false,
+    supportedCommands: fullWorkBenchCommands,
+  },
+  edit: {
+    menuOrder: [],
+    sourceRunOnly: false,
+    supportedCommands: [],
+  },
+  pwb: {
+    menuOrder: workBenchMenuOrder,
+    sourceRunOnly: false,
+    supportedCommands: fullWorkBenchCommands,
+  },
+  qbasic: {
+    menuOrder: qBasicMenuOrder,
+    sourceRunOnly: true,
+    supportedCommands: ["build-run"],
+  },
+};
 const workBenchMenus: Readonly<
   Record<WorkBenchMenuName, readonly WorkBenchMenuEntry[]>
 > = {
@@ -304,22 +368,21 @@ const editActions: readonly DosEditAction[] = [
 
 /** Shared DOS workbench controller used by CS QBASIC, CS ASM, CS C/C++, and EDIT. */
 export class DosIdeSession {
+  private readonly commandCatalog: DosIdeCommandCatalog;
   private readonly debuggerBreakpoints = new Set<number>();
   private readonly editor: DosEditSession;
+  private readonly editorProfileValue: DosEditorProfile;
   private readonly pressedButtons = new Set<0 | 1 | 2>();
   private lastRenderedScreen?: EditorScreen;
   private debuggerActiveValue = false;
   private debuggerAddressValue = 0;
   private debuggerOutput = "";
-  private debuggerVisible = false;
   private menuIndex = 0;
   private menuItemIndex = 0;
-  private modeValue: WorkBenchMode = "editing";
-  private output = "";
   private outputDiagnosticIndex = -1;
-  private outputDiagnostics: readonly OutputDiagnostic[] = [];
+  private outputDiagnostics: readonly NavigableGuestDiagnostic[] = [];
+  private outputRows: readonly string[] = [];
   private outputTop = 0;
-  private outputVisible = false;
   private pendingAfterSave?: DosIdeCommand;
   private primaryDrag = false;
   private programListInput = "";
@@ -329,7 +392,10 @@ export class DosIdeSession {
   private lastBuildStaleValue = true;
   private status = "Ready";
   private screenBatch?: EditorScreen;
-  private welcomeVisible: boolean;
+  private viewState: WorkBenchViewState = {
+    overlay: "none",
+    primary: "source",
+  };
 
   constructor(
     fileName: string,
@@ -347,6 +413,8 @@ export class DosIdeSession {
           : options.language === "asm"
             ? "csasm"
             : "pwb";
+    this.editorProfileValue = editorProfile;
+    this.commandCatalog = dosIdeCommandCatalogs[editorProfile];
     this.editor = new DosEditSession(
       fileName,
       contents,
@@ -362,6 +430,70 @@ export class DosIdeSession {
       },
     );
     this.welcomeVisible = options.showWelcome ?? false;
+  }
+
+  private get debuggerVisible(): boolean {
+    return this.viewState.primary === "debugger";
+  }
+
+  private set debuggerVisible(visible: boolean) {
+    if (visible) {
+      this.viewState = { overlay: "none", primary: "debugger" };
+    } else if (this.viewState.primary === "debugger") {
+      this.viewState = { overlay: "none", primary: "source" };
+    }
+  }
+
+  private get modeValue(): WorkBenchMode {
+    const overlay = this.viewState.overlay;
+    return overlay === "none" || overlay === "welcome" ? "editing" : overlay;
+  }
+
+  private set modeValue(mode: WorkBenchMode) {
+    if (mode === "editing") {
+      this.viewState =
+        this.viewState.primary === "debugger"
+          ? { overlay: "none", primary: "debugger" }
+          : this.viewState.primary === "output"
+            ? { overlay: "none", primary: "output" }
+            : { overlay: "none", primary: "source" };
+      return;
+    }
+    if (mode === "menu" || mode === "program-list") {
+      this.viewState =
+        this.viewState.primary === "debugger"
+          ? { overlay: mode, primary: "debugger" }
+          : { overlay: mode, primary: "source" };
+      return;
+    }
+    this.viewState = { overlay: mode, primary: "source" };
+  }
+
+  private get outputVisible(): boolean {
+    return this.viewState.primary === "output";
+  }
+
+  private set outputVisible(visible: boolean) {
+    if (visible) {
+      this.viewState = { overlay: "none", primary: "output" };
+    } else if (this.viewState.primary === "output") {
+      this.viewState = { overlay: "none", primary: "source" };
+    }
+  }
+
+  private get welcomeVisible(): boolean {
+    return (
+      this.viewState.primary === "source" &&
+      this.viewState.overlay === "welcome"
+    );
+  }
+
+  private set welcomeVisible(visible: boolean) {
+    if (visible) {
+      this.viewState = { overlay: "welcome", primary: "source" };
+    } else if (this.viewState.overlay === "welcome") {
+      this.viewState = { overlay: "none", primary: "source" };
+    }
   }
 
   get contents(): string {
@@ -417,6 +549,118 @@ export class DosIdeSession {
     return this.editor.state;
   }
 
+  get editorProfile(): DosEditorProfile {
+    return this.editorProfileValue;
+  }
+
+  terminalInteraction(): TerminalInteractionDescriptor {
+    if (this.editor.state === "closed") {
+      return createTerminalInteractionDescriptor({
+        context: "unavailable",
+        helpTopicId: this.editorProfileValue,
+        inputMode: "none",
+        interrupt: false,
+        pointer: "none",
+        presentation: "dos-tui",
+        secretInput: false,
+      });
+    }
+    return createTerminalInteractionDescriptor({
+      context: this.editorProfileValue,
+      helpTopicId: this.editorProfileValue,
+      hints: this.interactionHints(),
+      inputMode: "keys",
+      interrupt: false,
+      pointer: "cell",
+      presentation: "dos-tui",
+      secretInput: false,
+    });
+  }
+
+  private interactionHints(): readonly TerminalInteractionHint[] {
+    if (this.welcomeVisible) {
+      return [
+        { key: "Enter", label: "Open editor" },
+        { key: "F1", label: "Help" },
+        { key: "Esc", label: "Open editor" },
+      ];
+    }
+    if (this.options.editorMode === true) {
+      return this.editor.mode === "editing"
+        ? [
+            { key: "F1", label: "Help" },
+            { key: "F2", label: "Save" },
+            { key: "F3", label: "Find next" },
+            { key: "F10", label: "Menu" },
+            { key: "Alt+X", label: "Exit" },
+          ]
+        : [{ key: "Esc", label: "Close dialog" }];
+    }
+    if (this.modeValue === "program-list") {
+      return [
+        { key: "Enter", label: "Set program list" },
+        { key: "Esc", label: "Cancel" },
+      ];
+    }
+    if (this.modeValue === "help" || this.modeValue === "about") {
+      return [
+        { key: "F1", label: "Close" },
+        { key: "Enter", label: "Close" },
+        { key: "Esc", label: "Close" },
+      ];
+    }
+    if (this.modeValue === "menu") {
+      return [
+        { key: "Arrows", label: "Navigate" },
+        { key: "Enter", label: "Choose" },
+        { key: "Esc", label: "Close menu" },
+      ];
+    }
+    if (this.editor.mode !== "editing") {
+      return [{ key: "Esc", label: "Close dialog" }];
+    }
+    if (this.outputVisible) {
+      return [
+        { key: "F4", label: "Source" },
+        { key: "Esc", label: "Source" },
+        { key: "Up/Down", label: "Scroll" },
+        { key: "F3", label: "Next error" },
+        { key: "Shift+F3", label: "Previous error" },
+      ];
+    }
+    if (this.debuggerVisible) {
+      return this.debuggerActiveValue
+        ? [
+            { key: "Esc", label: "Source" },
+            { key: "F5", label: "Continue" },
+            { key: "F8", label: "Step" },
+            { key: "F9", label: "Breakpoint" },
+            { key: "Shift+F5", label: "Stop" },
+          ]
+        : [
+            { key: "Esc", label: "Source" },
+            { key: "F5", label: "Start debugger" },
+            { key: "F10", label: "Menu" },
+          ];
+    }
+    if (this.editorProfileValue === "qbasic") {
+      return [
+        { key: "F1", label: "Help" },
+        { key: "F2", label: "Save" },
+        { key: "F4", label: "Output" },
+        { key: "F5", label: "Run" },
+        { key: "F10", label: "Menu" },
+      ];
+    }
+    return [
+      { key: "F1", label: "Help" },
+      { key: "F2", label: "Save" },
+      { key: "F5", label: "Debug" },
+      { key: "F7", label: "Build" },
+      { key: "F10", label: "Menu" },
+    ];
+  }
+
   get language(): DosIdeLanguage {
     return this.options.language ?? "basic";
   }
@@ -440,11 +684,15 @@ export class DosIdeSession {
     command:
       "build" | "build-run" | "clean" | "compile-file" | "rebuild" | "run",
     exitCode: number,
-    output = "",
+    transcript: GuestToolchainTranscript,
     artifactDisplayName = this.artifactDisplayName(),
   ): EditorScreen {
-    this.output = output.slice(0, 256_000);
-    this.outputDiagnostics = parseOutputDiagnostics(this.output);
+    const rendered = renderGuestToolchainTranscript(transcript, {
+      displaySource: this.options.diagnosticSourceDisplay,
+      profile: "dos",
+    });
+    this.outputRows = rendered.orderedRows;
+    this.outputDiagnostics = rendered.navigableDiagnostics;
     this.outputDiagnosticIndex = -1;
     this.outputTop = 0;
     if (this.product === "qbasic") {
@@ -534,7 +782,11 @@ export class DosIdeSession {
   }
 
   completeRun(exitCode: number, output = ""): EditorScreen {
-    return this.completeCommand("build-run", exitCode, output);
+    return this.completeCommand(
+      "build-run",
+      exitCode,
+      guestToolchainTranscriptFromStreams(output, ""),
+    );
   }
 
   completeDebuggerCommand(
@@ -719,22 +971,19 @@ export class DosIdeSession {
         dosTuiColor.status,
       );
     }
-    if (this.outputVisible) this.drawOutput(rows);
-    if (this.debuggerVisible) this.drawDebugger(rows);
-    if (this.modeValue === "menu") {
+    if (this.viewState.primary === "output") this.drawOutput(rows);
+    else if (this.viewState.primary === "debugger") this.drawDebugger(rows);
+    if (this.viewState.overlay === "menu") {
       this.drawActiveMenuHeading(rows);
       this.drawMenu(rows);
     }
-    if (this.modeValue === "help") this.drawHelp(rows);
-    if (this.modeValue === "about") this.drawAbout(rows);
-    if (this.modeValue === "program-list") this.drawProgramList(rows);
-    if (this.welcomeVisible) this.drawWelcome(rows);
+    if (this.viewState.overlay === "help") this.drawHelp(rows);
+    if (this.viewState.overlay === "about") this.drawAbout(rows);
+    if (this.viewState.overlay === "program-list") this.drawProgramList(rows);
+    if (this.viewState.overlay === "welcome") this.drawWelcome(rows);
     const screen = {
       cursor:
-        this.outputVisible ||
-        this.debuggerVisible ||
-        this.welcomeVisible ||
-        this.modeValue !== "editing"
+        this.viewState.primary !== "source" || this.viewState.overlay !== "none"
           ? { x: 1, y: 1 }
           : base.cursor,
       rows,
@@ -776,14 +1025,12 @@ export class DosIdeSession {
     if (key === "F4") return this.toggleOutput();
     if (this.outputVisible) {
       if (key === "Escape") return this.toggleOutput();
+      if (key === "F1") return this.openHelp();
       if (key === "F10") return this.openMenu("file");
       if (key === "F3") return this.navigateDiagnostic(1);
       if (key === "Shift+F3") return this.navigateDiagnostic(-1);
       const viewportLines = this.editor.height - 4;
-      const maximumTop = Math.max(
-        0,
-        this.output.replaceAll("\r\n", "\n").split("\n").length - viewportLines,
-      );
+      const maximumTop = Math.max(0, this.outputRows.length - viewportLines);
       if (key === "ArrowUp") this.outputTop -= 1;
       else if (key === "ArrowDown") this.outputTop += 1;
       else if (key === "PageUp") this.outputTop -= viewportLines;
@@ -815,13 +1062,13 @@ export class DosIdeSession {
     }
     if (key === "F1") return this.openHelp();
     if (
-      this.product === "qbasic" &&
+      this.commandCatalog.sourceRunOnly &&
       (key === "F5" || key === "Ctrl+F5" || key === "Shift+F5")
     ) {
       return this.command("build-run");
     }
     if (
-      this.product === "qbasic" &&
+      this.commandCatalog.sourceRunOnly &&
       (key === "F7" || key === "F8" || key === "F9")
     ) {
       this.status =
@@ -979,7 +1226,7 @@ export class DosIdeSession {
       return " F1=Help  Enter=Execute  Esc=Cancel";
     }
     if (this.modeValue === "program-list") {
-      return " F1=Help  Enter=Execute  Esc=Cancel  Tab=Next Field";
+      return " Enter=Set Program List  Esc=Cancel  Backspace=Edit";
     }
     if (this.outputVisible) {
       const detail =
@@ -1033,6 +1280,12 @@ export class DosIdeSession {
   }
 
   private command(command: DosIdeCommand): QBasicSessionResult {
+    if (!this.commandCatalog.supportedCommands.includes(command)) {
+      this.status = this.commandCatalog.sourceRunOnly
+        ? "CS QBASIC runs source directly; no build artifact is created"
+        : this.closeLabel + " does not support " + command;
+      return this.continue();
+    }
     if (
       (command === "build" ||
         command === "build-run" ||
@@ -1241,6 +1494,7 @@ export class DosIdeSession {
   private applyMenuAction(action: WorkBenchAction): QBasicSessionResult {
     this.modeValue = "editing";
     if (isDosEditAction(action)) {
+      this.debuggerVisible = false;
       return this.transform(this.editor.invoke(action));
     }
     if (action === "output") return this.toggleOutput();
@@ -1288,12 +1542,12 @@ export class DosIdeSession {
 
   private activeMenuEntries(): readonly WorkBenchMenuEntry[] {
     const name = this.visibleMenuOrder[this.menuIndex]!;
-    if (this.product === "qbasic" && name === "view") {
+    if (this.commandCatalog.sourceRunOnly && name === "view") {
       return workBenchMenus.view.filter(
         ({ action }) => action !== "debug-show",
       );
     }
-    if (this.product === "qbasic" && name === "run") {
+    if (this.commandCatalog.sourceRunOnly && name === "run") {
       return [
         {
           action: "build-run",
@@ -1343,7 +1597,7 @@ export class DosIdeSession {
   }
 
   private get visibleMenuOrder(): readonly WorkBenchMenuName[] {
-    return this.product === "qbasic" ? qBasicMenuOrder : workBenchMenuOrder;
+    return this.commandCatalog.menuOrder;
   }
 
   private get menuBarText(): string {
@@ -1423,10 +1677,8 @@ export class DosIdeSession {
     for (let y = 2; y < Math.max(2, height - 2); y += 1) {
       rows[y] = row("", width, dosTuiColor.white, dosTuiColor.document);
     }
-    const lines = this.output.replaceAll("\r\n", "\n").split("\n");
-    if (lines.length === 1 && lines[0] === "") {
-      lines[0] = "(No program output)";
-    }
+    const lines =
+      this.outputRows.length === 0 ? ["(No program output)"] : this.outputRows;
     for (
       let index = 0;
       index < Math.min(lines.length - this.outputTop, height - 4);
@@ -1600,38 +1852,6 @@ function productIdentity(
     description: "QBasic-compatible DOS IDE",
     name: csQBasicProductName,
   };
-}
-
-function parseOutputDiagnostics(output: string): readonly OutputDiagnostic[] {
-  const diagnostics: OutputDiagnostic[] = [];
-  const lines = output.replaceAll("\r\n", "\n").split("\n");
-  for (let outputLine = 0; outputLine < lines.length; outputLine += 1) {
-    if (diagnostics.length >= 256) break;
-    const match =
-      /^(.{1,128})\(([0-9]{1,7}),([0-9]{1,7})\):\s+(?:fatal\s+)?(?:error|warning)\b/iu.exec(
-        lines[outputLine] ?? "",
-      );
-    if (match === null) continue;
-    const line = Number(match[2]);
-    const column = Number(match[3]);
-    if (
-      !Number.isSafeInteger(line) ||
-      !Number.isSafeInteger(column) ||
-      line < 1 ||
-      line > 65_535 ||
-      column < 1 ||
-      column > 4_096
-    ) {
-      continue;
-    }
-    diagnostics.push({
-      column,
-      fileName: match[1]!,
-      line,
-      outputLine,
-    });
-  }
-  return diagnostics;
 }
 
 function debuggerAddressFrom(output: string): number | undefined {

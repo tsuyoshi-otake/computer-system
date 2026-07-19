@@ -9,8 +9,12 @@ import { parse } from "../../domain/language/parser.js";
 import type { SourceSpan } from "../../domain/language/source.js";
 import type { GuestFilesystem } from "../os/guestFilesystem.js";
 import {
+  cs486ExecutableMemoryRequirements,
+  createCs486Flat32MemoryMetadata,
   Cs486Process,
-  type Cs486Executable,
+  type Cs486ExecutableMemoryRequirements,
+  type Cs486ExecutableV3,
+  type Cs486Flat32MemoryMetadata,
   type Cs486Instruction,
   type Cs486SyscallContext,
   type Cs486SyscallResult,
@@ -59,9 +63,31 @@ export interface PythonCs486Options {
 }
 
 export interface PythonCs486Program {
-  readonly executable: Cs486Executable;
+  readonly executable: Cs486ExecutableV3;
   readonly process: Cs486Process;
   readonly runtime: PythonCs486Runtime;
+}
+
+export interface PythonCs486PreparationOptions extends Omit<
+  PythonCs486Options,
+  "memoryBytes"
+> {
+  readonly managedRuntimeMemoryBytes?: number;
+  /**
+   * Physical bytes added to the CS486 linear grant for host-managed values.
+   * Defaults to the full managed runtime quota. The built-in boot control loop
+   * uses the base flat-process grant as its complete composite residency.
+   */
+  readonly managedRuntimeResidentBytes?: number;
+}
+
+export interface PreparedPythonCs486Program {
+  readonly executable: Cs486ExecutableV3;
+  readonly requirements: Extract<
+    Cs486ExecutableMemoryRequirements,
+    { readonly kind: "declared" }
+  >;
+  create(linearMemoryBytes: number): PythonCs486Program;
 }
 
 /**
@@ -73,37 +99,88 @@ export interface PythonCs486Program {
 export function createPythonCs486Program(
   options: PythonCs486Options,
 ): PythonCs486Program {
+  const limits = options.limits ?? defaultPythonRuntimeLimits;
+  const runtimeMemoryBytes = Math.min(
+    options.memoryBytes,
+    limits.maxMemoryBytes ?? options.memoryBytes,
+  );
+  const { memoryBytes, ...preparationOptions } = options;
+  return preparePythonCs486Program({
+    ...preparationOptions,
+    managedRuntimeMemoryBytes: runtimeMemoryBytes,
+  }).create(memoryBytes);
+}
+
+export function preparePythonCs486Program(
+  options: PythonCs486PreparationOptions,
+): PreparedPythonCs486Program {
+  const limits = options.limits ?? defaultPythonRuntimeLimits;
+  const managedRuntimeMemoryBytes =
+    options.managedRuntimeMemoryBytes ??
+    limits.maxMemoryBytes ??
+    defaultPythonRuntimeLimits.maxMemoryBytes;
+  if (
+    !Number.isSafeInteger(managedRuntimeMemoryBytes) ||
+    managedRuntimeMemoryBytes === undefined ||
+    managedRuntimeMemoryBytes <= 0
+  )
+    throw new RangeError(
+      "managedRuntimeMemoryBytes must be a positive safe integer",
+    );
+  const managedRuntimeResidentBytes =
+    options.managedRuntimeResidentBytes ?? managedRuntimeMemoryBytes;
+  if (
+    !Number.isSafeInteger(managedRuntimeResidentBytes) ||
+    managedRuntimeResidentBytes < 0 ||
+    managedRuntimeResidentBytes > managedRuntimeMemoryBytes
+  )
+    throw new RangeError(
+      "managedRuntimeResidentBytes must be a nonnegative safe integer no larger than managedRuntimeMemoryBytes",
+    );
+  const memory = createCs486Flat32MemoryMetadata({
+    auxiliaryResidentBytes: managedRuntimeResidentBytes,
+  });
   if (options.filesystem !== options.environment.filesystem) {
     throw new Error(
       "Python imports and native modules must share one guest filesystem",
     );
   }
   const graph = resolveModules(options);
-  const compiler = new PythonCs486Compiler(graph);
+  const compiler = new PythonCs486Compiler(graph, memory);
   const compiled = compiler.compile();
   const executable = appendExtensionObjects(compiled, graph.extensions);
-  const limits = options.limits ?? defaultPythonRuntimeLimits;
-  const runtimeMemoryBytes = Math.min(
-    options.memoryBytes,
-    limits.maxMemoryBytes ?? options.memoryBytes,
-  );
-  const runtime = new PythonCs486Runtime({
-    environment: options.environment,
-    functions: compiled.functions,
-    limits,
-    memoryBytes: runtimeMemoryBytes,
-    modules: compiled.modules,
-    operations: compiled.operations,
-    extensionModules: executable.extensionModules,
+  const requirements = cs486ExecutableMemoryRequirements(executable.executable);
+  if (requirements.kind !== "declared")
+    throw new Error("Python compiler produced a legacy CS486 executable");
+  return Object.freeze({
+    executable: executable.executable,
+    requirements,
+    create(linearMemoryBytes: number): PythonCs486Program {
+      const runtimeHolder: { runtime?: PythonCs486Runtime } = {};
+      const process = new Cs486Process(executable.executable, {
+        cpuModel: options.cpuModel,
+        externalMemoryUsageBytes: (): number =>
+          runtimeHolder.runtime?.memoryUsageBytes ?? 0,
+        memoryBytes: linearMemoryBytes,
+        syscallHandler: (name, context): Cs486SyscallResult => {
+          if (runtimeHolder.runtime === undefined)
+            throw new Error("Python runtime is not initialized");
+          return runtimeHolder.runtime.syscall(name, context);
+        },
+      });
+      const runtime = new PythonCs486Runtime({
+        environment: options.environment,
+        functions: compiled.functions,
+        limits,
+        memoryBytes: managedRuntimeMemoryBytes,
+        modules: compiled.modules,
+        operations: compiled.operations,
+        extensionModules: executable.extensionModules,
+      });
+      runtimeHolder.runtime = runtime;
+      return { executable: executable.executable, process, runtime };
+    },
   });
-  const process = new Cs486Process(executable.executable, {
-    cpuModel: options.cpuModel,
-    externalMemoryUsageBytes: (): number => runtime.memoryUsageBytes,
-    memoryBytes: options.memoryBytes,
-    syscallHandler: (name, context): Cs486SyscallResult =>
-      runtime.syscall(name, context),
-  });
-  return { executable: executable.executable, process, runtime };
 }
 
 interface ResolvedModule {
@@ -141,7 +218,7 @@ interface ResolvedGraph {
   readonly modules: readonly ResolvedModule[];
 }
 
-function resolveModules(options: PythonCs486Options): ResolvedGraph {
+function resolveModules(options: PythonCs486PreparationOptions): ResolvedGraph {
   const modules: ResolvedModule[] = [];
   const extensions: ResolvedExtension[] = [];
   const moduleByPath = new Map<string, ResolvedModule>();
@@ -461,7 +538,7 @@ interface CompiledModule {
 }
 
 interface PythonCompilation {
-  readonly executable: Cs486Executable;
+  readonly executable: Cs486ExecutableV3;
   readonly functions: readonly CompiledFunction[];
   readonly modules: readonly CompiledModule[];
   readonly operations: readonly PythonOperation[];
@@ -485,7 +562,10 @@ class PythonCs486Compiler {
   private currentModule!: ResolvedModule;
   private inFunction = false;
 
-  constructor(private readonly graph: ResolvedGraph) {
+  constructor(
+    private readonly graph: ResolvedGraph,
+    private readonly memory: Cs486Flat32MemoryMetadata,
+  ) {
     this.modules = graph.modules.map((module) => ({
       id: module.id,
       name: module.name,
@@ -525,7 +605,8 @@ class PythonCs486Compiler {
       executable: {
         format: "cs486-executable",
         instructions: this.instructions,
-        version: 1,
+        memory: this.memory,
+        version: 3,
       },
       functions: this.functions,
       modules: this.modules,
@@ -1010,7 +1091,7 @@ function appendExtensionObjects(
   compilation: PythonCompilation,
   extensions: readonly ResolvedExtension[],
 ): {
-  readonly executable: Cs486Executable;
+  readonly executable: Cs486ExecutableV3;
   readonly extensionModules: readonly ExtensionModuleRuntime[];
 } {
   const instructions = [...compilation.executable.instructions];
@@ -1039,7 +1120,7 @@ function appendExtensionObjects(
           ? `${extension.path} exports no zero-argument integer functions`
           : `${extension.path} exports no functions`,
       );
-    let linked: Cs486Executable;
+    let linked: Cs486ExecutableV3;
     try {
       linked = linkCs486Objects([extension.object], { entry });
     } catch (error: unknown) {
@@ -1083,15 +1164,14 @@ function appendExtensionObjects(
   }
   dataBytes = align(dataBytes, 4);
   if (instructions.length > 4_096) throw new VmLimitError("linked instruction");
-  const version =
-    compilation.executable.version === 2 || extensions.length > 0 ? 2 : 1;
   return {
     executable: {
       format: "cs486-executable",
       instructions,
       dataBytes,
       ...(initialData.length > 0 ? { initialData } : {}),
-      version,
+      memory: compilation.executable.memory,
+      version: 3,
     },
     extensionModules,
   };

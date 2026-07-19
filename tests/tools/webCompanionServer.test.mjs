@@ -14,6 +14,9 @@ import {
 } from "../../tools/web-companion-server.mjs";
 
 const servers = [];
+const browserInteractionHeaders = {
+  "X-Computer-System-Interaction-Schema": "1",
+};
 
 function newTestWebCompanionServer(options = {}) {
   return new WebCompanionServer({ autoOpenBrowser: false, ...options });
@@ -131,7 +134,7 @@ describe("Web companion HTTP server", () => {
     const status = await server.start();
 
     const response = await fetch(
-      `${status.origin}/fonts/WebPlus_IBM_VGA_8x16.woff`,
+      `${status.origin}/fonts/WebPlus_IBM_VGA_9x16.woff`,
     );
     expect(response.status).toBe(200);
     expect(response.headers.get("content-type")).toBe("font/woff");
@@ -844,6 +847,7 @@ describe("Web companion HTTP server", () => {
     expect(bds.commands[0]).toContain("http://192.0.2.1:");
     const localOrigin = new URL(launches[0]).origin;
     const { token } = await exchangeHandoffUrl(launches[0]);
+    await publishShellTerminal(server, bds, token);
     const input = await post(localOrigin, "/api/input", token, {
       kind: "line",
       value: "local-auto-open",
@@ -1053,6 +1057,7 @@ describe("Web companion HTTP server", () => {
     expect(redirect.hash).toBe("");
     expect((await fetch(handoffUrl, { redirect: "manual" })).status).toBe(302);
     const { token } = await exchangeHandoffUrl(handoffUrl);
+    const sessionId = server.store.activeSessions()[0].sessionId;
     const reused = await fetch(`${status.origin}/api/handoff`, {
       method: "POST",
       headers: {
@@ -1064,8 +1069,18 @@ describe("Web companion HTTP server", () => {
     expect(reused.status).toBe(401);
 
     expect((await fetch(`${status.origin}/api/session`)).status).toBe(401);
-    const sessionResponse = await fetch(`${status.origin}/api/session`, {
+    const incompatibleSession = await fetch(`${status.origin}/api/session`, {
       headers: { Authorization: `Bearer ${token}` },
+    });
+    expect(incompatibleSession.status).toBe(426);
+    expect(await incompatibleSession.json()).toMatchObject({
+      code: "interaction_protocol_mismatch",
+    });
+    const sessionResponse = await fetch(`${status.origin}/api/session`, {
+      headers: {
+        ...browserInteractionHeaders,
+        Authorization: `Bearer ${token}`,
+      },
     });
     expect(sessionResponse.status).toBe(200);
     expect(await sessionResponse.json()).toMatchObject({
@@ -1074,9 +1089,64 @@ describe("Web companion HTTP server", () => {
       state: "issued",
     });
 
+    const commandCountBeforeReadyRejection = bds.commands.length;
+    const notReady = await fetch(status.origin + "/api/input", {
+      method: "POST",
+      headers: {
+        ...browserInteractionHeaders,
+        Authorization: "Bearer " + token,
+        "Content-Type": "application/json",
+        Origin: status.origin,
+      },
+      body: JSON.stringify({ kind: "line", value: "echo premature" }),
+    });
+    expect(notReady.status).toBe(409);
+    expect(await notReady.json()).toMatchObject({ code: "terminal_not_ready" });
+    expect(bds.commands).toHaveLength(commandCountBeforeReadyRejection);
+
+    bds.log(
+      `CS_WEB_TERMINAL ${JSON.stringify(
+        tuiSnapshot(sessionId, { interaction: shellInteraction() }),
+      )}`,
+    );
+
+    const commandCountBeforeModeRejection = bds.commands.length;
+    const wrongMode = await fetch(`${status.origin}/api/input`, {
+      method: "POST",
+      headers: {
+        ...browserInteractionHeaders,
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+        Origin: status.origin,
+      },
+      body: JSON.stringify({ kind: "keys", value: ["F1"] }),
+    });
+    expect(wrongMode.status).toBe(409);
+    expect(await wrongMode.json()).toMatchObject({
+      code: "input_mode_changed",
+    });
+    expect(bds.commands).toHaveLength(commandCountBeforeModeRejection);
+
+    const idleInterrupt = await fetch(`${status.origin}/api/input`, {
+      method: "POST",
+      headers: {
+        ...browserInteractionHeaders,
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+        Origin: status.origin,
+      },
+      body: JSON.stringify({ kind: "interrupt" }),
+    });
+    expect(idleInterrupt.status).toBe(409);
+    expect(await idleInterrupt.json()).toMatchObject({
+      code: "input_mode_changed",
+    });
+    expect(bds.commands).toHaveLength(commandCountBeforeModeRejection);
+
     const input = await fetch(`${status.origin}/api/input`, {
       method: "POST",
       headers: {
+        ...browserInteractionHeaders,
         Authorization: `Bearer ${token}`,
         "Content-Type": "application/json",
         Origin: status.origin,
@@ -1088,9 +1158,12 @@ describe("Web companion HTTP server", () => {
       /^scriptevent computer_system:web-input [A-Za-z0-9_-]+ [A-Za-z0-9_-]{6,20} line hello%20world$/u,
     );
 
+    bds.log(`CS_WEB_TERMINAL ${JSON.stringify(tuiSnapshot(sessionId))}`);
+
     const keys = await fetch(`${status.origin}/api/input`, {
       method: "POST",
       headers: {
+        ...browserInteractionHeaders,
         Authorization: `Bearer ${token}`,
         "Content-Type": "application/json",
         Origin: status.origin,
@@ -1105,6 +1178,7 @@ describe("Web companion HTTP server", () => {
     const mouse = await fetch(`${status.origin}/api/input`, {
       method: "POST",
       headers: {
+        ...browserInteractionHeaders,
         Authorization: `Bearer ${token}`,
         "Content-Type": "application/json",
         Origin: status.origin,
@@ -1122,6 +1196,7 @@ describe("Web companion HTTP server", () => {
     const invalidMouse = await fetch(`${status.origin}/api/input`, {
       method: "POST",
       headers: {
+        ...browserInteractionHeaders,
         Authorization: `Bearer ${token}`,
         "Content-Type": "application/json",
         Origin: status.origin,
@@ -1136,6 +1211,7 @@ describe("Web companion HTTP server", () => {
     const invalidResize = await fetch(`${status.origin}/api/resize`, {
       method: "POST",
       headers: {
+        ...browserInteractionHeaders,
         Authorization: `Bearer ${token}`,
         "Content-Type": "application/json",
         Origin: status.origin,
@@ -1147,6 +1223,7 @@ describe("Web companion HTTP server", () => {
     const resize = await fetch(`${status.origin}/api/resize`, {
       method: "POST",
       headers: {
+        ...browserInteractionHeaders,
         Authorization: `Bearer ${token}`,
         "Content-Type": "application/json",
         Origin: status.origin,
@@ -1158,9 +1235,16 @@ describe("Web companion HTTP server", () => {
       /^scriptevent computer_system:web-resize [A-Za-z0-9_-]+ 80 25$/u,
     );
 
+    bds.log(
+      `CS_WEB_TERMINAL ${JSON.stringify(
+        tuiSnapshot(sessionId, { interaction: shellInteraction() }),
+      )}`,
+    );
+
     const completionRequest = fetch(`${status.origin}/api/complete`, {
       method: "POST",
       headers: {
+        ...browserInteractionHeaders,
         Authorization: `Bearer ${token}`,
         "Content-Type": "application/json",
         Origin: status.origin,
@@ -1189,6 +1273,7 @@ describe("Web companion HTTP server", () => {
     const invalidKeys = await fetch(`${status.origin}/api/input`, {
       method: "POST",
       headers: {
+        ...browserInteractionHeaders,
         Authorization: `Bearer ${token}`,
         "Content-Type": "application/json",
         Origin: status.origin,
@@ -1196,6 +1281,35 @@ describe("Web companion HTTP server", () => {
       body: JSON.stringify({ kind: "keys", value: Array(33).fill("x") }),
     });
     expect(invalidKeys.status).toBe(400);
+  });
+
+  it("closes the exact session when Bedrock publishes an incompatible interaction descriptor", async () => {
+    const bds = new FakeBds();
+    const server = newTestWebCompanionServer({
+      bds,
+      port: 0,
+      assetRoot: path.resolve(import.meta.dirname, "../../web"),
+    });
+    servers.push(server);
+    await server.start();
+
+    bds.log(
+      'CS_WEB_SESSION_REQUEST {"requestId":"r1-1","playerId":"player-1","computerId":"c-000001"}',
+    );
+    await until(() => bds.commands.length === 1);
+    await exchangeHandoffUrl(bds.commands[0].split(" ").at(-1));
+    const sessionId = server.store.activeSessions()[0].sessionId;
+    const incompatible = tuiSnapshot(sessionId);
+    delete incompatible.terminal.interaction;
+    bds.log(`CS_WEB_TERMINAL ${JSON.stringify(incompatible)}`);
+
+    await until(() => server.store.activeSessions().length === 0);
+    expect(
+      bds.commands.filter(
+        (command) =>
+          command === `scriptevent computer_system:web-close ${sessionId}`,
+      ),
+    ).toHaveLength(1);
   });
 
   it("returns input success only after the matching Bedrock admission marker", async () => {
@@ -1208,6 +1322,7 @@ describe("Web companion HTTP server", () => {
     );
     await until(() => bds.commands.length === 1);
     const connected = await consumeResponse(bds.commands[0]);
+    await publishShellTerminal(server, bds, connected.token);
 
     const pending = post(status.origin, "/api/input", connected.token, {
       kind: "line",
@@ -1255,6 +1370,7 @@ describe("Web companion HTTP server", () => {
     );
     await until(() => bds.commands.length === 1);
     const connected = await consumeResponse(bds.commands[0]);
+    await publishShellTerminal(server, bds, connected.token);
 
     const cases = [
       {
@@ -1322,6 +1438,7 @@ describe("Web companion HTTP server", () => {
     );
     await until(() => bds.commands.length === 1);
     const connected = await consumeResponse(bds.commands[0]);
+    await publishShellTerminal(server, bds, connected.token);
 
     const response = await post(status.origin, "/api/input", connected.token, {
       kind: "line",
@@ -1399,6 +1516,7 @@ describe("Web companion HTTP server", () => {
     );
     await until(() => bds.commands.length === 1);
     const connected = await consumeResponse(bds.commands[0]);
+    await publishShellTerminal(server, bds, connected.token);
     const relay = bds.runWebRelay.bind(bds);
     bds.runWebRelay = async (command) => {
       if (command.includes("computer_system:web-input")) {
@@ -1430,28 +1548,34 @@ describe("Web companion HTTP server", () => {
     const { token } = await exchangeHandoffUrl(handoffUrl);
 
     bds.log(
-      `CS_WEB_TERMINAL ${JSON.stringify({
-        sessionId,
-        computerId: "c-000001",
-        label: "Portable One",
-        lifecycle: "running",
-        terminal: { width: 51, height: 19, rows: [] },
-      })}`,
+      `CS_WEB_TERMINAL ${JSON.stringify(
+        tuiSnapshot(sessionId, {
+          interaction: shellInteraction(),
+          label: "Portable One",
+        }),
+      )}`,
     );
     await until(async () => {
       const response = await fetch(`${status.origin}/api/session`, {
-        headers: { Authorization: `Bearer ${token}` },
+        headers: {
+          ...browserInteractionHeaders,
+          Authorization: `Bearer ${token}`,
+        },
       });
       return (await response.json()).terminal !== null;
     });
     const session = await fetch(`${status.origin}/api/session`, {
-      headers: { Authorization: `Bearer ${token}` },
+      headers: {
+        ...browserInteractionHeaders,
+        Authorization: `Bearer ${token}`,
+      },
     }).then((response) => response.json());
     expect(session.terminal).toMatchObject({ label: "Portable One" });
 
     const rejected = await fetch(`${status.origin}/api/input`, {
       method: "POST",
       headers: {
+        ...browserInteractionHeaders,
         Authorization: `Bearer ${token}`,
         "Content-Type": "application/json",
         Origin: "https://attacker.invalid",
@@ -1611,6 +1735,7 @@ describe("Web companion HTTP server", () => {
     await until(() => bds.commands.length === 3);
     expect(bds.commands[2].split(" ").at(-2)).toBe("viewer");
     const second = await consumeResponse(bds.commands[2]);
+    await publishShellTerminal(server, bds, second.token);
 
     const rejected = await post(status.origin, "/api/input", second.token, {
       kind: "line",
@@ -1639,6 +1764,7 @@ describe("Web companion HTTP server", () => {
     );
     await until(() => bds.commands.length === 1);
     const connected = await consumeResponse(bds.commands[0]);
+    await publishShellTerminal(server, bds, connected.token);
     const session = server.store.activeSessions()[0];
     server.store.updateAccess(session.sessionId, "out_of_range");
 
@@ -1673,6 +1799,7 @@ describe("Web companion HTTP server", () => {
     expect(resumed.status).toBe(200);
     const replacement = await resumed.json();
     expect(replacement.token).not.toBe(connected.token);
+    await publishShellTerminal(server, bds, replacement.token);
     expect(
       (
         await post(status.origin, "/api/input", replacement.token, {
@@ -1698,6 +1825,7 @@ describe("Web companion HTTP server", () => {
     );
     await until(() => bds.commands.length === 1);
     const connected = await consumeResponse(bds.commands[0]);
+    await publishShellTerminal(server, bds, connected.token);
     const session = server.store.activeSessions()[0];
     server.store.updateAccess(session.sessionId, "out_of_range");
 
@@ -1854,6 +1982,20 @@ async function consumeResponse(command) {
   return exchangeHandoffUrl(command.split(" ").at(-1));
 }
 
+async function publishShellTerminal(server, bds, token) {
+  const session = server.store.authenticate(token);
+  bds.log(
+    `CS_WEB_TERMINAL ${JSON.stringify(
+      tuiSnapshot(session.sessionId, { interaction: shellInteraction() }),
+    )}`,
+  );
+  await until(
+    () =>
+      server.store.authenticate(token).terminal?.terminal?.interaction
+        ?.inputMode === "line",
+  );
+}
+
 async function connectDebugWriter(server, bds, computerId = "c-000001") {
   const waiting = server.waitForHandoff({
     computerId,
@@ -1879,10 +2021,34 @@ function tuiSnapshot(sessionId, options = {}) {
   const height = options.height ?? rows.length;
   const colorRow = Array.from({ length: width }, () => 7);
   const backgroundRow = Array.from({ length: width }, () => 1);
+  const secretInput = options.secretInput ?? false;
+  const interaction =
+    options.interaction ??
+    (secretInput
+      ? {
+          schema: 1,
+          inputMode: "line",
+          pointer: "none",
+          presentation: "terminal",
+          secretInput: true,
+          context: "secret",
+          interrupt: false,
+          hints: [{ key: "Enter", label: "Continue" }],
+        }
+      : {
+          schema: 1,
+          inputMode: "keys",
+          pointer: "cell",
+          presentation: "dos-tui",
+          secretInput: false,
+          context: "edit",
+          interrupt: false,
+          hints: [{ key: "F10", label: "Menu" }],
+        });
   return {
     sessionId,
     computerId: options.computerId ?? "c-000001",
-    label: "Debug Computer",
+    label: options.label ?? "Debug Computer",
     lifecycle: "running",
     terminal: {
       schema: 1,
@@ -1896,8 +2062,24 @@ function tuiSnapshot(sessionId, options = {}) {
         options.background ??
         Array.from({ length: height }, () => [...backgroundRow]),
       cursor: options.cursor ?? { x: 2, y: 1, blink: true },
-      secretInput: options.secretInput ?? false,
+      interaction,
     },
+  };
+}
+
+function shellInteraction() {
+  return {
+    schema: 1,
+    inputMode: "line",
+    pointer: "none",
+    presentation: "terminal",
+    secretInput: false,
+    context: "shell",
+    interrupt: false,
+    hints: [
+      { key: "Enter", label: "Run" },
+      { key: "Tab", label: "Complete" },
+    ],
   };
 }
 
@@ -1928,6 +2110,7 @@ function post(origin, pathname, token, body) {
   return fetch(`${origin}${pathname}`, {
     method: "POST",
     headers: {
+      ...browserInteractionHeaders,
       Authorization: `Bearer ${token}`,
       "Content-Type": "application/json",
       Origin: origin,

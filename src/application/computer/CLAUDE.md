@@ -6,8 +6,8 @@
   terminal, authentication, display, OS state, persistence callbacks, and final
   lifecycle result. Adapters request transitions; they do not finalize them.
 - Preserve the same identity, hardware/display profile, filesystem state, and OS
-  state through placement, breaking, item transfer, portable use, Monitor
-  attachment, reload, rollback, and migration.
+  state through placement, breaking, item transfer, portable use, integrated
+  display access, reload, rollback, and migration.
 - Periodic snapshots must be fixed-batch O(K), without allocating an O(N) list
   on every pass.
 

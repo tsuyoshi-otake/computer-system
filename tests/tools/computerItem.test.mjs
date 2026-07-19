@@ -8,6 +8,13 @@ import {
 import { machineTextureKeys } from "../../tools/machine-textures.mjs";
 
 describe("computer item generator", () => {
+  it("uses the Deskpro family names for both desktop profiles", () => {
+    expect(computerItemDisplayNames).toEqual({
+      advanced_computer: "Computer System Deskpro 486DX2",
+      computer: "Computer System Deskpro 486DX",
+    });
+  });
+
   it.each(["computer", "advanced_computer"])(
     "creates the %s identity-carrying item",
     (family) => {

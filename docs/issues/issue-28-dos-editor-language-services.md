@@ -84,3 +84,53 @@ executables, host-shell execution, and Python execution on CS-DOS.
 - A connected writer-owned CS-DOS Web Terminal was not available during this
   run, so actual EDIT/QBASIC/PWB/CSASM pointer and keyboard acceptance remains
   open and is not claimed by the static manual browser check.
+
+## 2026-07-18 Options correction verification
+
+A writer-owned 80x25 CS-DOS Web Terminal exposed two gaps in the released
+Options state machine: Editing, Completion, and Language had no reachable apply
+transition because Escape restored the opening snapshot, and the Editing page
+did not expose syntax, line-number, rainbow-indent, whitespace-marker, or wrap
+controls. The host tests had covered only the Display OK path.
+
+- The shared Editing page now exposes all nine bounded display/editing fields.
+- Editing, Completion, and Language each have explicit keyboard- and
+  pointer-reachable OK and Cancel terminal actions. OK retains the draft; Cancel
+  and Escape restore the complete opening snapshot.
+- The classic 80x25 Display dialog and the compact 51x19 Display fallback keep
+  their existing single OK/Cancel path without duplicated commands.
+- The same shared transition is exercised through EDIT, CS QBASIC, PWB/CS C/C++,
+  and CSASM, and Save Settings persists only the active profile while preserving
+  the others.
+
+`Verify:` Run `npm test -- tests/editor`.
+
+`Expect:` 10 files and 100 tests pass, including 51x19 and 80x25 layout,
+keyboard and pointer OK/Cancel, complete apply/cancel rollback, all four product
+profiles, `C:\EDITOR.INI` save/reopen, Reload Settings, and session-scoped
+Restore Defaults.
+
+`Result:` passed with 10 files and 100 tests.
+
+`Verify:` Run `npm run test:web`.
+
+`Expect:` 7 files and 92 tests pass with no Web Terminal transport or
+presentation regression.
+
+`Result:` passed before unrelated concurrent Web presentation changes entered
+the working tree.
+
+`Verify:` Run `npm run validate`.
+
+`Expect:` formatting, ESLint, TypeScript, 156 Vitest files and 1,044 tests, the
+production Bedrock pack build, and the 16-chapter Pages build pass.
+
+`Result:` a pre-final run passed all 156 files and 1,044 tests. The final rerun
+stopped on unrelated concurrent `web/app.js` formatting and
+`web/terminal-presentation.js` default-value test mismatches. ESLint,
+TypeScript, the issue-owned editor suite, the production Bedrock pack build, and
+the Pages build passed after the final Options changes. A clean full-gate result
+is therefore not claimed yet.
+
+The updated-pack real-BDS/Chrome rerun remains pending. The running interactive
+world was not force-stopped, so no post-fix live result is claimed yet.

@@ -7,7 +7,7 @@ import {
   type JobControlStartResult,
   type AccountedNativeModuleContext,
 } from "../runtime/nativeModules.js";
-import { createPythonCs486Program } from "../runtime/pythonCs486.js";
+import { preparePythonCs486Program } from "../runtime/pythonCs486.js";
 import {
   RoundRobinScheduler,
   type SchedulerLimits,
@@ -22,16 +22,20 @@ import type {
   CpuProcessState,
 } from "../../domain/runtime/cpuProcess.js";
 import type { CpuProcess } from "../../domain/runtime/cpuProcess.js";
-import { Cs486Process, runCs486 } from "../../domain/cpu/cs486.js";
+import {
+  Cs486Process,
+  runCs486,
+  type Cs486Executable,
+} from "../../domain/cpu/cs486.js";
 import type {
   ComputerOsProfile,
   ComputerRecord,
 } from "../../domain/computer/computer.js";
 import {
   GuestRamLedger,
+  normalizeGuestRamOwner,
   type GuestRamOwner,
   type GuestRamSnapshot,
-  type MemoryLease,
 } from "../../domain/computer/guestRamLedger.js";
 import { InMemoryFilesystem } from "../../domain/filesystem/inMemoryFilesystem.js";
 import { numericComputerId } from "../../domain/computer/identity.js";
@@ -42,6 +46,11 @@ import { defaultSystemBootSource } from "../os/systemPrograms.js";
 import type { ShellClockSource } from "../os/clock.js";
 import type { ShellCompletionResult } from "../os/shellCommands.js";
 import type { ShellSession } from "../os/shellSession.js";
+import {
+  createTerminalInteractionDescriptor,
+  unavailableTerminalInteraction,
+  type TerminalInteractionDescriptor,
+} from "../terminal/terminalInteraction.js";
 import type {
   ShellCommandResult,
   ShellBackgroundRequest,
@@ -69,6 +78,16 @@ import {
 import type { Cs486CFrontendOptions } from "../toolchain/cs486CFrontend.js";
 import type { Cs486CPreprocessorInclude } from "../toolchain/cs486CPreprocessor.js";
 import { Cs486LinkError, linkCs486Objects } from "../toolchain/cs486Linker.js";
+import {
+  concatGuestToolchainTranscripts,
+  createGuestToolchainTranscript,
+  emptyGuestToolchainTranscript,
+  guestToolchainTranscriptFromCompileError,
+  guestToolchainTranscriptFromFailure,
+  guestToolchainTranscriptFromStreams,
+  renderGuestToolchainTranscript,
+  type GuestToolchainTranscript,
+} from "../toolchain/guestToolchainTranscript.js";
 import { getOsProfile, type OsProfile } from "../os/osProfile.js";
 import { credentialedFilesystem } from "../os/credentialedFilesystem.js";
 import {
@@ -88,6 +107,13 @@ import {
   type OsProcessSignal,
 } from "../os/osRuntimeState.js";
 import { DosRuntimeState } from "../os/dosRuntimeState.js";
+import type { DosGuestMemoryManager } from "../os/dosGuestMemoryManager.js";
+import {
+  grantCs486ExecutableMemory,
+  grantCs486MemoryRequirements,
+  releaseGuestProcessMemory,
+  type GuestProcessMemoryGrant,
+} from "../runtime/guestProcessMemory.js";
 import {
   FloppyDrive,
   FloppyGuestFilesystem,
@@ -409,7 +435,13 @@ export class ComputerRuntime {
       return { outcome: "accepted", state: "foreground_interrupted" };
     }
     if (entry.compileJob !== undefined) {
-      this.completeCompileJob(entry, 130, "^C\n", 1, "SIGINT");
+      this.completeCompileJob(
+        entry,
+        130,
+        guestToolchainTranscriptFromFailure("^C\n"),
+        1,
+        "SIGINT",
+      );
       return { outcome: "accepted", state: "compile_interrupted" };
     }
     if (entry.debugJob !== undefined) {
@@ -640,8 +672,45 @@ export class ComputerRuntime {
     return this.entries.get(computerId)?.shell?.complete(line, cursor);
   }
 
+  terminalInteraction(computerId: string): TerminalInteractionDescriptor {
+    const entry = this.entries.get(computerId);
+    const interaction =
+      entry?.shell?.terminalInteraction() ?? unavailableTerminalInteraction();
+    if (entry === undefined || interaction.context === "unavailable") {
+      return interaction;
+    }
+    const vmState = entry.vm?.state;
+    const acceptsTerminalInput =
+      entry.stopIntent === undefined &&
+      entry.foreground === undefined &&
+      entry.compileJob === undefined &&
+      entry.debugJob === undefined &&
+      entry.jobWait === undefined &&
+      vmState?.kind === "waiting_event" &&
+      vmState.filter === undefined;
+    if (acceptsTerminalInput) return interaction;
+
+    const interrupt =
+      entry.stopIntent === undefined &&
+      (entry.foreground !== undefined ||
+        entry.compileJob !== undefined ||
+        entry.debugJob !== undefined);
+    return createTerminalInteractionDescriptor({
+      context: "busy",
+      ...(interaction.helpTopicId === undefined
+        ? {}
+        : { helpTopicId: interaction.helpTopicId }),
+      hints: interrupt ? [{ key: "Ctrl+C", label: "Interrupt" }] : [],
+      inputMode: "none",
+      interrupt,
+      pointer: "none",
+      presentation: interaction.presentation,
+      secretInput: interaction.secretInput,
+    });
+  }
+
   isShellSecretInput(computerId: string): boolean {
-    return this.entries.get(computerId)?.shell?.isSecretInput() ?? false;
+    return this.terminalInteraction(computerId).secretInput;
   }
 
   executeDebugShellCommand(
@@ -717,10 +786,11 @@ export class ComputerRuntime {
           this.completeCompileJob(
             entry,
             1,
-            formatCompileJobError(
+            compileJobErrorTranscript(
               compileCommand,
               normalized,
               getOsProfile(activeOsProfile(entry)),
+              compileJobFallbackSource(job.request),
             ),
           );
         }
@@ -745,28 +815,39 @@ export class ComputerRuntime {
       if (result.foreground?.kind === "cs486") {
         const request = result.foreground;
         return this.executeSynchronousOsProcess(entry, request, () => {
-          const executed = runCs486(request.executable, {
-            cpuModel: entry.record.hardware.cpuModel,
-            instructionLimit: 100_000,
-            memoryBytes: guestProcessMemoryBytes(entry),
-          });
-          const cpuCycles = Math.min(
-            1_000_000,
-            request.compileCycles + executed.cycles,
+          const instanceId = `sync-${String(this.nextRuntimeId++)}`;
+          const grant = grantExecutableProcessMemory(
+            entry,
+            request.executable,
+            request.command,
+            instanceId,
           );
-          const completion: DebugShellCommandCompletion = {
-            outcome: "completed",
-            exitCode: executed.state === "halted" ? 0 : 124,
-            stdout: executed.output,
-            stderr: request.stats
-              ? `${cs486RunResultStats(executed, entry.record.hardware).join("\n")}\n`
-              : executed.state === "yielded"
-                ? `${cpuModelSpecification(entry.record.hardware.cpuModel).runtimeName}: execution limit reached\n`
-                : "",
-            cpuCycles,
-          };
-          entry.shell?.completeForegroundProcess(completion.exitCode);
-          return completion;
+          try {
+            const executed = runCs486(request.executable, {
+              cpuModel: entry.record.hardware.cpuModel,
+              instructionLimit: 100_000,
+              memoryBytes: grant.memoryBytes,
+            });
+            const cpuCycles = Math.min(
+              1_000_000,
+              request.compileCycles + executed.cycles,
+            );
+            const completion: DebugShellCommandCompletion = {
+              outcome: "completed",
+              exitCode: executed.state === "halted" ? 0 : 124,
+              stdout: executed.output,
+              stderr: request.stats
+                ? `${cs486RunResultStats(executed, entry.record.hardware).join("\n")}\n`
+                : executed.state === "yielded"
+                  ? `${cpuModelSpecification(entry.record.hardware.cpuModel).runtimeName}: execution limit reached\n`
+                  : "",
+              cpuCycles,
+            };
+            entry.shell?.completeForegroundProcess(completion.exitCode);
+            return completion;
+          } finally {
+            releaseGuestProcessMemory(grant);
+          }
         });
       }
       return {
@@ -949,19 +1030,34 @@ export class ComputerRuntime {
       runHostWork: (lane, units, operation) =>
         this.runHostWork(lane, units, entry.record.computerId, operation),
     });
-    const process = createPythonCs486Program({
+    const prepared = preparePythonCs486Program({
       cpuModel: entry.record.hardware.cpuModel,
       environment,
       filesystem,
-      memoryBytes: guestProcessMemoryBytes(entry),
       path: request.path,
       source,
-    }).process;
+    });
+    const memoryGrant = grantCs486MemoryRequirements(
+      prepared.requirements,
+      guestProcessMemoryAdmission(
+        entry,
+        request.command,
+        `runtime-${String(runtimeId)}`,
+      ),
+    );
+    let process: Cs486Process;
+    try {
+      process = prepared.create(memoryGrant.memoryBytes).process;
+    } catch (error: unknown) {
+      releaseGuestProcessMemory(memoryGrant);
+      throw error;
+    }
     this.startDebugJob(
       entry,
       {
         compileCycles: 0,
         kind: "python",
+        memoryGrant,
         onComplete,
         process,
         runtimeId,
@@ -977,18 +1073,23 @@ export class ComputerRuntime {
     request: Extract<ShellForegroundRequest, { readonly kind: "cs486" }>,
     onComplete: (result: DebugShellCommandCompletion) => void,
   ): void {
+    const runtimeId = this.nextRuntimeId++;
+    const granted = createGrantedCs486Process(
+      entry,
+      request.executable,
+      request.command,
+      runtimeId,
+    );
     this.startDebugJob(
       entry,
       {
         compileCycles: request.compileCycles,
         instructionLimit: 100_000,
         kind: "cs486",
+        memoryGrant: granted.grant,
         onComplete,
-        process: new Cs486Process(request.executable, {
-          cpuModel: entry.record.hardware.cpuModel,
-          memoryBytes: guestProcessMemoryBytes(entry),
-        }),
-        runtimeId: this.nextRuntimeId++,
+        process: granted.process,
+        runtimeId,
         stats: request.stats,
       },
       { command: request.command, credentials: request.credentials },
@@ -1042,6 +1143,7 @@ export class ComputerRuntime {
       this.runtimeLanes.set(active.runtimeId, "mcp_debug");
       entry.debugJob = active;
     } catch (error: unknown) {
+      releaseGuestProcessMemory(active.memoryGrant);
       this.completeOsProcess(entry, osPid, 1);
       throw error;
     }
@@ -1106,6 +1208,7 @@ export class ComputerRuntime {
   ): void {
     this.unschedule(job.runtimeId);
     entry.debugJob = undefined;
+    releaseGuestProcessMemory(job.memoryGrant);
     if (job.kind === "debugger") {
       let result: Extract<
         DebugShellCommandResult,
@@ -1324,72 +1427,90 @@ export class ComputerRuntime {
       runHostWork: (lane, units, operation) =>
         this.runHostWork(lane, units, entry.record.computerId, operation),
     });
-    const vm = createPythonCs486Program({
+    const prepared = preparePythonCs486Program({
       cpuModel: entry.record.hardware.cpuModel,
       environment,
       filesystem,
-      memoryBytes: guestProcessMemoryBytes(entry),
       path: request.path,
       source,
-    }).process;
-    const maximumCpuCycles = 100_000_000;
-    let cpuCycles = 0;
-    let instructions = 0;
-    while (
-      (vm.state.kind === "ready" || vm.hasPendingCpuCycles) &&
-      cpuCycles < maximumCpuCycles
-    ) {
-      const slice = vm.runCpuSlice(
-        Math.min(1_000_000, maximumCpuCycles - cpuCycles),
-      );
-      if (slice.cpuCycles === 0) break;
-      cpuCycles += slice.cpuCycles;
-      instructions += slice.executedInstructions;
-    }
-    const output = terminal.snapshot().rows.join("\n").trimEnd();
-    const stdout = output.length === 0 ? "" : `${output}\n`;
-    if (vm.state.kind === "completed") {
-      const result: DebugShellCommandCompletion = {
-        outcome: "completed",
-        exitCode: 0,
-        stdout,
-        stderr: pythonStats(
-          instructions,
-          cpuCycles,
-          "completed",
-          entry.record.hardware,
-        ),
-        cpuCycles,
-      };
-      entry.shell?.completeForegroundProcess(result.exitCode);
-      return result;
-    }
-    if (vm.state.kind === "crashed") {
-      const result: DebugShellCommandCompletion = {
-        outcome: "completed",
-        exitCode: 1,
-        stdout,
-        stderr: `${vm.state.error.name}: ${vm.state.error.message}\n`,
-        cpuCycles,
-      };
-      entry.shell?.completeForegroundProcess(result.exitCode);
-      return result;
-    }
-    vm.terminate(
-      "MCP debug execution does not support waits or long-running work",
+    });
+    const memoryGrant = grantCs486MemoryRequirements(
+      prepared.requirements,
+      guestProcessMemoryAdmission(
+        entry,
+        request.command,
+        `sync-${String(this.nextRuntimeId++)}`,
+      ),
     );
-    const result: DebugShellCommandCompletion = {
-      outcome: "completed",
-      exitCode: 2,
-      stdout,
-      stderr:
-        cpuCycles >= maximumCpuCycles
-          ? `Python/${cpuModelSpecification(entry.record.hardware.cpuModel).runtimeName}: CPU cycle limit ${String(maximumCpuCycles)} exceeded\n`
-          : `Python/${cpuModelSpecification(entry.record.hardware.cpuModel).runtimeName}: waits and asynchronous work are not supported through MCP\n`,
-      cpuCycles,
-    };
-    entry.shell?.completeForegroundProcess(result.exitCode);
-    return result;
+    let vm: Cs486Process;
+    try {
+      vm = prepared.create(memoryGrant.memoryBytes).process;
+    } catch (error: unknown) {
+      releaseGuestProcessMemory(memoryGrant);
+      throw error;
+    }
+    try {
+      const maximumCpuCycles = 100_000_000;
+      let cpuCycles = 0;
+      let instructions = 0;
+      while (
+        (vm.state.kind === "ready" || vm.hasPendingCpuCycles) &&
+        cpuCycles < maximumCpuCycles
+      ) {
+        const slice = vm.runCpuSlice(
+          Math.min(1_000_000, maximumCpuCycles - cpuCycles),
+        );
+        if (slice.cpuCycles === 0) break;
+        cpuCycles += slice.cpuCycles;
+        instructions += slice.executedInstructions;
+      }
+      const output = terminal.snapshot().rows.join("\n").trimEnd();
+      const stdout = output.length === 0 ? "" : `${output}\n`;
+      if (vm.state.kind === "completed") {
+        const result: DebugShellCommandCompletion = {
+          outcome: "completed",
+          exitCode: 0,
+          stdout,
+          stderr: pythonStats(
+            instructions,
+            cpuCycles,
+            "completed",
+            entry.record.hardware,
+          ),
+          cpuCycles,
+        };
+        entry.shell?.completeForegroundProcess(result.exitCode);
+        return result;
+      }
+      if (vm.state.kind === "crashed") {
+        const result: DebugShellCommandCompletion = {
+          outcome: "completed",
+          exitCode: 1,
+          stdout,
+          stderr: `${vm.state.error.name}: ${vm.state.error.message}\n`,
+          cpuCycles,
+        };
+        entry.shell?.completeForegroundProcess(result.exitCode);
+        return result;
+      }
+      vm.terminate(
+        "MCP debug execution does not support waits or long-running work",
+      );
+      const result: DebugShellCommandCompletion = {
+        outcome: "completed",
+        exitCode: 2,
+        stdout,
+        stderr:
+          cpuCycles >= maximumCpuCycles
+            ? `Python/${cpuModelSpecification(entry.record.hardware.cpuModel).runtimeName}: CPU cycle limit ${String(maximumCpuCycles)} exceeded\n`
+            : `Python/${cpuModelSpecification(entry.record.hardware.cpuModel).runtimeName}: waits and asynchronous work are not supported through MCP\n`,
+        cpuCycles,
+      };
+      entry.shell?.completeForegroundProcess(result.exitCode);
+      return result;
+    } finally {
+      releaseGuestProcessMemory(memoryGrant);
+    }
   }
 
   resizeTerminal(computerId: string, width: number, height: number): boolean {
@@ -1422,10 +1543,6 @@ export class ComputerRuntime {
       entry.guestRamLedger = new GuestRamLedger(
         entry.record.hardware.memoryBytes,
       );
-      entry.residentMemoryLease =
-        activeProfile === "dos"
-          ? entry.guestRamLedger.acquire(64 * 1_024, "dos-resident")
-          : undefined;
       entry.osRuntimeState = floppyBoot
         ? OsRuntimeState.restore(entry.record.computerId, undefined)
         : entry.installedOsRuntimeState;
@@ -1552,6 +1669,8 @@ export class ComputerRuntime {
           this.runHostWork(lane, units, entry.record.computerId, operation),
       };
       let environment = createAccountedNativeEnvironment(nativeContext);
+      entry.shell = environment.shell;
+      entry.dosGuestMemoryManager = environment.shell.dosMemoryManager();
       if (activeProfile === "linux") {
         startupCredentials = linuxStartupCredentials(entry.record);
       }
@@ -1592,14 +1711,28 @@ export class ComputerRuntime {
           shell: environment.shell,
         });
       }
-      const vm = createPythonCs486Program({
+      const preparedBootProgram = preparePythonCs486Program({
         cpuModel: entry.record.hardware.cpuModel,
         environment,
         filesystem: startupFilesystem,
-        memoryBytes: guestProcessMemoryBytes(entry),
+        managedRuntimeMemoryBytes: usesInternalBootProgram
+          ? internalBootManagedMemoryBytes
+          : userBootManagedMemoryBytes(entry.record.hardware.memoryBytes),
+        ...(usesInternalBootProgram ? { managedRuntimeResidentBytes: 0 } : {}),
         path: "/startup.py",
         source,
-      }).process;
+      });
+      const bootGrant = grantCs486MemoryRequirements(
+        preparedBootProgram.requirements,
+        guestProcessMemoryAdmission(
+          entry,
+          "system",
+          `runtime-${String(entry.runtimeId)}`,
+          "System boot process",
+        ),
+      );
+      entry.vmMemoryGrant = bootGrant;
+      const vm = preparedBootProgram.create(bootGrant.memoryBytes).process;
       entry.vm = vm;
       entry.shell = environment.shell;
       entry.stopIntent = undefined;
@@ -1691,19 +1824,31 @@ export class ComputerRuntime {
       };
     }
     let process: CpuProcess | undefined;
+    let memoryGrant: GuestProcessMemoryGrant | undefined;
     let osPid: number | undefined;
     try {
       const runtimeId = this.nextRuntimeId++;
       const completionEvent = `${foregroundCompletionEvent}:${String(runtimeId)}`;
-      process =
-        request.kind === "python"
-          ? this.createForegroundPythonProcess(entry, request, runtimeId)
-          : request.kind === "debugger"
-            ? request.start()
-            : new Cs486Process(request.executable, {
-                cpuModel: entry.record.hardware.cpuModel,
-                memoryBytes: guestProcessMemoryBytes(entry),
-              });
+      if (request.kind === "python") {
+        const granted = this.createForegroundPythonProcess(
+          entry,
+          request,
+          runtimeId,
+        );
+        process = granted.process;
+        memoryGrant = granted.memoryGrant;
+      } else if (request.kind === "debugger") {
+        process = request.start();
+      } else {
+        const granted = createGrantedCs486Process(
+          entry,
+          request.executable,
+          request.command,
+          runtimeId,
+        );
+        process = granted.process;
+        memoryGrant = granted.grant;
+      }
       osPid = this.startOsProcess(entry, request.command, request.credentials);
       const foreground: ForegroundGuestProcess = {
         command: request.command,
@@ -1716,6 +1861,7 @@ export class ComputerRuntime {
         executedInstructions: 0,
         instructionLimit: request.kind === "cs486" ? 100_000 : undefined,
         kind: request.kind,
+        ...(memoryGrant === undefined ? {} : { memoryGrant }),
         osPid,
         process,
         runtimeId,
@@ -1734,6 +1880,7 @@ export class ComputerRuntime {
       entry.foreground = foreground;
       return { completionEvent, outcome: "started" };
     } catch (error: unknown) {
+      releaseGuestProcessMemory(memoryGrant);
       if (request.kind === "debugger") {
         try {
           process?.terminate("unable to schedule debugger execution");
@@ -1780,21 +1927,33 @@ export class ComputerRuntime {
 
     const runtimeId = this.nextRuntimeId++;
     let process: CpuProcess | undefined;
+    let memoryGrant: GuestProcessMemoryGrant | undefined;
     let osPid: number | undefined;
     let jobId: number | undefined;
     let scheduled = false;
     try {
-      process =
-        request.kind === "sleep"
-          ? new BackgroundSleepProcess(
-              this.scheduler.tickNumber + request.sleepTicks,
-            )
-          : request.kind === "python"
-            ? this.createBackgroundPythonProcess(entry, request, runtimeId)
-            : new Cs486Process(request.executable, {
-                cpuModel: entry.record.hardware.cpuModel,
-                memoryBytes: guestProcessMemoryBytes(entry),
-              });
+      if (request.kind === "sleep") {
+        process = new BackgroundSleepProcess(
+          this.scheduler.tickNumber + request.sleepTicks,
+        );
+      } else if (request.kind === "python") {
+        const granted = this.createBackgroundPythonProcess(
+          entry,
+          request,
+          runtimeId,
+        );
+        process = granted.process;
+        memoryGrant = granted.memoryGrant;
+      } else {
+        const granted = createGrantedCs486Process(
+          entry,
+          request.executable,
+          request.command,
+          runtimeId,
+        );
+        process = granted.process;
+        memoryGrant = granted.grant;
+      }
       const parentPid =
         entry.shell.processId() !== undefined &&
         entry.osRuntimeState.process(entry.shell.processId()!) !== undefined
@@ -1843,6 +2002,7 @@ export class ComputerRuntime {
         instructionLimit: request.kind === "cs486" ? 100_000 : undefined,
         jobId,
         kind: request.kind,
+        ...(memoryGrant === undefined ? {} : { memoryGrant }),
         osPid,
         process,
         runtimeId,
@@ -1855,6 +2015,7 @@ export class ComputerRuntime {
       this.syncOsRuntimeState(entry);
       return { jobId, outcome: "started", pid: osPid };
     } catch (error: unknown) {
+      releaseGuestProcessMemory(memoryGrant);
       if (scheduled) this.unschedule(runtimeId);
       try {
         process?.terminate("background admission failed");
@@ -2009,12 +2170,19 @@ export class ComputerRuntime {
         stderr: `${request.command}: guest RAM ledger is unavailable\n`,
       };
     }
-    let memoryLease: MemoryLease | undefined;
+    let memoryLease: GuestMemoryReservation | undefined;
     try {
-      memoryLease = guestRamLedger.acquire(
-        128 * 1_024,
-        compileMemoryOwner(request),
-      );
+      const owner = normalizeGuestRamOwner(compileMemoryOwner(request));
+      memoryLease =
+        activeOsProfile(entry) === "dos" &&
+        entry.dosGuestMemoryManager !== undefined
+          ? entry.dosGuestMemoryManager.reserveTransientResident({
+              bytes: 128 * 1_024,
+              category: owner.category,
+              displayName: owner.displayName,
+              moduleId: owner.moduleId,
+            })
+          : guestRamLedger.acquire(128 * 1_024, owner);
       const completionEvent = `${foregroundCompletionEvent}:compile:${String(this.nextRuntimeId++)}`;
       const osPid = this.startOsProcess(
         entry,
@@ -2072,10 +2240,11 @@ export class ComputerRuntime {
         this.completeCompileJob(
           entry,
           1,
-          formatCompileJobError(
+          compileJobErrorTranscript(
             job.request.command,
             normalized,
             getOsProfile(activeOsProfile(entry)),
+            compileJobFallbackSource(job.request),
           ),
         );
       }
@@ -2087,7 +2256,6 @@ export class ComputerRuntime {
     const task = job.request.task;
     if (task.kind === "program-list") {
       const result = task.execute();
-      const output = `${result.stdout}${result.stderr}`;
       if (result.foreground !== undefined) {
         if (result.foreground.kind !== "cs486") {
           throw new Error(
@@ -2102,7 +2270,7 @@ export class ComputerRuntime {
           result.foreground.compileCycles,
           job.osPid,
           "run",
-          output,
+          result.transcript,
         );
         this.compileReady.delete(entry);
         entry.compileJob = undefined;
@@ -2111,7 +2279,7 @@ export class ComputerRuntime {
       this.completeCompileJob(
         entry,
         result.exitCode,
-        output,
+        result.transcript,
         result.cpuCycles ?? 1,
       );
       return;
@@ -2127,7 +2295,12 @@ export class ComputerRuntime {
         task.outputPath,
         `CS486\n${JSON.stringify(executable)}`,
       );
-      this.completeCompileJob(entry, 0, "", compileTaskCycles(job.request));
+      this.completeCompileJob(
+        entry,
+        0,
+        emptyGuestToolchainTranscript(),
+        compileTaskCycles(job.request),
+      );
       return;
     }
     const assemblerOptions =
@@ -2257,18 +2430,23 @@ export class ComputerRuntime {
       }
       if (job.onComplete !== undefined) {
         this.releaseCompileMemory(job);
+        const runtimeId = this.nextRuntimeId++;
+        const granted = createGrantedCs486Process(
+          entry,
+          output,
+          job.request.command,
+          runtimeId,
+        );
         this.startDebugJob(
           entry,
           {
             compileCycles,
             instructionLimit: 100_000,
             kind: "cs486",
+            memoryGrant: granted.grant,
             onComplete: job.onComplete,
-            process: new Cs486Process(output, {
-              cpuModel: entry.record.hardware.cpuModel,
-              memoryBytes: guestProcessMemoryBytes(entry),
-            }),
-            runtimeId: this.nextRuntimeId++,
+            process: granted.process,
+            runtimeId,
             stats: false,
           },
           {
@@ -2292,6 +2470,7 @@ export class ComputerRuntime {
               : job.request.command === "c" || job.request.command === "c++"
                 ? "cscc"
                 : "basic",
+          emptyGuestToolchainTranscript(),
         );
       }
       this.compileReady.delete(entry);
@@ -2304,7 +2483,12 @@ export class ComputerRuntime {
       task.outputPath,
       `${output.format === "cs486-object" ? "CS486OBJ" : "CS486"}\n${JSON.stringify(output)}`,
     );
-    this.completeCompileJob(entry, 0, "", compileCycles);
+    this.completeCompileJob(
+      entry,
+      0,
+      emptyGuestToolchainTranscript(),
+      compileCycles,
+    );
   }
 
   private startCompiledForeground(
@@ -2314,22 +2498,26 @@ export class ComputerRuntime {
     compileCycles: number,
     osPid: number,
     command: "basic" | "csasm" | "cscc" | "qbasic" | "run",
-    completionOutputPrefix = "",
+    completionTranscriptPrefix: GuestToolchainTranscript,
   ): void {
     const runtimeId = this.nextRuntimeId++;
-    const process = new Cs486Process(executable, {
-      cpuModel: entry.record.hardware.cpuModel,
-      memoryBytes: guestProcessMemoryBytes(entry),
-    });
+    const granted = createGrantedCs486Process(
+      entry,
+      executable,
+      command,
+      runtimeId,
+    );
+    const process = granted.process;
     const foreground: ForegroundGuestProcess = {
       command,
       compileCycles,
       completionEvent,
-      completionOutputPrefix,
+      completionTranscriptPrefix,
       cpuCycles: 0,
       executedInstructions: 0,
       instructionLimit: 100_000,
       kind: "cs486",
+      memoryGrant: granted.grant,
       osPid,
       process,
       runtimeId,
@@ -2348,6 +2536,7 @@ export class ComputerRuntime {
       this.runtimeLanes.set(runtimeId, "guest_cpu");
       entry.foreground = foreground;
     } catch (error: unknown) {
+      releaseGuestProcessMemory(granted.grant);
       this.completeOsProcess(entry, osPid, 1, compileCycles);
       throw error;
     }
@@ -2356,38 +2545,59 @@ export class ComputerRuntime {
   private completeCompileJob(
     entry: RuntimeEntry,
     exitCode: number,
-    stderr: string,
+    transcript: GuestToolchainTranscript,
     cpuCycles = 1,
     signal?: OsProcessSignal,
   ): void {
-    const job = entry.compileJob;
-    if (job === undefined) return;
-    this.compileReady.delete(entry);
-    entry.compileJob = undefined;
-    this.releaseCompileMemory(job);
-    this.completeOsProcess(entry, job.osPid, exitCode, cpuCycles, signal);
-    const completionScreen = entry.shell?.completeForegroundProcess(
+    const job = this.finalizeCompileJobProcess(
+      entry,
       exitCode,
-      stderr,
+      cpuCycles,
+      signal,
     );
+    if (job === undefined) return;
+    const completionScreen = entry.shell?.completeToolchainForegroundProcess(
+      exitCode,
+      transcript,
+    );
+    const profile = getOsProfile(activeOsProfile(entry));
+    const rendered = renderGuestToolchainTranscript(transcript, {
+      displaySource: (source) => profile.pathDialect.display(source),
+      profile: profile.id,
+    });
     if (job.onComplete !== undefined) {
       job.onComplete({
         outcome: "completed",
         exitCode,
-        stderr,
-        stdout: "",
+        stderr: rendered.stderr,
+        stdout: rendered.stdout,
         cpuCycles,
       });
       return;
     }
     if (completionScreen !== undefined) {
       renderTerminalScreen(entry.record.terminal, completionScreen);
-    } else if (stderr.length > 0) {
-      writeTerminalLines(entry.record.terminal, stderr.trimEnd().split("\n"));
+    } else if (rendered.orderedRows.length > 0) {
+      writeTerminalLines(entry.record.terminal, rendered.orderedRows);
     }
     if (entry.vm !== undefined) {
       this.scheduler.queueEvent(entry.runtimeId, job.completionEvent, exitCode);
     }
+  }
+
+  private finalizeCompileJobProcess(
+    entry: RuntimeEntry,
+    exitCode: number,
+    cpuCycles: number,
+    signal?: OsProcessSignal,
+  ): CompileJob | undefined {
+    const job = entry.compileJob;
+    if (job === undefined) return undefined;
+    this.compileReady.delete(entry);
+    entry.compileJob = undefined;
+    this.releaseCompileMemory(job);
+    this.completeOsProcess(entry, job.osPid, exitCode, cpuCycles, signal);
+    return job;
   }
 
   private releaseCompileMemory(job: CompileJob): void {
@@ -2396,9 +2606,10 @@ export class ComputerRuntime {
 
   private finalizeGuestRam(entry: RuntimeEntry): void {
     const ledger = entry.guestRamLedger;
-    const resident = entry.residentMemoryLease;
-    entry.residentMemoryLease = undefined;
-    if (resident?.released === false) resident.release();
+    releaseGuestProcessMemory(entry.vmMemoryGrant);
+    entry.vmMemoryGrant = undefined;
+    entry.dosGuestMemoryManager?.close();
+    entry.dosGuestMemoryManager = undefined;
     if (ledger !== undefined && ledger.usedBytes !== 0) {
       throw new Error(
         `Guest RAM finalization leaked ${String(ledger.usedBytes)} bytes`,
@@ -2411,7 +2622,10 @@ export class ComputerRuntime {
     entry: RuntimeEntry,
     request: Extract<ShellForegroundRequest, { readonly kind: "python" }>,
     runtimeId: number,
-  ): Cs486Process {
+  ): {
+    readonly memoryGrant: GuestProcessMemoryGrant;
+    readonly process: Cs486Process;
+  } {
     const filesystem = guestFilesystemForEntry(
       entry,
       request.credentials,
@@ -2447,21 +2661,40 @@ export class ComputerRuntime {
       runHostWork: (lane, units, operation) =>
         this.runHostWork(lane, units, entry.record.computerId, operation),
     });
-    return createPythonCs486Program({
+    const prepared = preparePythonCs486Program({
       cpuModel: entry.record.hardware.cpuModel,
       environment,
       filesystem,
-      memoryBytes: guestProcessMemoryBytes(entry),
       path: request.path,
       source,
-    }).process;
+    });
+    const memoryGrant = grantCs486MemoryRequirements(
+      prepared.requirements,
+      guestProcessMemoryAdmission(
+        entry,
+        request.command,
+        `runtime-${String(runtimeId)}`,
+      ),
+    );
+    try {
+      return {
+        memoryGrant,
+        process: prepared.create(memoryGrant.memoryBytes).process,
+      };
+    } catch (error: unknown) {
+      releaseGuestProcessMemory(memoryGrant);
+      throw error;
+    }
   }
 
   private createBackgroundPythonProcess(
     entry: RuntimeEntry,
     request: Extract<ShellBackgroundRequest, { readonly kind: "python" }>,
     runtimeId: number,
-  ): Cs486Process {
+  ): {
+    readonly memoryGrant: GuestProcessMemoryGrant;
+    readonly process: Cs486Process;
+  } {
     const filesystem = guestFilesystemForEntry(
       entry,
       request.credentials,
@@ -2496,16 +2729,30 @@ export class ComputerRuntime {
       runHostWork: (lane, units, operation) =>
         this.runHostWork(lane, units, entry.record.computerId, operation),
     });
-    const process = createPythonCs486Program({
+    const prepared = preparePythonCs486Program({
       cpuModel: entry.record.hardware.cpuModel,
       environment,
       filesystem,
-      memoryBytes: guestProcessMemoryBytes(entry),
       path: request.path,
       source,
-    }).process;
+    });
+    const memoryGrant = grantCs486MemoryRequirements(
+      prepared.requirements,
+      guestProcessMemoryAdmission(
+        entry,
+        request.command,
+        `runtime-${String(runtimeId)}`,
+      ),
+    );
+    let process: Cs486Process;
+    try {
+      process = prepared.create(memoryGrant.memoryBytes).process;
+    } catch (error: unknown) {
+      releaseGuestProcessMemory(memoryGrant);
+      throw error;
+    }
     processHolder.process = process;
-    return process;
+    return { memoryGrant, process };
   }
 
   private completeForegroundProcess(
@@ -2515,6 +2762,7 @@ export class ComputerRuntime {
   ): void {
     this.unschedule(foreground.runtimeId);
     entry.foreground = undefined;
+    releaseGuestProcessMemory(foreground.memoryGrant);
     if (entry.stopIntent !== undefined || entry.vm === undefined) {
       this.completeOsProcess(
         entry,
@@ -2586,20 +2834,41 @@ export class ComputerRuntime {
       foreground.kind === "cs486"
         ? (foreground.process as Cs486Process).output
         : "";
-    const completionOutput = `${foreground.completionOutputPrefix ?? ""}${processOutput}`;
-    const completionScreen = entry.shell?.completeForegroundProcess(
-      exitCode,
-      completionOutput,
-    );
-    if (
-      foreground.kind === "cs486" &&
-      processOutput.length > 0 &&
-      completionScreen === undefined
-    ) {
-      writeTerminalLines(
-        entry.record.terminal,
-        processOutput.replaceAll("\r\n", "\n").replace(/\n$/u, "").split("\n"),
+    let completionTranscript: GuestToolchainTranscript;
+    let transcriptLimitExceeded = false;
+    try {
+      completionTranscript = concatGuestToolchainTranscripts([
+        foreground.completionTranscriptPrefix ??
+          emptyGuestToolchainTranscript(),
+        guestToolchainTranscriptFromStreams(processOutput, ""),
+      ]);
+    } catch (error: unknown) {
+      if (!(error instanceof RangeError)) throw error;
+      transcriptLimitExceeded = true;
+      exitCode = 1;
+      stateName = "failed";
+      completionTranscript = guestToolchainTranscriptFromFailure(
+        "runtime: process output limit exceeded\n",
       );
+    }
+    const completionScreen = entry.shell?.completeToolchainForegroundProcess(
+      exitCode,
+      completionTranscript,
+    );
+    if (completionScreen === undefined) {
+      if (transcriptLimitExceeded) {
+        writeTerminalLines(entry.record.terminal, [
+          "runtime: process output limit exceeded",
+        ]);
+      } else if (foreground.kind === "cs486" && processOutput.length > 0) {
+        writeTerminalLines(
+          entry.record.terminal,
+          processOutput
+            .replaceAll("\r\n", "\n")
+            .replace(/\n$/u, "")
+            .split("\n"),
+        );
+      }
     }
     if (foreground.stats) {
       writeTerminalLines(entry.record.terminal, [
@@ -2670,6 +2939,7 @@ export class ComputerRuntime {
   ): void {
     this.unschedule(background.runtimeId);
     entry.backgroundJobs.delete(background.osPid);
+    releaseGuestProcessMemory(background.memoryGrant);
 
     const recordedJob = entry.osRuntimeState.job(background.jobId);
     let exitCode = recordedJob?.exitStatus;
@@ -2859,11 +3129,8 @@ export class ComputerRuntime {
       unsafeFinalization = true;
     }
 
-    const compileJob = entry.compileJob;
+    const compileJob = this.finalizeCompileJobProcess(entry, 130, 1, "SIGHUP");
     if (compileJob !== undefined) {
-      this.compileReady.delete(entry);
-      entry.compileJob = undefined;
-      this.completeOsProcess(entry, compileJob.osPid, 130, 1, "SIGHUP");
       entry.shell?.completeForegroundProcess(130);
       if (compileJob.onComplete === undefined) {
         try {
@@ -2889,6 +3156,7 @@ export class ComputerRuntime {
     const foreground = entry.foreground;
     if (foreground !== undefined) {
       entry.foreground = undefined;
+      releaseGuestProcessMemory(foreground.memoryGrant);
       foreground.terminationSignal = "SIGHUP";
       try {
         foreground.process.terminate("terminal disconnected");
@@ -2921,6 +3189,7 @@ export class ComputerRuntime {
     const debugJob = entry.debugJob;
     if (debugJob !== undefined) {
       entry.debugJob = undefined;
+      releaseGuestProcessMemory(debugJob.memoryGrant);
       debugJob.terminationSignal = "SIGHUP";
       try {
         debugJob.process.terminate("terminal disconnected");
@@ -3029,7 +3298,13 @@ export class ComputerRuntime {
             "stopping new work admission; signalling owned processes",
           );
           if (entry.compileJob !== undefined)
-            this.completeCompileJob(entry, 143, "", 1, "SIGTERM");
+            this.completeCompileJob(
+              entry,
+              143,
+              emptyGuestToolchainTranscript(),
+              1,
+              "SIGTERM",
+            );
           if (entry.foreground !== undefined)
             this.signalOsProcess(entry, entry.foreground.osPid, "SIGTERM");
           if (entry.debugJob !== undefined)
@@ -3273,10 +3548,17 @@ export class ComputerRuntime {
 
   private forceFinalizeGuestWork(entry: RuntimeEntry): void {
     if (entry.compileJob !== undefined)
-      this.completeCompileJob(entry, 137, "", 1, "SIGKILL");
+      this.completeCompileJob(
+        entry,
+        137,
+        emptyGuestToolchainTranscript(),
+        1,
+        "SIGKILL",
+      );
     if (entry.foreground !== undefined) {
       const foreground = entry.foreground;
       entry.foreground = undefined;
+      releaseGuestProcessMemory(foreground.memoryGrant);
       foreground.terminationSignal = "SIGKILL";
       foreground.process.terminate("shutdown deadline exceeded");
       this.unschedule(foreground.runtimeId);
@@ -3297,6 +3579,7 @@ export class ComputerRuntime {
     if (entry.debugJob !== undefined) {
       const debug = entry.debugJob;
       entry.debugJob = undefined;
+      releaseGuestProcessMemory(debug.memoryGrant);
       debug.terminationSignal = "SIGKILL";
       debug.process.terminate("shutdown deadline exceeded");
       this.unschedule(debug.runtimeId);
@@ -3343,6 +3626,7 @@ export class ComputerRuntime {
       }
       this.unschedule(background.runtimeId);
       entry.backgroundJobs.delete(background.osPid);
+      releaseGuestProcessMemory(background.memoryGrant);
       const job = entry.osRuntimeState.job(background.jobId);
       if (job !== undefined && job.state !== "done") {
         entry.osRuntimeState.transitionJob(background.jobId, {
@@ -3577,6 +3861,7 @@ export class ComputerRuntime {
         jobId: foregroundJob.jobId!,
         kind: foregroundJob.kind as BackgroundGuestProcess["kind"],
         limitReached: foregroundJob.limitReached,
+        memoryGrant: foregroundJob.memoryGrant,
         osPid: foregroundJob.osPid,
         process: foregroundJob.process,
         runtimeId: foregroundJob.runtimeId,
@@ -3614,7 +3899,13 @@ export class ComputerRuntime {
       entry.debugJob.terminationSignal = signal;
       entry.debugJob.process.terminate(signal);
     } else if (entry.compileJob?.osPid === pid) {
-      this.completeCompileJob(entry, osSignalExitCode(signal), "", 1, signal);
+      this.completeCompileJob(
+        entry,
+        osSignalExitCode(signal),
+        emptyGuestToolchainTranscript(),
+        1,
+        signal,
+      );
     }
     this.syncOsRuntimeState(entry);
   }
@@ -3681,12 +3972,8 @@ export class ComputerRuntime {
     } catch (error: unknown) {
       finalizationFailures.push(error);
     }
-    if (entry.compileJob !== undefined) {
-      const compileJob = entry.compileJob;
-      this.compileReady.delete(entry);
-      entry.compileJob = undefined;
-      this.releaseCompileMemory(compileJob);
-      this.completeOsProcess(entry, compileJob.osPid, 130, 1, "SIGTERM");
+    const compileJob = this.finalizeCompileJobProcess(entry, 130, 1, "SIGTERM");
+    if (compileJob !== undefined) {
       try {
         compileJob.onComplete?.({
           outcome: "failed",
@@ -3700,6 +3987,7 @@ export class ComputerRuntime {
       const foreground = entry.foreground;
       this.unschedule(foreground.runtimeId);
       entry.foreground = undefined;
+      releaseGuestProcessMemory(foreground.memoryGrant);
       this.completeOsProcess(
         entry,
         foreground.osPid,
@@ -3718,6 +4006,7 @@ export class ComputerRuntime {
       const debugJob = entry.debugJob;
       this.unschedule(debugJob.runtimeId);
       entry.debugJob = undefined;
+      releaseGuestProcessMemory(debugJob.memoryGrant);
       this.completeOsProcess(
         entry,
         debugJob.osPid,
@@ -3839,7 +4128,8 @@ interface RuntimeEntry {
   readonly dosRuntimeState?: DosRuntimeState;
   readonly floppyDrive: FloppyDrive;
   guestRamLedger?: GuestRamLedger;
-  residentMemoryLease?: MemoryLease;
+  dosGuestMemoryManager?: DosGuestMemoryManager;
+  vmMemoryGrant?: GuestProcessMemoryGrant;
   activeFilesystem?: InMemoryFilesystem;
   activeOsProfile?: ComputerOsProfile;
   transientDosRuntimeState?: DosRuntimeState;
@@ -3891,6 +4181,7 @@ interface BackgroundGuestProcess {
   readonly jobId: number;
   readonly kind: "cs486" | "python" | "sleep";
   limitReached?: boolean;
+  readonly memoryGrant?: GuestProcessMemoryGrant;
   readonly osPid: number;
   readonly process: CpuProcess;
   readonly runtimeId: number;
@@ -3900,7 +4191,7 @@ interface BackgroundGuestProcess {
 
 interface CompileJob {
   readonly completionEvent: string;
-  readonly memoryLease: MemoryLease;
+  readonly memoryLease: GuestMemoryReservation;
   readonly onComplete?: (result: DebugShellCommandCompletion) => void;
   readonly osPid: number;
   readonly request: Extract<
@@ -3936,6 +4227,7 @@ interface DebugGuestJob {
   executedInstructions: number;
   readonly instructionLimit?: number;
   readonly kind: "cs486" | "debugger" | "python";
+  readonly memoryGrant?: GuestProcessMemoryGrant;
   readonly onComplete: (result: DebugShellCommandCompletion) => void;
   readonly osPid: number;
   readonly process: CpuProcess;
@@ -3962,7 +4254,7 @@ interface ForegroundGuestProcess {
   readonly commandLine?: string;
   readonly compileCycles: number;
   readonly completionEvent: string;
-  readonly completionOutputPrefix?: string;
+  readonly completionTranscriptPrefix?: GuestToolchainTranscript;
   cpuCycles: number;
   readonly debuggerCompletion?: () => ShellCommandResult;
   executedInstructions: number;
@@ -3970,6 +4262,7 @@ interface ForegroundGuestProcess {
   readonly jobId?: number;
   readonly kind: "cs486" | "debugger" | "python" | "sleep";
   limitReached?: boolean;
+  readonly memoryGrant?: GuestProcessMemoryGrant;
   readonly osPid: number;
   readonly process: CpuProcess;
   readonly runtimeId: number;
@@ -3984,6 +4277,20 @@ interface OsGuestProcessOwner {
 }
 
 const foregroundCompletionEvent = "__cs_foreground_complete";
+const internalBootManagedMemoryBytes = 64 * 1_024;
+const maximumUserBootManagedMemoryBytes = 1_024 * 1_024;
+
+/**
+ * A long-lived user startup process retains at most one quarter of physical
+ * RAM, capped at the historical 1 MiB Python quota. This leaves deterministic
+ * admission room for one ordinary foreground process on the 2 MiB desktop.
+ */
+function userBootManagedMemoryBytes(physicalMemoryBytes: number): number {
+  return Math.min(
+    maximumUserBootManagedMemoryBytes,
+    Math.max(1, Math.floor(physicalMemoryBytes / 4)),
+  );
+}
 const maximumStopPhaseTicks = 200;
 const maximumStoppingEntriesPerTick = 16;
 
@@ -4131,8 +4438,7 @@ function compileJobUnits(
 
 function compileTaskCycles(
   request: Extract<ShellForegroundRequest, { readonly kind: "compile" }>,
-  output?:
-    ReturnType<typeof assembleCs486Object> | ReturnType<typeof assembleCs486>,
+  output?: ReturnType<typeof assembleCs486Object> | Cs486Executable,
   includedSourceCharacters = 0,
 ): number {
   if (request.task.kind === "program-list") return 1;
@@ -4263,13 +4569,87 @@ function activeFilesystem(entry: RuntimeEntry): InMemoryFilesystem {
   return entry.activeFilesystem ?? entry.record.filesystem;
 }
 
-function guestProcessMemoryBytes(entry: RuntimeEntry): number {
-  const bytes =
-    entry.guestRamLedger?.availableBytes ?? entry.record.hardware.memoryBytes;
-  if (bytes <= 0) {
-    throw new Error("Out of Memory: no guest process memory remains");
+function grantExecutableProcessMemory(
+  entry: RuntimeEntry,
+  executable: Cs486Executable,
+  command: string,
+  instanceId: string,
+): GuestProcessMemoryGrant {
+  return grantCs486ExecutableMemory(
+    executable,
+    guestProcessMemoryAdmission(entry, command, instanceId),
+  );
+}
+
+interface GuestMemoryReservation {
+  readonly released: boolean;
+  release(): void;
+}
+
+function createGrantedCs486Process(
+  entry: RuntimeEntry,
+  executable: Cs486Executable,
+  command: string,
+  runtimeId: number,
+): {
+  readonly grant: GuestProcessMemoryGrant;
+  readonly process: Cs486Process;
+} {
+  const grant = grantExecutableProcessMemory(
+    entry,
+    executable,
+    command,
+    `runtime-${String(runtimeId)}`,
+  );
+  try {
+    return {
+      grant,
+      process: new Cs486Process(executable, {
+        cpuModel: entry.record.hardware.cpuModel,
+        memoryBytes: grant.memoryBytes,
+      }),
+    };
+  } catch (error: unknown) {
+    releaseGuestProcessMemory(grant);
+    throw error;
   }
-  return bytes;
+}
+
+function guestProcessMemoryAdmission(
+  entry: RuntimeEntry,
+  command: string,
+  instanceId: string,
+  displayName = command,
+): {
+  readonly dosMemoryManager?: DosGuestMemoryManager;
+  readonly identity: {
+    readonly displayName: string;
+    readonly instanceId: string;
+    readonly moduleId: string;
+  };
+  readonly ledger: GuestRamLedger;
+} {
+  return {
+    dosMemoryManager:
+      activeOsProfile(entry) === "dos"
+        ? entry.dosGuestMemoryManager
+        : undefined,
+    identity: {
+      displayName: displayName.slice(0, 96) || "Guest process",
+      instanceId,
+      moduleId: guestProcessModuleId(command),
+    },
+    ledger: requireGuestRamLedger(entry),
+  };
+}
+
+function guestProcessModuleId(command: string): string {
+  const normalized = command
+    .toLowerCase()
+    .replaceAll(/[^a-z0-9._-]+/gu, "-")
+    .replaceAll(/^-+|-+$/gu, "")
+    .slice(0, 64);
+  return /^[a-z0-9]/u.test(normalized) ? normalized : "guest-process";
 }
 
 function requireGuestRamLedger(entry: RuntimeEntry): GuestRamLedger {
@@ -4290,29 +4670,40 @@ function activeDosRuntimeState(
   return entry.transientDosRuntimeState ?? entry.dosRuntimeState;
 }
 
-function formatCompileJobError(
+function compileJobFallbackSource(
+  request: Extract<ShellForegroundRequest, { readonly kind: "compile" }>,
+): string {
+  return request.task.kind === "source"
+    ? (request.task.sourceName ?? request.command)
+    : request.command;
+}
+
+function compileJobErrorTranscript(
   command: string,
   error: Error,
   profile: OsProfile,
-): string {
-  const newline = profile.id === "dos" ? "\r\n" : "\n";
+  fallbackSource: string,
+): GuestToolchainTranscript {
   if (error instanceof Cs486CompileError) {
-    const source =
-      error.source === undefined
-        ? profile.id === "dos"
-          ? command.toUpperCase()
-          : command
-        : profile.pathDialect.display(error.source);
-    const location =
-      profile.id === "dos"
-        ? `${source}(${String(error.line ?? 1)},${String(error.column ?? 1)})`
-        : `${source}:${String(error.line ?? 1)}:${String(error.column ?? 1)}`;
-    return `${location}: error ${error.code}: ${error.detail}${newline}`;
+    return guestToolchainTranscriptFromCompileError(error, fallbackSource);
   }
   if (error instanceof Cs486LinkError) {
-    return `${profile.id === "dos" ? "LINK" : command}: error CSLINK001: ${error.message}${newline}`;
+    return createGuestToolchainTranscript([
+      {
+        diagnostic: {
+          code: "CSLINK001",
+          message: error.message,
+          notes: [],
+          severity: "error",
+          source: profile.id === "dos" ? "LINK" : command,
+        },
+        kind: "diagnostic",
+      },
+    ]);
   }
-  return `${profile.id === "dos" ? command.toUpperCase() : command}: ${error.name}: ${error.message}${newline}`;
+  return guestToolchainTranscriptFromFailure(
+    `${profile.id === "dos" ? command.toUpperCase() : command}: ${error.name}: ${error.message}\n`,
+  );
 }
 
 function guestParentPath(path: string): string {

@@ -13,10 +13,6 @@ import {
 } from "./computerComponent.js";
 
 import {
-  placeMonitorProbe,
-  registerMonitorComponent,
-} from "./monitorComponent.js";
-import {
   givePortableComputer,
   portableComputerDisplayName,
   registerPortableComputerComponent,
@@ -50,7 +46,6 @@ system.beforeEvents.startup.subscribe(
   ({ blockComponentRegistry, itemComponentRegistry }): void => {
     registerComputerComponents(blockComponentRegistry, itemComponentRegistry);
     registerRedstoneProbeComponent(blockComponentRegistry);
-    registerMonitorComponent(blockComponentRegistry);
     registerPortableComputerComponent(
       itemComponentRegistry,
       blockComponentRegistry,
@@ -104,7 +99,7 @@ system.afterEvents.scriptEventReceive.subscribe((event): void => {
     case "help":
     case "status":
       event.sourceEntity.sendMessage(
-        "Computer System Phase 0 commands: status, ui, ui-custom, ui-nano, stream, compete, computer, monitor, portable, runtime, storage, speaker, headless",
+        "Computer System Phase 0 commands: status, ui, ui-custom, ui-nano, stream, compete, computer, portable, runtime, storage, speaker, headless",
       );
       return;
     case "runtime":
@@ -183,9 +178,6 @@ system.afterEvents.scriptEventReceive.subscribe((event): void => {
       });
       return;
     }
-    case "monitor":
-      placeMonitorProbe(event.sourceEntity);
-      return;
     default:
       event.sourceEntity.sendMessage(
         `Unknown Computer System probe: ${command}`,

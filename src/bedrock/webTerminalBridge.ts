@@ -2,6 +2,7 @@ import { system, world, type Block, type Player } from "@minecraft/server";
 
 import type { ComputerRecord } from "../domain/computer/computer.js";
 import type { RuntimeCommandResult } from "../application/computer/computerRuntime.js";
+import type { TerminalInteractionDescriptor } from "../application/terminal/terminalInteraction.js";
 import { TerminalSnapshotScheduler } from "../application/terminal/terminalSnapshotScheduler.js";
 import { FloppyAudioEventBroker } from "../application/terminal/floppyAudioEvents.js";
 import {
@@ -78,7 +79,7 @@ interface SharedSnapshotFrame {
     readonly lifecycle: string;
     readonly storage: ReturnType<typeof computerHost.storageStatus>;
     readonly terminal: ReturnType<ComputerRecord["terminal"]["snapshot"]> & {
-      readonly secretInput: boolean;
+      readonly interaction: TerminalInteractionDescriptor;
     };
   };
   readonly terminal: ComputerRecord["terminal"];
@@ -108,6 +109,7 @@ type WebInputResult =
         | "mouse_move_superseded"
         | "read_only"
         | "secret_input"
+        | "input_mode_changed"
         | "stale_mouse_event";
     }
   | { readonly outcome: "missing"; readonly resource: "session" };
@@ -495,10 +497,10 @@ function handleInput(message: string): void {
     });
     return;
   }
-  if (
-    session.principal.kind === "debug" &&
-    computerHost.runtime.isShellSecretInput(session.computerId)
-  ) {
+  const interaction = computerHost.runtime.terminalInteraction(
+    session.computerId,
+  );
+  if (session.principal.kind === "debug" && interaction.secretInput) {
     finalizeInputRequest(sessionId, requestId, {
       outcome: "ignored",
       reason: "secret_input",
@@ -524,6 +526,13 @@ function handleInput(message: string): void {
         requestId,
         failedInputResult("invalid_mouse_event"),
       );
+      return;
+    }
+    if (interaction.pointer !== "cell") {
+      finalizeInputRequest(sessionId, requestId, {
+        outcome: "ignored",
+        reason: "input_mode_changed",
+      });
       return;
     }
     const newestSequence = Math.max(
@@ -591,6 +600,13 @@ function handleInput(message: string): void {
       );
       return;
     }
+    if (interaction.inputMode !== "keys") {
+      finalizeInputRequest(sessionId, requestId, {
+        outcome: "ignored",
+        reason: "input_mode_changed",
+      });
+      return;
+    }
     const result = safeInputQueueResult(
       computerHost.runtime.queueEvent(
         session.computerId,
@@ -606,6 +622,13 @@ function handleInput(message: string): void {
         requestId,
         failedInputResult("invalid_line"),
       );
+      return;
+    }
+    if (interaction.inputMode !== "line") {
+      finalizeInputRequest(sessionId, requestId, {
+        outcome: "ignored",
+        reason: "input_mode_changed",
+      });
       return;
     }
     const result = safeInputQueueResult(
@@ -682,11 +705,17 @@ function handleCompletion(message: string): void {
   ) {
     return;
   }
-  const completion = computerHost.runtime.completeShellInput(
+  const interaction = computerHost.runtime.terminalInteraction(
     session.computerId,
-    value,
-    cursor,
-  ) ?? { candidates: [], cursor, value };
+  );
+  const completion =
+    interaction.inputMode === "line" && !interaction.secretInput
+      ? (computerHost.runtime.completeShellInput(
+          session.computerId,
+          value,
+          cursor,
+        ) ?? { candidates: [], cursor, value })
+      : { candidates: [], cursor, value };
   console.warn(
     `${completionMarker}${JSON.stringify({
       ...completion,
@@ -730,7 +759,11 @@ function handleInterrupt(message: string): void {
   const match = /^([A-Za-z0-9_-]{12,32})$/u.exec(message);
   if (match === null) return;
   const session = requireActiveSession(match[1] ?? "");
-  if (session !== undefined && terminalAccess.canWrite(session.sessionId)) {
+  if (
+    session !== undefined &&
+    terminalAccess.canWrite(session.sessionId) &&
+    computerHost.runtime.terminalInteraction(session.computerId).interrupt
+  ) {
     computerHost.runtime.interrupt(session.computerId);
     snapshotScheduler.requestEager(session.sessionId);
   }
@@ -1029,9 +1062,21 @@ function flushPendingMouseMove(session: ActiveSession): void {
   finalizeInputRequest(session.sessionId, pending.requestId, result);
 }
 
-function releaseMouseButtons(session: ActiveSession | undefined): void {
+function releaseMouseButtons(
+  session: ActiveSession | undefined,
+  discardPendingMove = false,
+): void {
   if (session === undefined) return;
-  flushPendingMouseMove(session);
+  if (discardPendingMove && session.pendingMouseMove !== undefined) {
+    const pending = session.pendingMouseMove;
+    session.pendingMouseMove = undefined;
+    finalizeInputRequest(session.sessionId, pending.requestId, {
+      outcome: "ignored",
+      reason: "input_mode_changed",
+    });
+  } else {
+    flushPendingMouseMove(session);
+  }
   for (let button = 0; button <= 2; button += 1) {
     const mask = 1 << button;
     if ((session.mouseButtons & mask) === 0) continue;
@@ -1069,14 +1114,15 @@ function emitSnapshot(session: ActiveSession, force: boolean): boolean {
   const label = record.label ?? record.computerId;
   const lifecycle = record.lifecycle.state.kind;
   const storage = computerHost.storageStatus(record.computerId);
-  const secretInput = computerHost.runtime.isShellSecretInput(
+  const interaction = computerHost.runtime.terminalInteraction(
     record.computerId,
   );
+  if (interaction.pointer !== "cell") releaseMouseButtons(session, true);
   const terminalRevision = record.terminal.revision;
   const frameMetadata = JSON.stringify({
+    interaction,
     label,
     lifecycle,
-    secretInput,
     storage,
   });
   const metadata = `${String(audio.latestSequence)}:${frameMetadata}`;
@@ -1095,7 +1141,7 @@ function emitSnapshot(session: ActiveSession, force: boolean): boolean {
     label,
     lifecycle,
     storage,
-    secretInput,
+    interaction,
     terminalRevision,
     frameMetadata,
   );
@@ -1117,7 +1163,7 @@ function getSharedSnapshotFrame(
   label: string,
   lifecycle: string,
   storage: ReturnType<typeof computerHost.storageStatus>,
-  secretInput: boolean,
+  interaction: TerminalInteractionDescriptor,
   terminalRevision: number,
   metadata: string,
 ): SharedSnapshotFrame {
@@ -1139,7 +1185,7 @@ function getSharedSnapshotFrame(
       storage,
       terminal: {
         ...record.terminal.snapshot(),
-        secretInput,
+        interaction,
       },
     },
     terminal: record.terminal,

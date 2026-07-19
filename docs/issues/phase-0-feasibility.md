@@ -2,6 +2,10 @@
 
 Parent: #1
 
+> Historical note: the connected-display probe below proved Script API touch
+> feasibility. The production Desktop/Advanced hardware was later redesigned as
+> a one-block all-in-one with a built-in CRT; the standalone probe is retired.
+
 ## Goal
 
 Build minimal, disposable Bedrock prototypes for the parts whose feasibility or

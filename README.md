@@ -13,12 +13,12 @@ ComputerCraft-style behavior.
 
 <table>
   <tr>
-    <td align="center"><img src="web/assets/manual/desktop-computer-system.png" alt="Desktop Computer System concept sheet showing a 486DX 33 MHz system unit, CRT, keyboard, mouse, and floppy drives" height="400"></td>
-    <td align="center"><img src="web/assets/manual/portable-computer-system.png" alt="Portable Computer System concept sheet showing its DOS terminal, keyboard, trackball, ports, battery, and 386SX 16 MHz with 2 MB RAM specification" height="400"></td>
+    <td align="center"><img src="web/assets/manual/desktop-computer-system.png" alt="Computer System Deskpro 486 family sheet showing its all-in-one CRT chassis, keyboard, mouse, and 3.5-inch floppy drives" height="400"></td>
+    <td align="center"><img src="web/assets/manual/portable-computer-system.png" alt="Computer System LTE 386SX sheet showing its DOS terminal, keyboard, trackball, 3.5-inch floppy drive, ports, battery, and 2 MiB RAM specification" height="400"></td>
   </tr>
   <tr>
-    <td align="center"><b>Desktop Computer System</b><br>Linux-style workstation concept</td>
-    <td align="center"><b>Portable Computer System</b><br>386SX 16 MHz / 2 MB DOS mobile concept</td>
+    <td align="center"><b>Computer System Deskpro 486 family</b><br>486DX/33 and 486DX2/66 CS-Linux profiles</td>
+    <td align="center"><b>Computer System LTE 386SX</b><br>386SX 16 MHz / 2 MiB CS-DOS mobile profile</td>
   </tr>
 </table>
 
@@ -32,11 +32,11 @@ bounded conversion instead of maintaining separate hand-copied textures.
 
 The Phase 2 Bedrock Computer vertical slice is implemented. The language, VM,
 scheduler, computer lifecycle, terminal model, filesystem, persistence, redstone
-adapters, portable computer identity, monitor fallback, and bounded Bedrock
-probes are covered by host and Bedrock Dedicated Server verification.
+adapters, portable computer identity, integrated desktop displays, and bounded
+Bedrock probes are covered by host and Bedrock Dedicated Server verification.
 
 The latest public build is
-[v0.1.0-alpha.2](https://github.com/tsuyoshi-otake/computer-system/releases/tag/v0.1.0-alpha.2).
+[v0.1.0-alpha.3](https://github.com/tsuyoshi-otake/computer-system/releases/tag/v0.1.0-alpha.3).
 It is an alpha preview of the implemented Phase 2 slice, not the later Phase 6
 release-hardening milestone. Back up an existing world before testing it.
 
@@ -140,7 +140,7 @@ The current package baseline uses `@minecraft/server` 2.8.0,
 ## Install the alpha preview
 
 1. Download
-   [`computer-system-0.1.0-alpha.2.mcaddon`](https://github.com/tsuyoshi-otake/computer-system/releases/download/v0.1.0-alpha.2/computer-system-0.1.0-alpha.2.mcaddon).
+   [`computer-system-0.1.0-alpha.3.mcaddon`](https://github.com/tsuyoshi-otake/computer-system/releases/download/v0.1.0-alpha.3/computer-system-0.1.0-alpha.3.mcaddon).
 2. Open the downloaded file with Minecraft for Windows to import both packs.
 3. In the target world's settings, activate the Computer System Behavior Pack.
    Its declared dependency activates the matching Resource Pack.
@@ -296,32 +296,30 @@ Minecraft player-IP check: an eligible remote player interaction may open the
 browser on the server host, never on the remote player's device.
 
 Interacting with a Desktop or Advanced Desktop Computer System activates browser
-access only when exactly one Monitor is physically adjacent. A bare desktop is
-selected but does not expose Web Terminal. The Portable Computer System has a
-built-in display and opens the link while held or placed without an external
-Monitor. The companion advertises a stable LAN entry page and Minecraft prints
-the Computer's permanent four-digit number. Touching the machine activates that
-number once for two minutes. The companion waits for Bedrock to accept the exact
-session before it opens a browser or exposes the handoff; a rejection or timeout
-closes that exact session instead of leaving an orphan. Invalid codes are
-rate-limited per client, and a simultaneous four-digit collision fails
-explicitly rather than connecting the wrong Computer. A `GET /p/NNNN` only
-redirects to the stable entry page and never consumes or exposes authentication
-state. The page exchanges the activation with one same-origin
-`POST /api/handoff`, then takes the writer lease. The browser-only bearer token
-is never written to BDS logs, a query, or browser history. The authenticated
-session lasts at most 30 minutes. Placed machines pause only after the
-requesting player moves beyond three blocks, and resume at 2.75 blocks or
-nearer. The deadband keeps the current state, preventing boundary jitter from
-alternating `out_of_range` and `in_range`. Range state appears in the Web UI;
-Minecraft chat is not used for steady range-transition notices. After the first
-successful connection the browser stores only the permanent four-digit number in
-local storage and changes the bookmarkable URL to `/?computer=NNNN`. Opening
-that bookmark rotates the bearer token through one deduplicated, bounded
-exponential-backoff loop. The loop stops on terminal authentication outcomes,
-caps attempts, and honors `Retry-After` for rate limits. Code and exact-session
-lookups are O(1). A held Portable is the access point itself and does not use
-the placed-block distance check.
+access directly through its built-in CRT. The Portable Computer System likewise
+uses its built-in display and opens the link while held or placed. The companion
+advertises a stable LAN entry page and Minecraft prints the Computer's permanent
+four-digit number. Touching the machine activates that number once for two
+minutes. The companion waits for Bedrock to accept the exact session before it
+opens a browser or exposes the handoff; a rejection or timeout closes that exact
+session instead of leaving an orphan. Invalid codes are rate-limited per client,
+and a simultaneous four-digit collision fails explicitly rather than connecting
+the wrong Computer. A `GET /p/NNNN` only redirects to the stable entry page and
+never consumes or exposes authentication state. The page exchanges the
+activation with one same-origin `POST /api/handoff`, then takes the writer
+lease. The browser-only bearer token is never written to BDS logs, a query, or
+browser history. The authenticated session lasts at most 30 minutes. Placed
+machines pause only after the requesting player moves beyond three blocks, and
+resume at 2.75 blocks or nearer. The deadband keeps the current state,
+preventing boundary jitter from alternating `out_of_range` and `in_range`. Range
+state appears in the Web UI; Minecraft chat is not used for steady
+range-transition notices. After the first successful connection the browser
+stores only the permanent four-digit number in local storage and changes the
+bookmarkable URL to `/?computer=NNNN`. Opening that bookmark rotates the bearer
+token through one deduplicated, bounded exponential-backoff loop. The loop stops
+on terminal authentication outcomes, caps attempts, and honors `Retry-After` for
+rate limits. Code and exact-session lookups are O(1). A held Portable is the
+access point itself and does not use the placed-block distance check.
 
 For a local managed-BDS debugging session only, set
 `WEB_COMPANION_DEBUG_IGNORE_RANGE=1` before starting the companion to skip the
@@ -614,10 +612,14 @@ leaking Linux applet output. The implemented compatibility surface includes
 `LABEL`, and read-only `CHKDSK`. Computer System DOS 1.0 (`CS-DOS 1.0`) reads a
 bounded `CONFIG.SYS` and runs `AUTOEXEC.BAT`; `SET`, `PATH`, `PROMPT`, `REM`,
 `@ECHO OFF`, `%0`…`%9`, `%VAR%`, and `%ERRORLEVEL%` are supported. Unsupported
-boot directives fail visibly. `DEVICE`/`DEVICEHIGH` enables the modeled HIMEM or
-EMM386 state only after the referenced installed guest file begins with the
-expected versioned CS-DOS driver capsule; a missing, deleted, or corrupt file
-fails before changing memory state.
+boot directives are parsed and resolved as one atomic plan. Any invalid line or
+driver rejects the whole plan, emits bounded diagnostics, and boots the explicit
+64 KiB degraded-low profile before AUTOEXEC continues; no earlier line is
+partially retained. `DEVICE`/`DEVICEHIGH` enables the modeled HIMEM or EMM386
+state only after the referenced installed guest file begins with the expected
+versioned CS-DOS driver capsule. A missing, deleted, or corrupt file fails
+before changing memory state. `DEVICEHIGH` tries one contiguous UMB block and
+reports when it falls back to conventional memory.
 
 The DOS runtime owns A: and C:, the active drive, a separate current directory
 for each drive, media generations, volume labels, and FAT metadata. Production
@@ -763,17 +765,36 @@ without changing the Computer's cell geometry. The browser subtracts terminal
 padding and fits both rows and columns, so the terminal surface does not expose
 an internal browser scrollbar. Guest-rendered EDIT, vi, and WorkBench scrollbars
 remain cells in that same snapshot and are not removed by the centered wrapper.
-The complete fixed-cell display frame stays centered on both axes in CLI and TUI
-states. Its active-page **Options** dialog selects **Off**, **Subtle**,
-**Arcade**, or **Shadow Mask** CRT profiles independently from **Flat** or
-**Curved Glass** shape. A new page starts at Arcade and Flat; the bounded
-Curvature slider is enabled only for Curved Glass, spans 0-30%, and starts at
-5%. The selected percentage drives both the SVG displacement and inverse TUI
-pointer mapping. These tab-only presentation settings do not change cells,
-palettes, copied text, or the bounded row-diff render path. The browser
-coalesces up to 16 keys per relay, while the BDS boundary rejects batches above
-32 keys. Tab performs bounded command/path completion through the same
-writer-authorized relay.
+The complete fixed-cell display surface stays centered on both axes in CLI and
+TUI states without a simulated monitor bezel. One blank raster row above and
+below the fixed 80x25 grid preserves the vertical blanking margin of a CRT
+without changing guest coordinates. The display uses the IBM VGA 9x16 fixed-cell
+font, unit line spacing, and default light gray `#a8a8a8`. The 80x25 text and
+full-screen TUI paths share one 720x400 logical glyph raster. Including the two
+blanking rows, a 0.8 horizontal correction presents the complete CRT glass at
+exact 4:3 without changing guest cells or pointer coordinates. Raster correction
+is mode-specific: future 640x480 VGA uses 1.0, while 320x200 uses its own
+correction. This does not claim CS Windows support; it keeps a future 640x480
+graphics surface from inheriting the text-mode correction. Its active-page
+**Options** dialog selects **Off**, **Subtle**, **Arcade**, or **Shadow Mask**
+CRT profiles independently from **Flat** or **Curved Glass** shape. A new page
+starts at Subtle and Flat; the bounded Curvature slider is enabled only for
+Curved Glass, spans 0-30%, and starts at 2%. The selected percentage drives both
+the SVG displacement and inverse TUI pointer mapping. These tab-only
+presentation settings do not change cells, palettes, copied text, or the bounded
+row-diff render path. The browser coalesces up to 16 keys per relay, while the
+BDS boundary rejects batches above 32 keys. Tab performs bounded command/path
+completion through the same writer-authorized relay.
+
+Each terminal snapshot carries one versioned interaction descriptor derived from
+authoritative guest state. It selects line, bounded key-batch, or disabled
+input; cell-pointer admission; secret masking; interrupt availability; and up to
+five contextual key hints. The companion and browser validate the same schema,
+so guest text such as `-- INSERT --` cannot change input mode. Input is rejected
+until the first descriptor arrives. A missing or unsupported schema shows
+**RELOAD REQUIRED**, clears stale hints, and asks the operator to restart the
+companion and Computer components together before reloading the page; it never
+falls back to terminal-text heuristics.
 
 The Web Terminal top bar places equal-size **Options**, **Copy**, and **Manual**
 controls first, followed by the **PWR**, **HDD**, and **FDD** indicators plus
@@ -792,7 +813,11 @@ hear live activity, and leaving range or closing the session stops active
 voices. **Copy** copies an active terminal selection, or the visible fixed-cell
 screen when nothing is selected. It uses the Clipboard API when available and a
 synchronous browser copy fallback for LAN HTTP deployments; no polling or
-background clipboard work is performed.
+background clipboard work is performed. Ctrl+C follows that same selection rule;
+with no selection it sends an interrupt only when the current descriptor
+advertises an interruptible foreground operation. The contextual footer remains
+visible on desktop and narrow layouts and changes with shell, authentication,
+editor, debugger, and busy state.
 
 Computer snapshots remain canonical in Bedrock World Dynamic Properties, which
 BDS stores in the world's LevelDB. Clean persistence checks compare O(1)
@@ -849,8 +874,8 @@ identity registry is still stored in the legacy page format, startup migrates
 and verifies every referenced Computer first, including schema-1
 Computer/filesystem payloads, then commits the identity registry last as the
 activation point. The migration advances by at most one Dynamic Property
-read/write/delete per host tick, and normal Computer, Portable, Monitor, and Web
-Terminal startup remains gated until it reaches an explicit `complete` state.
+read/write/delete per host tick, and normal Computer, Portable, and Web Terminal
+startup remains gated until it reaches an explicit `complete` state.
 `CS_STORAGE_MIGRATION` log records expose progress or the terminal failure.
 Fallback is recovery input, not a terminal migration result: a valid previous
 current-format Computer or identity generation repairs and verifies the invalid
@@ -945,23 +970,38 @@ sandbox through `cpuinfo`, `free`, `/proc/cpuinfo`, and `/proc/meminfo`; paging,
 swap, virtual-memory paging, and MMU page emulation are not claimed. Linux
 memory usage includes a bounded resident kernel, system-service, and buffer
 allowance in addition to dynamic guest-runtime bytes. DOS exposes `CPU`, `MEM`,
-`MEM /C`, `MEM /D`, and `SYSTEMINFO`. Its 2 MiB view accounts for 640 KiB
-conventional memory, bounded UMB/reserved regions, and XMS/HMA state configured
-by the modeled `HIMEM.SYS`, `EMM386.EXE NOEMS`, and `DOS=HIGH,UMB` directives.
-`MEM` and `MEM /C` separate DOS system/driver residency from guest runtime use
-while keeping the region totals internally consistent. This is protected
-sandbox/v86 compatibility metadata, not native BIOS/DOS interrupt or `.COM` /
-`.EXE` emulation. RAM, persistent disk quota, collection size, and output bounds
-are independent limits.
+`MEM /C`, `MEM /D`, `MEM /F`, and `SYSTEMINFO`. One boot-scoped memory manager
+owns the address map and the transient RAM ledger. The 2 MiB portable view
+contains 640 KiB conventional memory, reserved video at 640–767 KiB, UMBs at
+768–895 KiB, reserved ROM at 896–1023 KiB, and XMS above 1 MiB. UMBs exist only
+with the modeled `HIMEM.SYS`, `EMM386.EXE NOEMS`, and `DOS=UMB`; HMA is the
+first 64 KiB of XMS and is never counted as extra capacity. `DOS=HIGH` moves the
+complete DOS high set only when it fits, while `COMMAND.COM` remains
+conventional.
 
-On the minimal portable boot, the shared transient RAM ledger reserves 64 KiB
-for DOS and drivers, so conventional memory reports 640 KiB total, 64 KiB used,
-and 576 KiB free. EDIT, CS QBASIC, and WorkBench reserve a coarse 256 KiB while
-open, `vi` reserves 192 KiB, and an admitted compiler, linker, or Program List
-job reserves 128 KiB. The validated CS process receives the ledger's remaining
-bytes, and every close, cancel, failure, disconnect, or shutdown owner releases
-its lease. These values model guest residency and are deliberately coarse; they
-are not byte-perfect measurements of the JavaScript host heap.
+`MEM` has no independent fallback calculation: all variants read one immutable
+manager snapshot. `/C` shows category/module residency and actual placement,
+`/D` shows manager flags and boot diagnostics, and `/F` shows real free extents
+and largest contiguous blocks. The paragraph-aligned first-fit allocator
+coalesces immediately and all snapshot/allocation work is bounded
+`O(active allocations + free extents)`.
+
+Editors, IDEs, compilers, linkers, debuggers, boot programs, and foreground or
+background processes acquire explicit physical grants before retained state or a
+`Cs486Process` is created. Version 3 executables declare the `cs-flat32-v1`
+stack, heap, and auxiliary residency; version 1/2 executables remain readable
+and take the complete currently free remainder exclusively for compatibility.
+The built-in empty-`/startup.py` shell is one 64 KiB composite grant. A
+long-lived user-authored `/startup.py` receives auxiliary residency equal to one
+quarter of physical RAM, capped at 1 MiB, while foreground Python keeps its
+historical 1 MiB managed-runtime quota. This leaves deterministic admission room
+for an ordinary foreground process on a 2 MiB desktop. Every completion, close,
+cancel, failure, disconnect, detach, and shutdown path has one exactly-once
+finalizer, and manager close requires a zero ledger. These values model guest
+residency and are not byte-perfect measurements of the JavaScript host heap.
+This is a Computer System ABI—not DPMI, EMS page mapping, native BIOS/DOS
+interrupts, or native `.COM`/`.EXE` execution. RAM, persistent disk quota,
+collection size, and output bounds remain independent limits.
 
 The sandboxed CS486 toolchain adds real 32-bit `EAX` through `EBP` registers,
 checked little-endian linear memory, stack/call control flow, terminal CPU
@@ -993,6 +1033,14 @@ it is independent Computer System code and does not include Microsoft C/C++ 7.0,
 Programmer's WorkBench binaries, artwork, help databases, OMF objects, or native
 x86 tools.
 
+WorkBench stores one constrained presentation state: exactly one primary Source,
+Output, or Debugger surface plus at most one permitted overlay. Menus and the
+Program List may remain over the Debugger where supported; selecting an editor
+dialog first returns to Source so the dialog cannot open invisibly. A
+profile-scoped command catalog keeps product boundaries explicit: CS QBASIC
+supports transient source run but rejects CS ASM/C/C++ build and rebuild
+shortcuts such as Alt+F7 and Ctrl+F7.
+
 `EDIT`, CS QBASIC, and the WorkBench share the same bounded editor state
 machine. Plain EDIT carries the title corner down a continuous left document
 border. In an 80x25 session, Ctrl+O opens with selected `*.TXT`, a bounded Files
@@ -1021,7 +1069,10 @@ but marks Run Last stale. Clean removes only paths recorded as project-owned,
 and canonical-path collisions with source, user objects, other outputs, or a
 pre-existing unowned file are rejected before mutation. The F4 pane is
 scrollable; F3 and Shift+F3 open the next or previous bounded DOS compiler
-location in the editor.
+location in the editor. Compiler diagnostics retain their authored path, code,
+span, and bounded notes as structured data. Output rows and F3 navigation are
+derived from that same record, so DOS display formatting cannot rewrite the
+canonical navigation target and changing output wording cannot break F3.
 
 The WorkBench, EDIT, and Web Terminal mouse path are built-in privileged
 sessions. User-authored C/C++/ASM currently has console output but no public
@@ -1127,18 +1178,16 @@ built-in shell program selected when `/startup.py` is empty. User-authored
 it; each attempt fails explicitly instead of exposing a live terminal shell
 object across an authentication boundary.
 
-The Bedrock pack includes placeable `Computer`, `Advanced Computer`, and
-`Monitor` items (`computer_system:computer_item`,
-`computer_system:advanced_computer_item`, and `computer_system:monitor`). Their
-inventory icons are generated from the authored machine plates. The Portable
-Computer System uses the matching authored plate as its held-item icon and can
-transfer that identity into the placeable
+The Bedrock pack includes placeable `Computer` and `Advanced Computer` items
+(`computer_system:computer_item` and `computer_system:advanced_computer_item`).
+Their inventory icons are generated from the authored machine plates. The
+Portable Computer System uses the matching authored plate as its held-item icon
+and can transfer that identity into the placeable
 `computer_system:portable_computer_block`; breaking it returns the same identity
 to an item. Placed blocks use internal `computer_system:computer_00..63` or
 `computer_system:advanced_computer_00..63` identifiers for their six-face
-redstone-output mask. Desktop Web Terminal access requires exactly one
-physically adjacent `computer_system:monitor`; missing or ambiguous connections
-fail explicitly. The current display block is named Monitor rather than Display.
+redstone-output mask. Each desktop is a single all-in-one block with a built-in
+CRT; interacting with that Computer opens its Web Terminal handoff directly.
 `computer_system:portable_computer` is the portable DOS item and applies the
 CS386SX 16 MHz / 2 MiB profile when its persistent identity is created or a
 legacy-default portable identity is safely migrated.

@@ -184,13 +184,17 @@ describe("DOS profile contract", (): void => {
       "     2097152 bytes total memory",
     );
     expect(shell.submit("MEM /C").lines).toContain(
-      "       65536 bytes guest runtime",
+      "           0 bytes guest runtime",
     );
     expect(shell.submit("MEM /C").lines).toContain(
-      "      131072 bytes DOS system and drivers",
+      "      113152 bytes DOS system and drivers",
     );
-    expect(shell.submit("MEM /C").stdout).toContain("DOS KERNEL");
-    expect(shell.submit("MEM /C").stdout).toContain("HIMEM/EMM386");
+    expect(shell.submit("MEM /C").stdout).toContain("os/command");
+    expect(shell.submit("MEM /C").stdout).toContain(
+      "COMMAND.COM               32768  Conventional",
+    );
+    expect(shell.submit("MEM /C").stdout).toContain("driver/himem");
+    expect(shell.submit("MEM /C").stdout).toContain("driver/emm386");
     expect(shell.submit("MEM /D").lines).toContain(
       "CPU mode: protected sandbox",
     );
@@ -309,7 +313,12 @@ describe("DOS profile contract", (): void => {
 
     expect(shell.takeStartupLines()).toEqual([]);
     expect(shell.submit("SET MODE").lines).toEqual(["MODE=PORTABLE"]);
-    expect(shell.submit("SET CONFIG_FILES").lines).toEqual(["CONFIG_FILES=40"]);
+    expect(shell.submit("SET CONFIG_FILES").lines).toEqual([
+      "Environment variable CONFIG_FILES not defined",
+    ]);
+    expect(shell.submit("MEM").lines).toContain(
+      "      115776 bytes DOS system and drivers",
+    );
     expect(shell.submit("PATH").lines).toEqual(["PATH=C:\\TOOLS;C:\\DOS"]);
     expect(shell.prompt()).toBe("[C]C:\\> ");
   });
@@ -375,8 +384,9 @@ describe("DOS profile contract", (): void => {
     const shell = new ShellSession(filesystem, { osProfile: "dos" });
 
     expect(shell.takeStartupLines()).toEqual([
-      "CONFIG.SYS line 1: unsupported directive DEVICE=C:\\DOS\\UNKNOWN.SYS",
-      "CONFIG.SYS line 2: unsupported directive SHELL=C:\\4DOS.COM",
+      "CONFIG.SYS line 1: C:\\DOS\\UNKNOWN.SYS is unsupported",
+      "CONFIG.SYS line 2: Unsupported CONFIG.SYS directive: SHELL=C:\\4DOS.COM",
+      "CONFIG.SYS: Invalid CONFIG.SYS; booted the explicit 64 KiB low-memory DOS profile",
     ]);
   });
 
@@ -390,8 +400,10 @@ describe("DOS profile contract", (): void => {
     const shell = new ShellSession(filesystem, { osProfile: "dos" });
 
     expect(shell.takeStartupLines()).toEqual([
-      "CONFIG.SYS line 1: HIMEM.SYS is missing or invalid",
-      "CONFIG.SYS line 2: EMM386.EXE is missing or invalid",
+      "CONFIG.SYS line 1: C:\\DOS\\HIMEM.SYS is invalid",
+      "CONFIG.SYS line 2: EMM386.EXE NOEMS requires HIMEM.SYS to be loaded first",
+      "CONFIG.SYS line 3: DOS=HIGH,UMB requires HIMEM.SYS and EMM386.EXE NOEMS to be loaded first",
+      "CONFIG.SYS: Invalid CONFIG.SYS; booted the explicit 64 KiB low-memory DOS profile",
     ]);
     expect(shell.submit("MEM /D").lines).toContain(
       "XMS driver (HIMEM.SYS): not installed",
@@ -430,7 +442,10 @@ describe("DOS profile contract", (): void => {
     const shell = new ShellSession(filesystem, { osProfile: "dos" });
 
     expect(shell.takeStartupLines()).toContain(
-      "C:\\CONFIG.SYS: configuration line limit exceeded",
+      "CONFIG.SYS line 65: CONFIG.SYS supports at most 64 lines",
+    );
+    expect(shell.submit("MEM /D").lines).toContain(
+      "Memory manager state: degraded-low",
     );
   });
 });

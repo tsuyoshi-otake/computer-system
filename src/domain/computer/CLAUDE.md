@@ -7,8 +7,8 @@
   validation are deterministic.
 - Do not renumber legacy `computer-N` identities or reinterpret an unsupported
   identity schema. Migration policy lives in the application/storage layers.
-- Keep block, item, Monitor, portable, storage, terminal, and runtime references
-  bound to the same stable identity.
+- Keep block, item, integrated display, portable, storage, terminal, and runtime
+  references bound to the same stable identity.
 
 ## Lifecycle
 

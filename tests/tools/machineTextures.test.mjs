@@ -15,6 +15,15 @@ import {
 const sourceDirectory = path.resolve("web/assets/machines");
 
 describe("authored machine textures", () => {
+  it("publishes only the two integrated desktops and unchanged Portable", () => {
+    expect(machineTextureSources).toEqual({
+      computer: "cs-computer.png",
+      advanced_computer: "cs-advanced-computer.png",
+      portable_computer: "cs-portable-computer.png",
+    });
+    expect(machineTextureKeys).not.toHaveProperty("monitor");
+  });
+
   it("maps every machine family into the shared item atlas", () => {
     expect(createMachineItemTextureAtlas()).toEqual({
       resource_pack_name: "computer_system",

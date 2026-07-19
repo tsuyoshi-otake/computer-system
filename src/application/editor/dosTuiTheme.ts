@@ -1,6 +1,7 @@
 import type { HighlightedCell } from "./syntaxHighlight.js";
 
 export const dosTuiColor = {
+  activeLineNumber: 6,
   black: 15,
   chrome: 8,
   document: 11,
@@ -31,7 +32,7 @@ export function drawDosTuiShadow(
       rows,
       row,
       left + width,
-      " ",
+      "  ",
       dosTuiColor.black,
       dosTuiColor.black,
     );

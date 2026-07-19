@@ -9,14 +9,29 @@ import {
   type ShellCompletionResult,
   type ShellForegroundRequest,
   type ShellJobControlRequest,
+  type ShellProcessMemoryAdmission,
+  type ShellProcessMemoryAdmissionRequest,
+  type ShellProcessMemoryGrant,
   type ShellRuntimeIdentityState,
 } from "./shellCommands.js";
 import type { ComputerOsProfile } from "../../domain/computer/computer.js";
-import type {
-  GuestRamOwner,
-  GuestRamSnapshot,
-  MemoryLease,
+import {
+  GuestRamLedger,
+  type GuestRamOwner,
+  type MemoryLease,
 } from "../../domain/computer/guestRamLedger.js";
+import { grantCs486ExecutableMemory } from "../runtime/guestProcessMemory.js";
+import {
+  DosGuestMemoryManager,
+  type DosGuestMemoryDiagnostic,
+  type DosGuestMemoryReservation,
+  type DosGuestMemorySnapshot,
+} from "./dosGuestMemoryManager.js";
+import {
+  planDosMemoryConfiguration,
+  type DosConfigurationDriverResolution,
+  type DosConfigurationDriverResolutionRequest,
+} from "./dosMemoryConfiguration.js";
 import {
   defaultComputerHardware,
   type ComputerHardwareProfile,
@@ -67,6 +82,19 @@ import {
   type QBasicSessionResult,
 } from "../editor/qbasicSession.js";
 import { ViSession, type ViResult } from "../editor/viSession.js";
+import {
+  createTerminalInteractionDescriptor,
+  type TerminalInteractionDescriptor,
+} from "../terminal/terminalInteraction.js";
+import {
+  concatGuestToolchainTranscripts,
+  concatGuestToolchainTranscriptsOrFailure,
+  emptyGuestToolchainTranscript,
+  guestToolchainTranscriptFromFailure,
+  guestToolchainTranscriptFromStreams,
+  renderGuestToolchainTranscript,
+  type GuestToolchainTranscript,
+} from "../toolchain/guestToolchainTranscript.js";
 import { maximumViConfigurationCharacters } from "../editor/viOptions.js";
 import {
   maximumViIncludeBytes,
@@ -116,10 +144,7 @@ export interface ShellResult {
 }
 
 export interface ShellSessionOptions {
-  readonly acquireMemoryLease?: (
-    bytes: number,
-    owner: GuestRamOwner,
-  ) => MemoryLease;
+  readonly admitProcessMemory?: ShellProcessMemoryAdmission;
   readonly clock?: ShellClockSource;
   readonly computerId?: number;
   readonly computerName?: string;
@@ -130,7 +155,7 @@ export interface ShellSessionOptions {
   readonly terminalWidth?: number;
   readonly hardware?: ComputerHardwareProfile;
   readonly memoryUsageBytes?: () => number;
-  readonly guestRamSnapshot?: () => GuestRamSnapshot | undefined;
+  readonly guestRamLedger?: GuestRamLedger;
   readonly requireLogin?: boolean;
   readonly passwordSalt?: () => string;
   readonly virtualDevices?: ReadonlyMap<string, VirtualDevice>;
@@ -156,7 +181,6 @@ export interface ShellSessionOptions {
 const maximumScriptDepth = 8;
 const maximumScriptLines = 256;
 const maximumScriptLoopIterations = 1_024;
-const maximumDosConfigLines = 64;
 const maximumPipelineBuffer = 256_000;
 const dosEditorResidentBytes = 256 * 1_024;
 const viResidentBytes = 192 * 1_024;
@@ -170,6 +194,21 @@ const maximumHistoryFileBytes = 32_768;
 const sudoCredentialLifetimeSeconds = 5 * 60;
 const variableMarkerStart = "\u{e000}";
 const variableMarkerEnd = "\u{e001}";
+const dosHimemResidentBytes = 14_592;
+const dosEmm386ResidentBytes = 22_528;
+const dosHimemCapsule = "CS-DOS XMS manager\n".padEnd(
+  dosHimemResidentBytes,
+  "\0",
+);
+const dosEmm386Capsule = "CS-DOS UMB manager\n".padEnd(
+  dosEmm386ResidentBytes,
+  "\0",
+);
+
+type SessionMemoryReservation = Pick<
+  MemoryLease | DosGuestMemoryReservation,
+  "release" | "released"
+>;
 
 interface ScriptFrame {
   arguments: string[];
@@ -229,22 +268,23 @@ type LinuxConversation =
     };
 
 export class ShellSession {
-  private readonly acquireMemoryLease:
-    ShellSessionOptions["acquireMemoryLease"] | undefined;
   private readonly accounts: LinuxAccountDatabase | undefined;
   private readonly authentication: LinuxAuthentication | undefined;
   private readonly credentialContext: CredentialContext;
   private readonly guestFilesystem: GuestFilesystem;
   private editor: DosIdeSession | undefined;
-  private editorMemoryLease: MemoryLease | undefined;
+  private editorMemoryLease: SessionMemoryReservation | undefined;
   private pendingEditorArtifactPath: string | undefined;
   private pendingEditorCommand: DosIdeCommand | undefined;
-  private pendingEditorOutputPrefix = "";
+  private pendingEditorTranscriptPrefix = emptyGuestToolchainTranscript();
   private vi: ViSession | undefined;
-  private viMemoryLease: MemoryLease | undefined;
+  private viMemoryLease: SessionMemoryReservation | undefined;
   private readonly commands: ShellCommandRuntime;
+  private readonly dosMemory: DosGuestMemoryManager | undefined;
   private readonly frontend: ShellFrontend;
   private readonly hardware: ComputerHardwareProfile;
+  private readonly guestRamLedger: GuestRamLedger;
+  private readonly ownsGuestRamLedger: boolean;
   private readonly history: string[] = [];
   private historyPath: string | undefined;
   private lastExitCode = 0;
@@ -278,10 +318,13 @@ export class ShellSession {
     private readonly filesystem: InMemoryFilesystem,
     options: ShellSessionOptions = {},
   ) {
-    this.acquireMemoryLease = options.acquireMemoryLease;
     this.terminalWidth = options.terminalWidth ?? 51;
     this.terminalHeight = options.terminalHeight ?? 19;
     const profile = getOsProfile(options.osProfile ?? "linux");
+    this.hardware = options.hardware ?? defaultComputerHardware;
+    this.guestRamLedger =
+      options.guestRamLedger ?? new GuestRamLedger(this.hardware.memoryBytes);
+    this.ownsGuestRamLedger = options.guestRamLedger === undefined;
     this.frontend = shellFrontendFor(profile.id);
     const currentTick = options.currentTick ?? ((): number => 0);
     const ticksPerSecond = options.ticksPerSecond ?? 20;
@@ -349,12 +392,12 @@ export class ShellSession {
       this.guestFilesystem =
         options.guestFilesystem ?? unrestrictedGuestFilesystem(filesystem);
     }
+    this.dosMemory =
+      profile.id === "dos"
+        ? new DosGuestMemoryManager(this.guestRamLedger)
+        : undefined;
     if (this.osRuntime !== undefined) {
-      ensureLinuxRuntimePresence(
-        this.osRuntime,
-        currentTick(),
-        options.hardware ?? defaultComputerHardware,
-      );
+      ensureLinuxRuntimePresence(this.osRuntime, currentTick(), this.hardware);
       this.notifyOsRuntimeChanged();
     }
     const runtimeOptions: ShellCommandRuntimeOptions = {
@@ -367,9 +410,21 @@ export class ShellSession {
       credentials: () => this.credentialContext.current,
       profile,
       ticksPerSecond,
-      hardware: options.hardware ?? defaultComputerHardware,
+      hardware: this.hardware,
       memoryUsageBytes: options.memoryUsageBytes ?? ((): number => 0),
-      guestRamSnapshot: options.guestRamSnapshot,
+      ...(this.dosMemory === undefined
+        ? {}
+        : {
+            dosMemorySnapshot: (): DosGuestMemorySnapshot =>
+              this.dosMemory!.snapshot(),
+          }),
+      admitProcessMemory:
+        this.dosMemory === undefined
+          ? (options.admitProcessMemory ??
+            ((request): ShellProcessMemoryGrant =>
+              this.admitLedgerProcessMemory(request)))
+          : (request): ShellProcessMemoryGrant =>
+              this.admitDosProcessMemory(request),
       virtualDevices: options.virtualDevices,
       peripherals: options.peripherals,
       deferGuestExecution: options.deferGuestExecution,
@@ -387,7 +442,6 @@ export class ShellSession {
       dosRuntime: options.dosRuntime,
       onDosRuntimeChanged: options.onDosRuntimeChanged,
     };
-    this.hardware = runtimeOptions.hardware;
     this.commands = new ShellCommandRuntime(
       this.guestFilesystem,
       runtimeOptions,
@@ -397,7 +451,7 @@ export class ShellSession {
         this.activateAuthenticatedSession(this.startupLines);
     } else {
       for (const loaded of [
-        this.loadDosConfiguration("C:\\CONFIG.SYS"),
+        this.configureDosMemory("C:\\CONFIG.SYS"),
         this.executeDosBatch("C:\\AUTOEXEC.BAT", [], 0),
       ]) {
         const text = `${loaded.stderr}${loaded.stdout}`.trimEnd();
@@ -416,11 +470,45 @@ export class ShellSession {
     return this.commands.prompt();
   }
 
-  isSecretInput(): boolean {
-    return (
+  terminalInteraction(): TerminalInteractionDescriptor {
+    if (this.disconnected) {
+      return createTerminalInteractionDescriptor({
+        context: "unavailable",
+        inputMode: "none",
+        interrupt: false,
+        pointer: "none",
+        presentation: "terminal",
+        secretInput: false,
+      });
+    }
+    if (this.vi !== undefined) return this.vi.terminalInteraction();
+    if (this.editor !== undefined) return this.editor.terminalInteraction();
+    const secretInput =
       this.linuxConversation !== undefined ||
-      (this.authentication?.isSecretInput() ?? false)
-    );
+      (this.authentication?.isSecretInput() ?? false);
+    const login =
+      this.linuxConversation !== undefined ||
+      this.authentication?.isAuthenticated() === false;
+    return createTerminalInteractionDescriptor({
+      context: secretInput ? "secret" : login ? "login" : "shell",
+      helpTopicId: login ? "login" : "shell",
+      hints: login
+        ? [{ key: "Enter", label: "Continue" }]
+        : [
+            { key: "Enter", label: "Run command" },
+            { key: "Tab", label: "Complete" },
+            { key: "Up/Down", label: "History" },
+          ],
+      inputMode: "line",
+      interrupt: false,
+      pointer: "none",
+      presentation: "terminal",
+      secretInput,
+    });
+  }
+
+  isSecretInput(): boolean {
+    return this.terminalInteraction().secretInput;
   }
 
   isAuthenticated(): boolean {
@@ -442,16 +530,36 @@ export class ShellSession {
     return this.shellProcessId;
   }
 
+  dosMemoryManager(): DosGuestMemoryManager | undefined {
+    return this.dosMemory;
+  }
+
   disconnect(): readonly string[] {
     if (this.disconnected) return [];
     this.disconnected = true;
-    this.releaseViMemory();
-    this.releaseEditorMemory();
+    let finalizationFailure: Error | undefined;
+    const finalize = (operation: () => void): void => {
+      try {
+        operation();
+      } catch (error: unknown) {
+        finalizationFailure ??=
+          error instanceof Error ? error : new Error(String(error));
+      }
+    };
+    finalize(() => this.releaseViMemory());
+    finalize(() => this.releaseEditorMemory());
     this.vi = undefined;
     this.editor = undefined;
     this.pendingEditorCommand = undefined;
-    this.commands.closeDebugger();
-    return this.logoutAuthenticatedSession("disconnect");
+    finalize(() => this.commands.closeDebugger());
+    if (this.ownsGuestRamLedger && this.dosMemory !== undefined) {
+      finalize(() => {
+        this.dosMemory!.close();
+      });
+    }
+    const result = this.logoutAuthenticatedSession("disconnect");
+    if (finalizationFailure !== undefined) throw finalizationFailure;
+    return result;
   }
 
   writeCompilerOutput(path: string, contents: string): void {
@@ -689,26 +797,48 @@ export class ShellSession {
     exitCode: number,
     output = "",
   ): EditorScreen | undefined {
-    this.lastExitCode = exitCode;
+    return this.completeToolchainForegroundProcess(
+      exitCode,
+      guestToolchainTranscriptFromStreams(output, ""),
+    );
+  }
+
+  completeToolchainForegroundProcess(
+    exitCode: number,
+    transcript: GuestToolchainTranscript,
+  ): EditorScreen | undefined {
     const editor = this.editor;
-    if (editor?.options.editorMode !== false) return undefined;
+    if (editor?.options.editorMode !== false) {
+      this.lastExitCode = exitCode;
+      return undefined;
+    }
     const command = this.pendingEditorCommand ?? "build-run";
     const artifactPath =
       this.pendingEditorArtifactPath ??
       editor.lastArtifactPath ??
       editorArtifactPath(editor.fileName);
-    const combinedOutput = joinEditorDebuggerOutput([
-      this.pendingEditorOutputPrefix,
-      output,
-    ]);
+    const pendingTranscript = this.pendingEditorTranscriptPrefix;
     this.pendingEditorArtifactPath = undefined;
     this.pendingEditorCommand = undefined;
-    this.pendingEditorOutputPrefix = "";
+    this.pendingEditorTranscriptPrefix = emptyGuestToolchainTranscript();
+    const merged = concatGuestToolchainTranscriptsOrFailure(
+      [pendingTranscript, transcript],
+      "workbench: toolchain output limit exceeded\r\n",
+    );
+    const effectiveExitCode = merged.limitExceeded ? 1 : exitCode;
+    this.lastExitCode = effectiveExitCode;
+    const combinedTranscript = merged.transcript;
+    const rendered = renderGuestToolchainTranscript(combinedTranscript, {
+      displaySource: (source) =>
+        this.commands.profile.pathDialect.display(source),
+      profile: "dos",
+    });
+    const combinedOutput = rendered.orderedRows.join("\r\n");
     if (command === "debug-start") {
-      if (exitCode !== 0) {
+      if (effectiveExitCode !== 0) {
         return editor.completeDebuggerCommand(
           command,
-          exitCode,
+          effectiveExitCode,
           combinedOutput,
         );
       }
@@ -717,7 +847,7 @@ export class ShellSession {
     if (command === "debug-step" || command === "debug-continue") {
       return editor.completeDebuggerCommand(
         command,
-        exitCode,
+        effectiveExitCode,
         this.editorDebuggerSnapshot(combinedOutput),
       );
     }
@@ -731,13 +861,13 @@ export class ShellSession {
     ) {
       const screen = editor.completeCommand(
         command,
-        exitCode,
-        combinedOutput,
+        effectiveExitCode,
+        combinedTranscript,
         this.commands.profile.pathDialect.display(artifactPath),
       );
       if (
         editor.product !== "qbasic" &&
-        exitCode === 0 &&
+        effectiveExitCode === 0 &&
         (command === "build" ||
           command === "build-run" ||
           command === "rebuild")
@@ -746,7 +876,11 @@ export class ShellSession {
       }
       return screen;
     }
-    return editor.completeDebuggerCommand(command, exitCode, combinedOutput);
+    return editor.completeDebuggerCommand(
+      command,
+      effectiveExitCode,
+      combinedOutput,
+    );
   }
 
   complete(line: string, cursor: number): ShellCompletionResult {
@@ -2931,124 +3065,101 @@ export class ShellSession {
     };
   }
 
-  private loadDosConfiguration(path: string): ShellCommandResult {
+  private configureDosMemory(path: string): ShellCommandResult {
+    const manager = this.dosMemory;
+    if (manager === undefined) {
+      return commandFailure(path, "DOS memory manager is unavailable");
+    }
     let source: string;
     try {
       source = this.commands.readFile(path);
     } catch (error: unknown) {
-      return commandFailure(path, message(error));
+      const snapshot = manager.configureDegradedMinimal([
+        {
+          code: "configuration-read-failed",
+          lineNumber: null,
+          message: `Unable to read ${path}: ${message(error)}`,
+        },
+      ]);
+      return this.dosConfigurationResult(snapshot.diagnostics, 2);
     }
-    const lines = source.replaceAll("\r\n", "\n").split("\n");
-    if (lines.length > maximumDosConfigLines)
-      return commandFailure(path, "configuration line limit exceeded");
-    let stderr = "";
-    let exitCode = 0;
-    for (const [index, sourceLine] of lines.entries()) {
-      const line = sourceLine.trim();
-      if (
-        line.length === 0 ||
-        line.startsWith(";") ||
-        /^REM(?:\s|$)/iu.test(line)
-      )
-        continue;
-      const numeric = /^(FILES|BUFFERS)\s*=\s*([0-9]+)$/iu.exec(line);
-      if (numeric !== null) {
-        const name = numeric[1]!.toUpperCase();
-        const value = Number(numeric[2]);
-        const maximum = name === "FILES" ? 255 : 99;
-        if (!Number.isSafeInteger(value) || value < 1 || value > maximum) {
-          stderr += `CONFIG.SYS line ${String(index + 1)}: ${name} must be between 1 and ${String(maximum)}\r\n`;
-          exitCode = 2;
-          continue;
-        }
-        this.commands.setVariable(`CONFIG_${name}`, String(value));
-        continue;
-      }
-
-      const device = /^DEVICE(?:HIGH)?\s*=\s*([^\s]+)(?:\s+(.*))?$/iu.exec(
-        line,
-      );
-      if (device !== null) {
-        const driver = device[1]!.replaceAll("/", "\\").toUpperCase();
-        const arguments_ = (device[2] ?? "").trim().toUpperCase();
-        if (driver === "HIMEM.SYS" || driver.endsWith("\\HIMEM.SYS")) {
-          if (!this.isInstalledDosDriver(driver, "CS-DOS XMS manager")) {
-            stderr += `CONFIG.SYS line ${String(index + 1)}: HIMEM.SYS is missing or invalid\r\n`;
-            exitCode = 2;
-            continue;
-          }
-          this.commands.setVariable("CONFIG_XMS", "ON");
-          continue;
-        }
-        if (driver === "EMM386.EXE" || driver.endsWith("\\EMM386.EXE")) {
-          if (arguments_ !== "" && arguments_ !== "NOEMS") {
-            stderr += `CONFIG.SYS line ${String(index + 1)}: EMM386 supports only NOEMS\r\n`;
-            exitCode = 2;
-            continue;
-          }
-          if (!this.isInstalledDosDriver(driver, "CS-DOS UMB manager")) {
-            stderr += `CONFIG.SYS line ${String(index + 1)}: EMM386.EXE is missing or invalid\r\n`;
-            exitCode = 2;
-            continue;
-          }
-          this.commands.setVariable("CONFIG_EMM386", "ON");
-          this.commands.setVariable(
-            "CONFIG_EMM386_MODE",
-            arguments_ === "NOEMS" ? "NOEMS" : "EMS",
-          );
-          continue;
-        }
-      }
-
-      const dos = /^DOS\s*=\s*(.+)$/iu.exec(line);
-      if (dos !== null) {
-        const modes = new Set(
-          dos[1]!
-            .split(",")
-            .map((value) => value.trim().toUpperCase())
-            .filter((value) => value.length > 0),
-        );
-        if (
-          modes.size === 0 ||
-          [...modes].some(
-            (mode) =>
-              mode !== "HIGH" &&
-              mode !== "LOW" &&
-              mode !== "UMB" &&
-              mode !== "NOUMB",
-          )
-        ) {
-          stderr += `CONFIG.SYS line ${String(index + 1)}: DOS supports HIGH, LOW, UMB, or NOUMB\r\n`;
-          exitCode = 2;
-          continue;
-        }
-        this.commands.setVariable(
-          "CONFIG_DOS_HIGH",
-          modes.has("LOW") ? "OFF" : modes.has("HIGH") ? "ON" : "OFF",
-        );
-        this.commands.setVariable(
-          "CONFIG_UMB",
-          modes.has("NOUMB") ? "OFF" : modes.has("UMB") ? "ON" : "OFF",
-        );
-        continue;
-      }
-
-      stderr += `CONFIG.SYS line ${String(index + 1)}: unsupported directive ${line}\r\n`;
-      exitCode = 2;
+    const planned = planDosMemoryConfiguration(source, {
+      resolve: (
+        request: DosConfigurationDriverResolutionRequest,
+      ): DosConfigurationDriverResolution =>
+        this.resolveDosConfigurationDriver(request),
+    });
+    if (!planned.committable) {
+      const snapshot = manager.configureDegradedMinimal(planned.diagnostics);
+      return this.dosConfigurationResult(snapshot.diagnostics, 2);
     }
-    return { exitCode, stderr, stdout: "" };
+    const configured = manager.configure(planned.plan);
+    if (!configured.configured) {
+      const snapshot = manager.configureDegradedMinimal(configured.diagnostics);
+      return this.dosConfigurationResult(snapshot.diagnostics, 2);
+    }
+    return this.dosConfigurationResult(
+      configured.snapshot.diagnostics,
+      configured.snapshot.diagnostics.length === 0 ? 0 : 1,
+    );
   }
 
-  private isInstalledDosDriver(driver: string, capsule: string): boolean {
-    const path =
-      /^[A-Za-z]:/u.test(driver) || driver.includes("\\")
-        ? driver
-        : `C:\\DOS\\${driver}`;
-    try {
-      return this.commands.readFile(path).startsWith(`${capsule}\n`);
-    } catch {
-      return false;
+  private resolveDosConfigurationDriver(
+    request: DosConfigurationDriverResolutionRequest,
+  ): DosConfigurationDriverResolution {
+    if (request.expectedKind === "resident") {
+      return { reason: "unsupported", status: "rejected" };
     }
+    const capsule =
+      request.expectedKind === "himem" ? dosHimemCapsule : dosEmm386Capsule;
+    const residentBytes =
+      request.expectedKind === "himem"
+        ? dosHimemResidentBytes
+        : dosEmm386ResidentBytes;
+    const sourcePath =
+      /^[A-Za-z]:/u.test(request.path) || request.path.includes("\\")
+        ? request.path
+        : `C:\\DOS\\${request.path}`;
+    let installed: string;
+    try {
+      installed = this.commands.readFile(sourcePath);
+    } catch {
+      return { reason: "missing", status: "rejected" };
+    }
+    if (installed !== capsule) {
+      return { reason: "invalid", status: "rejected" };
+    }
+    const canonicalPath = this.commands.profile.pathDialect.display(
+      this.commands.resolvePath(sourcePath),
+    );
+    return {
+      canonicalPath,
+      displayName:
+        request.expectedKind === "himem" ? "HIMEM.SYS" : "EMM386.EXE",
+      kind: request.expectedKind,
+      moduleId: request.expectedKind === "himem" ? "himem" : "emm386",
+      residentBytes,
+      status: "resolved",
+    };
+  }
+
+  private dosConfigurationResult(
+    diagnostics: readonly DosGuestMemoryDiagnostic[],
+    exitCode: number,
+  ): ShellCommandResult {
+    return {
+      exitCode,
+      stderr: diagnostics
+        .map((diagnostic) => {
+          const location =
+            diagnostic.lineNumber === null || diagnostic.lineNumber <= 0
+              ? "CONFIG.SYS"
+              : `CONFIG.SYS line ${String(diagnostic.lineNumber)}`;
+          return `${location}: ${diagnostic.message}\r\n`;
+        })
+        .join(""),
+      stdout: "",
+    };
   }
 
   private executeScriptLines(
@@ -3250,6 +3361,8 @@ export class ShellSession {
               ? "UNTITLED"
               : this.commands.profile.pathDialect.display(path),
             {
+              diagnosticSourceDisplay: (source): string =>
+                this.commands.profile.pathDialect.display(source),
               editorMode: true,
               editorConfiguration,
               externalContext: (request): readonly ViExternalDocument[] =>
@@ -3299,6 +3412,8 @@ export class ShellSession {
               ? "Untitled"
               : this.commands.profile.pathDialect.display(path),
             {
+              diagnosticSourceDisplay: (source): string =>
+                this.commands.profile.pathDialect.display(source),
               editorMode: false,
               editorConfiguration,
               externalContext: (request): readonly ViExternalDocument[] =>
@@ -3426,6 +3541,8 @@ export class ShellSession {
               ? "Untitled"
               : this.commands.profile.pathDialect.display(path),
             {
+              diagnosticSourceDisplay: (source): string =>
+                this.commands.profile.pathDialect.display(source),
               editorMode: false,
               editorConfiguration,
               externalContext: (request): readonly ViExternalDocument[] =>
@@ -3518,13 +3635,13 @@ export class ShellSession {
     if (this.editorMemoryLease !== undefined) {
       throw new Error("Editor memory lease is already active");
     }
-    const lease = this.acquireMemoryLease?.(dosEditorResidentBytes, owner);
+    const lease = this.reserveSessionMemory(dosEditorResidentBytes, owner);
     try {
       const editor = create();
       this.editorMemoryLease = lease;
       return editor;
     } catch (error: unknown) {
-      lease?.release();
+      lease.release();
       throw error;
     }
   }
@@ -3533,13 +3650,13 @@ export class ShellSession {
     if (this.viMemoryLease !== undefined) {
       throw new Error("vi memory lease is already active");
     }
-    const lease = this.acquireMemoryLease?.(viResidentBytes, "vi");
+    const lease = this.reserveSessionMemory(viResidentBytes, "vi");
     try {
       const vi = create();
       this.viMemoryLease = lease;
       return vi;
     } catch (error: unknown) {
-      lease?.release();
+      lease.release();
       throw error;
     }
   }
@@ -3554,6 +3671,72 @@ export class ShellSession {
     const lease = this.viMemoryLease;
     this.viMemoryLease = undefined;
     lease?.release();
+  }
+
+  private reserveSessionMemory(
+    bytes: number,
+    owner: Extract<
+      GuestRamOwner,
+      "dos-editor" | "dos-qbasic" | "dos-toolchain-ide" | "vi"
+    >,
+  ): SessionMemoryReservation {
+    if (this.dosMemory === undefined) {
+      return this.guestRamLedger.acquire(bytes, owner);
+    }
+    const identity =
+      owner === "dos-editor"
+        ? {
+            category: "editor" as const,
+            displayName: "EDIT",
+            moduleId: "edit",
+          }
+        : owner === "dos-qbasic"
+          ? {
+              category: "ide" as const,
+              displayName: "CS QBASIC",
+              moduleId: "qbasic",
+            }
+          : owner === "dos-toolchain-ide"
+            ? {
+                category: "ide" as const,
+                displayName: "Programmer's WorkBench",
+                moduleId: "pwb",
+              }
+            : {
+                category: "editor" as const,
+                displayName: "vi",
+                moduleId: "vi",
+              };
+    return this.dosMemory.reserveTransientResident({ ...identity, bytes });
+  }
+
+  private admitDosProcessMemory(
+    request: ShellProcessMemoryAdmissionRequest,
+  ): ShellProcessMemoryGrant {
+    const manager = this.dosMemory;
+    if (manager === undefined) {
+      throw new Error("DOS process memory admission is unavailable");
+    }
+    return grantCs486ExecutableMemory(request.executable, {
+      dosMemoryManager: manager,
+      identity: {
+        displayName: request.displayName,
+        moduleId: request.moduleId,
+      },
+      ledger: this.guestRamLedger,
+    });
+  }
+
+  private admitLedgerProcessMemory(
+    request: ShellProcessMemoryAdmissionRequest,
+  ): ShellProcessMemoryGrant {
+    return grantCs486ExecutableMemory(request.executable, {
+      identity: {
+        displayName: request.displayName,
+        moduleId: request.moduleId,
+      },
+      ledger: this.guestRamLedger,
+    });
   }
 
   private readDosEditorConfiguration(): DosEditorConfiguration {
@@ -3938,7 +4121,7 @@ export class ShellSession {
       this.editor = undefined;
       this.pendingEditorArtifactPath = undefined;
       this.pendingEditorCommand = undefined;
-      this.pendingEditorOutputPrefix = "";
+      this.pendingEditorTranscriptPrefix = emptyGuestToolchainTranscript();
       this.commands.closeDebugger();
       this.lastExitCode = 0;
       return {
@@ -4024,7 +4207,8 @@ export class ShellSession {
     try {
       let artifactPath = editorArtifactPath(editor.fileName);
       let operation: ShellCommandResult;
-      let outputPrefix = "";
+      let operationTranscript: GuestToolchainTranscript | undefined;
+      let outputPrefix = emptyGuestToolchainTranscript();
       let producerSucceeded = false;
       if (
         editor.product === "qbasic" &&
@@ -4039,10 +4223,12 @@ export class ShellSession {
           editor.fileName,
           this.commands.profile.pathDialect.display(editor.fileName),
         );
-        operation = this.commands.runQBasicSource(
+        const toolchain = this.commands.runQBasicSourceForEditor(
           editor.fileName,
           editor.contents,
         );
+        operation = this.commands.renderToolchainCommandResult(toolchain);
+        operationTranscript = toolchain.transcript;
       } else if (command === "clean") {
         if (editor.programListPath === undefined) {
           throw new Error("Set a Program List before Clean");
@@ -4053,14 +4239,17 @@ export class ShellSession {
         artifactPath = editorObjectPath(editor.fileName);
         const compiler =
           editor.language === "asm"
-            ? "as"
+            ? "asm"
             : editor.language === "cpp"
-              ? "c++"
+              ? "cpp"
               : "c";
-        operation = this.commands.execute(
-          [compiler, editor.fileName, "-c", "-o", artifactPath],
-          "",
+        const toolchain = this.commands.compileDosIdeFileForEditor(
+          compiler,
+          editor.fileName,
+          artifactPath,
         );
+        operation = this.commands.renderToolchainCommandResult(toolchain);
+        operationTranscript = toolchain.transcript;
       } else if (
         editor.programListPath !== undefined &&
         (command === "build" ||
@@ -4073,21 +4262,24 @@ export class ShellSession {
           editor.programListPath,
         );
         artifactPath = inspected.outputPath;
-        const built = this.commands.buildDosProgramList(
+        const built = this.commands.buildDosProgramListForEditor(
           inspected.projectPath,
           command === "rebuild",
           command === "build-run",
         );
+        const builtCommand = this.commands.renderToolchainCommandResult(built);
         if (built.foreground !== undefined || built.exitCode !== 0) {
-          operation = built;
+          operation = builtCommand;
+          operationTranscript = built.transcript;
         } else {
           producerSucceeded = true;
           editor.recordSuccessfulArtifact(artifactPath);
           if (command === "build-run") {
-            outputPrefix = `${built.stdout}${built.stderr}`;
+            outputPrefix = built.transcript;
             operation = this.commands.execute(["run", artifactPath], "");
           } else {
-            operation = built;
+            operation = builtCommand;
+            operationTranscript = built.transcript;
           }
         }
       } else if (
@@ -4106,13 +4298,15 @@ export class ShellSession {
           this.commands.profile.pathDialect.display(editor.fileName),
         );
         if (command === "debug-start") this.commands.closeDebugger();
-        operation = this.commands.buildDosIdeSource(
+        const toolchain = this.commands.buildDosIdeSourceForEditor(
           editor.language,
           editor.fileName,
           editor.contents,
           artifactPath,
           command === "build-run",
         );
+        operation = this.commands.renderToolchainCommandResult(toolchain);
+        operationTranscript = toolchain.transcript;
         producerSucceeded = operation.foreground === undefined;
       } else if (command === "run") {
         const lastArtifactPath = editor.lastArtifactPath;
@@ -4144,15 +4338,26 @@ export class ShellSession {
       if (operation.foreground !== undefined) {
         this.pendingEditorArtifactPath = artifactPath;
         this.pendingEditorCommand = command;
-        this.pendingEditorOutputPrefix = outputPrefix;
+        this.pendingEditorTranscriptPrefix = concatGuestToolchainTranscripts([
+          outputPrefix,
+          operationTranscript ?? emptyGuestToolchainTranscript(),
+        ]);
         return shellResultFromCommand(operation);
       }
 
-      const output = joinEditorDebuggerOutput([
+      const combinedTranscript = concatGuestToolchainTranscripts([
         outputPrefix,
-        operation.stdout,
-        operation.stderr,
+        operationTranscript ??
+          guestToolchainTranscriptFromStreams(
+            operation.stdout,
+            operation.stderr,
+          ),
       ]);
+      const output = renderGuestToolchainTranscript(combinedTranscript, {
+        displaySource: (source) =>
+          this.commands.profile.pathDialect.display(source),
+        profile: "dos",
+      }).orderedRows.join("\r\n");
       if (
         producerSucceeded &&
         editor.product !== "qbasic" &&
@@ -4193,7 +4398,7 @@ export class ShellSession {
         terminalScreen = editor.completeCommand(
           command,
           operation.exitCode,
-          output,
+          combinedTranscript,
           this.commands.profile.pathDialect.display(artifactPath),
         );
       }
@@ -4239,7 +4444,7 @@ export class ShellSession {
               | "rebuild"
               | "run",
             1,
-            output,
+            guestToolchainTranscriptFromFailure(output),
             this.commands.profile.pathDialect.display(
               editorArtifactPath(editor.fileName),
             ),

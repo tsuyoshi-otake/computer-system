@@ -75,4 +75,22 @@ describe("NanoEditorSession", (): void => {
       discardedChanges: true,
     });
   });
+
+  it("keeps visible line numbers within 999 and rejects line 1000", (): void => {
+    const maximum = Array.from({ length: 999 }, (_, index) =>
+      String(index + 1),
+    ).join("\n");
+    const editor = new NanoEditorSession("max.txt", maximum);
+    for (let index = 1; index < 999; index += 1) editor.submit(":down");
+
+    const rejected = editor.submit("last");
+    expect(rejected.snapshot.lines).toHaveLength(999);
+    expect(rejected.snapshot.status).toBe("Document line limit reached.");
+    expect(editor.visibleRows().at(-1)?.lineNumber).toBe(999);
+
+    const oversized = Array.from({ length: 1_000 }, () => "line").join("\n");
+    expect(() => new NanoEditorSession("too-many.txt", oversized)).toThrow(
+      "nano document line limit exceeded",
+    );
+  });
 });

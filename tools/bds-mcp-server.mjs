@@ -114,7 +114,6 @@ const tools = [
             "computer",
             "headless",
             "help",
-            "monitor",
             "portable",
             "runtime",
             "speaker",

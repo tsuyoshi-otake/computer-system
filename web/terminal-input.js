@@ -25,25 +25,130 @@ const namedEditorKeys = new Set([
   "Insert",
   "Tab",
 ]);
-const dosEditorMenuPattern =
-  /^ {1,2}File\s+Edit\s+(?:(?:View\s+)?Search\s+(?:Make\s+)?(?:Run\s+)?(?:Debug\s+)?)?Options\s+Help/u;
-const viModePattern = /^-- (?:COMMAND|INSERT|NORMAL) --/u;
+const terminalInputModes = new Set(["keys", "line", "none"]);
+const terminalPointerModes = new Set(["cell", "none"]);
+const terminalPresentationModes = new Set(["dos-tui", "terminal"]);
+const terminalInteractionContexts = new Set([
+  "busy",
+  "csasm",
+  "edit",
+  "login",
+  "pwb",
+  "qbasic",
+  "secret",
+  "shell",
+  "unavailable",
+  "vi-command",
+  "vi-insert",
+  "vi-normal",
+  "vi-output",
+]);
+const maximumInteractionHints = 5;
+const maximumInteractionHintKeyLength = 32;
+const maximumInteractionHintLabelLength = 64;
 const keyboardLockModifiers = {
   capsLock: "CapsLock",
   numLock: "NumLock",
   scrollLock: "ScrollLock",
 };
 
-export function isEditorTerminalScreen(rows) {
-  if (!Array.isArray(rows)) return false;
+export class TerminalInteractionProtocolError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "TerminalInteractionProtocolError";
+    this.code = "interaction_protocol_mismatch";
+  }
+}
+
+export function terminalInteractionFromTerminal(terminal) {
+  const interaction = terminal?.interaction;
   if (
-    rows.some(
-      (row) => typeof row === "string" && viModePattern.test(row.trimStart()),
+    interaction === null ||
+    typeof interaction !== "object" ||
+    Array.isArray(interaction) ||
+    interaction.schema !== 1
+  ) {
+    throw new TerminalInteractionProtocolError(
+      "This terminal frame does not provide interaction schema 1.",
+    );
+  }
+  if (!terminalInputModes.has(interaction.inputMode)) {
+    throw new TerminalInteractionProtocolError(
+      "The terminal frame has an unsupported input mode.",
+    );
+  }
+  if (!terminalPointerModes.has(interaction.pointer)) {
+    throw new TerminalInteractionProtocolError(
+      "The terminal frame has an unsupported pointer mode.",
+    );
+  }
+  if (!terminalPresentationModes.has(interaction.presentation)) {
+    throw new TerminalInteractionProtocolError(
+      "The terminal frame has an unsupported presentation mode.",
+    );
+  }
+  if (!terminalInteractionContexts.has(interaction.context)) {
+    throw new TerminalInteractionProtocolError(
+      "The terminal frame has an unsupported interaction context.",
+    );
+  }
+  if (
+    typeof interaction.secretInput !== "boolean" ||
+    typeof interaction.interrupt !== "boolean"
+  ) {
+    throw new TerminalInteractionProtocolError(
+      "The terminal frame has invalid interaction flags.",
+    );
+  }
+  if (
+    interaction.helpTopicId !== undefined &&
+    !boundedProtocolText(interaction.helpTopicId, 64)
+  ) {
+    throw new TerminalInteractionProtocolError(
+      "The terminal frame has an invalid help topic.",
+    );
+  }
+  if (
+    !Array.isArray(interaction.hints) ||
+    interaction.hints.length > maximumInteractionHints ||
+    interaction.hints.some(
+      (hint) =>
+        hint === null ||
+        typeof hint !== "object" ||
+        Array.isArray(hint) ||
+        !boundedProtocolText(hint.key, maximumInteractionHintKeyLength) ||
+        !boundedProtocolText(hint.label, maximumInteractionHintLabelLength),
     )
   ) {
-    return true;
+    throw new TerminalInteractionProtocolError(
+      "The terminal frame has invalid contextual hints.",
+    );
   }
-  return dosEditorMenuPattern.test(typeof rows[0] === "string" ? rows[0] : "");
+  if (
+    interaction.pointer === "cell" &&
+    (interaction.inputMode !== "keys" || interaction.presentation !== "dos-tui")
+  ) {
+    throw new TerminalInteractionProtocolError(
+      "Cell pointer input requires DOS key input.",
+    );
+  }
+  if (
+    interaction.secretInput &&
+    interaction.inputMode !== "line" &&
+    interaction.inputMode !== "none"
+  ) {
+    throw new TerminalInteractionProtocolError(
+      "Secret input requires line input.",
+    );
+  }
+  return Object.freeze({
+    ...interaction,
+    hints: Object.freeze(
+      interaction.hints.map((hint) =>
+        Object.freeze({ key: hint.key, label: hint.label }),
+      ),
+    ),
+  });
 }
 
 export function keyboardLockStatesFromEvent(event) {
@@ -208,4 +313,13 @@ export class BoundedEditorKeyQueue {
 }
 function clamp(value, minimum, maximum) {
   return Math.max(minimum, Math.min(maximum, value));
+}
+
+function boundedProtocolText(value, maximumLength) {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= maximumLength &&
+    !/[\0\r\n]/u.test(value)
+  );
 }

@@ -7,7 +7,8 @@
 - Portable uses `portable-vga-256k`: 80x25 text, 320x200x8, and 640x480x4 in 256
   KiB VRAM on an 800x480 physical LCD.
 - Desktop uses `desktop-vga-512k`; Advanced uses `advanced-vga-512k`. Both add
-  640x480x8 in 512 KiB VRAM on a 640x480 Monitor. All profiles stop at 640x480.
+  640x480x8 in 512 KiB VRAM on a built-in 640x480 CRT. All profiles stop at
+  640x480.
 - Accept only mode IDs supported by the selected profile, then verify their
   computed framebuffer requirement fits its VRAM before allocation or switch.
 

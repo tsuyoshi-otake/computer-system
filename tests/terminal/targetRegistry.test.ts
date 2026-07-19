@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { TerminalTargetRegistry } from "../../src/application/terminal/targetRegistry.js";
 
 describe("terminal target registry", (): void => {
-  it("shares the latest selected computer with monitor fallback", (): void => {
+  it("shares the latest selected computer with the terminal bridge", (): void => {
     const targets = new TerminalTargetRegistry();
     expect(targets.resolve("player-1")).toEqual({
       outcome: "missing",

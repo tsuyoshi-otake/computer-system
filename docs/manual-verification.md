@@ -48,17 +48,19 @@ Record the exact client and server versions with each result.
 Verify lifecycle and persistence:
 
 - Place each Computer family while facing north, east, south, and west. Confirm
-  the front faces the placer, the Desktop body is wider than the Monitor base,
-  and redstone output changes do not reset orientation.
-- Put one Monitor adjacent to a Desktop, interact within three blocks, and
-  verify Minecraft prints the stable LAN entry page plus a permanent four-digit
-  number. Interact twice rapidly and confirm there is one admitted request and
-  at most one browser launch. Before Bedrock acknowledges attachment, expect no
-  browser launch or consumable token. Enter the number within two minutes.
-  Confirm `GET /p/NNNN` redirects without a token and can be repeated without
-  consuming the handoff; exactly one `POST /api/handoff` succeeds. Confirm the
-  stable URL becomes `/?computer=NNNN`, the number is in browser local storage,
-  and no bearer token or `handoff` flag remains in the URL or history.
+  the front faces the placer, each Desktop is one all-in-one block, and redstone
+  output changes do not reset orientation. Confirm the upper CRT housing has one
+  flat rectangular top, vertical rear and side faces, and crisp 90-degree
+  physical top/rear corners without a chamfer, rounded cap, or sloped shoulder.
+- Interact with a Desktop directly within three blocks and verify Minecraft
+  prints the stable LAN entry page plus a permanent four-digit number. Interact
+  twice rapidly and confirm there is one admitted request and at most one
+  browser launch. Before Bedrock acknowledges attachment, expect no browser
+  launch or consumable token. Enter the number within two minutes. Confirm
+  `GET /p/NNNN` redirects without a token and can be repeated without consuming
+  the handoff; exactly one `POST /api/handoff` succeeds. Confirm the stable URL
+  becomes `/?computer=NNNN`, the number is in browser local storage, and no
+  bearer token or `handoff` flag remains in the URL or history.
 - Move just beyond three blocks and expect one `out_of_range` transition with
   input disabled but no session close. Move between 2.75 and 3.0 blocks and
   expect the current state to remain unchanged; return to 2.75 blocks or nearer
@@ -123,8 +125,8 @@ and calls `redstone.set_output("right", value)`:
 - Reload and repeat to prove identity, program, and output configuration
   survive.
 
-Verify the shared terminal from a Computer, Portable Computer System, and
-Monitor touch:
+Verify the shared terminal from a Computer, Advanced Computer, and Portable
+Computer System interaction:
 
 - All 51 columns and 19 rows remain visible with monospace alignment.
 - Cursor position/blink and every foreground/background combination from the 16
@@ -416,8 +418,8 @@ Use a disposable copy of a real legacy-format world for the live check:
 3. Install the new packs and start that same world without resetting it.
 4. Inspect BDS logs for transition-only `CS_STORAGE_MIGRATION` JSON. Confirm the
    phase and completed/total counts make bounded progress and that no Computer,
-   Portable, Monitor, or Web Terminal interaction becomes available before the
-   terminal `complete` record.
+   Portable or Web Terminal interaction becomes available before the terminal
+   `complete` record.
 5. Open representative existing Computers. Verify identity, family, block/item
    form, label, OS and hardware profiles, display profile, terminal state,
    files, ownership/mode/mtime, symbolic links, and hard-link sharing.
@@ -439,34 +441,36 @@ head remains unchanged; a corrupt current-format head recovered from its
 previous generation is rebuilt and must reload without fallback before the
 terminal `complete` state.
 
-## Phase 0 Monitor checklist
+## Integrated Deskpro and LTE artwork checklist
 
-Run this command while facing south with three blocks of clear space ahead:
+The earlier standalone Monitor feasibility probe is historical evidence only;
+the production Desktop and Advanced Desktop now carry their CRT in the same
+placeable block.
 
-```text
-/scriptevent computer_system:probe monitor
-```
+`Verify:` Run `npm run build`, install Resource Pack 0.1.16 with Behavior Pack
+0.1.6 in the Windows GDK client, and inspect both placed blocks and inventory
+items for Computer, Advanced, and Portable.
 
-Verify:
+`Expect:` Computer and Advanced share one cream square all-in-one Deskpro-style
+chassis. The upper CRT housing is a strict rectangular cuboid: one uninterrupted
+flat top plane, straight rear and side edges, vertical rear/side faces, and a
+crisp physical 90-degree corner at the top-rear edge. It has no bevel, chamfer,
+rounded cap, clipped corner, sloped shoulder, wedge, or notch. Computer has one
+compact right-mounted 3.5-inch floppy drive; Advanced has two; both keep the
+power control on the left. Portable retains the existing thin open-laptop block
+silhouette, darker keyboard deck, trackball, and 4:3 black screen. No 5.25-inch
+drive appears. The desktop screen sits nearly flush against the CRT housing
+without a visible thick slab along its side or lower edge. Item silhouettes
+remain legible at inventory scale, block faces resolve without missing-material
+purple, and all four cardinal placements face the player consistently.
 
-- A 3x2 black Monitor surface appears three blocks south of the player.
-- Touching the near (north) face reports `monitor_touch north x y` in chat.
-- Touching near the top-left reports coordinates near `1,1`; touching near the
-  bottom-right reports coordinates near `51,18`.
-- Each valid touch opens the Computer System terminal UI fallback.
+`Verify:` Inspect the generated Behavior/Resource Packs, place each desktop, and
+interact with it directly within three blocks.
 
-The BDS suite verifies discovery and update bounds. This manual check covers the
-real block-face coordinates and player-facing fallback interaction.
-
-### Result: Windows GDK 1.26.33
-
-- Connected surface: `PASS` — the generated 3x2 Monitor surface was available
-  for player interaction.
-- Touch mapping: `PASS` — separate touches reported `monitor_touch north 45 3`
-  and `monitor_touch north 38 3`, proving that the mapped cell changes with the
-  interaction position.
-- Terminal fallback: `PASS` — a valid Monitor touch opened the Computer System
-  terminal UI.
+`Expect:` There is no standalone `computer_system:monitor` block, item,
+geometry, texture, atlas entry, or probe. Each desktop occupies one placeable
+block, and direct Computer interaction requests exactly one Web Terminal handoff
+for that Computer identity.
 
 ## Web Terminal identity and multi-session checklist
 
@@ -492,14 +496,20 @@ does not migrate the previous sequential `computer-N` registry.
    `terminal_closed` record is emitted.
 7. Open a second Computer alongside the first and confirm both Computers can
    have independent writers.
-8. At desktop width, confirm the complete 80x25 display frame is centered
-   horizontally and vertically in both CLI and TUI states. Open **Options** and
+8. At desktop width, confirm the complete bezel-free 80x25 display surface is
+   centered horizontally and vertically in both CLI and TUI states, with one
+   blank raster row above and below the active cells. Confirm the first and last
+   guest rows remain fully visible and EDIT corner clicks still address rows 1
+   and 25. In browser diagnostics, verify the outer display rectangle is 4:3
+   within one device pixel and `--terminal-horizontal-scale` is `0.8`. Confirm
+   the same values remain in a DOS full-screen TUI; future 640x480 graphics must
+   report a 1.0 correction rather than inheriting 0.8. Open **Options** and
    select Off, Subtle, Arcade, and Shadow Mask; confirm each profile remains
    clipped to that frame. Confirm Curvature is disabled for Flat, becomes
-   enabled for Curved Glass, starts at 5%, and updates the visible warp
+   enabled for Curved Glass, starts at 2%, and updates the visible warp
    immediately at 0% and 30%. Exercise EDIT corner and center clicks at both
-   bounds; expect the intended 80x25 cells. Reload and confirm Arcade, Flat, and
-   the 5% slider value return. Selection, Copy, typing, guest-rendered
+   bounds; expect the intended 80x25 cells. Reload and confirm Subtle, Flat, and
+   the 2% slider value return. Selection, Copy, typing, guest-rendered
    scrollbars, and the bounded row-diff path must remain unchanged. As an
    existing responsive regression smoke only, repeat at 390 pixels and confirm
    there is no page-level horizontal overflow; no mobile profile-parity pass is
@@ -510,8 +520,23 @@ does not migrate the previous sequential `computer-N` registry.
    usable.
 10. Drag-select several terminal rows and press Ctrl+C. Confirm the exact range
     is copied, the selection remains visible until the next user action, and no
-    interrupt is emitted. Select command-line text and repeat; then press Ctrl+C
-    with no selection and confirm exactly one interrupt.
+    interrupt is emitted. Select command-line text and repeat. At an idle
+    prompt, press Ctrl+C with no selection and confirm no interrupt is emitted.
+    Start an interruptible foreground guest process, press Ctrl+C with no
+    selection, and confirm exactly one interrupt.
+
+    `Verify:` Observe the contextual key hints at desktop width and at 390
+    pixels while moving through login/secret input, shell, EDIT or vi,
+    WorkBench, and a busy foreground command. Print a shell line beginning with
+    `-- INSERT --`. Exercise a client or companion with a missing or unsupported
+    interaction schema.
+
+    `Expect:` The hints remain visible and follow only authoritative guest
+    state; printed text does not change input mode. On schema mismatch, stale
+    hints clear, input stops, the status reads `RELOAD REQUIRED`, and **Reload
+    page** is offered. Restart the companion and Computer components together
+    before using it; no terminal-text compatibility fallback occurs.
+
 11. Paste a single-line command and a multiline command. Confirm insertion
     occurs at the current selection, line breaks become spaces, the value stops
     at 128 characters, and neither paste runs a command before physical Enter.
@@ -558,9 +583,11 @@ does not migrate the previous sequential `computer-N` registry.
     confirm include reads remain inside the credentialed guest filesystem.
 18. Run `free` and `/proc/meminfo`; confirm used memory exceeds guest runtime
     and the kernel, services, buffers, and guest fields sum to the reported
-    usage. On CS-DOS run `MEM` and `MEM /C`; confirm DOS system/driver plus
-    guest runtime accounting agrees with the conventional, upper, reserved, and
-    XMS region total.
+    usage. On CS-DOS run `MEM`, `MEM /C`, `MEM /D`, and `MEM /F`; confirm DOS
+    system/driver plus guest runtime accounting agrees with the conventional,
+    upper, two reserved-aperture, and XMS totals. Confirm HMA is included in
+    XMS, COMMAND.COM remains conventional, and free extents match the
+    largest-block lines.
 19. Restart the Computer. Confirm `/home/cs/demo.py` and `/etc` survive, `/tmp`
     is empty, and BDS logs contain no persistence failure. Stop BDS before
     backing up the complete world directory; restore the stopped-world copy and
@@ -570,6 +597,53 @@ does not migrate the previous sequential `computer-N` registry.
 reaches the VM, takeover has one observable winner, a non-final detach does not
 close the shared terminal, and each Computer owns its writer lease
 independently.
+
+## Issue #34 DOS memory architecture v2
+
+Run the host preflight first:
+
+`Verify:`
+`npm test -- tests/computer/boundedIntervalAllocator.test.ts tests/os/dosMemoryConfiguration.test.ts tests/os/dosGuestMemoryManager.test.ts tests/computer/guestProcessMemory.test.ts tests/computer/dosMemoryArchitectureV2.test.ts tests/computer/guestResourceAccounting.test.ts tests/os/dosProfile.test.ts tests/runtime/cs486ExecutableV3.test.ts`
+
+`Expect:` Atomic CONFIG rejection leaves no partial modules; first-fit extents
+coalesce; HMA remains inside XMS; v3 uses the declared grant; legacy execution
+is exclusive; compile/disconnect and three-session detach paths return to their
+exact memory baseline.
+
+For the real-client check, use one backed-up Portable CS-DOS Computer and a
+writer-owned Web Terminal:
+
+1. Record `TYPE C:\CONFIG.SYS`, reboot, then run `MEM`, `MEM /C`, `MEM /D`, and
+   `MEM /F`.
+   - `Verify:` Add each region total plus free/used values, inspect every module
+     placement, and compare every largest-block line with the listed extents.
+   - `Expect:` Conventional is 0–639 KiB, video 640–767 KiB is reserved, UMB is
+     768–895 KiB, ROM 896–1023 KiB is reserved, and XMS starts at 1 MiB. HMA is
+     the first 64 KiB of XMS, not an additional region. COMMAND.COM is
+     conventional and no `CONFIG_*` environment variable is synthesized.
+2. Start and finish one compiled v3 foreground program, then repeat all MEM
+   commands. Repeat with a second browser attached as viewer, perform one writer
+   takeover, close the viewer, then close the writer.
+   - `Verify:` Compare the boot baseline before admission, while the program is
+     active, after completion, after each non-final detach, and after final
+     terminal closure.
+   - `Expect:` Runtime bytes increase by the declared physical reservation only
+     while active. A viewer or takeover never duplicates a grant. Every
+     completion/detach returns to the exact baseline and BDS reports no retained
+     ledger bytes.
+3. On a disposable copy, place a valid directive before one malformed directive
+   and reboot. Separately, fill the UMB so one `DEVICEHIGH` driver cannot fit
+   contiguously.
+   - `Verify:` Inspect the boot diagnostics, `MEM /C`, and `MEM /D` after each
+     boot; restore the stopped-world backup afterward.
+   - `Expect:` The malformed file commits none of the earlier configuration and
+     boots one explicit 64 KiB degraded-low profile while AUTOEXEC continues.
+     DEVICEHIGH falls back to conventional memory with one explicit diagnostic;
+     it does not fail silently or claim upper placement.
+
+This verifies the Computer System model only. EMS page mapping, DPMI, native
+x86, BIOS/DOS interrupts, and downloaded DOS `.COM`/`.EXE` execution remain
+unsupported.
 
 ## Issue #29 EDIT and Web Terminal responsiveness
 
@@ -911,11 +985,13 @@ live pass. Record the exact `c-xxxxxx` identities and retain terminal captures.
 10. On a disposable DOS Computer, record the current memory report, remove or
     corrupt the installed HIMEM/EMM386 guest driver referenced by `CONFIG.SYS`,
     and reboot once.
-    - `Verify:` Compare the boot error and memory state with the intact driver
-      capsule, then restore the utility from a stopped backup or known base.
-    - `Expect:` A missing or invalid capsule fails explicitly before enabling
-      XMS/UMB state. Matching only the driver basename never executes or enables
-      a native driver.
+    - `Verify:` Compare the boot error and `MEM /C` plus `MEM /D` state with the
+      intact driver capsule, then restore the utility from a stopped backup or
+      known base.
+    - `Expect:` A missing or invalid capsule rejects the complete CONFIG plan
+      before enabling XMS/UMB state and boots the explicit 64 KiB degraded-low
+      profile; no earlier directive is partially retained. Matching only the
+      driver basename never executes or enables a native driver.
 11. Verify the non-claims: run `ip`, `ping`, and `ss` on Linux; inspect the FDD
     indicator and `A:` on DOS; and try a native `.COM`/`.EXE` artifact.
     - `Expect:` Guest networking commands are unavailable, FDD/A: remains absent
@@ -970,6 +1046,17 @@ validated disassembly, step/continue results, and breakpoints. It does not claim
 source-line stepping, Microsoft C/C++ 7.0, native PWB, OMF, COM, EXE, or
 host-compiler compatibility.
 
+`Verify:` In CSASM or PWB, open the Debugger, then choose Options > Display.
+Confirm the editor dialog is visible over Source rather than hidden behind the
+Debugger. Return to Debugger and open its menu and Program List where supported.
+In the Program List, verify the footer advertises only Enter, Escape, and
+Backspace. Open F4 Output and press F1.
+
+`Expect:` Exactly one primary Source, Output, or Debugger surface is visible.
+Only supported overlays compose with that surface, editor dialogs cannot be
+hidden, the Program List has no nonfunctional F1/Tab hints, and Output F1 opens
+bounded help.
+
 `Verify:` Compile without `/OUT:` using `CC /C C:\WORK\MAIN.C`, compile and link
 without `/OUT:`, and link `C:\WORK\MAIN.OBJ` without an output name.
 
@@ -995,20 +1082,21 @@ returns to the IDE and F4 shows bounded output.
 `Verify:` At 80x25, compare EDIT, CS QBASIC, CSASM, and PWB with the DOS
 reference: plain menu headings with right-aligned Help, centered filename, blue
 document, gray vertical/horizontal scrollbars, one cyan footer, reversed active
-selection, and gray Save/Discard/Cancel dialog with a black shadow. Require the
-same EDIT left chrome offsets in all four environments: File starts after two
-cells, the cyan status starts after one cell, and the left document border is
-continuous below the title corner. In plain EDIT, require F1 Help, no inline
-shortcuts in the File dropdown, `↑`/`↓`/`←`/`→` scrollbar ends, and only
-`00001:001` at the right of the menu footer. Inspect the computed Web font and
-colors. Press bare Alt, Alt+F, F4 through F12, Shift+F3/Shift+F5,
-Ctrl+F5/Ctrl+F7, Alt+F7, Ctrl+Shift+S/O, and Alt+Left. From the QBASIC Welcome
-screen, click File once; then click and drag on the document row containing the
-caret.
+selection, and gray Save/Discard/Cancel dialog with a black shadow offset two
+cells right and one row down. Require the same EDIT left chrome offsets in all
+four environments: File starts after two cells, the cyan status starts after one
+cell, and the left document border is continuous below the title corner. In
+plain EDIT, require F1 Help, no inline shortcuts in the File dropdown,
+`↑`/`↓`/`←`/`→` scrollbar ends, and only `00001:001` at the right of the menu
+footer. Inspect the computed Web font and colors. Press bare Alt, Alt+F, F4
+through F12, Shift+F3/Shift+F5, Ctrl+F5/Ctrl+F7, Alt+F7, Ctrl+Shift+S/O, and
+Alt+Left. From the QBASIC Welcome screen, click File once; then click and drag
+on the document row containing the caret.
 
-`Expect:` DOS development screens use IBM VGA 8x16 at weight 400, unit line
-spacing, continuous single-line box glyphs, and only the exact four colors
-`#AAAAAA`, `#0000AA`, `#00AAAA`, and `#000000`. Bare Alt provides the F10/File
+`Expect:` CLI and DOS development screens use IBM VGA 9x16 at weight 400, unit
+line spacing, continuous single-line box glyphs, bright-white `#FFFFFF` for the
+active line number, gray `#a8a8a8`, blue `#0000AA`, cyan `#00AAAA`, and black
+`#000000`. The cyan status line uses black text. Bare Alt provides the F10/File
 fallback, every listed modified key reaches the guest exactly once, the first
 Welcome-menu click opens the menu, and the transparent keyboard input does not
 intercept any terminal cell.
@@ -1027,7 +1115,9 @@ Discard, and Cancel.
 entries are returned, filtering and scrolling are deterministic, empty and
 not-ready states are visible, and changed media resets the selection. Binary,
 capacity-plus-one, collision, external-change, deletion, and write failures keep
-the current buffer without partial mutation. Successful writes use CRLF.
+the current buffer without partial mutation. EDIT, the DOS IDEs, vi, and nano
+accept 999 lines with fixed three-digit line numbers and reject line 1000.
+Successful DOS writes use CRLF.
 
 `Verify:` In `EDIT`, CS QBASIC, PWB with `.C` and `.CPP`, and CSASM with `.ASM`,
 open Options > Display/Editing/Completion/Language. Toggle syntax, line numbers,
@@ -1035,15 +1125,17 @@ rainbow indentation, whitespace, wrap, autoindent, expandtab, tab/indent widths,
 completion sources, include definitions, and filetype. Save and reload
 `C:\EDITOR.INI`; verify `[common]`, `[edit]`, `[qbasic]`, `[pwb]`, and `[csasm]`
 overrides, then try an unknown key, a value above 16, 65 lines, and more than
-4,096 characters.
+4,096 characters. With line numbers enabled, navigate to line 999 and attempt to
+add or load line 1000 in EDIT, CS QBASIC, PWB, CSASM, vi, and nano.
 
 `Expect:` All four products use the same bounded dialogs while keeping their
 language defaults. Saving one profile preserves the other sections. Valid
 settings survive reopen; invalid or oversized configuration reports its exact
 failure without partially opening or applying earlier lines. The 51x19 and 80x25
 layouts keep every selected row and close action visible. Plain EDIT Display
-shows the fixed White-on-Blue Foreground/Background preview, Scroll Bars, and
-`Tab Stops: 8`; the preview does not claim a persisted color-setting model.
+shows only Scroll Bars and `Tab Stops: 8`; fixed colors are not presented as
+settings. The active three-digit line number is brighter than inactive numbers,
+and line 1000 is rejected without a partial edit or document replacement.
 
 `Verify:` Type prefixes in BASIC, C, C++, ASM, Python, and text buffers. Press
 Ctrl+Space, select with arrows, accept with Enter, and cancel with Esc. Exercise
@@ -1074,6 +1166,24 @@ list the source directory and inspect the QBASIC menus and F1 help.
 `Expect:` Each path runs the saved source transiently and returns bounded output
 to the IDE. No `.OBJ`, `.CSX`, `.EXE`, or other build artifact appears. QBASIC
 shows File/Edit/View/Search/Run/Options/Help and does not claim Make or Debug.
+
+`Verify:` In QBASIC, press F7, Alt+F7, and Ctrl+F7 before and after a successful
+F5 source run. Inspect the source directory and output state. Repeat those build
+shortcuts in CSASM or PWB with a valid source.
+
+`Expect:` QBASIC never admits persistent build/rebuild commands or creates a
+build artifact; CSASM and PWB admit the commands defined by their product
+catalog. A shortcut cannot leak across product profiles.
+
+`Verify:` Build a source with two diagnostics, including one with a code,
+authored file/line/column span, and note. Inspect F4 Output, then use F3 and
+Shift+F3. Repeat the host formatter test with different diagnostic wording while
+keeping the structured records unchanged.
+
+`Expect:` Output shows the diagnostic code and bounded note, navigation opens
+the canonical authored path and exact span in both directions, and wording
+changes do not change the F3 target because display and navigation derive from
+the same structured diagnostic.
 
 `Verify:` Create a `CS PROGRAM LIST 1.0` file containing C, C++, ASM, and an
 authored OBJ, plus INCLUDE/DEFINE/ENTRY/OUTPUT/LISTING/MAP. Select it from Make,
@@ -1249,6 +1359,18 @@ fail explicitly without corrupting the paused process. Writable memory,
 source-variable reconstruction, native debugger emulation, dynamic linking,
 PIC/IRQ/IDT execution, and native interrupt delivery remain explicitly
 unsupported.
+
+## Issue #34 declared process memory admission
+
+`Verify:` On a 2 MiB desktop, boot once with an empty `/startup.py`, then
+replace it with a non-empty program that remains alive and reboot. In each case,
+run one ordinary foreground Python program and inspect the guest RAM snapshot.
+
+`Expect:` Empty startup uses one 64 KiB composite grant. User-authored startup
+uses a 64 KiB flat-process grant plus 512 KiB auxiliary residency. The
+foreground program is still admitted with its 64 KiB flat-process grant plus
+historical 1 MiB managed-runtime residency, and every grant disappears exactly
+once when its owning process completes, disconnects, or shuts down.
 
 ## Issue #31 guest resource accounting
 

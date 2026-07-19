@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 
 import { assembleCs486 } from "../../src/application/toolchain/cs486Assembler.js";
-import { runCs486, Cs486Fault } from "../../src/domain/cpu/cs486.js";
+import {
+  createCs486Flat32MemoryMetadata,
+  runCs486,
+  Cs486Fault,
+} from "../../src/domain/cpu/cs486.js";
 
 describe("CS486DX execution core", (): void => {
   it("executes registers, branches, stack operations, and cycle costs", (): void => {
@@ -159,6 +163,8 @@ describe("CS486DX execution core", (): void => {
     const executable = {
       ...assembleCs486("push eax\npush eax\nhalt"),
       dataBytes: 65_532,
+      memory: createCs486Flat32MemoryMetadata({ stackBytes: 4 }),
+      version: 3 as const,
     };
 
     expect(() => runCs486(executable, { memoryBytes: 65_536 })).toThrowError(
@@ -180,8 +186,12 @@ describe("CS486DX execution core", (): void => {
     );
     expect(() =>
       runCs486(
-        { ...assembleCs486("mov esp, 0\npop eax\nhalt"), dataBytes: 4 },
-        { memoryBytes: 65_536 },
+        {
+          ...assembleCs486("mov esp, 0\npop eax\nhalt"),
+          dataBytes: 4,
+          version: 3 as const,
+        },
+        { memoryBytes: 65_540 },
       ),
     ).toThrowError(
       expect.objectContaining({

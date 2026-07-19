@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { calculateFixedGridFontSize } from "../../web/terminal-layout.js";
+import {
+  calculateFixedGridFontSize,
+  calculateRasterPresentation,
+  calculateTextRasterPresentation,
+} from "../../web/terminal-layout.js";
 
 const fixedGrid = {
   columns: 80,
@@ -11,6 +15,35 @@ const fixedGrid = {
 };
 
 describe("fixed Web Terminal layout", () => {
+  it("presents the 80x25 IBM 9x16 text raster on a 4:3 glass area", () => {
+    const raster = calculateTextRasterPresentation({
+      columns: 80,
+      rows: 25,
+    });
+
+    expect(raster.fittedRows).toBe(27);
+    expect(raster.rasterMarginRows).toBe(1);
+    expect(raster.displayAspectRatio).toBeCloseTo(4 / 3, 12);
+    expect(raster.logicalAspectRatio).toBeCloseTo(720 / 432, 12);
+    expect(raster.physicalCellRatio).toBeCloseTo(0.45, 12);
+    expect(raster.horizontalScale).toBeCloseTo(0.8, 12);
+  });
+
+  it("keeps 640x480 VGA square while correcting 320x200 independently", () => {
+    expect(
+      calculateRasterPresentation({
+        logicalHeight: 480,
+        logicalWidth: 640,
+      }).horizontalScale,
+    ).toBeCloseTo(1, 12);
+    expect(
+      calculateRasterPresentation({
+        logicalHeight: 200,
+        logicalWidth: 320,
+      }).horizontalScale,
+    ).toBeCloseTo(5 / 6, 12);
+  });
+
   it("fits the 80x25 grid to both desktop axes", () => {
     const result = calculateFixedGridFontSize({
       ...fixedGrid,

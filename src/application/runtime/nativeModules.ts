@@ -19,6 +19,7 @@ import {
 } from "../../domain/redstone/redstoneState.js";
 import { ShellSession } from "../os/shellSession.js";
 import type { ShellResult } from "../os/shellSession.js";
+import type { ShellProcessMemoryAdmission } from "../os/shellCommands.js";
 import type {
   ShellBackgroundRequest,
   ShellForegroundRequest,
@@ -28,12 +29,7 @@ import type { EditorScreen } from "../editor/editorScreen.js";
 import type { ComputerOsProfile } from "../../domain/computer/computer.js";
 import type { ShellClockSource } from "../os/clock.js";
 import type { ComputerHardwareProfile } from "../../domain/computer/hardware.js";
-import type {
-  GuestRamLedger,
-  GuestRamOwner,
-  GuestRamSnapshot,
-  MemoryLease,
-} from "../../domain/computer/guestRamLedger.js";
+import type { GuestRamLedger } from "../../domain/computer/guestRamLedger.js";
 import { formatOsIdentity, getOsIdentity } from "../os/osIdentity.js";
 import type {
   SerialEndpoint,
@@ -91,6 +87,7 @@ export interface NativeModuleContext {
   readonly hardware?: ComputerHardwareProfile;
   readonly memoryUsageBytes?: () => number;
   readonly guestRamLedger?: GuestRamLedger;
+  readonly admitProcessMemory?: ShellProcessMemoryAdmission;
   readonly requireLinuxLogin?: boolean;
   readonly shell?: ShellSession;
   readonly startForegroundProcess?: (
@@ -203,14 +200,10 @@ export function createNativeEnvironment(
       memoryUsageBytes: context.memoryUsageBytes,
       ...(context.guestRamLedger === undefined
         ? {}
-        : {
-            acquireMemoryLease: (
-              bytes: number,
-              owner: GuestRamOwner,
-            ): MemoryLease => context.guestRamLedger!.acquire(bytes, owner),
-            guestRamSnapshot: (): GuestRamSnapshot =>
-              context.guestRamLedger!.snapshot(),
-          }),
+        : { guestRamLedger: context.guestRamLedger }),
+      ...(context.admitProcessMemory === undefined
+        ? {}
+        : { admitProcessMemory: context.admitProcessMemory }),
       requireLogin: context.requireLinuxLogin,
       terminalHeight: context.terminal.height,
       terminalWidth: context.terminal.width,

@@ -36,9 +36,12 @@ describe("Web terminal UI", () => {
     expect(css).toContain("-webkit-text-security: disc");
     expect(css).toContain(".terminal-row > span");
     expect(css).toContain("height: 100%");
-    expect(script).toContain("terminal.secretInput === true");
+    expect(script).toContain("terminalInteractionFromTerminal(terminal)");
+    expect(script).toContain("terminalInteraction.secretInput");
     expect(script).toContain("!submittedSecret");
-    expect(script).toContain("if (!secretInput) moveHistory(-1)");
+    expect(script).toContain(
+      "if (terminalInteraction?.secretInput !== true) moveHistory(-1)",
+    );
   });
 
   it("places the command input at the terminal cursor without a visible field", async () => {
@@ -97,9 +100,9 @@ describe("Web terminal UI", () => {
       expect(html).toContain('name="screen-shape" value="' + value + '"');
     }
     expect(html).toMatch(/Changes\s+apply immediately to this tab only\./u);
-    expect(html).toContain('data-crt-profile="arcade"');
+    expect(html).toContain('data-crt-profile="subtle"');
     expect(html).toContain('data-screen-shape="flat"');
-    expect(html).toContain('data-curvature-percent="5"');
+    expect(html).toContain('data-curvature-percent="2"');
     expect(html).toContain('id="curvature-strength"');
     expect(html).toContain('name="curvature-percent"');
     const curvatureInputStart = html.indexOf('id="curvature-strength"');
@@ -112,18 +115,23 @@ describe("Web terminal UI", () => {
       'min="0"',
       'max="30"',
       'step="1"',
-      'value="5"',
+      'value="2"',
       "disabled",
     ]) {
       expect(curvatureInput).toContain(attribute);
     }
     expect(html).toContain('id="curvature-value"');
     expect(html).toContain('id="terminal-display"');
+    expect(html).toContain('data-raster-kind="text"');
     expect(html).toContain('id="terminal-optical-source"');
+    expect(html).toContain('id="terminal-raster-content"');
     expect(html.indexOf('id="terminal-display"')).toBeLessThan(
       html.indexOf('id="terminal-optical-source"'),
     );
     expect(html.indexOf('id="terminal-optical-source"')).toBeLessThan(
+      html.indexOf('id="terminal-raster-content"'),
+    );
+    expect(html.indexOf('id="terminal-raster-content"')).toBeLessThan(
       html.indexOf('id="terminal-screen"'),
     );
     expect(html).toContain('id="terminal-curved-glass"');
@@ -136,6 +144,20 @@ describe("Web terminal UI", () => {
     expect(css).toMatch(
       /\.terminal-display\s*\{[^}]*width: var\(--terminal-frame-width\);[^}]*height: var\(--terminal-frame-height\);[^}]*overflow: hidden;/su,
     );
+    expect(css).toMatch(
+      /\.terminal-display\s*\{[^}]*box-shadow: none;[^}]*font-family: var\(--terminal-screen-font\);/su,
+    );
+    expect(css).toContain("--terminal-raster-margin: 1em");
+    expect(css).toContain(
+      "width: calc(100% / var(--terminal-horizontal-scale))",
+    );
+    expect(css).toContain(
+      "transform: scaleX(var(--terminal-horizontal-scale))",
+    );
+    expect(css).toMatch(
+      /\.terminal-optical-source\s*\{[^}]*inset: var\(--terminal-raster-margin\) 0;/su,
+    );
+    expect(css).not.toContain("0 0 0 5px #050708");
     expect(css).toMatch(
       /\.terminal-optical-source::before,[\s\S]*?\.terminal-optical-source::after\s*\{[^}]*pointer-events: none;/su,
     );
@@ -158,9 +180,20 @@ describe("Web terminal UI", () => {
     expect(script).toContain(
       "curvaturePercent: terminalPresentation.curvaturePercent",
     );
-    expect(script).toContain('editorActive ? "EDIT" : "COMMAND"');
+    expect(script).toContain(
+      'if (terminalInteraction.inputMode === "keys") return "EDIT"',
+    );
     expect(script).toContain('"--terminal-frame-width"');
     expect(script).toContain('"--terminal-frame-height"');
+    expect(script).toContain("const lineHeightRatio = 1");
+    expect(script).toContain(
+      "calculateTextRasterPresentation({ columns, rows })",
+    );
+    expect(script).toContain(
+      'elements.terminalDisplay.dataset.rasterKind = "text"',
+    );
+    expect(script).toContain('"--terminal-raster-margin"');
+    expect(script).toContain('"--terminal-horizontal-scale"');
     expect(presentation).not.toContain("localStorage");
     expect(presentation).not.toContain("sessionStorage");
     expect(presentation).toContain("MAX_CURVATURE_PERCENT = 30");
@@ -180,17 +213,25 @@ describe("Web terminal UI", () => {
       source("web/terminal-input.js"),
     ]);
 
-    expect(html).toContain("<kbd>Enter</kbd>");
-    expect(html).toContain("<kbd>Tab</kbd>");
+    expect(html).toContain("Waiting for terminal interaction details.");
+    expect(html).toContain('id="keyboard-help"');
+    expect(html).toContain('aria-atomic="true"');
     expect(html).toContain('id="completion-menu"');
-    expect(html).toContain("<kbd>Ctrl</kbd>+<kbd>C</kbd>");
     expect(script).toContain('key === "c"');
     expect(script).toContain('event.key === "ArrowUp"');
     expect(script).toContain('key === "u" || key === "k" || key === "w"');
     expect(script).toContain("void closeSession()");
     expect(script).toContain("historyDraft");
-    expect(script).toContain('elements.inputState.textContent = "INPUT"');
-    expect(script).toContain('elements.inputState.textContent = "WAIT"');
+    expect(script).toContain("function interactionStateLabel()");
+    expect(script).toContain("function renderInteractionHints(interaction)");
+    expect(script).toContain("elements.keyboardHelp.replaceChildren(fragment)");
+    expect(script).toContain('"Reload page"');
+    expect(script).toContain("location.reload()");
+    expect(css).not.toContain(
+      ".terminal-display:has(.command-line textarea:focus-visible)",
+    );
+    expect(css).toContain("#keyboard-help kbd");
+    expect(css).toMatch(/\[hidden\]\s*\{\s*display:\s*none\s*!important;/u);
     expect(script).toContain('event.key === "Tab"');
     expect(script).toContain('api("/api/complete"');
     for (const id of [
@@ -300,11 +341,18 @@ describe("Web terminal UI", () => {
     expect(script).toContain("machineAcceptsInput(machineLifecycle)");
   });
 
-  it("detects vi, EDIT, and QBASIC screens and relays bounded editor input", async () => {
-    const script = await source("web/app.js");
+  it("uses authoritative interaction descriptors for bounded editor input", async () => {
+    const [script, inputHelpers] = await Promise.all([
+      source("web/app.js"),
+      source("web/terminal-input.js"),
+    ]);
 
-    expect(script).toContain("editorActive =");
-    expect(script).toContain("isEditorTerminalScreen(terminal.rows)");
+    expect(script).toContain("terminalInteractionFromTerminal(terminal)");
+    expect(inputHelpers).not.toContain("isEditorTerminalScreen");
+    expect(inputHelpers).not.toContain("-- INSERT --");
+    expect(script).toContain('nextInteraction.presentation === "dos-tui"');
+    expect(script).toContain('terminalInteraction?.inputMode === "keys"');
+    expect(script).toContain('terminalInteraction?.pointer === "cell"');
     expect(script).toContain("queueEditorKeys([key])");
     expect(script).toContain("new BoundedEditorKeyQueue()");
     expect(script).toContain("editorKeyQueue.peekBatch()");
@@ -324,47 +372,51 @@ describe("Web terminal UI", () => {
     expect(script).toContain("editorKeyFromKeyboardEvent(event)");
     expect(script).toContain('event.key === "Alt"');
     expect(script).toContain('queueEditorKeys(["F10"])');
+    expect(script).toContain('"X-Computer-System-Interaction-Schema": "1"');
+    expect(script).toContain('setConnection("offline", "RELOAD REQUIRED")');
   });
 
-  it("renders DOS development screens with the reference VGA font and exact palette", async () => {
+  it("renders the fixed-cell screen with the reference VGA font and exact palette", async () => {
     const [css, script, font] = await Promise.all([
       source("web/styles.css"),
       source("web/app.js"),
-      readFile(path.join(root, "web/fonts/WebPlus_IBM_VGA_8x16.woff")),
+      readFile(path.join(root, "web/fonts/WebPlus_IBM_VGA_9x16.woff")),
     ]);
 
     expect(font.subarray(0, 4).toString("ascii")).toBe("wOFF");
     expect(font.byteLength).toBeGreaterThan(20_000);
-    expect(css).toContain('font-family: "IBM VGA 8x16"');
+    expect(css).toContain('font-family: "IBM VGA 9x16"');
     expect(css).toContain(
-      'src: url("/fonts/WebPlus_IBM_VGA_8x16.woff") format("woff")',
+      'src: url("/fonts/WebPlus_IBM_VGA_9x16.woff") format("woff")',
     );
     expect(css).toMatch(
-      /\.terminal-stage\.dos-editor-active[\s\S]*?font-weight: 400;[\s\S]*?font-synthesis: none;[\s\S]*?line-height: 1;[\s\S]*?letter-spacing: 0;/u,
+      /\.terminal-display\s*\{[^}]*font-weight: 400;[^}]*font-synthesis: none;[^}]*line-height: 1;[^}]*letter-spacing: 0;/su,
     );
     expect(css).toContain("-webkit-font-smoothing: none");
     expect(css).toMatch(
       /\.terminal-stage\.dos-editor-active \.command-line textarea\s*\{[^}]*pointer-events: none;/su,
     );
-    for (const color of ['"#AAAAAA"', '"#00AAAA"', '"#0000AA"', '"#000000"']) {
+    for (const color of [
+      '"#FFFFFF"',
+      '"#a8a8a8"',
+      '"#00AAAA"',
+      '"#0000AA"',
+      '"#000000"',
+    ]) {
       expect(script).toContain(color);
     }
-    for (const color of ['"#FFFFFF"', '"#00AAA9"', '"#0100AB"']) {
+    for (const color of ['"#00AAA9"', '"#0100AB"']) {
       expect(script).not.toContain(color);
     }
     expect(script).toContain('"terminal-cell--join-y"');
     expect(css).toMatch(
       /\.terminal-stage\.dos-editor-active \.terminal-cell--join-y\s*\{[^}]*text-shadow: 0 1px currentcolor;/su,
     );
-    expect(script).toContain(
-      'classList.toggle("dos-editor-active", editorActive)',
+    expect(script).toMatch(
+      /classList\.toggle\(\s*"dos-editor-active",\s*dosTuiPresentation,\s*\)/u,
     );
     expect(script).toContain(
-      "const activePalette = editorActive ? dosTuiPalette : palette",
-    );
-    expect(script).toContain("const lineHeightRatio = editorActive ? 1 : 1.32");
-    expect(script).toContain(
-      "const monospaceRatio = editorActive ? 0.5 : 0.61",
+      "const activePalette = dosTuiPresentation ? dosTuiPalette : palette",
     );
   });
 
@@ -382,7 +434,9 @@ describe("Web terminal UI", () => {
     expect(css).toContain('button[aria-busy="true"]');
     expect(script).toContain('api("/api/take-control"');
     expect(script).toContain('accessMode === "writer"');
-    expect(script).toContain('accessMode === "viewer" ? "LOCKED" : state');
+    expect(script).toMatch(
+      /accessMode === "viewer"\s+\? "LOCKED"\s+: writable\s+\? interactionStateLabel\(\)\s+: state/u,
+    );
     expect(script).toContain('error?.code === "read_only"');
     expect(script).toContain('error?.code === "out_of_range"');
   });
@@ -409,6 +463,10 @@ describe("Web terminal UI", () => {
     expect(script).toContain("maximumPixels: 48");
     expect(layout).toContain("availableWidth / (columns * monospaceRatio)");
     expect(layout).toContain("availableHeight / (rows * lineHeightRatio)");
+    expect(layout).toContain("export function calculateRasterPresentation");
+    expect(layout).toContain("export function calculateTextRasterPresentation");
+    expect(layout).toContain("logicalWidth: columns * glyphWidth");
+    expect(layout).toContain("logicalHeight: fittedRows * glyphHeight");
     const scheduledFit =
       /function scheduleTerminalFit\(\)[\s\S]+?(?=async function ensureHardwareTextMode)/u.exec(
         script,

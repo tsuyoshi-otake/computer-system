@@ -1,7 +1,8 @@
 import {
+  createCs486Flat32MemoryMetadata,
   cs486RegisterNames,
   validateCs486Executable,
-  type Cs486Executable,
+  type Cs486ExecutableV3,
   type Cs486FunctionSignature,
   type Cs486Instruction,
   type Cs486Operand,
@@ -93,7 +94,7 @@ const maximumInstructions = 4_096;
 export function assembleCs486(
   source: string,
   options: Omit<Cs486AssemblerOptions, "dataBytes" | "language"> = {},
-): Cs486Executable {
+): Cs486ExecutableV3 {
   const object = assembleCs486Object(source, { ...options, language: "asm" });
   return materializeStandaloneObject(object);
 }
@@ -768,7 +769,7 @@ function emitInitializedData(
   }
 }
 
-function materializeStandaloneObject(object: Cs486Object): Cs486Executable {
+function materializeStandaloneObject(object: Cs486Object): Cs486ExecutableV3 {
   if (!isCs486ObjectV2(object))
     throw new Cs486CompileError("internal assembler produced a legacy object");
   const undefinedSymbol = object.symbols.find(
@@ -799,12 +800,13 @@ function materializeStandaloneObject(object: Cs486Object): Cs486Executable {
           (relocation.addend ?? 0);
     applyRelocation(instructions, initialData, layout.bases, relocation, value);
   }
-  const executable: Cs486Executable = {
+  const executable: Cs486ExecutableV3 = {
     dataBytes: object.dataBytes,
     format: "cs486-executable",
     initialData:
       initialData.length === 0 ? [] : [{ bytes: initialData, offset: 0 }],
     instructions,
+    memory: createCs486Flat32MemoryMetadata(),
     symbols: object.symbols
       .filter(
         (symbol) => symbol.binding === "global" && symbol.offset !== undefined,
@@ -821,7 +823,7 @@ function materializeStandaloneObject(object: Cs486Object): Cs486Executable {
         section: symbol.section,
         type: symbol.type,
       })),
-    version: 2,
+    version: 3,
   };
   validateCs486Executable(executable);
   return executable;

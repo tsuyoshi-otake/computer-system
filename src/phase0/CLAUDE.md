@@ -9,9 +9,9 @@ code.
 - Keep facades thin and behaviorally compatible with the current domain or
   application owner. New production policy belongs in the owning modern
   subsystem, not duplicated here.
-- Preserve bounded operation leases, terminal finalization, monitor-surface,
-  portable-session, redstone constraints, probe protocol, and scheduler-probe
-  semantics until every production import has migrated.
+- Preserve bounded operation leases, terminal finalization, portable-session,
+  redstone constraints, probe protocol, and scheduler-probe semantics until
+  every production import has migrated.
 - A compatibility wrapper must propagate explicit success/failure/rollback and
   must not translate an unsupported outcome into success.
 - Transactional operations commit or roll back exactly once. Probe helpers bound

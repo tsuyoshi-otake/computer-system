@@ -9,11 +9,11 @@ export const SCREEN_SHAPES = Object.freeze(["flat", "curved"]);
 
 export const MIN_CURVATURE_PERCENT = 0;
 export const MAX_CURVATURE_PERCENT = 30;
-export const DEFAULT_CURVATURE_PERCENT = 5;
+export const DEFAULT_CURVATURE_PERCENT = 2;
 
 export const DEFAULT_TERMINAL_PRESENTATION = Object.freeze({
   curvaturePercent: DEFAULT_CURVATURE_PERCENT,
-  profile: "arcade",
+  profile: "subtle",
   shape: "flat",
 });
 

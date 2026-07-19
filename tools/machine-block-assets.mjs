@@ -3,7 +3,6 @@ import { encodeRgbaPng } from "./machine-textures.mjs";
 export const machineBlockGeometryIds = {
   advanced_computer: "geometry.computer_system.advanced_computer",
   computer: "geometry.computer_system.computer",
-  monitor: "geometry.computer_system.monitor",
   portable_computer: "geometry.computer_system.portable_computer",
 };
 
@@ -11,7 +10,7 @@ export const machineBlockTextureKeys = {
   case: "computer_system_machine_case",
   computer_front: "computer_system_computer_front",
   advanced_computer_front: "computer_system_advanced_computer_front",
-  monitor_front: "computer_system_monitor_front",
+  desktop_screen: "computer_system_desktop_screen",
   portable_keyboard: "computer_system_portable_keyboard",
   portable_screen: "computer_system_portable_screen",
 };
@@ -58,7 +57,7 @@ export function createMachineBlockTextures() {
     [machineBlockTextureKeys.advanced_computer_front]: texture(
       computerFrontTexture(true),
     ),
-    [machineBlockTextureKeys.monitor_front]: texture(monitorFrontTexture()),
+    [machineBlockTextureKeys.desktop_screen]: texture(desktopScreenTexture()),
     [machineBlockTextureKeys.portable_keyboard]: texture(
       portableKeyboardTexture(),
     ),
@@ -78,12 +77,6 @@ export function createMachineBlockGeometry() {
         machineBlockGeometryIds.advanced_computer,
         desktopCubes("advanced_computer_front"),
       ),
-      geometry(machineBlockGeometryIds.monitor, [
-        cube([-7, 2, -5], [14, 12, 10], "case"),
-        cube([-6.5, 2.5, -5.5], [13, 11, 0.5], "monitor_front"),
-        cube([-2, 1, -1], [4, 1, 2], "case"),
-        cube([-5, 0, -3], [10, 1, 6], "case"),
-      ]),
       geometry(machineBlockGeometryIds.portable_computer, [
         cube([-7, 0, -6], [14, 2, 12], "case"),
         cube([-6.5, 2, -5.5], [13, 0.5, 11], "portable_keyboard"),
@@ -96,8 +89,10 @@ export function createMachineBlockGeometry() {
 
 function desktopCubes(frontMaterial) {
   return [
-    cube([-7.75, 0, -7.25], [15.5, 16, 14.5], "case"),
-    cube([-6.75, 0.5, -7.75], [13.5, 15, 0.5], frontMaterial),
+    cube([-7.75, 0, -7.25], [15.5, 6, 14.5], "case"),
+    cube([-6.75, 0.5, -7.75], [13.5, 5, 0.5], frontMaterial),
+    cube([-7, 5, -6.5], [14, 11, 13], "case"),
+    cube([-6, 6.25, -6.5625], [12, 9, 0.0625], "desktop_screen"),
   ];
 }
 
@@ -156,13 +151,14 @@ function caseTexture() {
 function computerFrontTexture(advanced) {
   const canvas = caseTexture();
   if (advanced) {
-    drive(canvas, 1, 2);
-    drive(canvas, 1, 6);
+    drive(canvas, 5, 2);
+    drive(canvas, 5, 6);
   } else {
-    drive(canvas, 1, 2);
+    drive(canvas, 5, 2);
   }
-  rectangle(canvas, 13, 3, 2, 2, [82, 82, 79, 255]);
-  pixel(canvas, 13, 3, [231, 224, 195, 255]);
+  rectangle(canvas, 1, 3, 2, 2, [82, 82, 79, 255]);
+  pixel(canvas, 1, 3, [231, 224, 195, 255]);
+  pixel(canvas, 3, 4, [79, 91, 72, 255]);
   for (let y = 12; y <= 14; y += 2) {
     for (let x = 2; x <= 12; x += 2) {
       rectangle(canvas, x, y, 1, 1, [119, 116, 111, 255]);
@@ -172,21 +168,17 @@ function computerFrontTexture(advanced) {
 }
 
 function drive(canvas, x, y) {
-  rectangle(canvas, x, y, 11, 3, [109, 106, 101, 255]);
-  rectangle(canvas, x + 1, y + 1, 8, 1, [43, 44, 43, 255]);
-  pixel(canvas, x + 9, y + 1, [221, 214, 191, 255]);
+  rectangle(canvas, x, y, 9, 3, [109, 106, 101, 255]);
+  rectangle(canvas, x + 1, y + 1, 6, 1, [43, 44, 43, 255]);
+  pixel(canvas, x + 7, y + 1, [221, 214, 191, 255]);
 }
 
-function monitorFrontTexture() {
-  const canvas = caseTexture();
-  rectangle(canvas, 1, 1, 14, 12, [156, 150, 141, 255]);
-  rectangle(canvas, 2, 2, 12, 10, [8, 12, 13, 255]);
-  rectangle(canvas, 3, 3, 10, 8, [3, 7, 8, 255]);
+function desktopScreenTexture() {
+  const canvas = createCanvas([8, 12, 13, 255]);
+  rectangle(canvas, 1, 1, 14, 14, [3, 7, 8, 255]);
   rectangle(canvas, 4, 5, 1, 1, [218, 218, 203, 255]);
   rectangle(canvas, 6, 5, 3, 1, [218, 218, 203, 255]);
   rectangle(canvas, 4, 7, 5, 1, [176, 185, 170, 255]);
-  rectangle(canvas, 3, 13, 8, 1, [119, 116, 111, 255]);
-  pixel(canvas, 13, 13, [79, 91, 72, 255]);
   return canvas;
 }
 

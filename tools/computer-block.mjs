@@ -58,6 +58,10 @@ export function createComputerBlock(family, mask) {
             render_method: "opaque",
             texture: machineBlockTextureKeys.advanced_computer_front,
           },
+          desktop_screen: {
+            render_method: "opaque",
+            texture: machineBlockTextureKeys.desktop_screen,
+          },
         },
         "minecraft:redstone_conductivity": { redstone_conductor: false },
         ...(connectedFaces.length === 0

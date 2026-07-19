@@ -25,7 +25,13 @@ describe("Python CS486OBJ v2 extensions", (): void => {
       kind: "list",
       values: [11, 42],
     });
-    expect(program.executable.version).toBe(2);
+    expect(program.executable).toMatchObject({
+      memory: {
+        auxiliaryResidentBytes: 1_048_576,
+        model: "cs-flat32-v1",
+      },
+      version: 3,
+    });
     expect(program.executable.initialData).toEqual([
       { bytes: [11, 0, 0, 0], offset: 0 },
       { bytes: [42, 0, 0, 0], offset: 4 },

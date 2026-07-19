@@ -43,6 +43,10 @@ import {
   dosTuiSingleLineBox as singleLineBox,
   drawDosTuiShadow,
 } from "./dosTuiTheme.js";
+import {
+  editorLineNumberDigits,
+  maximumEditorDocumentLines,
+} from "./editorDocumentLimits.js";
 
 export { dosTuiColor } from "./dosTuiTheme.js";
 
@@ -118,7 +122,9 @@ export interface DosEditSessionOptions {
 }
 
 type OptionPage = "completion" | "display" | "editing" | "language";
-const classicDisplayFieldCount = 7;
+const classicDisplayFieldCount = 5;
+const genericOptionButtons = ["< OK >", "< Cancel >"] as const;
+const genericOptionButtonGap = 4;
 interface CompletionState {
   readonly candidates: readonly ViCompletionCandidate[];
   readonly prefixStart: number;
@@ -142,7 +148,7 @@ interface PendingSaveDecision {
   readonly targetSnapshot?: string;
 }
 
-const maximumEditorLines = 4_096;
+const maximumEditorLines = maximumEditorDocumentLines;
 const maximumClipboardCharacters = 4_096;
 const maximumLineCharacters = 4_096;
 const maximumSearchCharacters = 64;
@@ -515,7 +521,7 @@ export class DosEditSession {
     }
     rows.push(this.horizontalScrollBar());
     rows.push(
-      this.plainRow(this.footerLine(), dosTuiColor.white, dosTuiColor.status),
+      this.plainRow(this.footerLine(), dosTuiColor.black, dosTuiColor.status),
     );
     this.drawDocumentLeftBorder(rows);
     this.drawVerticalScrollBar(rows);
@@ -826,7 +832,7 @@ export class DosEditSession {
       }
       return this.continue("No file is selected");
     }
-    if (row === geometry.buttonRow) {
+    if (this.optionPage !== "display" && row === geometry.buttonRow) {
       if (column < geometry.left + Math.floor(geometry.width / 2)) {
         return this.fileDialogPath.trim().length > 0
           ? this.openNamedFileDialogEntry()
@@ -1283,32 +1289,20 @@ export class DosEditSession {
     ) {
       const dialogWidth = Math.min(62, this.width - 2);
       const left = Math.floor((this.width - dialogWidth) / 2);
-      const top = Math.max(1, Math.floor((this.height - 19) / 2));
-      const foregroundLeft = left + 1 + 27;
-      const backgroundLeft = left + 1 + 44;
-      if (row >= top + 3 && row <= top + 11) {
-        if (column >= foregroundLeft && column < foregroundLeft + 13) {
-          this.optionIndex = 0;
-          return this.continue("Foreground field selected");
-        }
-        if (column >= backgroundLeft && column < backgroundLeft + 13) {
-          this.optionIndex = 1;
-          return this.continue("Background field selected");
-        }
-      }
-      if (row === top + 15) {
+      const top = Math.max(1, Math.floor((this.height - 6) / 2));
+      if (row === top + 2) {
         const scrollLeft = left + 5;
         const tabLeft = left + 1 + Math.max(30, dialogWidth - 2 - 20);
         if (column >= scrollLeft && column < scrollLeft + 15) {
-          this.optionIndex = 2;
+          this.optionIndex = 0;
           return this.continue("Scroll Bars field selected");
         }
         if (column >= tabLeft && column < tabLeft + 13) {
-          this.optionIndex = 3;
+          this.optionIndex = 1;
           return this.continue("Tab Stops field selected");
         }
       }
-      if (row === top + 17) {
+      if (row === top + 4) {
         const buttons = [
           { column: 10, length: 6 },
           { column: 25, length: 10 },
@@ -1320,7 +1314,7 @@ export class DosEditSession {
             column < left + 1 + buttonColumn + length,
         );
         if (selected >= 0) {
-          this.optionIndex = selected + 4;
+          this.optionIndex = selected + 2;
           return this.displayOptionsKey("Enter");
         }
       }
@@ -1328,13 +1322,23 @@ export class DosEditSession {
     }
 
     const entries = this.optionRows();
-    const width = Math.max(34, Math.min(60, this.width - 2));
-    const left = Math.floor((this.width - width) / 2);
-    const top = Math.max(1, Math.floor((this.height - entries.length - 4) / 2));
-    const selected = row - top - 1;
+    const geometry = this.genericOptionsGeometry(entries.length);
+    const contentColumn = column - geometry.left - 1;
+    if (row === geometry.buttonRow) {
+      const button = geometry.buttonColumns.findIndex(
+        (start, index) =>
+          contentColumn >= start &&
+          contentColumn < start + genericOptionButtons[index]!.length,
+      );
+      if (button >= 0) {
+        this.optionIndex = entries.length + button;
+        return this.optionsKey("Enter");
+      }
+    }
+    const selected = row - geometry.top - 1;
     if (
-      column > left &&
-      column < left + width - 1 &&
+      column > geometry.left &&
+      column < geometry.left + geometry.width - 1 &&
       selected >= 0 &&
       selected < entries.length
     ) {
@@ -1353,11 +1357,36 @@ export class DosEditSession {
       return this.continue(`${this.optionPageLabel} field selected`);
     }
     if (this.optionPage === "display") return this.displayOptionsKey(key);
+    const fieldCount = this.optionRows().length;
     if (key === "ArrowUp" || key === "ArrowDown") {
       const direction = key === "ArrowUp" ? -1 : 1;
       this.optionIndex =
         (this.optionIndex + direction + this.optionCount) % this.optionCount;
       return this.continue(`${this.optionPageLabel} options`);
+    }
+    if (this.optionIndex >= fieldCount) {
+      if (key === "ArrowLeft" || key === "ArrowRight") {
+        const direction = key === "ArrowLeft" ? -1 : 1;
+        this.optionIndex =
+          fieldCount +
+          ((this.optionIndex -
+            fieldCount +
+            direction +
+            genericOptionButtons.length) %
+            genericOptionButtons.length);
+        return this.continue(`${this.optionPageLabel} command selected`);
+      }
+      if (key === "Enter" || key === " ") {
+        return this.optionIndex === fieldCount
+          ? this.finishOptions(false, `${this.optionPageLabel} options applied`)
+          : this.finishOptions(
+              true,
+              `${this.optionPageLabel} options cancelled`,
+            );
+      }
+      return this.continue(
+        "Tab selects fields and buttons; Enter executes; Esc cancels",
+      );
     }
     if (
       key === "ArrowLeft" ||
@@ -1370,40 +1399,40 @@ export class DosEditSession {
       return this.continue(`${this.optionPageLabel} options updated`);
     }
     return this.continue(
-      "Tab selects fields; arrows change options; Esc cancels",
+      "Tab selects fields and buttons; arrows change options; Esc cancels",
     );
   }
 
   private displayOptionsKey(key: string): EditorResult {
     if (key === "F1") {
-      this.optionIndex = 6;
+      this.optionIndex = 4;
       return this.continue(
         "Tab selects fields; arrows change Tab Stops; Enter executes",
       );
     }
     if (
-      this.optionIndex >= 4 &&
+      this.optionIndex >= 2 &&
       (key === "ArrowLeft" || key === "ArrowRight")
     ) {
       const direction = key === "ArrowLeft" ? -1 : 1;
-      this.optionIndex = 4 + ((this.optionIndex - 4 + direction + 3) % 3);
+      this.optionIndex = 2 + ((this.optionIndex - 2 + direction + 3) % 3);
       return this.continue("Display command selected");
     }
     if (key === "Enter") {
-      if (this.optionIndex === 4) {
+      if (this.optionIndex === 2) {
         return this.finishOptions(false, "Display options applied");
       }
-      if (this.optionIndex === 5) {
+      if (this.optionIndex === 3) {
         return this.finishOptions(true, "Display options cancelled");
       }
-      if (this.optionIndex === 6) {
+      if (this.optionIndex === 4) {
         return this.continue(
           "Tab selects fields; arrows change Tab Stops; Esc cancels",
         );
       }
     }
     if (
-      this.optionIndex === 3 &&
+      this.optionIndex === 1 &&
       (key === "ArrowLeft" ||
         key === "ArrowRight" ||
         key === "ArrowUp" ||
@@ -1416,12 +1445,7 @@ export class DosEditSession {
       this.setOptions({ ...this.optionsValue, tabstop: next });
       return this.continue("Display Tab Stops updated");
     }
-    if (this.optionIndex <= 1) {
-      return this.continue(
-        "CS-DOS uses the fixed gray-on-blue four-color palette",
-      );
-    }
-    if (this.optionIndex === 2) {
+    if (this.optionIndex === 0) {
       return this.continue("CS-DOS EDIT scroll bars remain enabled");
     }
     return this.continue("Tab selects fields; Enter executes; Esc cancels");
@@ -1440,11 +1464,21 @@ export class DosEditSession {
     const current = this.optionsValue;
     if (this.optionPage === "display") return;
     if (this.optionPage === "editing") {
-      if (this.optionIndex < 2) {
-        const key = (["autoindent", "expandtab"] as const)[this.optionIndex]!;
+      const booleanOptions = [
+        "syntax",
+        "number",
+        "rainbow",
+        "list",
+        "wrap",
+        "autoindent",
+        "expandtab",
+      ] as const;
+      if (this.optionIndex < booleanOptions.length) {
+        const key = booleanOptions[this.optionIndex]!;
         this.setOptions({ ...current, [key]: !current[key] });
       } else {
-        const key = this.optionIndex === 2 ? "tabstop" : "shiftwidth";
+        const key =
+          this.optionIndex === booleanOptions.length ? "tabstop" : "shiftwidth";
         const next = ((current[key] - 1 + direction + 16) % 16) + 1;
         this.setOptions({ ...current, [key]: next });
       }
@@ -1517,9 +1551,42 @@ export class DosEditSession {
 
   private get optionCount(): number {
     if (this.optionPage === "display") return classicDisplayFieldCount;
-    if (this.optionPage === "editing") return 4;
-    if (this.optionPage === "completion") return 8;
-    return 1;
+    return this.optionRows().length + genericOptionButtons.length;
+  }
+
+  private genericOptionsGeometry(fieldCount: number): {
+    readonly buttonColumns: readonly number[];
+    readonly buttonRow: number;
+    readonly innerWidth: number;
+    readonly left: number;
+    readonly top: number;
+    readonly width: number;
+  } {
+    const width = Math.max(34, Math.min(60, this.width - 2));
+    const innerWidth = width - 2;
+    const left = Math.floor((this.width - width) / 2);
+    const bodyRows = fieldCount + 2;
+    const top = Math.max(1, Math.floor((this.height - bodyRows - 2) / 2));
+    const totalButtonWidth =
+      genericOptionButtons.reduce((total, label) => total + label.length, 0) +
+      genericOptionButtonGap;
+    const firstButtonColumn = Math.max(
+      1,
+      Math.floor((innerWidth - totalButtonWidth) / 2),
+    );
+    return {
+      buttonColumns: [
+        firstButtonColumn,
+        firstButtonColumn +
+          genericOptionButtons[0].length +
+          genericOptionButtonGap,
+      ],
+      buttonRow: top + fieldCount + 1,
+      innerWidth,
+      left,
+      top,
+      width,
+    };
   }
 
   private get optionPageLabel(): string {
@@ -3232,33 +3299,87 @@ export class DosEditSession {
       return this.drawClassicDisplayOptions(rows);
     }
     const entries = this.optionRows();
-    const width = Math.max(34, Math.min(60, this.width - 2));
-    const left = Math.floor((this.width - width) / 2);
-    const top = Math.max(1, Math.floor((this.height - entries.length - 4) / 2));
+    const geometry = this.genericOptionsGeometry(entries.length);
+    if (this.optionPage === "display") {
+      const body = [
+        ...entries.map(({ label, value }) => ` ${label.padEnd(22)} ${value} `),
+        " Tab/Arrows select  Enter=execute  Esc=cancel ",
+      ];
+      this.drawDialog(
+        rows,
+        geometry.top,
+        geometry.left,
+        geometry.width,
+        "Display Options",
+        body,
+      );
+      this.overlay(
+        rows,
+        geometry.top + this.optionIndex + 1,
+        geometry.left + 1,
+        [...(body[this.optionIndex] ?? "")]
+          .slice(0, geometry.innerWidth)
+          .join("")
+          .padEnd(geometry.innerWidth),
+        0,
+        7,
+      );
+      return {
+        x: geometry.left + 2,
+        y: geometry.top + this.optionIndex + 2,
+      };
+    }
+    const buttonLine = genericOptionButtons.reduce(
+      (line, label, index) =>
+        `${line.padEnd(geometry.buttonColumns[index]!)}${label}`,
+      "",
+    );
     const body = [
       ...entries.map(({ label, value }) => ` ${label.padEnd(22)} ${value} `),
-      " Left/Right/Space change  Esc close ",
+      buttonLine.padEnd(geometry.innerWidth),
+      " Arrows/Space change  Enter=button  Esc=cancel ",
     ];
     this.drawDialog(
       rows,
-      top,
-      left,
-      width,
+      geometry.top,
+      geometry.left,
+      geometry.width,
       `${this.optionPageLabel} Options`,
       body,
     );
+    if (this.optionIndex < entries.length) {
+      this.overlay(
+        rows,
+        geometry.top + this.optionIndex + 1,
+        geometry.left + 1,
+        [...(body[this.optionIndex] ?? "")]
+          .slice(0, geometry.innerWidth)
+          .join("")
+          .padEnd(geometry.innerWidth),
+        0,
+        7,
+      );
+      return {
+        x: geometry.left + 2,
+        y: geometry.top + this.optionIndex + 2,
+      };
+    }
+    const buttonIndex = this.optionIndex - entries.length;
+    const label = genericOptionButtons[buttonIndex] ?? genericOptionButtons[0];
+    const buttonColumn =
+      geometry.buttonColumns[buttonIndex] ?? geometry.buttonColumns[0]!;
     this.overlay(
       rows,
-      top + this.optionIndex + 1,
-      left + 1,
-      [...(body[this.optionIndex] ?? "")]
-        .slice(0, width - 2)
-        .join("")
-        .padEnd(width - 2),
+      geometry.buttonRow,
+      geometry.left + 1 + buttonColumn,
+      label,
       0,
       7,
     );
-    return { x: left + 2, y: top + this.optionIndex + 2 };
+    return {
+      x: geometry.left + buttonColumn + 2,
+      y: geometry.buttonRow + 1,
+    };
   }
 
   private drawClassicDisplayOptions(rows: HighlightedCell[][]): {
@@ -3270,23 +3391,6 @@ export class DosEditSession {
     const innerWidth = width - 2;
     const groupColumn = 1;
     const groupWidth = innerWidth - 2;
-    const sampleColumn = 4;
-    const sampleWidth = 20;
-    const foregroundColumn = 27;
-    const colorWidth = 13;
-    const backgroundColumn = 44;
-    const colors = [
-      "Black",
-      "Blue",
-      "Green",
-      "Cyan",
-      "Red",
-      "Magenta",
-      "Brown",
-      "White",
-    ] as const;
-    const topBorder = (boxWidth: number): string =>
-      `${singleLineBox.topLeft}${singleLineBox.horizontal.repeat(boxWidth - 2)}${singleLineBox.topRight}`;
     const bottomBorder = (boxWidth: number): string =>
       `${singleLineBox.bottomLeft}${singleLineBox.horizontal.repeat(boxWidth - 2)}${singleLineBox.bottomRight}`;
     const groupSides = (): readonly {
@@ -3300,74 +3404,6 @@ export class DosEditSession {
       },
     ];
     const body: string[] = [
-      composeFixedRow(innerWidth, [
-        { column: groupColumn, value: titledBorder("Colors", groupWidth) },
-      ]),
-      composeFixedRow(innerWidth, [
-        ...groupSides(),
-        {
-          column: foregroundColumn,
-          value: centeredText("Foreground", colorWidth),
-        },
-        {
-          column: backgroundColumn,
-          value: centeredText("Background", colorWidth),
-        },
-      ]),
-      composeFixedRow(innerWidth, [
-        ...groupSides(),
-        { column: sampleColumn, value: topBorder(sampleWidth) },
-        { column: foregroundColumn, value: topBorder(colorWidth) },
-        { column: backgroundColumn, value: topBorder(colorWidth) },
-      ]),
-      ...colors.map((color, index) =>
-        composeFixedRow(innerWidth, [
-          ...groupSides(),
-          ...(index < 5
-            ? [
-                {
-                  column: sampleColumn,
-                  value: `${singleLineBox.vertical} ${(
-                    [
-                      "",
-                      "Set colors for",
-                      "the CS-DOS text",
-                      "editor window:",
-                      "",
-                    ][index] ?? ""
-                  ).padEnd(sampleWidth - 4)} ${singleLineBox.vertical}`,
-                },
-              ]
-            : index === 5
-              ? [
-                  {
-                    column: sampleColumn,
-                    value: bottomBorder(sampleWidth),
-                  },
-                ]
-              : []),
-          {
-            column: foregroundColumn,
-            value: `${singleLineBox.vertical} ${`${color}${index === 0 ? " ^" : index === colors.length - 1 ? " v" : ""}`
-              .slice(0, colorWidth - 4)
-              .padEnd(colorWidth - 4)} ${singleLineBox.vertical}`,
-          },
-          {
-            column: backgroundColumn,
-            value: `${singleLineBox.vertical} ${`${color}${index === 0 ? " ^" : index === colors.length - 1 ? " v" : ""}`
-              .slice(0, colorWidth - 4)
-              .padEnd(colorWidth - 4)} ${singleLineBox.vertical}`,
-          },
-        ]),
-      ),
-      composeFixedRow(innerWidth, [
-        ...groupSides(),
-        { column: foregroundColumn, value: bottomBorder(colorWidth) },
-        { column: backgroundColumn, value: bottomBorder(colorWidth) },
-      ]),
-      composeFixedRow(innerWidth, [
-        { column: groupColumn, value: bottomBorder(groupWidth) },
-      ]),
       composeFixedRow(innerWidth, [
         {
           column: groupColumn,
@@ -3394,38 +3430,10 @@ export class DosEditSession {
     const top = Math.max(1, Math.floor((this.height - (body.length + 2)) / 2));
     this.drawDialog(rows, top, left, width, "Display", body);
 
-    const sampleLines = ["Set colors for", "the CS-DOS text", "editor window:"];
-    for (const [index, line] of sampleLines.entries()) {
-      this.overlay(
-        rows,
-        top + 5 + index,
-        left + 1 + sampleColumn + 1,
-        line.padEnd(sampleWidth - 4),
-        dosTuiColor.chrome,
-        dosTuiColor.document,
-      );
-    }
-    this.overlay(
-      rows,
-      top + 11,
-      left + 1 + foregroundColumn + 1,
-      " White v ".slice(0, colorWidth - 2).padEnd(colorWidth - 2),
-      dosTuiColor.chrome,
-      dosTuiColor.black,
-    );
-    this.overlay(
-      rows,
-      top + 5,
-      left + 1 + backgroundColumn + 1,
-      " Blue ".padEnd(colorWidth - 2),
-      dosTuiColor.chrome,
-      dosTuiColor.black,
-    );
-
     const scrollBarsColumn = left + 1 + 4;
     const tabStopsColumn = left + 1 + Math.max(30, innerWidth - 20);
-    const optionRow = top + 15;
-    if (this.optionIndex === 2) {
+    const optionRow = top + 2;
+    if (this.optionIndex === 0) {
       this.overlay(
         rows,
         optionRow,
@@ -3434,7 +3442,7 @@ export class DosEditSession {
         dosTuiColor.chrome,
         dosTuiColor.black,
       );
-    } else if (this.optionIndex === 3) {
+    } else if (this.optionIndex === 1) {
       this.overlay(
         rows,
         optionRow,
@@ -3450,11 +3458,11 @@ export class DosEditSession {
       { column: 25, label: "< Cancel >" },
       { column: 43, label: "< Help >" },
     ] as const;
-    if (this.optionIndex >= 4) {
-      const button = buttons[this.optionIndex - 4]!;
+    if (this.optionIndex >= 2) {
+      const button = buttons[this.optionIndex - 2]!;
       this.overlay(
         rows,
-        top + 17,
+        top + 4,
         left + 1 + button.column,
         button.label,
         dosTuiColor.chrome,
@@ -3463,13 +3471,11 @@ export class DosEditSession {
     }
 
     const targets = [
-      { x: left + 1 + foregroundColumn + 2, y: top + 11 },
-      { x: left + 1 + backgroundColumn + 2, y: top + 5 },
       { x: scrollBarsColumn + 1, y: optionRow },
       { x: tabStopsColumn + 1, y: optionRow },
       ...buttons.map(({ column }) => ({
         x: left + 1 + column + 2,
-        y: top + 17,
+        y: top + 4,
       })),
     ] as const;
     const target = targets[this.optionIndex] ?? targets[0];
@@ -3483,8 +3489,6 @@ export class DosEditSession {
     const enabled = (value: boolean): string => (value ? "On" : "Off");
     if (this.optionPage === "display") {
       return [
-        { label: "Foreground", value: "White (fixed)" },
-        { label: "Background", value: "Blue (fixed)" },
         { label: "Scroll Bars", value: "On" },
         { label: "Tab Stops", value: String(this.optionsValue.tabstop) },
         { label: "OK", value: "Apply" },
@@ -3494,6 +3498,11 @@ export class DosEditSession {
     }
     if (this.optionPage === "editing") {
       return [
+        { label: "Syntax Highlight", value: enabled(this.optionsValue.syntax) },
+        { label: "Line Numbers", value: enabled(this.optionsValue.number) },
+        { label: "Rainbow Indent", value: enabled(this.optionsValue.rainbow) },
+        { label: "Whitespace Marks", value: enabled(this.optionsValue.list) },
+        { label: "Line Wrapping", value: enabled(this.optionsValue.wrap) },
         { label: "Auto Indent", value: enabled(this.optionsValue.autoindent) },
         { label: "Expand Tabs", value: enabled(this.optionsValue.expandtab) },
         { label: "Tab Width", value: String(this.optionsValue.tabstop) },
@@ -4254,7 +4263,10 @@ export class DosEditSession {
       ...[...gutter].map((character) => ({
         background: 11,
         character,
-        foreground: lineIndex === this.cursorLine && segment === 0 ? 15 : 8,
+        foreground:
+          lineIndex === this.cursorLine && segment === 0
+            ? dosTuiColor.activeLineNumber
+            : dosTuiColor.chrome,
       })),
       ...highlighted.cells.map((cell) => ({
         ...cell,
@@ -4356,7 +4368,7 @@ export class DosEditSession {
   }
 
   private get numberDigits(): number {
-    return Math.max(3, String(this.lines.length).length);
+    return editorLineNumberDigits;
   }
 
   private continue(status: string): EditorResult {

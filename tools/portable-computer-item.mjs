@@ -2,7 +2,7 @@ import { machineTextureKeys } from "./machine-textures.mjs";
 
 export const portableComputerIdentifier = "computer_system:portable_computer";
 export const portableComputerTextureKey = machineTextureKeys.portable_computer;
-export const portableComputerDisplayName = "Portable Computer System";
+export const portableComputerDisplayName = "Computer System LTE 386SX";
 
 export function createPortableComputerItem() {
   return {

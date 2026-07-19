@@ -40,7 +40,8 @@ describe("Bedrock terminal adapters", () => {
     expect(computer).toContain(
       "requestWebComputerTerminal(player, record, event.block)",
     );
-    expect(computer).toContain("hasAdjacentMonitor(event.block)");
+    expect(computer).not.toContain("hasAdjacentMonitor");
+    expect(computer).not.toContain("computer_system:monitor");
     expect(computer).toContain("selectComputerTerminal");
     expect(portable).toContain("requestWebComputerTerminal");
     expect(portable).toContain("resolvePortableComputer(source, itemStack)");
@@ -143,6 +144,10 @@ describe("Bedrock terminal adapters", () => {
     expect(bridge).toContain('"terminal_keys"');
     expect(bridge).toContain('"terminal_mouse"');
     expect(bridge).toContain("isTerminalKeyBatch");
+    expect(bridge).toContain("computerHost.runtime.terminalInteraction");
+    expect(bridge).toContain(
+      "readonly interaction: TerminalInteractionDescriptor",
+    );
     expect(bridge).toContain("flushPendingMouseMoves");
     expect(bridge).toContain("releaseMouseButtons");
     expect(bridge).toContain('"terminal_closed"');
@@ -206,10 +211,9 @@ describe("Bedrock terminal adapters", () => {
     expect(handler).toContain('resource: "session"');
     expect(handler).toContain('reason: "read_only"');
     expect(handler).toContain('session.principal.kind === "debug"');
-    expect(handler).toContain(
-      "computerHost.runtime.isShellSecretInput(session.computerId)",
-    );
+    expect(handler).toContain("interaction.secretInput");
     expect(handler).toContain('reason: "secret_input"');
+    expect(handler).toContain('reason: "input_mode_changed"');
     expect(handler).toContain('failedInputResult("malformed_input")');
     expect(handler).toContain('failedInputResult("invalid_encoding")');
     expect(handler.match(/computerHost\.runtime\.queueEvent/gu)).toHaveLength(
@@ -218,7 +222,7 @@ describe("Bedrock terminal adapters", () => {
     expect(handler.match(/const result = safeInputQueueResult/gu)).toHaveLength(
       3,
     );
-    expect(handler.match(/finalizeInputRequest\(/gu)).toHaveLength(15);
+    expect(handler.match(/finalizeInputRequest\(/gu)).toHaveLength(18);
     expect(handler).not.toContain("snapshotScheduler.requestEager");
 
     expect(mouseFlush).toContain("pending.requestId");
@@ -258,6 +262,9 @@ describe("Bedrock terminal adapters", () => {
     expect(emit).toContain("session.lastTerminal === record.terminal");
     expect(emit).toContain("session.lastTerminalRevision === terminalRevision");
     expect(emit).toContain("session.lastSnapshotMetadata === metadata");
+    expect(emit).toContain("const interaction =");
+    expect(emit).toContain("interaction,");
+    expect(emit).not.toContain("secretInput,");
     expect(emit).toContain("audio.events.length === 0");
     expect(emit.match(/record\.terminal\.snapshot\(\)/gu)).toHaveLength(1);
     expect(emit.match(/JSON\.stringify/gu)).toHaveLength(2);
@@ -280,20 +287,22 @@ describe("Bedrock terminal adapters", () => {
     expect(coordinator).not.toContain("showCustomTerminalView");
   });
 
-  it("routes Monitor touch only to one physically adjacent desktop computer", async () => {
-    const [monitor, coordinator] = await Promise.all([
-      source("src/bedrock/monitorComponent.ts"),
+  it("uses the built-in desktop CRT without registering a standalone Monitor route", async () => {
+    const [main, computer, coordinator] = await Promise.all([
+      source("src/bedrock/main.ts"),
+      source("src/bedrock/computerComponent.ts"),
       source("src/bedrock/computerTerminal.ts"),
     ]);
 
-    expect(monitor).toContain("adjacentDesktopComputers");
-    expect(monitor).toContain(
-      "requestWebComputerTerminal(player, record, block)",
+    expect(main).not.toContain("registerMonitorComponent");
+    expect(main).not.toContain('case "monitor"');
+    expect(computer).toContain(
+      "requestWebComputerTerminal(player, record, event.block)",
     );
-    expect(monitor).not.toContain("openSelectedComputerTerminal");
-    expect(monitor).not.toContain("showTerminalProbe");
+    expect(computer).not.toContain("adjacentDesktopComputers");
+    expect(computer).not.toContain("hasAdjacentMonitor");
     expect(coordinator).toContain("TerminalTargetRegistry");
-    expect(coordinator).toContain("targets.resolve(player.id)");
+    expect(coordinator).not.toContain("openSelectedComputerTerminal");
   });
 
   it("guards a broken Computer coordinate until residual block cleanup finishes", async () => {

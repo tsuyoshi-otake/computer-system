@@ -5,8 +5,8 @@ import {
   editorKeyFromKeyboardEvent,
   hasCopySelection,
   insertPastedCommand,
-  isEditorTerminalScreen,
   keyboardLockStatesFromEvent,
+  terminalInteractionFromTerminal,
 } from "../../web/terminal-input.js";
 
 describe("Web terminal input helpers", () => {
@@ -83,28 +83,63 @@ describe("Web terminal input helpers", () => {
     expect(key("f", { ctrlKey: true, metaKey: true })).toBeUndefined();
   });
 
-  it("recognizes the actual EDIT, WorkBench, and vi screen contracts", () => {
-    expect(
-      isEditorTerminalScreen(["  File   Edit   Search   Options   Help "]),
-    ).toBe(true);
-    expect(
-      isEditorTerminalScreen([
-        " File Edit View Search Run Options                         Help ",
-      ]),
-    ).toBe(true);
-    expect(
-      isEditorTerminalScreen([
-        "plain shell output",
-        "                         -- INSERT --",
-      ]),
-    ).toBe(true);
-    expect(
-      isEditorTerminalScreen([
-        "File Edit Search Options Help",
-        "C:\\>echo normal terminal output",
-      ]),
-    ).toBe(false);
-    expect(isEditorTerminalScreen(undefined)).toBe(false);
+  it("uses the authoritative interaction descriptor instead of screen text", () => {
+    const interaction = {
+      schema: 1,
+      inputMode: "line",
+      pointer: "none",
+      presentation: "terminal",
+      secretInput: false,
+      context: "shell",
+      interrupt: false,
+      hints: [{ key: "Enter", label: "Run" }],
+    };
+
+    for (const rows of [
+      ["  File   Edit   Search   Options   Help "],
+      ["plain shell output", "                         -- INSERT --"],
+    ]) {
+      expect(
+        terminalInteractionFromTerminal({ interaction, rows }),
+      ).toMatchObject({ inputMode: "line", presentation: "terminal" });
+    }
+  });
+
+  it("fails closed for missing, unknown, or unbounded interaction schemas", () => {
+    expect(() => terminalInteractionFromTerminal({ rows: [] })).toThrow(
+      /interaction schema 1/u,
+    );
+    expect(() =>
+      terminalInteractionFromTerminal({
+        interaction: {
+          schema: 2,
+          inputMode: "keys",
+          pointer: "cell",
+          presentation: "dos-tui",
+          secretInput: false,
+          context: "edit",
+          interrupt: false,
+          hints: [],
+        },
+      }),
+    ).toThrow(/interaction schema 1/u);
+    expect(() =>
+      terminalInteractionFromTerminal({
+        interaction: {
+          schema: 1,
+          inputMode: "keys",
+          pointer: "cell",
+          presentation: "dos-tui",
+          secretInput: false,
+          context: "edit",
+          interrupt: false,
+          hints: Array.from({ length: 6 }, (_, index) => ({
+            key: `F${String(index + 1)}`,
+            label: "Action",
+          })),
+        },
+      }),
+    ).toThrow(/contextual hints/u);
   });
 
   it("reports keyboard lock state without inventing unavailable browser state", () => {

@@ -106,16 +106,16 @@
 - Keep high-resolution isometric machine plates as manual/inventory sources and
   derive purpose-built block geometry, face textures, and terrain-atlas entries
   separately. Stretching one isometric view across cube faces cannot represent a
-  placed machine. — Evidence: machine asset tests cover four bounded geometries,
-  six 16 px face textures, the terrain atlas, and four transparent item icons;
-  the production pack builds with no new BDS diagnostics.
-- Resolve hardware-gated terminal access from current physical topology at every
-  entry point. A selected Desktop identity is not proof that a Monitor exists;
-  require exactly one adjacent Desktop/Monitor connection and terminate missing
-  or ambiguous paths explicitly. Portable machines may bypass that gate only as
-  an explicit built-in-display capability. — Evidence: Bedrock adapter tests
-  cover the Desktop gate, adjacent Monitor resolution, Portable held/placed
-  paths, and stationary-redstone exclusion for Portable blocks.
+  placed machine. — Evidence: machine asset tests cover three bounded
+  geometries, six 16 px face textures, the terrain atlas, and three transparent
+  machine item icons; the production pack builds with no new BDS diagnostics.
+- Desktop and Advanced are one-block all-in-one machines with a built-in CRT.
+  Resolve terminal access directly from the touched Computer identity; do not
+  add a separate display block, item, probe, or adjacency gate. Portable retains
+  its explicit built-in-display capability. — Evidence: Bedrock adapter and
+  generated-pack checks cover direct Desktop access, absence of standalone
+  display paths, Portable held/placed paths, and stationary-redstone exclusion
+  for Portable blocks.
 - Treat live cross-language benchmarks as correctness experiments first: use
   identical workload/checksum sources, cold guest processes, exact persisted
   hardware identities, and runtime statistics rather than MCP command overhead.
