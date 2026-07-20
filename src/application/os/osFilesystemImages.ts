@@ -14,7 +14,8 @@ const previousLinuxImageId = "cs-linux-1.0-rootfs-v3";
 const recentLinuxImageId = "cs-linux-1.0-rootfs-v4";
 const formerLinuxImageId = "cs-linux-1.0-rootfs-v5";
 const linuxImageId = "cs-linux-1.0-rootfs-v6";
-const currentLinuxImageId = "cs-linux-1.0-rootfs-v7";
+const priorLinuxImageId = "cs-linux-1.0-rootfs-v7";
+const currentLinuxImageId = "cs-linux-1.0-rootfs-v8";
 const legacyDosImageId = "cs-dos-1.0-rootfs-v1";
 const previousDosImageId = "cs-dos-1.0-rootfs-v2";
 const recentDosImageId = "cs-dos-1.0-rootfs-v3";
@@ -423,6 +424,14 @@ export const linuxFilesystemImage: FilesystemBaseImage = Object.freeze({
   ]),
 });
 
+const priorV7LinuxFilesystemImage: FilesystemBaseImage = Object.freeze({
+  id: priorLinuxImageId,
+  directories: currentLinuxImageDirectories,
+  files: Object.freeze(
+    linuxFilesystemImage.files.filter((file) => file.path !== "/usr/bin/make"),
+  ),
+});
+
 const priorLinuxFilesystemImage: FilesystemBaseImage = Object.freeze({
   id: linuxImageId,
   directories: linuxImageDirectories,
@@ -638,6 +647,7 @@ export function registerOsFilesystemImages(): void {
   registerFilesystemBaseImage(recentLinuxFilesystemImage);
   registerFilesystemBaseImage(formerLinuxFilesystemImage);
   registerFilesystemBaseImage(priorLinuxFilesystemImage);
+  registerFilesystemBaseImage(priorV7LinuxFilesystemImage);
   registerFilesystemBaseImage(linuxFilesystemImage);
   registerFilesystemBaseImage(legacyDosFilesystemImage);
   registerFilesystemBaseImage(previousDosFilesystemImage);

@@ -95,6 +95,26 @@ import {
   renderGuestToolchainTranscript,
   type GuestToolchainTranscript,
 } from "../toolchain/guestToolchainTranscript.js";
+import {
+  fingerprintGuestMakeInput,
+  fingerprintGuestMakeOutput,
+  GUEST_MAKE_LIMITS,
+  GuestMakeError,
+  parseGuestMakeArguments,
+  parseGuestMakefile,
+  parseGuestMakeState,
+  planGuestMakeBuild,
+  serializeGuestMakeState,
+  type GuestMakeArguments,
+  type GuestMakeFingerprintFile,
+  type GuestMakePlan,
+  type GuestMakeRecipe,
+  type GuestMakeStateRecord,
+} from "../toolchain/guestMake.js";
+import type {
+  ShellMakeIoCompletion,
+  ShellMakeStepResult,
+} from "./shellTypes.js";
 import { maximumViConfigurationCharacters } from "../editor/viOptions.js";
 import {
   maximumViIncludeBytes,
@@ -194,6 +214,22 @@ const maximumHistoryFileBytes = 32_768;
 const sudoCredentialLifetimeSeconds = 5 * 60;
 const variableMarkerStart = "\u{e000}";
 const variableMarkerEnd = "\u{e001}";
+const linuxMakeRecipeCommands: ReadonlySet<string> = new Set([
+  "as",
+  "c++",
+  "cc",
+  "cp",
+  "echo",
+  "ld",
+  "mkdir",
+  "mv",
+  "nm",
+  "objdump",
+  "printf",
+  "rm",
+  "rmdir",
+  "touch",
+]);
 const dosHimemResidentBytes = 14_592;
 const dosEmm386ResidentBytes = 22_528;
 const dosHimemCapsule = "CS-DOS XMS manager\n".padEnd(
@@ -654,6 +690,50 @@ export class ShellSession {
       !this.suppressFilesystemWait,
     );
     if (
+      ioWaitEvent !== undefined &&
+      result.foreground?.kind === "compile" &&
+      result.foreground.task.kind === "make"
+    ) {
+      const foreground = result.foreground;
+      const makeStep = result.foreground.task.step;
+      let initialWaitQueued = false;
+      let initialIoComplete = false;
+      result = {
+        ...result,
+        foreground: {
+          ...foreground,
+          task: {
+            kind: "make",
+            step: (completion?: ShellMakeIoCompletion): ShellMakeStepResult => {
+              if (!initialIoComplete) {
+                if (!initialWaitQueued) {
+                  initialWaitQueued = true;
+                  return { ioWaitEvent, kind: "wait" };
+                }
+                initialIoComplete = true;
+                if (completion?.outcome !== "completed") {
+                  const code =
+                    completion?.code === undefined
+                      ? ""
+                      : ` (${completion.code})`;
+                  return {
+                    kind: "complete",
+                    result: {
+                      exitCode: 1,
+                      transcript: guestToolchainTranscriptFromFailure(
+                        `make: filesystem I/O failed${code}\n`,
+                      ),
+                    },
+                  };
+                }
+                return makeStep();
+              }
+              return makeStep(completion);
+            },
+          },
+        },
+      };
+    } else if (
       ioWaitEvent !== undefined &&
       result.foreground === undefined &&
       result.action === undefined
@@ -1496,6 +1576,21 @@ export class ShellSession {
             : `${timed.stderr}real ${elapsed.toFixed(3)}s\n`,
       };
     }
+    if (sessionCommand === "linux-make") {
+      if (
+        depth !== 0 ||
+        !interactiveAllowed ||
+        !foregroundAllowed ||
+        command.redirects.length > 0
+      ) {
+        return commandFailure(
+          "make",
+          "cannot run in a pipeline, redirect, script, or command chain",
+          2,
+        );
+      }
+      return this.startLinuxMake(arguments_);
+    }
     if (sessionCommand === "vi") {
       if (this.scopedElevationDepth > 0) {
         return commandFailure(
@@ -1541,6 +1636,548 @@ export class ShellSession {
     const result = this.commands.execute(command.words, stdin);
     this.cpuCyclesValue += result.cpuCycles ?? 0;
     return result;
+  }
+
+  private startLinuxMake(arguments_: readonly string[]): ShellCommandResult {
+    const usage =
+      "make [-f FILE] [-C DIR] [-n] [-B] [-s] [NAME=value ...] [TARGET ...]";
+    try {
+      const options = parseGuestMakeArguments(arguments_);
+      if (options.help) {
+        return commandSuccess(
+          "CS Make 1.0\nUsage: " +
+            usage +
+            "\nOne bounded guest recipe is executed per scheduler tick.\n",
+        );
+      }
+      if (options.version) return commandSuccess("CS Make 1.0\n");
+
+      const parentIdentity = this.commands.captureIdentityState();
+      const projectDirectory =
+        options.directory === undefined
+          ? parentIdentity.currentDirectory
+          : this.commands.resolvePath(options.directory);
+      return {
+        exitCode: 0,
+        foreground: {
+          command: "make",
+          credentials: this.credentialContext.current,
+          kind: "compile",
+          task: this.createLinuxMakeTask(options, projectDirectory),
+          umask: this.guestFilesystem.getUmask(),
+        },
+        stderr: "",
+        stdout: "",
+      };
+    } catch (error: unknown) {
+      const detail =
+        error instanceof GuestMakeError || error instanceof Error
+          ? error.message
+          : String(error);
+      return commandFailure("make", detail);
+    }
+  }
+
+  private createLinuxMakeTask(
+    options: GuestMakeArguments,
+    projectDirectory: string,
+  ): {
+    readonly kind: "make";
+    readonly step: (completion?: ShellMakeIoCompletion) => ShellMakeStepResult;
+  } {
+    const transcripts: GuestToolchainTranscript[] = [];
+    let cpuCycles = 1;
+    let plan: GuestMakePlan | undefined;
+    let makeState = new Map<string, GuestMakeStateRecord>();
+    let committedStateContents = serializeGuestMakeState(makeState);
+    let candidateStateContents: string | undefined;
+    let makeStatePath = "";
+    const targetBaselines = new Map<string, GuestMakeStateRecord>();
+    let phase: "initialize" | "recipe" | "verify" = "initialize";
+    let targetIndex = 0;
+    let recipeIndex = 0;
+    let terminalExitCode: number | undefined;
+    let waitingFor:
+      "commit" | "initialize" | "recipe" | "rollback" | "verify" | undefined;
+
+    const complete = (exitCode: number): ShellMakeStepResult => {
+      const merged = concatGuestToolchainTranscriptsOrFailure(
+        transcripts,
+        "make: output limit exceeded\n",
+      );
+      return {
+        kind: "complete",
+        result: {
+          cpuCycles,
+          exitCode: merged.limitExceeded ? 1 : exitCode,
+          transcript: merged.transcript,
+        },
+      };
+    };
+
+    const failMake = (detail: string, exitCode = 1): ShellMakeStepResult => {
+      transcripts.push(
+        guestToolchainTranscriptFromFailure("make: " + detail + "\n"),
+      );
+      terminalExitCode = exitCode;
+      return complete(exitCode);
+    };
+
+    const beginRollback = (): ShellMakeStepResult => {
+      let ioWaitEvent: string | undefined;
+      this.commands.beginFilesystemIo();
+      try {
+        this.commands.writeFile(makeStatePath, committedStateContents);
+      } catch (error: unknown) {
+        transcripts.push(
+          guestToolchainTranscriptFromFailure(
+            "make: state rollback failed: " + message(error) + "\n",
+          ),
+        );
+      } finally {
+        ioWaitEvent = this.commands.completeFilesystemIo(!this.debugSubmission);
+      }
+      terminalExitCode = 1;
+      if (ioWaitEvent !== undefined) {
+        waitingFor = "rollback";
+        return { ioWaitEvent, kind: "wait" };
+      }
+      return complete(1);
+    };
+
+    const advanceTarget = (): void => {
+      targetIndex += 1;
+      recipeIndex = 0;
+      phase = "recipe";
+    };
+
+    const handleCompletion = (
+      completion: ShellMakeIoCompletion,
+    ): ShellMakeStepResult | undefined => {
+      const completedPhase = waitingFor;
+      waitingFor = undefined;
+      if (completion.outcome !== "completed") {
+        const code =
+          completion.code === undefined ? "" : " (" + completion.code + ")";
+        transcripts.push(
+          guestToolchainTranscriptFromFailure(
+            "make: filesystem I/O failed" + code + "\n",
+          ),
+        );
+        if (completedPhase === "commit") return beginRollback();
+        terminalExitCode = 1;
+        return complete(1);
+      }
+      if (completedPhase === "commit") {
+        committedStateContents =
+          candidateStateContents ?? committedStateContents;
+        candidateStateContents = undefined;
+        advanceTarget();
+      } else if (completedPhase === "rollback") {
+        return complete(1);
+      }
+      if (terminalExitCode !== undefined) return complete(terminalExitCode);
+      return undefined;
+    };
+
+    const initialize = (): ShellMakeStepResult => {
+      let ioWaitEvent: string | undefined;
+      const parentIdentity = this.commands.captureIdentityState();
+      this.commands.beginFilesystemIo();
+      try {
+        if (
+          !this.guestFilesystem.exists(projectDirectory) ||
+          !this.guestFilesystem.isDirectory(projectDirectory)
+        ) {
+          throw new GuestMakeError(
+            (options.directory ?? projectDirectory) + ": not a directory",
+          );
+        }
+        this.commands.restoreDirectory(projectDirectory);
+        const candidates =
+          options.makefile === undefined
+            ? ["Makefile", "makefile"]
+            : [options.makefile];
+        const makefileName = candidates.find((candidate) => {
+          const path = this.commands.resolvePath(candidate);
+          return (
+            this.guestFilesystem.exists(path) &&
+            !this.guestFilesystem.isDirectory(path)
+          );
+        });
+        if (makefileName === undefined) {
+          throw new GuestMakeError("no Makefile or makefile found");
+        }
+        const source = this.commands.readFile(
+          this.commands.resolvePath(makefileName),
+        );
+        makeStatePath = this.commands.resolvePath(".cs-make-state");
+        if (this.guestFilesystem.exists(makeStatePath)) {
+          committedStateContents = this.commands.readFile(makeStatePath);
+          makeState = parseGuestMakeState(committedStateContents);
+        } else {
+          committedStateContents = serializeGuestMakeState(makeState);
+        }
+        const makefile = parseGuestMakefile(source, options.variables);
+        const snapshot = this.createGuestMakeSnapshotReader();
+        plan = planGuestMakeBuild(
+          makefile,
+          source,
+          options.variables,
+          {
+            exists: (path): boolean =>
+              this.guestFilesystem.exists(this.commands.resolvePath(path)),
+            fingerprintChanged: (target, prerequisites, recipes): boolean => {
+              const canonicalTarget = this.commands.resolvePath(target);
+              const fingerprint = this.fingerprintGuestMakeTarget(
+                canonicalTarget,
+                prerequisites.map((path) => this.commands.resolvePath(path)),
+                recipes,
+                snapshot,
+              );
+              const previous = makeState.get(canonicalTarget);
+              return (
+                previous === undefined ||
+                previous.inputFingerprint !== fingerprint.inputFingerprint ||
+                previous.outputFingerprint !== fingerprint.outputFingerprint
+              );
+            },
+            modifiedAt: (path): number | undefined => {
+              const resolved = this.commands.resolvePath(path);
+              if (!this.guestFilesystem.exists(resolved)) return undefined;
+              return this.guestFilesystem.getMetadata(resolved)
+                .modifiedAtMilliseconds;
+            },
+          },
+          options.targets,
+          options.force,
+        );
+        phase = "recipe";
+        cpuCycles = Math.min(
+          1_000_000,
+          cpuCycles + makefile.rules.size + snapshot.filesRead(),
+        );
+      } catch (error: unknown) {
+        terminalExitCode = 1;
+        transcripts.push(
+          guestToolchainTranscriptFromFailure("make: " + message(error) + "\n"),
+        );
+      } finally {
+        try {
+          ioWaitEvent = this.commands.completeFilesystemIo(
+            !this.debugSubmission,
+          );
+        } finally {
+          this.commands.restoreIdentityState(parentIdentity);
+        }
+      }
+      if (ioWaitEvent !== undefined) {
+        waitingFor = "initialize";
+        return { ioWaitEvent, kind: "wait" };
+      }
+      if (terminalExitCode !== undefined) return complete(terminalExitCode);
+      if (plan?.targets.length === 0) {
+        const target = plan.requestedTargets[0] ?? "";
+        transcripts.push(
+          guestToolchainTranscriptFromStreams(
+            "make: '" + target + "' is up to date.\n",
+            "",
+          ),
+        );
+        return complete(0);
+      }
+      return { kind: "continue" };
+    };
+
+    const step = (completion?: ShellMakeIoCompletion): ShellMakeStepResult => {
+      if (completion !== undefined) {
+        const completionResult = handleCompletion(completion);
+        if (completionResult !== undefined) return completionResult;
+      }
+      if (terminalExitCode !== undefined) return complete(terminalExitCode);
+      if (phase === "initialize") return initialize();
+      if (plan?.targets.length === 0) {
+        const target = plan.requestedTargets[0] ?? "";
+        transcripts.push(
+          guestToolchainTranscriptFromStreams(
+            "make: '" + target + "' is up to date.\n",
+            "",
+          ),
+        );
+        return complete(0);
+      }
+      const target = plan?.targets[targetIndex];
+      if (target === undefined) return complete(0);
+
+      const canonicalTarget = this.withGuestMakeProjectDirectory(
+        projectDirectory,
+        () => this.commands.resolvePath(target.target),
+      );
+      if (phase === "verify") {
+        const baseline = targetBaselines.get(canonicalTarget);
+        if (baseline === undefined) {
+          return failMake(
+            "missing pre-recipe snapshot for '" + target.target + "'",
+          );
+        }
+        let current: GuestMakeStateRecord;
+        let ioWaitEvent: string | undefined;
+        let verifyError: string | undefined;
+        this.commands.beginFilesystemIo();
+        try {
+          current = this.withGuestMakeProjectDirectory(projectDirectory, () =>
+            this.fingerprintGuestMakeTarget(
+              canonicalTarget,
+              target.prerequisites.map((path) =>
+                this.commands.resolvePath(path),
+              ),
+              target.recipes,
+              this.createGuestMakeSnapshotReader(),
+            ),
+          );
+          if (current.inputFingerprint !== baseline.inputFingerprint) {
+            throw new GuestMakeError(
+              "inputs changed while building '" + target.target + "'",
+            );
+          }
+          const updated = new Map(makeState);
+          updated.set(canonicalTarget, current);
+          makeState = new Map(
+            [...updated]
+              .sort(([left], [right]) => left.localeCompare(right))
+              .slice(-GUEST_MAKE_LIMITS.stateRecords),
+          );
+          candidateStateContents = serializeGuestMakeState(makeState);
+          this.commands.writeFile(makeStatePath, candidateStateContents);
+        } catch (error: unknown) {
+          verifyError = message(error);
+        } finally {
+          ioWaitEvent = this.commands.completeFilesystemIo(
+            !this.debugSubmission,
+          );
+        }
+        if (verifyError !== undefined) {
+          transcripts.push(
+            guestToolchainTranscriptFromFailure("make: " + verifyError + "\n"),
+          );
+          terminalExitCode = 1;
+          if (ioWaitEvent !== undefined) {
+            waitingFor = "verify";
+            return { ioWaitEvent, kind: "wait" };
+          }
+          return complete(1);
+        }
+        if (ioWaitEvent !== undefined) {
+          waitingFor = "commit";
+          return { ioWaitEvent, kind: "wait" };
+        }
+        committedStateContents =
+          candidateStateContents ?? committedStateContents;
+        candidateStateContents = undefined;
+        advanceTarget();
+        return targetIndex >= (plan?.targets.length ?? 0)
+          ? complete(0)
+          : { kind: "continue" };
+      }
+
+      const recipe = target.recipes[recipeIndex];
+      if (recipe === undefined) {
+        phase = "verify";
+        return { kind: "continue" };
+      }
+      const commandEcho =
+        options.dryRun || (!options.silent && !recipe.silent)
+          ? recipe.command + "\n"
+          : "";
+      let result: ShellCommandResult = {
+        exitCode: 0,
+        stderr: "",
+        stdout: "",
+      };
+      let ioWaitEvent: string | undefined;
+      if (!options.dryRun) {
+        this.commands.beginFilesystemIo();
+        try {
+          if (recipeIndex === 0) {
+            const current = this.withGuestMakeProjectDirectory(
+              projectDirectory,
+              () =>
+                this.fingerprintGuestMakeTarget(
+                  canonicalTarget,
+                  target.prerequisites.map((path) =>
+                    this.commands.resolvePath(path),
+                  ),
+                  target.recipes,
+                  this.createGuestMakeSnapshotReader(),
+                ),
+            );
+            targetBaselines.set(canonicalTarget, current);
+          }
+          result = this.executeLinuxMakeRecipe(recipe, projectDirectory);
+        } catch (error: unknown) {
+          result = commandFailure("make", message(error));
+        } finally {
+          ioWaitEvent = this.commands.completeFilesystemIo(
+            !this.debugSubmission,
+          );
+        }
+      }
+      cpuCycles = Math.min(1_000_000, cpuCycles + (result.cpuCycles ?? 1));
+      transcripts.push(
+        guestToolchainTranscriptFromStreams(
+          commandEcho + result.stdout,
+          result.stderr,
+        ),
+      );
+      recipeIndex += 1;
+      if (recipeIndex >= target.recipes.length) {
+        phase = options.dryRun ? "recipe" : "verify";
+        if (options.dryRun) advanceTarget();
+      }
+      if (result.exitCode !== 0) terminalExitCode = result.exitCode;
+      if (ioWaitEvent !== undefined) {
+        waitingFor = "recipe";
+        return { ioWaitEvent, kind: "wait" };
+      }
+      if (terminalExitCode !== undefined) return complete(terminalExitCode);
+      return targetIndex >= (plan?.targets.length ?? 0)
+        ? complete(0)
+        : { kind: "continue" };
+    };
+    return { kind: "make", step };
+  }
+
+  private createGuestMakeSnapshotReader(): {
+    readonly filesRead: () => number;
+    readonly read: (path: string) => GuestMakeFingerprintFile;
+  } {
+    const contents = new Map<string, GuestMakeFingerprintFile>();
+    let bytes = 0;
+    return {
+      filesRead: (): number => contents.size,
+      read: (path): GuestMakeFingerprintFile => {
+        const cached = contents.get(path);
+        if (cached !== undefined) return cached;
+        let value: GuestMakeFingerprintFile;
+        if (!this.guestFilesystem.exists(path)) {
+          value = { kind: "missing" };
+        } else if (this.guestFilesystem.isDirectory(path)) {
+          value = { kind: "directory" };
+        } else {
+          const fileContents = this.commands.readFile(path);
+          value = { contents: fileContents, kind: "file" };
+          bytes += utf8ByteLength(fileContents);
+        }
+        if (bytes > GUEST_MAKE_LIMITS.fingerprintBytes) {
+          throw new GuestMakeError(
+            "fingerprint inputs exceed " +
+              String(GUEST_MAKE_LIMITS.fingerprintBytes) +
+              " bytes",
+          );
+        }
+        contents.set(path, value);
+        return value;
+      },
+    };
+  }
+
+  private fingerprintGuestMakeTarget(
+    target: string,
+    prerequisites: readonly string[],
+    recipes: readonly GuestMakeRecipe[],
+    snapshot: {
+      readonly read: (path: string) => GuestMakeFingerprintFile;
+    },
+  ): GuestMakeStateRecord {
+    return {
+      inputFingerprint: fingerprintGuestMakeInput(
+        target,
+        prerequisites,
+        recipes,
+        snapshot.read,
+      ),
+      outputFingerprint: fingerprintGuestMakeOutput(snapshot.read(target)),
+    };
+  }
+
+  private withGuestMakeProjectDirectory<T>(
+    projectDirectory: string,
+    action: () => T,
+  ): T {
+    const identity = this.commands.captureIdentityState();
+    try {
+      this.commands.restoreDirectory(projectDirectory);
+      return action();
+    } finally {
+      this.commands.restoreIdentityState(identity);
+    }
+  }
+
+  private executeLinuxMakeRecipe(
+    recipe: GuestMakeRecipe,
+    projectDirectory: string,
+  ): ShellCommandResult {
+    const parentIdentity = this.commands.captureIdentityState();
+    const previousUmask = this.guestFilesystem.getUmask();
+    try {
+      this.commands.restoreDirectory(projectDirectory);
+      const program = this.frontend.parse(
+        recipe.command,
+        (name) => "\u{e000}" + name + "\u{e001}",
+      );
+      if (program.chains.length !== 1) {
+        return commandFailure(
+          "make",
+          "recipe command chains are unavailable",
+          2,
+        );
+      }
+      const chain = program.chains[0]!;
+      if (
+        chain.operator !== undefined ||
+        chain.pipeline.background === true ||
+        chain.pipeline.commands.length !== 1
+      ) {
+        return commandFailure(
+          "make",
+          "pipelines, command chains, and background recipes are unavailable",
+          2,
+        );
+      }
+      const command = this.expandCommand(chain.pipeline.commands[0]!);
+      if (command.redirects.length > 0) {
+        return commandFailure("make", "recipe redirects are unavailable", 2);
+      }
+      const name = this.commands.canonicalCommand(command.words[0] ?? "");
+      if (!linuxMakeRecipeCommands.has(name)) {
+        return commandFailure(
+          "make",
+          "recipe command '" + name + "' is not admitted",
+          126,
+        );
+      }
+      const result = this.commands.executeAdmittedMakeRecipe(command.words, "");
+      if (
+        result.action !== undefined ||
+        result.background !== undefined ||
+        result.foreground !== undefined ||
+        result.ioWaitEvent !== undefined ||
+        result.jobControl !== undefined ||
+        result.resetTerminal === true ||
+        result.sleepTicks !== undefined ||
+        result.terminalScreen !== undefined
+      ) {
+        return commandFailure(
+          "make",
+          "asynchronous, session-control, and TUI recipes are unavailable",
+          2,
+        );
+      }
+      return result;
+    } finally {
+      this.commands.restoreIdentityState(parentIdentity);
+      this.guestFilesystem.setUmask(previousUmask);
+    }
   }
 
   private executeLinuxIdentityCommand(

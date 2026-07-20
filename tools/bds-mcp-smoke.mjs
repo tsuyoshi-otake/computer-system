@@ -74,6 +74,7 @@ try {
   });
   const stopped = await call("bds_stop", {});
   const authentication = requireLinuxAuthenticationRecord(probeLogs);
+  const make = requireLinuxMakeRecord(probeLogs);
   if (started.state !== "running") {
     throw new Error(`Expected running, received ${String(started.state)}.`);
   }
@@ -101,6 +102,7 @@ try {
           terminal.line.slice(terminal.line.indexOf("CS_PROBE_RESULT ") + 16),
         ),
         authentication: authentication.details,
+        make: make.details,
         diagnostics: diagnostics.length,
         finalState: stopped.state,
       },
@@ -141,6 +143,40 @@ function requireLinuxAuthenticationRecord(logs) {
   ) {
     throw new Error(
       `CS-Linux authentication probe did not pass its contract: ${JSON.stringify(record)}`,
+    );
+  }
+  return record;
+}
+
+function requireLinuxMakeRecord(logs) {
+  const marker = "CS_PROBE_RESULT ";
+  const entry = logs.find((candidate) =>
+    candidate.line.includes('"probe":"linux_make"'),
+  );
+  if (entry === undefined) {
+    throw new Error("Headless suite omitted the CS-Linux make probe.");
+  }
+  const markerIndex = entry.line.indexOf(marker);
+  if (markerIndex < 0) {
+    throw new Error("CS-Linux make probe record was malformed.");
+  }
+  const record = JSON.parse(entry.line.slice(markerIndex + marker.length));
+  if (
+    record.probe !== "linux_make" ||
+    record.status !== "PASS" ||
+    record.details?.built !== true ||
+    record.details?.failureStopped !== true ||
+    record.details?.finalized !== true ||
+    record.details?.missingStateRecovered !== true ||
+    record.details?.noOp !== true ||
+    record.details?.rebuilt !== true ||
+    record.details?.stateV2 !== true ||
+    !Number.isInteger(record.details?.ticks) ||
+    record.details.ticks < 1 ||
+    record.details.ticks > 512
+  ) {
+    throw new Error(
+      `CS-Linux make probe did not pass its contract: ${JSON.stringify(record)}`,
     );
   }
   return record;

@@ -2,6 +2,7 @@ import { world } from "@minecraft/server";
 
 import { formatProbeRecord } from "../../phase0/probeProtocol.js";
 import { runLinuxAuthenticationProbe } from "../../application/computer/linuxAuthenticationProbe.js";
+import { runLinuxMakeProbe } from "../../application/computer/linuxMakeProbe.js";
 import { inspectAlwaysDayState } from "../daylightController.js";
 import { computerStorageReady } from "../computerRegistry.js";
 import { executeItemIdentityProbe } from "./itemIdentityProbe.js";
@@ -85,6 +86,14 @@ async function executeSuite(runId: string): Promise<void> {
     } catch (error: unknown) {
       failures += 1;
       emitFailure(runId, "linux_authentication", error);
+    }
+
+    try {
+      const make = runLinuxMakeProbe();
+      emit(runId, "linux_make", "PASS", { ...make });
+    } catch (error: unknown) {
+      failures += 1;
+      emitFailure(runId, "linux_make", error);
     }
 
     try {

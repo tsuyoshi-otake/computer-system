@@ -467,6 +467,19 @@ export class ComputerRuntime {
     if (entry.stopIntent !== undefined && !name.startsWith("block_io:")) {
       return { outcome: "ignored", reason: "stopping" };
     }
+    const compileJob = entry.compileJob;
+    if (
+      compileJob?.request.task.kind === "make" &&
+      compileJob.makeIoWaitEvent === name
+    ) {
+      compileJob.makeIoWaitEvent = undefined;
+      compileJob.makeIoCompletion = {
+        ...(typeof arguments_[1] === "string" ? { code: arguments_[1] } : {}),
+        outcome: typeof arguments_[0] === "string" ? arguments_[0] : "failed",
+      };
+      this.compileReady.add(entry);
+      return { outcome: "accepted", state: entry.record.lifecycle.state.kind };
+    }
     try {
       this.scheduler.queueEvent(
         entry.foreground?.runtimeId ?? entry.runtimeId,
@@ -779,7 +792,19 @@ export class ComputerRuntime {
         if (job === undefined) throw new Error("Unable to start compile job");
         const compileCommand = job.request.command;
         try {
-          this.executeCompileJob(entry, job);
+          let attempts = 0;
+          do {
+            this.executeCompileJob(entry, job);
+            attempts += 1;
+            if (attempts > 258) {
+              throw new Error("Synchronous make step limit exceeded");
+            }
+          } while (
+            job.request.task.kind === "make" &&
+            job.makeIoWaitEvent === undefined &&
+            entry.compileJob === job &&
+            completion === undefined
+          );
         } catch (error: unknown) {
           const normalized =
             error instanceof Error ? error : new Error(String(error));
@@ -2281,6 +2306,25 @@ export class ComputerRuntime {
         result.exitCode,
         result.transcript,
         result.cpuCycles ?? 1,
+      );
+      return;
+    }
+    if (task.kind === "make") {
+      if (job.makeIoWaitEvent !== undefined) return;
+      const completion = job.makeIoCompletion;
+      job.makeIoCompletion = undefined;
+      const step = task.step(completion);
+      if (step.kind === "continue") return;
+      if (step.kind === "wait") {
+        job.makeIoWaitEvent = step.ioWaitEvent;
+        this.compileReady.delete(entry);
+        return;
+      }
+      this.completeCompileJob(
+        entry,
+        step.result.exitCode,
+        step.result.transcript,
+        step.result.cpuCycles ?? 1,
       );
       return;
     }
@@ -4194,6 +4238,11 @@ interface CompileJob {
   readonly memoryLease: GuestMemoryReservation;
   readonly onComplete?: (result: DebugShellCommandCompletion) => void;
   readonly osPid: number;
+  makeIoCompletion?: {
+    readonly code?: string;
+    readonly outcome: string;
+  };
+  makeIoWaitEvent?: string;
   readonly request: Extract<
     ShellForegroundRequest,
     { readonly kind: "compile" }
@@ -4205,6 +4254,13 @@ function compileMemoryOwner(
 ): GuestRamOwner {
   if (request.task.kind === "program-list") return "program-list";
   if (request.task.kind === "link") return "linker";
+  if (request.task.kind === "make") {
+    return {
+      category: "compiler",
+      displayName: "CS Make",
+      moduleId: "make",
+    };
+  }
   switch (request.task.language) {
     case "asm":
       return "compiler-asm";
@@ -4423,6 +4479,7 @@ function compileJobUnits(
   request: Extract<ShellForegroundRequest, { readonly kind: "compile" }>,
 ): number {
   if (request.task.kind === "program-list") return 256;
+  if (request.task.kind === "make") return 256;
   if (request.task.kind === "source") {
     // Assembly may expand bounded guest includes and macros that are not
     // represented by the root source length. Reserve the lane maximum so the
@@ -4442,6 +4499,7 @@ function compileTaskCycles(
   includedSourceCharacters = 0,
 ): number {
   if (request.task.kind === "program-list") return 1;
+  if (request.task.kind === "make") return 1;
   if (request.task.kind === "link") {
     return Math.min(
       1_000_000,

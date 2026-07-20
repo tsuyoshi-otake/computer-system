@@ -44,6 +44,19 @@ export interface ShellForegroundDebugger extends ShellProcessContext {
   readonly start: () => CpuProcess;
 }
 
+export interface ShellMakeIoCompletion {
+  readonly code?: string;
+  readonly outcome: string;
+}
+
+export type ShellMakeStepResult =
+  | { readonly kind: "continue" }
+  | { readonly ioWaitEvent: string; readonly kind: "wait" }
+  | {
+      readonly kind: "complete";
+      readonly result: ShellToolchainCommandResult;
+    };
+
 export type ShellCompileTask =
   | {
       readonly kind: "source";
@@ -69,6 +82,13 @@ export type ShellCompileTask =
       readonly runAfterCompile: boolean;
     }
   | {
+      /** One bounded guest recipe step. ComputerRuntime remains finalization owner. */
+      readonly kind: "make";
+      readonly step: (
+        completion?: ShellMakeIoCompletion,
+      ) => ShellMakeStepResult;
+    }
+  | {
       /**
        * Scheduler-owned CS-DOS WorkBench project operation. The closure is
        * bounded to guest-only ShellCommandRuntime state captured by its owning
@@ -85,7 +105,7 @@ export type ShellCompileTask =
     };
 
 export interface ShellForegroundCompile extends ShellProcessContext {
-  readonly command: "as" | "c" | "c++" | "ld" | "pwb" | "qbasic";
+  readonly command: "as" | "c" | "c++" | "ld" | "make" | "pwb" | "qbasic";
   readonly kind: "compile";
   readonly task: ShellCompileTask;
 }

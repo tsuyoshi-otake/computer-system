@@ -615,6 +615,30 @@ implemented. ASM interoperation is therefore limited to the zero-argument
 EAX/void contract and optional `SIGNATURE`. Do not document MASM, near/far, OMF,
 DOS extender, or Microsoft library compatibility.
 
+CS-Linux Makefiles are parsed and planned by `guestMake.ts`; the implementation
+must remain independent of host make, shells, processes, filesystems, and
+network access. Planning is O(source bytes + graph nodes + graph edges), with
+explicit limits on source, rules, prerequisites, expansion depth, graph depth,
+recipes, requested targets, output, and fingerprint input bytes. Mtime checks
+are reinforced by bounded `CSMAKE2` records with SHA-256 input and output
+fingerprints plus an explicit toolchain identity. Legacy `CSMAKE1`, missing,
+evicted, and foreign-toolchain records are untrusted migration inputs that force
+rebuild; malformed state remains an error. Each target takes a fresh pre-recipe
+input snapshot, rejects inputs changed before post-build verification, and
+persists its record only after recipe block I/O completes. State-write I/O
+failure restores the last committed serialized state; failure of a later target
+does not erase records already committed by earlier targets.
+
+`ComputerRuntime` owns the single foreground make PID, 128 KiB RAM lease,
+bounded planning/fingerprinting after admission, one-recipe-per-tick progress,
+block-I/O waits, and exactly-once completion on success, failure, interrupt,
+disconnect, or shutdown. The initial planning tick may execute no recipe. A
+recipe may dispatch only the documented guest toolchain, synchronous filesystem,
+and output allowlist; aliases, functions, pipelines, redirects, chains,
+background work, TUI/session/lifecycle commands, recursive make, and host
+execution never cross that boundary. CS-DOS continues to use Program Lists and
+PWB and must not gain a MAKE capsule.
+
 CS-DOS Program Lists are parsed by `csDosProgramList.ts` and resolved again to
 canonical credentialed guest paths in `ShellCommandRuntime`. The parser bounds
 lines, sources, objects, includes, definitions, and paths. The runtime must

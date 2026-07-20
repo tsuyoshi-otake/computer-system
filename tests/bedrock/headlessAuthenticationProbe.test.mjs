@@ -18,9 +18,14 @@ describe("Bedrock headless authentication coverage", () => {
     expect(source).toContain(
       'emitFailure(runId, "linux_authentication", error)',
     );
+    expect(source).toContain("runLinuxMakeProbe");
+    expect(source).toContain('emit(runId, "linux_make", "PASS", { ...make })');
+    expect(source).toContain('emitFailure(runId, "linux_make", error)');
     expect(smoke).toContain("requireLinuxAuthenticationRecord(probeLogs)");
     expect(smoke).toContain('record.probe !== "linux_authentication"');
     expect(smoke).toContain('record.details?.authenticatedUser !== "cs"');
     expect(smoke).toContain("record.details?.passwordMasked !== true");
+    expect(smoke).toContain("requireLinuxMakeRecord(probeLogs)");
+    expect(smoke).toContain('record.probe !== "linux_make"');
   });
 });

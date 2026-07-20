@@ -55,7 +55,7 @@ describe("OS filesystem images and disk profiles", (): void => {
 
     expect(afterSecond).toEqual(afterFirst);
     const snapshot = second.filesystem.snapshot();
-    expect(snapshot.baseImageId).toBe("cs-linux-1.0-rootfs-v7");
+    expect(snapshot.baseImageId).toBe("cs-linux-1.0-rootfs-v8");
     expect(second.filesystem.exists("/home/cs")).toBe(true);
     expect(second.filesystem.exists("/home/computer")).toBe(false);
     expect(snapshot.files.some(([path]) => path.startsWith("/usr/bin/"))).toBe(
@@ -118,7 +118,7 @@ describe("OS filesystem images and disk profiles", (): void => {
 
     new ShellSession(filesystem, { osProfile: "linux" });
 
-    expect(filesystem.baseImageId).toBe("cs-linux-1.0-rootfs-v7");
+    expect(filesystem.baseImageId).toBe("cs-linux-1.0-rootfs-v8");
     expect(filesystem.exists("/usr/bin/sudo")).toBe(true);
     expect(filesystem.exists("/usr/bin/ls")).toBe(false);
     expect(filesystem.exists("/home/computer")).toBe(false);
@@ -142,7 +142,7 @@ describe("OS filesystem images and disk profiles", (): void => {
     const dos = new InMemoryFilesystem();
     const dosShell = new ShellSession(dos, { osProfile: "dos" });
 
-    expect(linux.baseImageId).toBe("cs-linux-1.0-rootfs-v7");
+    expect(linux.baseImageId).toBe("cs-linux-1.0-rootfs-v8");
     expect(linux.exists("/usr/bin/basic")).toBe(false);
     expect(linux.exists("/usr/bin/basicc")).toBe(false);
     expect(linuxShell.submit("basic C:/DEMO.BAS").exitCode).toBe(127);

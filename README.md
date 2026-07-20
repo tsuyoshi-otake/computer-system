@@ -1018,6 +1018,29 @@ CS-DOS alone exposes the original, sandboxed `QBASIC.EXE`; its currently
 supported integer/console source subset compiles to the same validated process
 as CS QBASIC 1.0. Current CS-Linux exposes neither `basic` nor `basicc`.
 
+Current CS-Linux installs CS Make 1.0 as `/usr/bin/make`. It accepts the
+documented `-f`, `-C`, `-n`, `-B`, and `-s` options, command-line variable
+overrides, explicit targets, `.PHONY`, the four common assignment forms,
+parenthesized and braced variable references, doubled dollar signs, and the
+automatic target and prerequisite variables. Guest mtimes plus bounded `CSMAKE2`
+records in `.cs-make-state` skip current targets only when SHA-256 input,
+output, recipe, and toolchain identities all still match. Missing, evicted,
+legacy `CSMAKE1`, or foreign-toolchain records rebuild conservatively; malformed
+state fails explicitly. Makefile parsing, planning, and fingerprint reads start
+only after the make PID and 128 KiB RAM lease are admitted to the guest compile
+lane. The initial bounded planning step advances no recipe, then at most one
+isolated recipe runs per scheduler tick with credentialed filesystem I/O
+accounting. Each successful target commits its state only after recipe I/O and
+post-build input/output verification complete; a later target failure keeps
+earlier committed targets, while state-I/O failure restores the last committed
+state. Recipes admit only `as`, `cc`, `c++`, `ld`, `nm`, `objdump`, `cp`, `mv`,
+`rm`, `mkdir`, `rmdir`, `touch`, `echo`, and `printf`. Pipelines, redirects,
+command chains, background work, recursive make, implicit rules, includes,
+conditionals, parallel jobs, and host execution fail explicitly. Makefiles are
+limited to 32,768 characters, 256 lines, 128 rules, 512 edges, 256 recipes, and
+graph depth 32; one fingerprint pass reads at most 1 MiB. CS-DOS does not
+install `make`; its separate bounded build contract remains CS PROGRAM LIST/PWB.
+
 On CS-DOS, `CSASM [source]`, `CSCC [source]`, `CSCPP [source]`, and
 `PWB [source]` open the full-screen WorkBench. `CSCC` accepts C, `CSCPP` accepts
 C++, and `PWB` selects ASM, C, or C++ from the source extension. Its

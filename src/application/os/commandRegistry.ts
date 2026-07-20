@@ -89,6 +89,7 @@ const linuxCommands = [
   "kill",
   "last",
   "man",
+  "make",
   "apropos",
   "mkdir",
   "mv",

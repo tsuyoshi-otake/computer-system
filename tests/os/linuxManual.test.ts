@@ -28,6 +28,11 @@ describe("CS-Linux manual metadata", (): void => {
     );
     expect(rendered).toContain("bounded OS process table");
     expect(rendered.length).toBeLessThan(4_096);
+    const make = renderLinuxManualPage(linuxManualPage("make")!);
+    expect(make).toContain("CS Make 1.0");
+    expect(make).toContain("CSMAKE2 SHA-256");
+    expect(make).toContain("begin after the make PID and 128 KiB lease");
+    expect(make).toContain("one isolated guest command per scheduler tick");
   });
 
   it("serves man and apropos through installed sandbox utilities", (): void => {

@@ -22,6 +22,7 @@ export type SessionCommandKind =
   | "dos-toolchain-ide"
   | "linux-builtin"
   | "linux-history"
+  | "linux-make"
   | "linux-python"
   | "linux-script"
   | "linux-timer"

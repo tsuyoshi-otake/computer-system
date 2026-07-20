@@ -40,6 +40,7 @@ export class LinuxShellFrontend implements ShellFrontend {
     )
       return "linux-builtin";
     if (name === "history") return "linux-history";
+    if (name === "make") return "linux-make";
     if (name === "python" || name === "micropython") return "linux-python";
     if (name === "sh" || name === "bash" || name === "source")
       return "linux-script";

@@ -21,6 +21,19 @@ const pages = Object.freeze([
     ["ps", "service", "dmesg", "shutdown"],
   ),
   page(
+    "make",
+    1,
+    "build bounded CS-Linux targets from a Makefile",
+    ["make [-f FILE] [-C DIR] [-n] [-B] [-s] [NAME=value ...] [TARGET ...]"],
+    [
+      "CS Make 1.0 parses explicit dependency rules, .PHONY, =, :=, ?=, +=, make variables, and the automatic variables $@, $<, and $^.",
+      "The first non-special rule is the default target. Guest mtimes and bounded CSMAKE2 SHA-256 input/output records skip a target only while recipe and toolchain identity also match. Missing, evicted, legacy, or foreign records rebuild; malformed state fails. -B forces rebuilding and -n prints recipes without executing them.",
+      "Makefile parsing, planning, and fingerprints begin after the make PID and 128 KiB lease are admitted. The initial bounded scheduler step plans without running a recipe; each admitted recipe then executes as one isolated guest command per scheduler tick. Successful targets commit state after recipe I/O and post-build verification. Allowed commands are as, cc, c++, ld, nm, objdump, cp, mv, rm, mkdir, rmdir, touch, echo, and printf. Pipelines, redirects, command chains, background work, host commands, recursive make, implicit rules, includes, conditionals, and parallel jobs are unavailable.",
+      "Makefiles are limited to 32768 characters, 256 lines, 128 rules, 512 dependency edges, 256 recipe lines, graph depth 32, and 1 MiB of fingerprint content. CS-DOS does not install make; use CS PROGRAM LIST/PWB there.",
+    ],
+    ["cc", "ld", "pwb"],
+  ),
+  page(
     "apropos",
     1,
     "search installed manual page names and summaries",

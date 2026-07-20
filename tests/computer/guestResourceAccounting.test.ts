@@ -239,6 +239,122 @@ describe("guest resource accounting", (): void => {
     expect(runtime.guestMemoryStatus(record.computerId)).toEqual(bootMemory);
   });
 
+  it("completes bounded multi-step make through the synchronous MCP path", (): void => {
+    const runtime = new ComputerRuntime();
+    const record = new ComputerRecord("c-000949", "standard");
+    runtime.register(record);
+    runtime.powerOn(record.computerId);
+    completeBoot(runtime, record);
+    const baselineMemory = runtime.guestMemoryStatus(record.computerId);
+    record.filesystem.makeDirectory("/tmp/make-sync");
+    record.filesystem.writeFile(
+      "/tmp/make-sync/Makefile",
+      "all:\n\ttouch first\n\ttouch second",
+    );
+
+    expect(
+      runtime.executeDebugShellCommand(
+        record.computerId,
+        "make -C /tmp/make-sync -B",
+      ),
+    ).toMatchObject({ outcome: "completed", exitCode: 0 });
+    expect(record.filesystem.exists("/tmp/make-sync/first")).toBe(true);
+    expect(record.filesystem.exists("/tmp/make-sync/second")).toBe(true);
+    expect(runtime.guestMemoryStatus(record.computerId)).toEqual(
+      baselineMemory,
+    );
+  });
+
+  it("ticks one make recipe at a time and finalizes RAM and PID on interrupt", (): void => {
+    const runtime = new ComputerRuntime();
+    const record = new ComputerRecord("c-000948", "standard");
+    runtime.register(record);
+    runtime.powerOn(record.computerId);
+    completeBoot(runtime, record);
+    const baselineMemory = runtime.guestMemoryStatus(record.computerId);
+    const osState = liveOsState(runtime, record.computerId);
+    const baselinePids = osState.processes().map(({ pid }) => pid);
+    record.filesystem.writeFile(
+      "/home/cs/Makefile",
+      "all:\n\ttouch /tmp/first\n\ttouch /tmp/second\n\ttouch /tmp/third",
+    );
+    const completions: DebugShellCommandCompletion[] = [];
+
+    runtime.enqueueDebugShellCommand(record.computerId, "make -B", (result) =>
+      completions.push(result),
+    );
+
+    expect(runtime.guestMemoryStatus(record.computerId)?.breakdown).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          bytes: 128 * 1_024,
+          category: "compiler",
+          displayName: "CS Make",
+          leases: 1,
+          moduleId: "make",
+          owner: "make",
+        }),
+      ]),
+    );
+    const makeProcess = osState
+      .processes()
+      .find(({ pid }) => !baselinePids.includes(pid));
+    expect(makeProcess).toMatchObject({ command: "make", state: "running" });
+
+    runtime.runTick();
+    expect(record.filesystem.exists("/tmp/first")).toBe(false);
+    expect(record.filesystem.exists("/tmp/second")).toBe(false);
+    expect(completions).toEqual([]);
+    expect(runtime.guestMemoryStatus(record.computerId)?.breakdown).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          bytes: 128 * 1_024,
+          moduleId: "make",
+          owner: "make",
+        }),
+      ]),
+    );
+
+    runtime.runTick();
+    expect(record.filesystem.exists("/tmp/first")).toBe(true);
+    expect(record.filesystem.exists("/tmp/second")).toBe(false);
+    expect(completions).toEqual([]);
+
+    expect(runtime.interrupt(record.computerId)).toMatchObject({
+      outcome: "accepted",
+      state: "compile_interrupted",
+    });
+    expect(completions).toEqual([
+      expect.objectContaining({ outcome: "completed", exitCode: 130 }),
+    ]);
+    expect(runtime.guestMemoryStatus(record.computerId)).toEqual(
+      baselineMemory,
+    );
+    expect(osState.process(makeProcess!.pid)).toBeUndefined();
+    runtime.runTick();
+    expect(completions).toHaveLength(1);
+    expect(record.filesystem.exists("/tmp/second")).toBe(false);
+
+    const disconnectCompletions: DebugShellCommandCompletion[] = [];
+    runtime.enqueueDebugShellCommand(record.computerId, "make -B", (result) =>
+      disconnectCompletions.push(result),
+    );
+    expect(
+      runtime.queueEvent(record.computerId, "terminal_closed"),
+    ).toMatchObject({ outcome: "accepted" });
+    expect(disconnectCompletions).toEqual([
+      expect.objectContaining({ outcome: "completed", exitCode: 130 }),
+    ]);
+    expect(runtime.guestMemoryStatus(record.computerId)).toEqual(
+      baselineMemory,
+    );
+    expect(osState.processes().some(({ command }) => command === "make")).toBe(
+      false,
+    );
+    runtime.runTick();
+    expect(disconnectCompletions).toHaveLength(1);
+  });
+
   it("finalizes compiler RAM, callback, and process exactly once on terminal disconnect", (): void => {
     const runtime = new ComputerRuntime();
     const record = new ComputerRecord("c-000433", "standard");
@@ -311,4 +427,17 @@ function liveOsState(
   const state = entries.get(computerId)?.osRuntimeState;
   if (state === undefined) throw new Error("missing runtime OS state");
   return state;
+}
+
+function completeBoot(runtime: ComputerRuntime, record: ComputerRecord): void {
+  for (let tick = 0; tick < 200; tick += 1) {
+    if (
+      record.lifecycle.state.kind !== "booting" &&
+      record.display.state.kind !== "post"
+    ) {
+      return;
+    }
+    runtime.runTick();
+  }
+  throw new Error("runtime did not complete CSBIOS");
 }

@@ -266,6 +266,7 @@ export class ShellCommandRuntime {
   private cs486DebuggerOutputCursor = 0;
   private readonly dosRuntime: DosRuntimeState | undefined;
   private dosTransactionDepth = 0;
+  private admittedMakeRecipeDepth = 0;
 
   constructor(
     private readonly filesystem: GuestFilesystem,
@@ -800,6 +801,18 @@ export class ShellCommandRuntime {
       }
     }
     return undefined;
+  }
+
+  executeAdmittedMakeRecipe(
+    words: readonly string[],
+    stdin: string,
+  ): ShellCommandResult {
+    this.admittedMakeRecipeDepth += 1;
+    try {
+      return this.execute(words, stdin);
+    } finally {
+      this.admittedMakeRecipeDepth -= 1;
+    }
   }
 
   execute(words: readonly string[], stdin: string): ShellCommandResult {
@@ -2216,7 +2229,7 @@ export class ShellCommandRuntime {
             "info: whoami id hostname uname date uptime stat df du quota man apropos",
             "hardware: cpuinfo free mount dmesg spi i2c /proc/cpuinfo /proc/meminfo",
             "utility: history time sleep seq cut test [",
-            "toolchain: as cc c++ ld nm run objdump csdb",
+            "toolchain: as cc c++ ld make nm run objdump csdb",
             "syntax: |  >  >>  <  &&  ||  ;  '...'  \"...\"  $VAR  $?",
           ].join("\n") + "\n",
         );
@@ -2397,6 +2410,8 @@ export class ShellCommandRuntime {
         return this.objectDump(arguments_);
       case "ld":
         return this.linkObjects(arguments_);
+      case "make":
+        return failure("make", "internal dispatch is unavailable", 2);
       case "nm":
         return this.listSymbols(arguments_);
       case "path":
@@ -4222,7 +4237,10 @@ export class ShellCommandRuntime {
     const source = this.readFile(sourceName);
     if (source.length > 128_000)
       return this.toolchainFailure(language, "source limit exceeded");
-    if (this.options.deferGuestExecution === true) {
+    if (
+      this.options.deferGuestExecution === true &&
+      this.admittedMakeRecipeDepth === 0
+    ) {
       return {
         exitCode: 0,
         foreground: {
@@ -4329,7 +4347,10 @@ export class ShellCommandRuntime {
       outputPath = replacePathExtension(paths[0]!, ".CSX");
     }
     outputPath = this.resolvePath(outputPath);
-    if (this.options.deferGuestExecution === true) {
+    if (
+      this.options.deferGuestExecution === true &&
+      this.admittedMakeRecipeDepth === 0
+    ) {
       return {
         exitCode: 0,
         foreground: {

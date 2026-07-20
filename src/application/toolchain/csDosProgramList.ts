@@ -1,4 +1,4 @@
-import { sha256Hex } from "../os/passwordHash.js";
+import { sha256Hex } from "../../domain/crypto/sha256.js";
 
 export type CsDosProgramSourceLanguage = "asm" | "c" | "cpp";
 
