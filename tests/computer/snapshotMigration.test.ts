@@ -209,7 +209,7 @@ describe("Computer snapshot schema migration", (): void => {
     );
     record.filesystem.writeFile("/drives/c/history.txt", "DIR\r\nMEM /F\r\n");
     record.filesystem.writeFile("/drives/c/system.log", "operator log\r\n");
-    record.filesystem.delete("/drives/c/command/edit.com");
+    record.filesystem.delete("/drives/c/dos/edit.com");
 
     const runtime = DosRuntimeState.create();
     const modifiedAtMilliseconds = Date.UTC(2026, 6, 16, 12, 34, 57);
@@ -254,7 +254,7 @@ describe("Computer snapshot schema migration", (): void => {
       "DIR\r\nMEM /F\r\n",
     );
     expect(restored.filesystem.snapshot().tombstones).toContain(
-      "/drives/c/command/edit.com",
+      "/drives/c/dos/edit.com",
     );
     const restoredRuntime = DosRuntimeState.restore(
       restored.dosRuntimeSnapshot,

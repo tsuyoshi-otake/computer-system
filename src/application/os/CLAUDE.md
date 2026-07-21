@@ -17,11 +17,20 @@ authoritative OS-presence aggregates.
   O(number of image files). Persist only per-Computer copy-on-write blobs,
   metadata, link identities, and tombstones; never duplicate the base image.
 - Image utilities have real bounded sizes, modes, owners, and inode identities.
-  Deleting `/usr/bin/ls` or `C:\COMMAND\EDIT.COM` creates a persistent tombstone
-  and makes later invocation return 127 until the file is restored.
-- Memory reports add bounded OS residency to dynamic guest usage: Linux
-  separates kernel, services, buffers, and guest runtime; DOS separates
-  system/driver footprint while preserving conventional/UMB/XMS totals.
+  Deleting `/usr/bin/ls` or `C:\DOS\EDIT.COM` creates a persistent tombstone and
+  makes later invocation return 127 until the file is restored.
+- Linux built-ins are gated by the shared `/bin/bash` interpreter and DOS
+  internal commands by `C:\COMMAND.COM`; an implementation without its
+  interpreter file is unavailable.
+- One boot-scoped memory manager per active profile owns every physical guest
+  RAM lease. CS-Linux reserves kernel and services, reclaims/refills its buffer
+  lease under admission pressure, binds process grants to PIDs, and exposes one
+  immutable `O(allocations)` snapshot. `free`, `/proc/meminfo`,
+  `/proc/<pid>/status`, and `top` derive only from that snapshot; never restore
+  synthetic residency arithmetic, zero-value process fallbacks, or optional
+  accounting callbacks.
+- CS-DOS keeps its system/driver and process grants in the DOS manager while
+  preserving conventional/UMB/XMS address totals.
 
 ## Linux accounts and filesystem credentials
 
@@ -80,8 +89,10 @@ authoritative OS-presence aggregates.
   variables, `$?`, pipelines, redirects, `&&`, `||`, `;`, and bounded
   `sh`/`bash` scripts. Cap pipeline bytes, script depth/lines, expansions, and
   regex-like input. Add sandbox applets rather than invoking host tools.
-- The prompt is `<login>@<computer-id>:<path>$` or `#`. Login shows the previous
-  session when present and the real `/etc/motd`. Persist mode-0600 per-user
+- The pre-login prompt is `<computer-id> login:`, optionally preceded by
+  `/etc/issue`. After authentication, the shell prints the real `/etc/motd`
+  before a wall-clock `Last login:` line when a previous timestamp exists;
+  legacy records without one do not fabricate a line. Persist mode-0600 per-user
   `.bash_history`, capped at 100 entries, 512 UTF-8 bytes/line, and 32 KiB
   total; secret input never enters history.
 - Keep exactly one bounded `OsRuntimeState` per Computer as owner of lifecycle,
@@ -92,6 +103,33 @@ authoritative OS-presence aggregates.
 - PID 1 is `/sbin/cs-init`; `cs-login` owns a waiting getty; an authenticated
   shell is their child. Admitted Python, CS486, and background work receives a
   PID, credential snapshot, state, and modeled cycles.
+- `/etc/inittab` (`sysinit`/`wait`/`respawn`/`initdefault`/`ctrlaltdel` entries,
+  parsed by the bounded `linuxInittab.ts`, ≤64 lines) selects the target
+  runlevel; `/etc/rcN.d/` (`N` = `0`-`6`; `S` aliases `1`) holds the `SNN`/`KNN`
+  symlink farm into `/etc/init.d/<name>` real interpretable shell scripts.
+  Runlevels 2-5 are deliberately identical multi-user aliases; 0/6 reuse the
+  existing shutdown/reboot lifecycle; 1/S stop rc.d services. `telinit {0-6|S}`
+  (root-only; `init` is its alias) and read-only `runlevel` are the guest
+  commands; `service NAME status` remains status-only exactly as before
+  (`/etc/init.d/<name> start|stop|restart` is the only mutation path).
+- Service mutation is centralized in the internal `cs-init-ctl NAME ACTION`
+  primitive (root-only, not listed in the public command index or `man -k`): a
+  fixed table (today `syslog`, `cron`) is the only thing that produces real
+  process/service effects, so a user-authored `/etc/init.d/foo` script is
+  genuinely interpreted but cannot invent a new working service. Deleting or
+  removing the executable bit from an `/etc/init.d/<name>` script makes its
+  direct invocation fail explicitly (127/126) without disturbing `cs-init-ctl`
+  itself. The inittab-driven rc.d service start-up runs synchronously during
+  `ShellSession` construction (see `computer/CLAUDE.md` for the paced-render vs.
+  synchronous-completion split at the `ComputerRuntime` boundary).
+- `/etc/crontab` is the only supported crontab surface. `crontab -l` reads it
+  and root `crontab -e` opens it in the existing `vi`; there is no per-user
+  spool. `linuxCrontab.ts` parses its bounded 7-field lines (`*`, numbers, `a-b`
+  ranges, comma lists, `*/n` and `a-b/n` steps) and re-parses only on `cron`
+  service start/restart. Cron due-time comparisons must use the tick-derived
+  virtual calendar (`virtualCalendarFields`), never the injected wall-clock
+  `ShellClockSource` used by `date`/login timestamps, so job firing stays a
+  deterministic function of guest tick count.
 - Only one interactive `sleep`, `python`/`micropython`, or `run` command may use
   a trailing `&`. Reject background redirects, pipelines, scripts, aliases,
   functions, MCP submissions, and unsupported commands before side effects.
@@ -136,6 +174,9 @@ authoritative OS-presence aggregates.
   `DEL`/`ERASE`, `MD`/`RD`, `MOVE`, `REN`, `TYPE`, `TREE`, `VOL`, `VER`,
   `DOSKEY`, `MEM`, `ATTRIB`, `LABEL`, and read-only `CHKDSK` must not leak Linux
   output.
+- DOS exposes an underline prompt cursor. Arrow-key history is disabled until a
+  bare `DOSKEY` installs it; `DOSKEY /HISTORY` only lists retained entries. F3
+  recalls the most recent submitted line independently.
 - DOS batch supports bounded labels, `GOTO`/`:EOF`, internal/external `CALL`,
   `SHIFT`, `IF [NOT] ERRORLEVEL`, `IF [NOT] EXIST`, and `COMMAND /C` or `/K`.
   Defaults: 256 lines/labels, nine positional args, call depth 8, 1,024 jumps,

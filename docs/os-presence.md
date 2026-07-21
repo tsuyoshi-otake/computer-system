@@ -37,12 +37,16 @@ minimal CS-Linux identity and authentication prompt; the journal is available
 through `dmesg` and the guest log files instead of being replayed as a long fake
 boot animation.
 
-After login, the shell prompt is `<login>@<computer-id>:<path>$`; effective UID
-0 uses `#`. A prior session produces `Last login: ...`, then the shell reads the
-real `/etc/motd` and versioned login scripts. The authenticated user's
-`.bash_history` is loaded and saved as a mode-0600 regular file. It retains at
-most 100 entries, 512 UTF-8 bytes per line, and 32 KiB total. Password prompts
-and other secret conversation input never enter history or completion.
+Before login, `/etc/issue` is shown when readable and the prompt is
+`<computer-id> login:`. After login, the shell prompt is
+`<login>@<computer-id>:<path>$`; effective UID 0 uses `#`. The shell reads the
+real `/etc/motd` first, then shows a prior session with a host wall-clock
+`Last login: ...` line. Legacy records without wall time omit that banner rather
+than deriving a false date from guest ticks. Versioned login scripts run
+afterward. The authenticated user's `.bash_history` is loaded and saved as a
+mode-0600 regular file. It retains at most 100 entries, 512 UTF-8 bytes per
+line, and 32 KiB total. Password prompts and other secret conversation input
+never enter history or completion.
 
 ## Processes, jobs, and signals
 
@@ -75,9 +79,11 @@ default job-table maximum is 32.
 
 `tty`, `who`, `w`, and `last` render the active-session and last-login tables.
 The defaults permit eight active sessions and retain 64 last-login records.
-`service --status-all` and `service <name> status` inspect the maximum-32
-service table. Service mutation remains owned by `cs-init`; start, stop, and
-restart are not guest operator commands in this release.
+`who` and `last` render stored wall-clock timestamps when present and fall back
+independently to `tick N` for legacy session fields; `w` retains its guest-tick
+LOGIN@ view. `service --status-all` and `service <name> status` inspect the
+maximum-32 service table. Service mutation remains owned by `cs-init`; start,
+stop, and restart are not guest operator commands in this release.
 
 The following paths are generated at read time from the same state:
 

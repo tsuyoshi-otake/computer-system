@@ -338,6 +338,12 @@ export class CredentialedFilesystem implements GuestFilesystem {
     return this.filesystem.readFile(resolved);
   }
 
+  readFileBytes(path: string): Uint8Array {
+    const resolved = this.resolveFollowedPath(path);
+    this.requireMode(resolved, filesystemRead);
+    return this.filesystem.readFileBytes(resolved);
+  }
+
   readLink(path: string): string {
     return this.filesystem.readLink(this.resolveEntryPath(path));
   }
@@ -417,6 +423,20 @@ export class CredentialedFilesystem implements GuestFilesystem {
     }
     this.requireCreate(destination);
     this.filesystem.writeFile(destination, contents);
+    this.ownCreatedPath(destination, mode);
+  }
+
+  writeFileBytes(path: string, contents: Uint8Array, mode = 0o666): void {
+    validMode(mode);
+    const destination = this.resolveFollowedPath(path);
+    this.requireManagedAccountsIntact(destination, false);
+    if (this.filesystem.exists(destination)) {
+      this.requireMode(destination, filesystemWrite);
+      this.filesystem.writeFileBytes(destination, contents);
+      return;
+    }
+    this.requireCreate(destination);
+    this.filesystem.writeFileBytes(destination, contents);
     this.ownCreatedPath(destination, mode);
   }
 

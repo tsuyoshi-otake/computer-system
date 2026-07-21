@@ -5,13 +5,17 @@ export const maximumTerminalInteractionHintKeyLength = 32;
 export const maximumTerminalInteractionHintLabelLength = 64;
 
 export type TerminalInteractionInputMode = "keys" | "line" | "none";
+export type TerminalInteractionCursorShape = "block" | "underline";
 export type TerminalInteractionPointer = "cell" | "none";
 export type TerminalInteractionPresentation = "dos-tui" | "terminal";
 export type TerminalInteractionContext =
   | "busy"
+  | "cs-abi"
   | "csasm"
   | "edit"
+  | "less"
   | "login"
+  | "more"
   | "pwb"
   | "qbasic"
   | "secret"
@@ -29,8 +33,10 @@ export interface TerminalInteractionHint {
 
 export interface TerminalInteractionDescriptor {
   readonly context: TerminalInteractionContext;
+  readonly cursorShape: TerminalInteractionCursorShape;
   readonly helpTopicId?: string;
   readonly hints: readonly TerminalInteractionHint[];
+  readonly history: boolean;
   readonly inputMode: TerminalInteractionInputMode;
   readonly interrupt: boolean;
   readonly pointer: TerminalInteractionPointer;
@@ -58,6 +64,15 @@ export function createTerminalInteractionDescriptor(
     throw new RangeError(
       `terminal interaction hints exceed ${String(maximumTerminalInteractionHints)}`,
     );
+  }
+  if (input.cursorShape !== "block" && input.cursorShape !== "underline") {
+    throw new RangeError("terminal cursor shape is invalid");
+  }
+  if (typeof input.history !== "boolean") {
+    throw new RangeError("terminal history flag is invalid");
+  }
+  if (input.history && (input.inputMode !== "line" || input.secretInput)) {
+    throw new RangeError("terminal history requires non-secret line input");
   }
   if (
     input.helpTopicId !== undefined &&
@@ -102,10 +117,12 @@ export function createTerminalInteractionDescriptor(
   );
   return Object.freeze({
     context: input.context,
+    cursorShape: input.cursorShape,
     ...(input.helpTopicId === undefined
       ? {}
       : { helpTopicId: input.helpTopicId }),
     hints,
+    history: input.history,
     inputMode: input.inputMode,
     interrupt: input.interrupt,
     pointer: input.pointer,
@@ -128,6 +145,8 @@ function isBoundedInteractionText(
 
 const unavailableInteraction = createTerminalInteractionDescriptor({
   context: "unavailable",
+  cursorShape: "underline",
+  history: false,
   inputMode: "none",
   interrupt: false,
   pointer: "none",

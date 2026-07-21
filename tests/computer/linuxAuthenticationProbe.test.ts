@@ -22,7 +22,7 @@ describe("CS-Linux authentication headless probe", (): void => {
       setupCompleted: true,
     });
     expect(result.ticks).toBeGreaterThanOrEqual(8);
-    expect(result.ticks).toBeLessThanOrEqual(64);
+    expect(result.ticks).toBeLessThanOrEqual(256);
 
     const source = await readFile(
       path.resolve(

@@ -76,6 +76,34 @@ const tools = [
           description:
             "Recreate only the managed MCP debug runtime and world. Defaults to false.",
         },
+        acceptanceFixture: {
+          type: "boolean",
+          description:
+            "Enable the isolated, password-free CS-Linux acceptance fixture. Requires resetWorld, an explicit empty work directory below the user tmp directory, and the exact acceptance world name.",
+        },
+      },
+    },
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  },
+  {
+    name: "bds_provision_acceptance_fixture",
+    title: "Provision acceptance Computer",
+    description:
+      "Provision one idempotent CS-Linux Computer only in the isolated acceptance build and return its non-secret identity. Rejects production builds, player sources, connected players, and non-fixture sessions.",
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        timeoutMs: {
+          type: "integer",
+          minimum: 1,
+          maximum: 30_000,
+        },
       },
     },
     annotations: {
@@ -605,10 +633,16 @@ async function callTool(name, args) {
       requireKeys(args, []);
       return toolSuccess(status());
     case "bds_start":
-      requireKeys(args, ["resetWorld"]);
+      requireKeys(args, ["resetWorld", "acceptanceFixture"]);
       if (!session.getStatus().running) mcpWebSessions.clear();
-      await session.start({ resetWorld: args.resetWorld ?? false });
+      await session.start({
+        resetWorld: args.resetWorld ?? false,
+        acceptanceFixture: args.acceptanceFixture ?? false,
+      });
       return toolSuccess(status());
+    case "bds_provision_acceptance_fixture":
+      requireKeys(args, ["timeoutMs"]);
+      return toolSuccess(await session.provisionAcceptanceFixture(args));
     case "bds_stop":
       requireKeys(args, []);
       try {

@@ -16,12 +16,15 @@ import {
 } from "../../src/application/terminal/terminalInteraction.js";
 import { guestToolchainTranscriptFromStreams } from "../../src/application/toolchain/guestToolchainTranscript.js";
 import { InMemoryFilesystem } from "../../src/domain/filesystem/inMemoryFilesystem.js";
+import { TerminalBuffer } from "../../src/domain/terminal/terminalBuffer.js";
 
 describe("TerminalInteractionDescriptor", (): void => {
   it("constructs an immutable descriptor and rejects a sixth hint", (): void => {
     const interaction = createTerminalInteractionDescriptor({
       context: "shell",
+      cursorShape: "block",
       hints: [{ key: "Enter", label: "Run command" }],
+      history: true,
       inputMode: "line",
       interrupt: false,
       pointer: "none",
@@ -40,11 +43,13 @@ describe("TerminalInteractionDescriptor", (): void => {
     expect(() =>
       createTerminalInteractionDescriptor({
         context: "shell",
+        cursorShape: "block",
         hints: Array.from(
           { length: maximumTerminalInteractionHints + 1 },
           (_, index) => ({ key: String(index), label: "Hint" }),
         ),
         inputMode: "line",
+        history: true,
         interrupt: false,
         pointer: "none",
         presentation: "terminal",
@@ -56,6 +61,8 @@ describe("TerminalInteractionDescriptor", (): void => {
   it("rejects unbounded text and inconsistent interaction capabilities", (): void => {
     const base = {
       context: "shell" as const,
+      cursorShape: "block" as const,
+      history: false,
       inputMode: "line" as const,
       interrupt: false,
       pointer: "none" as const,
@@ -104,6 +111,26 @@ describe("TerminalInteractionDescriptor", (): void => {
         secretInput: true,
       }),
     ).toThrow(/secret input/u);
+    expect(() =>
+      createTerminalInteractionDescriptor({
+        ...base,
+        cursorShape: "beam" as "block",
+      }),
+    ).toThrow(/cursor shape/u);
+    expect(() =>
+      createTerminalInteractionDescriptor({
+        ...base,
+        history: true,
+        secretInput: true,
+      }),
+    ).toThrow(/history requires/u);
+    expect(() =>
+      createTerminalInteractionDescriptor({
+        ...base,
+        history: true,
+        inputMode: "keys",
+      }),
+    ).toThrow(/history requires/u);
   });
 
   it("derives vi interaction from the authoritative mode and output state", (): void => {
@@ -273,6 +300,58 @@ describe("TerminalInteractionDescriptor", (): void => {
       interrupt: true,
       presentation: "dos-tui",
       secretInput: false,
+    });
+  });
+
+  it("aborts only line input without submitting or recording a command", (): void => {
+    const computerId = "c-000903";
+    const runtime = new ComputerRuntime();
+    const shell = new ShellSession(new InMemoryFilesystem());
+    shell.submit("echo retained");
+    const historyBefore = [
+      ...(shell as unknown as { readonly history: readonly string[] }).history,
+    ];
+    const terminal = new TerminalBuffer(80, 25);
+    (
+      runtime as unknown as {
+        readonly entries: Map<string, unknown>;
+      }
+    ).entries.set(computerId, {
+      record: { terminal },
+      shell,
+      vm: { state: { kind: "waiting_event" } },
+    });
+
+    expect(runtime.abortLine(computerId)).toEqual({
+      outcome: "accepted",
+      state: "line_aborted",
+    });
+    expect(terminal.snapshot().rows.join("\n")).toContain("^C");
+    expect(terminal.snapshot().rows.join("\n")).toContain(shell.prompt());
+    expect(
+      (shell as unknown as { readonly history: readonly string[] }).history,
+    ).toEqual(historyBefore);
+
+    shell.submit("vi");
+    expect(runtime.abortLine(computerId)).toEqual({
+      outcome: "ignored",
+      reason: "not_running",
+    });
+
+    const secretShell = new ShellSession(new InMemoryFilesystem(), {
+      computerName: computerId,
+      osProfile: "linux",
+      requireLogin: true,
+    });
+    (
+      runtime as unknown as {
+        readonly entries: Map<string, { shell: ShellSession }>;
+      }
+    ).entries.get(computerId)!.shell = secretShell;
+    expect(secretShell.terminalInteraction().secretInput).toBe(true);
+    expect(runtime.abortLine(computerId)).toEqual({
+      outcome: "ignored",
+      reason: "not_running",
     });
   });
 });

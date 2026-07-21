@@ -54,6 +54,7 @@ interface MacroDefinition {
   readonly parameters: readonly string[];
   readonly replacement: readonly Cs486CPreprocessorToken[];
   readonly span: Cs486SourceSpan;
+  readonly variadic: boolean;
 }
 
 interface ConditionalFrame {
@@ -69,13 +70,21 @@ interface PreprocessorState {
   includeFiles: number;
   readonly includeStack: string[];
   readonly macros: Map<string, MacroDefinition>;
+  readonly onceFiles: Set<string>;
   readonly options: Cs486CPreprocessorOptions;
   readonly output: Cs486CPreprocessorToken[];
 }
 
-const maximumRootSourceCharacters = 128_000;
-const maximumAggregateSourceCharacters = 512_000;
-const maximumEmittedTokens = 32_000;
+export const cs486CPreprocessorLimits = Object.freeze({
+  aggregateSourceCharacters: 2 * 1_048_576,
+  emittedTokens: 512_000,
+  rootSourceCharacters: 2 * 1_048_576,
+});
+const maximumRootSourceCharacters =
+  cs486CPreprocessorLimits.rootSourceCharacters;
+const maximumAggregateSourceCharacters =
+  cs486CPreprocessorLimits.aggregateSourceCharacters;
+const maximumEmittedTokens = cs486CPreprocessorLimits.emittedTokens;
 const maximumIncludeDepth = 16;
 const maximumIncludeFiles = 64;
 const maximumConditionalDepth = 64;
@@ -152,6 +161,7 @@ export function preprocessCs486C(
     includeFiles: 0,
     includeStack: [],
     macros: new Map(),
+    onceFiles: new Set(),
     options,
     output: [],
   };
@@ -176,6 +186,7 @@ function installCommandLineDefinitions(
       parameters: [],
       replacement,
       span: pointSpan(sourceName, 1, 1, 0),
+      variadic: false,
     });
   }
   for (const name of state.options.undefines ?? []) {
@@ -192,6 +203,7 @@ function processFile(
   depth: number,
   sourceNotes: readonly Cs486DiagnosticNote[] = [],
 ): void {
+  if (state.onceFiles.has(identity)) return;
   if (depth > maximumIncludeDepth) {
     throw preprocessorError(
       "include depth limit exceeded",
@@ -214,8 +226,12 @@ function processFile(
   state.includeStack.push(identity);
   const conditionals: ConditionalFrame[] = [];
   const lexerState = { blockComment: false };
+  let mappedSource = sourceName;
+  let mappedLineDelta = 0;
   try {
-    for (const line of mappedLogicalLines(source, sourceName)) {
+    const lines = mappedLogicalLines(source, sourceName);
+    for (const [lineIndex, physicalLine] of lines.entries()) {
+      const line = remapLine(physicalLine, mappedSource, mappedLineDelta);
       if (line.text.length > maximumLogicalLineCharacters) {
         throw preprocessorError(
           "logical line limit exceeded",
@@ -232,7 +248,21 @@ function processFile(
       );
       const directive = directiveTokens(tokens);
       if (directive !== undefined) {
-        processDirective(state, directive, conditionals, sourceName, depth);
+        const remap = processDirective(
+          state,
+          directive,
+          conditionals,
+          sourceName,
+          identity,
+          depth,
+        );
+        if (remap !== undefined) {
+          const nextPhysicalLine =
+            lines[lineIndex + 1]?.positions[0]?.line ??
+            physicalLine.positions.at(-1)!.line + 1;
+          mappedLineDelta = remap.line - nextPhysicalLine;
+          mappedSource = remap.source ?? mappedSource;
+        }
         continue;
       }
       if (!conditionalActive(conditionals) || tokens.length === 0) continue;
@@ -260,9 +290,10 @@ function processDirective(
   tokens: readonly Cs486CPreprocessorToken[],
   conditionals: ConditionalFrame[],
   sourceName: string,
+  identity: string,
   depth: number,
-): void {
-  if (tokens.length === 0) return;
+): { readonly line: number; readonly source?: string } | undefined {
+  if (tokens.length === 0) return undefined;
   const name = tokens[0]!;
   if (name.kind !== "identifier") {
     throw preprocessorError("invalid preprocessor directive", name.span);
@@ -274,35 +305,35 @@ function processDirective(
     name.value === "ifndef"
   ) {
     beginConditional(state, conditionals, name, rest);
-    return;
+    return undefined;
   }
   if (name.value === "elif") {
     continueConditional(state, conditionals, name, rest);
-    return;
+    return undefined;
   }
   if (name.value === "else") {
     elseConditional(conditionals, name, rest);
-    return;
+    return undefined;
   }
   if (name.value === "endif") {
     endConditional(conditionals, name, rest);
-    return;
+    return undefined;
   }
-  if (!conditionalActive(conditionals)) return;
+  if (!conditionalActive(conditionals)) return undefined;
   if (name.value === "include") {
     includeFile(state, rest, sourceName, depth, name.span);
-    return;
+    return undefined;
   }
   if (name.value === "define") {
     parseDefine(state, rest, name.span);
-    return;
+    return undefined;
   }
   if (name.value === "undef") {
     if (rest.length !== 1 || rest[0]!.kind !== "identifier") {
       throw preprocessorError("#undef requires one macro name", name.span);
     }
     state.macros.delete(rest[0]!.value);
-    return;
+    return undefined;
   }
   if (name.value === "error") {
     const detail = joinTokens(rest).trim();
@@ -311,10 +342,50 @@ function processDirective(
       name.span,
     );
   }
+  if (name.value === "pragma") {
+    if (rest.length === 1 && rest[0]!.value === "once") {
+      state.onceFiles.add(identity);
+      return undefined;
+    }
+    throw preprocessorError(
+      "unsupported preprocessor directive #pragma",
+      name.span,
+    );
+  }
+  if (name.value === "line") {
+    return parseLineDirective(state, rest, name.span);
+  }
   throw preprocessorError(
     `unsupported preprocessor directive #${name.value}`,
     name.span,
   );
+}
+
+function parseLineDirective(
+  state: PreprocessorState,
+  sourceTokens: readonly Cs486CPreprocessorToken[],
+  directiveSpan: Cs486SourceSpan,
+): { readonly line: number; readonly source?: string } {
+  const tokens = expandTokens(state, sourceTokens, new Set<string>(), 0);
+  const lineToken = tokens[0];
+  const line =
+    lineToken?.kind === "number"
+      ? parsePreprocessorInteger(lineToken.value)
+      : undefined;
+  if (line === undefined || line <= 0 || line > 2_147_483_647) {
+    throw preprocessorError(
+      "#line requires a positive line number",
+      directiveSpan,
+    );
+  }
+  const sourceToken = tokens[1];
+  if (
+    tokens.length > 2 ||
+    (sourceToken !== undefined && sourceToken.kind !== "string")
+  ) {
+    throw preprocessorError("invalid #line directive", directiveSpan);
+  }
+  return { line, source: sourceToken?.value };
 }
 
 function directiveTokens(
@@ -347,7 +418,7 @@ function beginConditional(
           directive.span,
         );
       }
-      condition = state.macros.has(tokens[0]!.value);
+      condition = macroDefined(state, tokens[0]!.value);
       if (directive.value === "ifndef") condition = !condition;
     } else {
       condition = evaluateIfExpression(state, tokens, directive.span) !== 0;
@@ -484,6 +555,7 @@ function parseDefine(
   assertMacroName(name.value, name.span);
   let index = 1;
   let functionLike = false;
+  let variadic = false;
   const parameters: string[] = [];
   if (tokens[index]?.raw === "(" && tokens[index]!.leadingSpace === false) {
     functionLike = true;
@@ -491,6 +563,17 @@ function parseDefine(
     if (tokens[index]?.raw !== ")") {
       for (;;) {
         const parameter = tokens[index];
+        if (parameter?.raw === "...") {
+          variadic = true;
+          index += 1;
+          if (tokens[index]?.raw !== ")") {
+            throw preprocessorError(
+              "variadic marker must end macro parameters",
+              tokens[index]?.span ?? parameter.span,
+            );
+          }
+          break;
+        }
         if (parameter?.kind !== "identifier") {
           throw preprocessorError(
             "macro parameter name expected",
@@ -519,6 +602,17 @@ function parseDefine(
           );
         }
         index += 1;
+        if (tokens[index]?.raw === "...") {
+          variadic = true;
+          index += 1;
+          if (tokens[index]?.raw !== ")") {
+            throw preprocessorError(
+              "variadic marker must end macro parameters",
+              tokens[index]?.span ?? name.span,
+            );
+          }
+          break;
+        }
       }
     }
     index += 1;
@@ -527,13 +621,14 @@ function parseDefine(
   if (replacement.length > maximumMacroReplacementTokens) {
     throw preprocessorError("macro replacement limit exceeded", name.span);
   }
-  validateReplacement(parameters, replacement, name.span);
+  validateReplacement(parameters, replacement, name.span, variadic);
   defineMacro(state, {
     functionLike,
     name: name.value,
     parameters,
     replacement,
     span: name.span,
+    variadic,
   });
 }
 
@@ -541,17 +636,32 @@ function validateReplacement(
   parameters: readonly string[],
   replacement: readonly Cs486CPreprocessorToken[],
   span: Cs486SourceSpan,
+  variadic: boolean,
 ): void {
   for (let index = 0; index < replacement.length; index += 1) {
     const token = replacement[index]!;
     if (token.raw === "#") {
       const next = replacement[index + 1];
-      if (next?.kind !== "identifier" || !parameters.includes(next.value)) {
+      if (
+        next?.kind !== "identifier" ||
+        (!parameters.includes(next.value) &&
+          !(variadic && next.value === "__VA_ARGS__"))
+      ) {
         throw preprocessorError(
           "# must stringify a macro parameter",
           token.span,
         );
       }
+    }
+    if (
+      token.kind === "identifier" &&
+      token.value === "__VA_ARGS__" &&
+      !variadic
+    ) {
+      throw preprocessorError(
+        "__VA_ARGS__ requires a variadic macro",
+        token.span,
+      );
     }
     if (
       token.raw === "##" &&
@@ -582,6 +692,7 @@ function defineMacro(
 function sameMacro(left: MacroDefinition, right: MacroDefinition): boolean {
   return (
     left.functionLike === right.functionLike &&
+    left.variadic === right.variadic &&
     left.parameters.join("\0") === right.parameters.join("\0") &&
     left.replacement.map((token) => token.raw).join("\0") ===
       right.replacement.map((token) => token.raw).join("\0")
@@ -603,6 +714,11 @@ function expandTokens(
   const output: Cs486CPreprocessorToken[] = [];
   for (let index = 0; index < tokens.length; index += 1) {
     const token = tokens[index]!;
+    const predefined = expandPredefinedMacro(token);
+    if (predefined !== undefined) {
+      appendExpansionTokens(output, [predefined], token.span);
+      continue;
+    }
     const macro =
       token.kind === "identifier" && !disabled.has(token.value)
         ? state.macros.get(token.value)
@@ -633,21 +749,28 @@ function expandTokens(
     }
     const invocation = parseMacroArguments(tokens, index + 1, token.span);
     index = invocation.endIndex;
-    if (
-      invocation.arguments.length !== macro.parameters.length &&
-      !(
-        macro.parameters.length === 0 &&
-        invocation.arguments.length === 1 &&
-        invocation.arguments[0]!.length === 0
-      )
-    ) {
+    const emptyInvocation =
+      invocation.arguments.length === 1 &&
+      invocation.arguments[0]!.length === 0;
+    const argumentCount =
+      macro.parameters.length === 0 && emptyInvocation
+        ? 0
+        : invocation.arguments.length;
+    const invalidArgumentCount = macro.variadic
+      ? argumentCount < macro.parameters.length
+      : argumentCount !== macro.parameters.length;
+    if (invalidArgumentCount) {
       throw preprocessorError(
-        `${macro.name} expects ${String(macro.parameters.length)} macro arguments`,
+        macro.variadic
+          ? `${macro.name} expects at least ${String(macro.parameters.length)} macro arguments`
+          : `${macro.name} expects ${String(macro.parameters.length)} macro arguments`,
         token.span,
       );
     }
     const arguments_ =
-      macro.parameters.length === 0 ? [] : invocation.arguments;
+      macro.parameters.length === 0 && !macro.variadic
+        ? []
+        : invocation.arguments;
     const substituted = substituteMacro(
       state,
       macro,
@@ -665,6 +788,33 @@ function expandTokens(
     );
   }
   return output;
+}
+
+function expandPredefinedMacro(
+  token: Cs486CPreprocessorToken,
+): Cs486CPreprocessorToken | undefined {
+  if (token.kind !== "identifier") return undefined;
+  if (token.value === "__LINE__") {
+    return {
+      ...token,
+      kind: "number",
+      raw: String(token.span.start.line),
+      value: String(token.span.start.line),
+    };
+  }
+  if (token.value === "__FILE__") {
+    return {
+      ...token,
+      kind: "string",
+      raw: JSON.stringify(token.span.start.source),
+      value: token.span.start.source,
+    };
+  }
+  return undefined;
+}
+
+function macroDefined(state: PreprocessorState, name: string): boolean {
+  return name === "__FILE__" || name === "__LINE__" || state.macros.has(name);
 }
 
 function parseMacroArguments(
@@ -724,6 +874,17 @@ function substituteMacro(
       expandTokens(state, raw, disabled, depth + 1),
     );
   }
+  if (macro.variadic) {
+    const raw = joinVariadicArguments(
+      arguments_.slice(macro.parameters.length),
+      expansionSpan,
+    );
+    rawArguments.set("__VA_ARGS__", raw);
+    expandedArguments.set(
+      "__VA_ARGS__",
+      expandTokens(state, raw, disabled, depth + 1),
+    );
+  }
   const substituted: Cs486CPreprocessorToken[] = [];
   for (let index = 0; index < macro.replacement.length; index += 1) {
     const token = macro.replacement[index]!;
@@ -765,6 +926,26 @@ function substituteMacro(
     }
   }
   return pasteTokens(substituted, expansionSpan);
+}
+
+function joinVariadicArguments(
+  arguments_: readonly (readonly Cs486CPreprocessorToken[])[],
+  span: Cs486SourceSpan,
+): readonly Cs486CPreprocessorToken[] {
+  const tokens: Cs486CPreprocessorToken[] = [];
+  for (const [index, argument] of arguments_.entries()) {
+    if (index > 0) {
+      tokens.push({
+        kind: "punctuation",
+        leadingSpace: false,
+        raw: ",",
+        span,
+        value: ",",
+      });
+    }
+    appendExpansionTokens(tokens, argument, span);
+  }
+  return tokens;
 }
 
 function macroExpansionSpan(
@@ -882,7 +1063,9 @@ function evaluateIfExpression(
         throw preprocessorError("invalid defined expression", token.span);
       }
     }
-    defined.push(numberToken(state.macros.has(name.value) ? 1 : 0, token.span));
+    defined.push(
+      numberToken(macroDefined(state, name.value) ? 1 : 0, token.span),
+    );
   }
   const expanded = expandTokens(state, defined, new Set<string>(), 0).map(
     (token) =>
@@ -1119,13 +1302,24 @@ function tokenizeMappedLine(
       leadingSpace = false;
       continue;
     }
-    if (/[0-9]/u.test(character)) {
+    if (
+      /[0-9]/u.test(character) ||
+      (character === "." && /[0-9]/u.test(line.text[index + 1] ?? ""))
+    ) {
       index += 1;
-      while (
-        index < line.text.length &&
-        /[A-Za-z0-9_.]/u.test(line.text[index]!)
-      )
-        index += 1;
+      while (index < line.text.length) {
+        const next = line.text[index]!;
+        if (/[A-Za-z0-9_.]/u.test(next)) {
+          index += 1;
+          continue;
+        }
+        const previous = line.text[index - 1]!;
+        if ((next === "+" || next === "-") && /[eEpP]/u.test(previous)) {
+          index += 1;
+          continue;
+        }
+        break;
+      }
       const raw = line.text.slice(start, index);
       tokens.push({
         kind: "number",
@@ -1230,6 +1424,22 @@ function mappedLineFromText(
     }),
   );
   return { positions, text };
+}
+
+function remapLine(
+  line: MappedLine,
+  source: string,
+  lineDelta: number,
+): MappedLine {
+  if (lineDelta === 0 && line.positions[0]?.source === source) return line;
+  return {
+    positions: line.positions.map((position) => ({
+      ...position,
+      line: position.line + lineDelta,
+      source,
+    })),
+    text: line.text,
+  };
 }
 
 function spanForRange(

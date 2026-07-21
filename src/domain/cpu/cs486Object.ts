@@ -1,8 +1,21 @@
 import {
+  cs486FunctionSignatureUsesFloat,
+  createCs486Flat32MemoryMetadata,
+  isCs486FunctionSignature,
   validateCs486Executable,
   type Cs486FunctionSignature,
   type Cs486Instruction,
 } from "./cs486.js";
+import {
+  cs486FormatLimits,
+  type Cs486FormatLimits,
+} from "./cs486FormatLimits.js";
+import {
+  cs486Word32DataModel,
+  isCs486DataModel,
+  isSupportedCs486ObjectVersion,
+  type Cs486DataModel,
+} from "./cs486Compatibility.js";
 
 export type Cs486ObjectLanguage = "asm" | "basic" | "c" | "cpp";
 export type Cs486ObjectSectionName = "bss" | "data" | "rodata" | "text";
@@ -30,7 +43,8 @@ export interface Cs486ObjectRelocation {
   readonly offset?: number;
   readonly section?: "data" | "rodata" | "text";
   readonly symbol: string;
-  readonly type: "absolute32" | "data-address" | "text-target";
+  readonly type:
+    "absolute32" | "data-address" | "function-address" | "text-target";
 }
 
 export interface Cs486ObjectTextSection {
@@ -61,25 +75,28 @@ export type Cs486ObjectSection =
 
 /**
  * Version 1 objects carry normalized assembly and text-only metadata. Version 2
- * adds structured sections and relocations while retaining `assembly` as a
- * bounded, human-readable listing for objdump and integrity diagnostics.
+ * adds structured sections and relocations. Version 3 widens function
+ * signatures to the bounded multi-argument `cs486-cc2` ABI. Version 4 carries
+ * the explicit C data-model identity. All retain `assembly` as a bounded,
+ * human-readable integrity transcript.
  */
 export interface Cs486Object {
   readonly assembly: string;
+  readonly assemblyTruncated?: true;
   readonly dataBytes: number;
+  /** Required by v4; v1-v3 are read as `cs-word32-v1`. */
+  readonly dataModel?: Cs486DataModel;
   readonly format: "cs486-object";
   readonly language: Cs486ObjectLanguage;
   readonly relocations: readonly Cs486ObjectRelocation[];
   readonly sections?: readonly Cs486ObjectSection[];
   readonly symbols: readonly Cs486ObjectSymbol[];
-  readonly version: 1 | 2;
+  readonly version: 1 | 2 | 3 | 4;
 }
 
-const maximumAssemblyCharacters = 256_000;
-const maximumDataBytes = 16 * 1_048_576;
-const maximumInitializedDataBytes = 256_000;
-const maximumRelocations = 4_096;
-const maximumSymbols = 2_048;
+export function cs486ObjectDataModel(object: Cs486Object): Cs486DataModel {
+  return object.version === 4 ? object.dataModel! : cs486Word32DataModel;
+}
 
 export function validateCs486Object(
   value: unknown,
@@ -89,24 +106,43 @@ export function validateCs486Object(
   const candidate = value as Partial<Cs486Object>;
   if (
     candidate.format !== "cs486-object" ||
-    (candidate.version !== 1 && candidate.version !== 2) ||
-    !["asm", "basic", "c", "cpp"].includes(candidate.language ?? "") ||
+    !isSupportedCs486ObjectVersion(candidate.version) ||
+    !["asm", "basic", "c", "cpp"].includes(candidate.language ?? "")
+  )
+    throw new TypeError("unsupported CS486 object format");
+  const limits = cs486FormatLimits({
+    format: "object",
+    version: candidate.version,
+  });
+  if (
     typeof candidate.assembly !== "string" ||
-    candidate.assembly.length > maximumAssemblyCharacters ||
+    candidate.assembly.length > limits.assemblyCharacters ||
+    (candidate.assemblyTruncated !== undefined &&
+      candidate.version !== 3 &&
+      candidate.version !== 4) ||
+    (candidate.assemblyTruncated !== undefined &&
+      (candidate.assemblyTruncated !== true ||
+        candidate.assembly.length !== limits.assemblyCharacters)) ||
+    (candidate.version === 4
+      ? !isCs486DataModel(candidate.dataModel)
+      : candidate.dataModel !== undefined) ||
     !Number.isSafeInteger(candidate.dataBytes) ||
     (candidate.dataBytes ?? -1) < 0 ||
-    (candidate.dataBytes ?? 0) > maximumDataBytes ||
+    (candidate.dataBytes ?? 0) > limits.dataBytes ||
     !Array.isArray(candidate.symbols) ||
-    candidate.symbols.length > maximumSymbols ||
+    candidate.symbols.length > limits.symbols ||
     !Array.isArray(candidate.relocations) ||
-    candidate.relocations.length > maximumRelocations
+    candidate.relocations.length > limits.relocations
   )
     throw new TypeError("unsupported CS486 object format");
 
   if (candidate.version === 1) {
-    if (candidate.sections !== undefined)
+    if (
+      candidate.sections !== undefined ||
+      candidate.assemblyTruncated !== undefined
+    )
       throw new TypeError("unsupported CS486 object format");
-  } else validateSections(candidate);
+  } else validateSections(candidate, limits);
 
   const symbolNames = new Set<string>();
   const symbolsByName = new Map<string, Cs486ObjectSymbol>();
@@ -128,10 +164,14 @@ export function validateCs486Object(
         symbol.type !== "notype" &&
         symbol.type !== "object") ||
       (symbol.functionSignature !== undefined &&
-        (candidate.version !== 2 ||
+        (candidate.version === 1 ||
           symbol.type !== "function" ||
-          (symbol.functionSignature !== "()->i32" &&
-            symbol.functionSignature !== "()->void"))) ||
+          !isCs486FunctionSignature(
+            symbol.functionSignature,
+            candidate.version === 2 ? false : true,
+          ) ||
+          (candidate.version < 4 &&
+            cs486FunctionSignatureUsesFloat(symbol.functionSignature)))) ||
       (symbol.size !== undefined &&
         (!Number.isSafeInteger(symbol.size) || symbol.size < 0)) ||
       symbolNames.has(symbol.name)
@@ -145,7 +185,11 @@ export function validateCs486Object(
         symbol.size !== undefined)
     )
       throw new TypeError("invalid CS486 object symbol");
-    if (candidate.version === 2) {
+    if (
+      candidate.version === 2 ||
+      candidate.version === 3 ||
+      candidate.version === 4
+    ) {
       if (
         (symbol.type === "function" && symbol.section !== "text") ||
         (symbol.type === "object" && symbol.section === "text")
@@ -177,7 +221,9 @@ export function validateCs486Object(
     );
     const symbol = symbolsByName.get(relocation.symbol);
     if (
-      candidate.version === 2 &&
+      (candidate.version === 2 ||
+        candidate.version === 3 ||
+        candidate.version === 4) &&
       symbol !== undefined &&
       symbol.binding !== "undefined" &&
       !cs486RelocationAcceptsSection(relocation.type, symbol.section)
@@ -193,6 +239,15 @@ export function isCs486ObjectV2(object: Cs486Object): object is Cs486Object & {
   return object.version === 2;
 }
 
+export function isCs486StructuredObject(
+  object: Cs486Object,
+): object is Cs486Object & {
+  readonly sections: readonly Cs486ObjectSection[];
+  readonly version: 2 | 3 | 4;
+} {
+  return object.version === 2 || object.version === 3 || object.version === 4;
+}
+
 export function objectSection<TName extends Cs486ObjectSectionName>(
   object: Cs486Object & { readonly sections: readonly Cs486ObjectSection[] },
   name: TName,
@@ -204,7 +259,7 @@ export function objectSection<TName extends Cs486ObjectSectionName>(
 
 /** Required base alignment when this object's static sections are concatenated. */
 export function cs486ObjectDataAlignment(object: Cs486Object): number {
-  if (!isCs486ObjectV2(object)) return 4;
+  if (!isCs486StructuredObject(object)) return 4;
   return Math.max(
     4,
     objectSection(object, "rodata").alignment,
@@ -217,14 +272,17 @@ export function cs486RelocationAcceptsSection(
   type: Cs486ObjectRelocation["type"],
   section: Cs486ObjectSectionName,
 ): boolean {
-  return type === "text-target"
+  return type === "text-target" || type === "function-address"
     ? section === "text"
     : type === "data-address"
       ? section !== "text"
       : true;
 }
 
-function validateSections(candidate: Partial<Cs486Object>): void {
+function validateSections(
+  candidate: Partial<Cs486Object>,
+  limits: Cs486FormatLimits,
+): void {
   if (!Array.isArray(candidate.sections) || candidate.sections.length !== 4)
     throw new TypeError("invalid CS486 object sections");
   const names = new Set<string>();
@@ -251,13 +309,22 @@ function validateSections(candidate: Partial<Cs486Object>): void {
     if (!isAlignment(section.alignment))
       throw new TypeError("invalid CS486 object section alignment");
     if (section.name === "text") {
-      if (section.alignment !== 1 || !Array.isArray(section.instructions))
+      if (
+        section.alignment !== 1 ||
+        !Array.isArray(section.instructions) ||
+        section.instructions.length > limits.instructions
+      )
         throw new TypeError("invalid CS486 text section");
       try {
         validateCs486Executable({
+          dataBytes: 0,
           format: "cs486-executable",
           instructions: section.instructions,
-          version: 1,
+          ...(candidate.version === 4
+            ? { dataModel: candidate.dataModel }
+            : {}),
+          memory: createCs486Flat32MemoryMetadata(),
+          version: candidate.version === 4 ? 5 : 4,
         });
       } catch {
         throw new TypeError("invalid CS486 text section");
@@ -289,7 +356,7 @@ function validateSections(candidate: Partial<Cs486Object>): void {
     !names.has("rodata") ||
     !names.has("data") ||
     !names.has("bss") ||
-    initializedBytes > maximumInitializedDataBytes ||
+    initializedBytes > limits.initializedDataBytes ||
     dataBytes !== candidate.dataBytes
   )
     throw new TypeError("invalid CS486 object sections");
@@ -297,7 +364,7 @@ function validateSections(candidate: Partial<Cs486Object>): void {
 
 function validateRelocation(
   value: unknown,
-  version: 1 | 2,
+  version: 1 | 2 | 3 | 4,
   symbolNames: ReadonlySet<string>,
   sections?: readonly Cs486ObjectSection[],
 ): Cs486ObjectRelocation {
@@ -323,6 +390,7 @@ function validateRelocation(
   if (
     (relocation.type !== "text-target" &&
       relocation.type !== "data-address" &&
+      relocation.type !== "function-address" &&
       relocation.type !== "absolute32") ||
     (relocation.section !== "text" &&
       relocation.section !== "data" &&
@@ -342,7 +410,21 @@ function validateRelocation(
     (typed.type === "text-target" &&
       (typed.section !== "text" || typed.field !== "target")) ||
     (typed.type === "data-address" &&
-      (typed.section !== "text" || typed.field !== "address")) ||
+      !(
+        (typed.section === "text" &&
+          (typed.field === "address" ||
+            typed.field === "source" ||
+            typed.field === "right")) ||
+        ((typed.section === "data" || typed.section === "rodata") &&
+          typed.field === "data")
+      )) ||
+    (typed.type === "function-address" &&
+      !(
+        (typed.section === "text" &&
+          (typed.field === "source" || typed.field === "right")) ||
+        ((typed.section === "data" || typed.section === "rodata") &&
+          typed.field === "data")
+      )) ||
     (typed.type === "absolute32" &&
       !(
         (typed.section === "text" &&

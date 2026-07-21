@@ -1,7 +1,7 @@
 export interface LinuxManualPage {
   readonly description: readonly string[];
   readonly name: string;
-  readonly section: 1 | 5 | 7 | 8;
+  readonly section: 1 | 5 | 6 | 7 | 8;
   readonly seeAlso: readonly string[];
   readonly synopsis: readonly string[];
   readonly summary: string;
@@ -21,17 +21,104 @@ const pages = Object.freeze([
     ["ps", "service", "dmesg", "shutdown"],
   ),
   page(
+    "nethack",
+    6,
+    "play the reduced deterministic CS-Linux dungeon game",
+    ["nethack [--help|--version]"],
+    [
+      "NetHack for CS-Linux is a reduced guest-authored CS C 2.0 game with ten dungeon levels, the Amulet of Yendor, bounded monsters and items, hunger, experience, and explored-tile memory. It is not an unmodified upstream NetHack port.",
+      "Move with h, j, k, l, y, u, b, and n. Use < and > for stairs, S to save and exit, and #quit (or q) to abandon unsaved progress. Only explicit S writes a save.",
+      "The save path is the immutable launch environment's $HOME/.nethack.sav. A successful save writes a mode-0600 sibling temporary file and atomically replaces the canonical record. Missing HOME, malformed saves, DAC denial, capacity failure, interruption, and terminal close fail without silently saving.",
+      "The stock root-owned executable is /usr/games/nethack. Sources and an explicit-rule Makefile are under /usr/src/nethack. A writable copy can be rebuilt with guest make, cc, and ld; make install PREFIX=/usr/local installs /usr/local/games/nethack and requires root privileges for that destination.",
+    ],
+    ["make", "cc", "ld", "vi"],
+  ),
+  page(
+    "cc",
+    1,
+    "compile and link bounded CS C programs",
+    [
+      "cc [-mword32|-mbyte8] [-c] [-I DIR] [-D NAME[=VALUE]] [-U NAME] SOURCE... [-L DIR] [-l NAME] [-o OUTPUT]",
+      "c++ accepts the same data-model options for its supported C-compatible subset",
+    ],
+    [
+      "The default cs-word32-v1 profile has CHAR_BIT=32 and one 32-bit word per char, short, int, long, and pointer. -mbyte8 (or -mdata-model=cs-byte8-v1) selects 8-bit char, 16-bit short, and 32-bit int, long, and pointer layout. -mword32 explicitly selects the default.",
+      "Current objects are CS486OBJ v4, executables are CS486 v5, and archives are CS486AR v2. Each carries one data-model identity. cc selects /usr/lib/<data-model>/libc.csa; ld, archive selection, Python extension loading, and all output installation reject a mixed model.",
+      "Byte-profile file counts are bytes and preserve all values 0 through 255 without UTF-8 or newline conversion. Word-profile file counts remain word characters. <cs/byte.h> explicitly packs four octets per unsigned-int storage unit for word applications, but does not make word unsigned-char pointers byte compatible.",
+      "float is binary32, double is binary64, and long double aliases double. Deterministic software arithmetic and constant folding share round-to-nearest ties-to-even semantics. Use -lm for the bounded <math.h> profile; variadic float promotes to double and %f accepts at most 18 fractional places.",
+      "Both profiles are bounded Computer System ABIs, not native x86, ELF, OMF, or ISO/POSIX conformance claims.",
+    ],
+    ["ar", "ld", "make", "math", "csdb"],
+  ),
+  page(
+    "math",
+    7,
+    "deterministic bounded CS C floating-point and libm profile",
+    ["#include <float.h>", "#include <math.h>", "cc program.c -lm -o program"],
+    [
+      "float is IEEE-754 binary32 and double is binary64. long double is an alias of double. Both are little endian, four-byte aligned, and use round-to-nearest ties-to-even.",
+      "The initial guest libm supplies fabs, copysign, floor, ceil, trunc, round, fmod, sqrt, ldexp, frexp, modf, isnan, isinf, isfinite, signbit, and appropriate f variants. Invalid results set EDOM; divide-by-zero, overflow, and underflow set ERANGE through process-local status.",
+      "Decimal and hexadecimal literals, constant folding, runtime operations, and %f formatting use the same bounded integer/rational software core. Results never delegate to host libm, locale, JavaScript floating arithmetic, WebAssembly, or a native addon.",
+      "Trigonometric, exponential, logarithmic, pow, complex, mutable fenv, x87/SIMD, fast-math, and arbitrary precision are not implemented.",
+    ],
+    ["cc", "ld", "ar"],
+  ),
+  page(
     "make",
     1,
     "build bounded CS-Linux targets from a Makefile",
     ["make [-f FILE] [-C DIR] [-n] [-B] [-s] [NAME=value ...] [TARGET ...]"],
     [
-      "CS Make 1.0 parses explicit dependency rules, .PHONY, =, :=, ?=, +=, make variables, and the automatic variables $@, $<, and $^.",
+      "CS Make 1.0 parses explicit and indexed pattern rules, .PHONY, =, :=, ?=, +=, required or optional Makefile includes, ifeq/ifneq/ifdef/ifndef with else/endif, make variables, and the automatic variables $@, $<, $^, and $*.",
       "The first non-special rule is the default target. Guest mtimes and bounded CSMAKE2 SHA-256 input/output records skip a target only while recipe and toolchain identity also match. Missing, evicted, legacy, or foreign records rebuild; malformed state fails. -B forces rebuilding and -n prints recipes without executing them.",
-      "Makefile parsing, planning, and fingerprints begin after the make PID and 128 KiB lease are admitted. The initial bounded scheduler step plans without running a recipe; each admitted recipe then executes as one isolated guest command per scheduler tick. Successful targets commit state after recipe I/O and post-build verification. Allowed commands are as, cc, c++, ld, nm, objdump, cp, mv, rm, mkdir, rmdir, touch, echo, and printf. Pipelines, redirects, command chains, background work, host commands, recursive make, implicit rules, includes, conditionals, and parallel jobs are unavailable.",
-      "Makefiles are limited to 32768 characters, 256 lines, 128 rules, 512 dependency edges, 256 recipe lines, graph depth 32, and 1 MiB of fingerprint content. CS-DOS does not install make; use CS PROGRAM LIST/PWB there.",
+      "Makefile parsing, planning, and fingerprints begin after the make PID and 128 KiB lease are admitted. The initial bounded scheduler step plans without running a recipe; each admitted recipe then executes as one isolated guest command per scheduler tick. Successful targets commit generated .d prerequisites after recipe I/O and post-build verification. Allowed commands include as, cc, c++, ar, ranlib, ld, inspection tools, and bounded filesystem/output utilities. Pipelines, redirects, command chains, background work, host commands, recursive make, arbitrary implicit-rule search, and parallel jobs are unavailable.",
+      "Makefiles are limited to an aggregate 32768 characters, 256 lines, 64 includes at depth 8, 128 rules/patterns, 512 dependency edges, 256 recipe lines, graph depth 32, and 16 MiB of fingerprint content. CS-DOS does not install make; use CS PROGRAM LIST/PWB there.",
     ],
-    ["cc", "ld", "pwb"],
+    ["cc", "ar", "ld", "sh"],
+  ),
+  page(
+    "ar",
+    1,
+    "create and inspect bounded CS486AR static archives",
+    ["ar {rcs|r|d|t|x} ARCHIVE [MEMBER ...]"],
+    [
+      "Current CS486AR version 2 contains validated CS486OBJ members, canonical member order, SHA-256 member digests, a bounded global-symbol index, explicit ABI/data-model identity, and an archive checksum. Version 1 remains readable as the legacy word model. It is not Unix ar, ELF, OMF, or a native library.",
+      "r or rcs creates/replaces members, d deletes, t lists, and x extracts into the current guest directory. Every mutation validates a complete trial and atomically replaces the archive; failure leaves the prior file unchanged.",
+      "An archive contains at most 128 members and 8192 indexed symbols and has an 8 MiB encoded limit. Names are bounded basenames. All input/output stays in the credentialed guest filesystem.",
+    ],
+    ["ranlib", "cc", "ld"],
+  ),
+  page(
+    "ranlib",
+    1,
+    "refresh a CS486AR symbol index",
+    ["ranlib ARCHIVE"],
+    [
+      "ranlib validates every CS486OBJ member and deterministically rebuilds the canonical CS486AR global-symbol index before one atomic replacement.",
+      "Duplicate exports, corrupt members, incompatible formats, capacity overflow, DAC denial, and output failure terminate explicitly without publishing a partial index.",
+    ],
+    ["ar", "ld"],
+  ),
+  page(
+    "git",
+    1,
+    "manage bounded local CS System Git repositories",
+    [
+      "git init [-b BRANCH] [DIRECTORY]",
+      "git status [--short] | git add [-A] [-f] PATH... | git rm [-r] [-f] [--cached] PATH...",
+      "git commit -m MESSAGE | git log [--oneline] [-n COUNT] | git show [REV] | git diff [--cached] [PATH...]",
+      "git branch [NAME [START]] | git switch [-c NAME [START]|--detach REV|BRANCH] | git checkout [-b NAME [START]|BRANCH|REV]",
+      "git merge [--ff-only] [-m MESSAGE] REV | git tag [NAME [REV]]",
+      "git remote [-v]|add|remove|get-url|set-url | git config [--get|--unset] user.name|user.email [VALUE]",
+    ],
+    [
+      "CS System Git 1.0 is a Git-like, independently implemented local version-control system. It uses a .git directory and familiar commands, but its required computerSystemVcs repository extension, object encoding, and index are intentionally not interoperable with native Git.",
+      "Content-addressed SHA-256 blob, tree, and commit objects preserve binary file contents, executable-file mode, and symbolic-link targets. They do not version uid/gid, timestamps, hard-link identity, empty directories, or device metadata. Index, checkout, merge, commit, and compare-and-swap ref updates use bounded guest-filesystem transactions; repository ownership and every .git symlink are checked before use. Merge is exact-path three-way plus fast-forward: rename detection, octopus merge, recursive synthesis of multiple merge bases, and conflict-marker worktrees are unavailable and fail before mutation.",
+      ".gitignore files, .git/info/exclude, negation, anchored patterns, **, ?, character classes, directory rules, and git add -f are supported. The walker never follows symbolic links or descends into an excluded parent to rediscover a negated child. Hooks, helpers, filters, submodules, LFS, signing, shallow history, alternate object stores, environment path overrides, and native Git config includes are unavailable.",
+      "One repository tracks at most 256 paths, scans 512 worktree entries, stores 2048 objects, reads 256 commits per history operation, and limits one object to 384 KiB. Ignore files, patterns, config, output, total bytes, and work units have separate ceilings. Each command acquires and always releases a 1 MiB guest RAM lease; bounded payload, hash, object, and transaction buffers are processed sequentially, and all object and worktree bytes pass through guest block-I/O accounting.",
+      "remote stores cs+tcp://, ssh://, or https:// metadata without inline credentials. clone, fetch, pull, and push fail explicitly in CS-Linux 1.0 because authenticated guest TCP/IP transport is not installed. The future guest-only port requires peer verification before scoped credential use, capability negotiation, per-tick and total ceilings, chunked objects, bounded backoff, quarantine verification/promotion, ref CAS, and exactly-once cleanup. A lost update acknowledgement terminates as unknown and must be reconciled before retry.",
+    ],
+    ["diff", "sha256sum", "vi"],
   ),
   page(
     "apropos",
@@ -62,6 +149,36 @@ const pages = Object.freeze([
       "Print kernel and device events which actually occurred during this boot. The ring has fixed entry and byte limits.",
     ],
     ["service", "ps"],
+  ),
+  page(
+    "base64",
+    1,
+    "encode or decode data in base64",
+    ["base64 [FILE]", "base64 -d [FILE]"],
+    [
+      "Encode a file or stdin to base64, wrapped at 76 columns, or decode with -d/--decode. Decoding rejects malformed base64 text or a decoded byte sequence that is not valid UTF-8, matching this shell's text-only file model.",
+    ],
+    ["md5sum", "sha256sum"],
+  ),
+  page(
+    "md5sum",
+    1,
+    "print the MD5 digest of a file or stdin",
+    ["md5sum [FILE ...]"],
+    [
+      "Compute a bounded, pure-guest MD5 digest, printed as 32 hex characters followed by the source name. Reads stdin when no file is given.",
+    ],
+    ["sha256sum", "base64"],
+  ),
+  page(
+    "nl",
+    1,
+    "number the non-blank lines of a file",
+    ["nl [FILE ...]"],
+    [
+      "Print each input line preceded by a right-justified line number and a tab; blank lines are printed unnumbered. Reads stdin when no file is given.",
+    ],
+    ["cat", "wc"],
   ),
   page(
     "fg",
@@ -107,11 +224,33 @@ const pages = Object.freeze([
     "man",
     1,
     "display an installed CS-Linux manual page",
-    ["man TOPIC"],
+    ["man [SECTION] TOPIC"],
     [
       "Pages come from the same versioned command metadata shipped with the OS image. This command does not access the Internet or host manual database.",
     ],
     ["apropos", "cs-linux"],
+  ),
+  page(
+    "less",
+    1,
+    "page through a file with backward and forward scrolling",
+    ["less PATH"],
+    [
+      "A bounded, document-resident full-screen pager over a real file. It requires a file path; unlike host less it does not read stdin or run in a pipeline.",
+      "Space/PageDown or f advance one screen; PageUp or b go back one screen; Enter/j/ArrowDown and k/ArrowUp move one line; g and G jump to the top and bottom; q quits back to the shell prompt.",
+    ],
+    ["more", "vi", "cat"],
+  ),
+  page(
+    "more",
+    1,
+    "page forward through a file one screen at a time",
+    ["more PATH"],
+    [
+      "A bounded, document-resident forward-only pager over a real file, matching traditional more instead of less's full scrolling. It requires a file path; it does not read stdin or run in a pipeline.",
+      "Space/PageDown advances one screen and Enter advances one line; q quits back to the shell prompt.",
+    ],
+    ["less", "vi", "cat"],
   ),
   page(
     "ps",
@@ -124,6 +263,37 @@ const pages = Object.freeze([
     ["kill", "top", "jobs"],
   ),
   page(
+    "pgrep",
+    1,
+    "list process IDs matching a name",
+    ["pgrep [-l] [-x] PATTERN"],
+    [
+      "Match PATTERN against each process's command name (the final path segment before its arguments) from the bounded OS process table. Default matching is a substring; -x requires an exact name match. -l also prints the matched name.",
+      "Prints nothing and exits nonzero when no process matches.",
+    ],
+    ["ps", "pkill", "killall"],
+  ),
+  page(
+    "pkill",
+    1,
+    "signal processes matching a name",
+    ["pkill [-SIGNAL] [-x] PATTERN"],
+    [
+      "Send SIGNAL (default TERM) to every process whose command name matches PATTERN, using the same substring/-x matching as pgrep. Ownership and PID 1 protection follow kill's rules.",
+    ],
+    ["pgrep", "kill", "killall"],
+  ),
+  page(
+    "killall",
+    1,
+    "signal processes by exact command name",
+    ["killall [-SIGNAL] NAME ..."],
+    [
+      "Send SIGNAL (default TERM) to every process whose command name exactly matches each given NAME. A NAME with no match reports an explicit error but does not stop remaining names from being processed.",
+    ],
+    ["pkill", "kill", "pgrep"],
+  ),
+  page(
     "service",
     8,
     "inspect real CS-Linux service state",
@@ -131,7 +301,54 @@ const pages = Object.freeze([
     [
       "Service mutation is owned by cs-init and is not exposed by this status-only command. CS-Linux does not imitate systemd.",
     ],
-    ["dmesg", "ps"],
+    ["dmesg", "ps", "telinit", "crontab"],
+  ),
+  page(
+    "telinit",
+    8,
+    "change the SysV runlevel",
+    ["telinit {0-6|S}"],
+    [
+      "Requires superuser privilege. Runlevels 0 and 6 reuse the existing shutdown/reboot lifecycle; 1 and S stop rc.d multi-user services; 2-5 are identical multi-user runlevels.",
+      "Starts and stops the rc.d-managed services listed in the target /etc/rcN.d directory in place; it does not itself power off or restart the Computer for runlevels 1-5.",
+    ],
+    ["init", "runlevel", "service", "shutdown", "reboot"],
+  ),
+  page(
+    "init",
+    8,
+    "alias for telinit",
+    ["init {0-6|S}"],
+    [
+      "init is the conventional alias for telinit; see telinit(8) for behavior.",
+    ],
+    ["telinit", "runlevel"],
+  ),
+  page(
+    "runlevel",
+    8,
+    "print the previous and current SysV runlevel",
+    ["runlevel"],
+    [
+      'Prints "PREVIOUS CURRENT", using N for previous when no runlevel change has occurred yet, or "unknown" before the first runlevel is established.',
+    ],
+    ["telinit", "init"],
+  ),
+  page(
+    "crontab",
+    1,
+    "list or edit the single CS-Linux system crontab",
+    [
+      "crontab -l",
+      "crontab -e",
+      "/etc/crontab: minute hour day-of-month month day-of-week user command",
+    ],
+    [
+      "Seven whitespace-separated fields: minute hour day-of-month month day-of-week user command.",
+      "Each numeric field accepts *, a bare number, a-b ranges, comma lists, and */n or a-b/n steps. day-of-week accepts 0-7 (0 and 7 are both Sunday).",
+      "cron re-reads /etc/crontab only when the cron service starts or restarts; edits do not take effect until then. -e opens that file in vi and requires a durable root login shell; no per-user spool exists.",
+    ],
+    ["service"],
   ),
   page(
     "top",
@@ -178,6 +395,115 @@ const pages = Object.freeze([
     ["who"],
     ["List authenticated sessions from the bounded OS login-session table."],
     ["last", "tty", "w"],
+  ),
+  page(
+    "sed",
+    1,
+    "bounded stream editor",
+    ["sed [-n] [-e SCRIPT] SCRIPT [FILE ...]"],
+    [
+      "Supports p, d, and s/pattern/replacement/g with numeric, $, or /pattern/ addresses. Patterns use the bounded CS matcher, not host regular expressions.",
+    ],
+    ["awk", "grep"],
+  ),
+  page(
+    "awk",
+    1,
+    "bounded record and field processor",
+    ["awk [-F CHAR] PROGRAM [FILE ...]"],
+    [
+      "Supports BEGIN/END, /pattern/, field comparisons, print, bounded printf, $0..$64, NR, and NF. Programs, records, fields, rules, and matcher steps have fixed limits.",
+    ],
+    ["sed", "cut"],
+  ),
+  page(
+    "tar",
+    1,
+    "create, list, or extract bounded ustar archives",
+    ["tar -cf ARCHIVE PATH ...", "tar -tf ARCHIVE", "tar -xf ARCHIVE [-C DIR]"],
+    [
+      "Uses binary-safe guest files and POSIX ustar headers. Extraction preflights checksums, paths, duplicates, symlink pivots, entry count, and expanded bytes, then commits atomically.",
+    ],
+    ["gzip", "zip"],
+  ),
+  page(
+    "gzip",
+    1,
+    "compress or decompress bounded gzip files",
+    ["gzip [-d] [-k] FILE ..."],
+    [
+      "Writes deterministic RFC 1952 streams with stored DEFLATE blocks and validates CRC32 and size on decode. Unsupported DEFLATE block forms fail explicitly.",
+    ],
+    ["gunzip", "tar"],
+  ),
+  page(
+    "gunzip",
+    1,
+    "decompress bounded gzip files",
+    ["gunzip [-k] FILE.gz ..."],
+    ["Equivalent to gzip -d for the supported bounded gzip stream."],
+    ["gzip"],
+  ),
+  page(
+    "zip",
+    1,
+    "create bounded stored ZIP archives",
+    ["zip ARCHIVE.zip PATH ..."],
+    [
+      "Creates standard UTF-8 ZIP archives using method 0 with local headers, a central directory, and CRC32.",
+    ],
+    ["unzip", "tar"],
+  ),
+  page(
+    "unzip",
+    1,
+    "list or extract bounded stored ZIP archives",
+    ["unzip [-l] ARCHIVE.zip [-d DIR]"],
+    [
+      "Accepts unencrypted method-0 ZIP entries. ZIP64, encryption, and compressed methods fail explicitly; extraction uses the same atomic path safety as tar.",
+    ],
+    ["zip", "tar"],
+  ),
+  page(
+    "nice",
+    1,
+    "run guest work with a bounded scheduling weight",
+    ["nice [-n -20..19] COMMAND ..."],
+    [
+      "Captures the nice value at process admission. Negative values require root; four deterministic weight bands preserve bounded scheduler work and prevent starvation.",
+    ],
+    ["ps", "nohup"],
+  ),
+  page(
+    "nohup",
+    1,
+    "detach a supported bounded background task from terminal hangup",
+    ["nohup {sleep|python|micropython|run} ... &"],
+    [
+      "Reparents the admitted task to init and ignores terminal SIGHUP. Shutdown and reboot remain finalization owners; unsupported foreground forms fail explicitly.",
+    ],
+    ["nice", "jobs"],
+  ),
+  page(
+    "watch",
+    1,
+    "repeat a finite command on guest ticks",
+    ["watch [-n SECONDS] [-c COUNT] -- COMMAND ..."],
+    [
+      "Runs one finite non-interactive command per interval. COUNT defaults to 300 and is capped at 3600; Ctrl+C, failure, disconnect, and completion each reach an explicit foreground terminal state.",
+    ],
+    ["top", "nice"],
+  ),
+  page(
+    "vmstat",
+    1,
+    "print one bounded virtual-memory statistics snapshot",
+    ["vmstat"],
+    [
+      "Render one non-interactive report line from the authoritative memory snapshot and process table: runnable and waiting process counts plus free memory and reclaimable buffers in KiB.",
+      "CS-Linux models no swap device and no sampled interrupt or context-switch counters, so the swap, io, and system columns are always zero. Interval and count operands are not supported.",
+    ],
+    ["ps", "top"],
   ),
 ] satisfies readonly LinuxManualPage[]);
 

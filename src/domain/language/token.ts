@@ -10,21 +10,26 @@ export type TokenKind =
   | "newline"
   | "number"
   | "operator"
-  | "string";
+  | "string"
+  | "template_string";
 
 export interface Token {
   readonly kind: TokenKind;
   readonly lexeme: string;
-  readonly literal?: boolean | null | number | string;
+  readonly literal?: bigint | boolean | null | number | string;
   readonly span: SourceSpan;
 }
 
 export const keywords = new Set([
   "and",
   "as",
+  "async",
+  "await",
   "break",
+  "class",
   "continue",
   "def",
+  "del",
   "elif",
   "else",
   "except",
@@ -32,11 +37,14 @@ export const keywords = new Set([
   "finally",
   "for",
   "from",
+  "global",
   "if",
   "import",
   "in",
   "is",
+  "lambda",
   "None",
+  "nonlocal",
   "not",
   "or",
   "pass",
@@ -45,4 +53,6 @@ export const keywords = new Set([
   "True",
   "try",
   "while",
+  "with",
+  "yield",
 ]);

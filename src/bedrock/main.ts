@@ -20,6 +20,7 @@ import {
 } from "./portableComputer.js";
 import { handleDebugCommand } from "./debugCommandBridge.js";
 import { handleDebugComputerListRequest } from "./debugComputerListBridge.js";
+import { handleDebugAcceptanceFixtureRequest } from "./debugAcceptanceFixtureBridge.js";
 import { startComputerStorageBreakGuard } from "./computerRegistry.js";
 import { startFloppyComponent } from "./floppyComponent.js";
 import { handleDebugWebSessionRequest } from "./debugWebSessionBridge.js";
@@ -68,6 +69,10 @@ system.run((): void => {
 
 system.afterEvents.scriptEventReceive.subscribe((event): void => {
   if (handleWebTerminalScriptEvent(event.id, event.message)) return;
+  if (event.id === "computer_system:debug-acceptance-fixture") {
+    handleDebugAcceptanceFixtureRequest(event.message, event.sourceType);
+    return;
+  }
   if (event.id === "computer_system:debug-command") {
     handleDebugCommand(event.message);
     return;

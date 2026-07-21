@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import { createPythonCs486Program } from "../../src/application/runtime/pythonCs486.js";
 import { createNativeEnvironment } from "../../src/application/runtime/nativeModules.js";
 import { assembleCs486Object } from "../../src/application/toolchain/cs486Assembler.js";
+import { compileCs486Object } from "../../src/application/toolchain/highLevelCompilers.js";
+import { cs486Byte8DataModel } from "../../src/domain/cpu/cs486Compatibility.js";
 import type { Cs486Object } from "../../src/domain/cpu/cs486Object.js";
 import { InMemoryFilesystem } from "../../src/domain/filesystem/inMemoryFilesystem.js";
 import { TerminalBuffer } from "../../src/domain/terminal/terminalBuffer.js";
@@ -30,11 +32,11 @@ describe("Python CS486OBJ v2 extensions", (): void => {
         auxiliaryResidentBytes: 1_048_576,
         model: "cs-flat32-v1",
       },
-      version: 3,
+      version: 5,
     });
     expect(program.executable.initialData).toEqual([
-      { bytes: [11, 0, 0, 0], offset: 0 },
-      { bytes: [42, 0, 0, 0], offset: 4 },
+      { bytes: [11, 0, 0, 0], offset: 4 },
+      { bytes: [42, 0, 0, 0], offset: 8 },
     ]);
   });
 
@@ -69,9 +71,34 @@ describe("Python CS486OBJ v2 extensions", (): void => {
       values: [11, 42],
     });
     expect(program.executable.initialData).toEqual([
-      { bytes: [11, 0, 0, 0], offset: 0 },
+      { bytes: [11, 0, 0, 0], offset: 4 },
       { bytes: [42, 0, 0, 0], offset: 16 },
     ]);
+  });
+
+  it("relocates admitted function-pointer tables inside a C extension", (): void => {
+    const object = compileCs486Object(
+      "c",
+      [
+        "typedef int (*getter)(void);",
+        "static int forty(void) { return 40; }",
+        "static int two(void) { return 2; }",
+        "static getter values[2] = { forty, two };",
+        "int read(void) { return values[0]() + values[1](); }",
+      ].join("\n"),
+    );
+    const filesystem = extensionFilesystem({ callbacks: object });
+    const program = createProgram(
+      filesystem,
+      "import callbacks\nresult = callbacks.read()\n",
+    );
+
+    run(program.process);
+
+    expect(program.process.state.kind).toBe("completed");
+    expect(program.runtime.globals.get("result")).toBe(42);
+    expect(program.executable.version).toBe(5);
+    expect(program.executable.functionEntries).toHaveLength(3);
   });
 
   it("does not expose global data symbols as Python functions", (): void => {
@@ -100,6 +127,64 @@ describe("Python CS486OBJ v2 extensions", (): void => {
 
     expect(() => createProgram(filesystem, "import notifier\n")).toThrow(
       /exports no zero-argument integer functions/u,
+    );
+  });
+
+  it("does not expose an argument-taking function through the Python extension ABI", (): void => {
+    const object = assembleCs486Object(
+      [
+        "section .text",
+        "global identity",
+        "type identity, function",
+        "signature identity, i32, i32",
+        "identity:",
+        "mov eax, 0",
+        "ret",
+      ].join("\n"),
+    );
+    const filesystem = extensionFilesystem({ parameterized: object });
+
+    expect(() => createProgram(filesystem, "import parameterized\n")).toThrow(
+      /exports no zero-argument integer functions/u,
+    );
+  });
+
+  it("rejects a floating return instead of widening the Python integer extension ABI", (): void => {
+    const object = assembleCs486Object(
+      [
+        "section .text",
+        "global measurement",
+        "type measurement, function",
+        "signature measurement, f64",
+        "measurement:",
+        "mov eax, 0",
+        "mov edx, 1072693248",
+        "ret",
+      ].join("\n"),
+    );
+    const filesystem = extensionFilesystem({ floating: object });
+
+    expect(() => createProgram(filesystem, "import floating\n")).toThrow(
+      /exports no zero-argument integer functions/u,
+    );
+  });
+
+  it("rejects a byte-profile object instead of converting the Python extension ABI", (): void => {
+    const object = assembleCs486Object(
+      [
+        "global answer",
+        "type answer, function",
+        "signature answer, i32",
+        "answer:",
+        "mov eax, 42",
+        "ret",
+      ].join("\n"),
+      { dataModel: cs486Byte8DataModel },
+    );
+    const filesystem = extensionFilesystem({ byte_extension: object });
+
+    expect(() => createProgram(filesystem, "import byte_extension\n")).toThrow(
+      /Python extensions require cs-word32-v1/u,
     );
   });
 

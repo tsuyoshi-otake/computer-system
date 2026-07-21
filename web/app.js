@@ -1,14 +1,15 @@
 import {
   BoundedEditorKeyQueue,
+  CompletionShelfController,
   editorKeyFromKeyboardEvent,
   hasCopySelection,
   insertPastedCommand,
-  keyboardLockStatesFromEvent,
   terminalInteractionFromTerminal,
 } from "/terminal-input.js";
 import { manualChapters, manualParts, searchManual } from "/manual.js";
 import {
-  calculateFixedGridFontSize,
+  calculateIntegerGridPresentation,
+  calculateLineCursorCell,
   calculateTextRasterPresentation,
 } from "/terminal-layout.js";
 import {
@@ -75,6 +76,12 @@ const screenShapeLabels = {
   curved: "Curved Glass screen",
   flat: "Flat screen",
 };
+const completionKindLabels = {
+  command: "CMD",
+  device: "DEV",
+  directory: "DIR",
+  file: "FILE",
+};
 
 const elements = {
   computerName: document.querySelector("#computer-name"),
@@ -82,13 +89,19 @@ const elements = {
   statusLight: document.querySelector("#status-light"),
   statusText: document.querySelector("#status-text"),
   terminalStage: document.querySelector("#terminal-stage"),
+  terminalShell: document.querySelector(".terminal-shell"),
   terminalDisplay: document.querySelector("#terminal-display"),
   terminalOutput: document.querySelector("#terminal-output"),
   terminalScreen: document.querySelector("#terminal-screen"),
+  terminalCursor: document.querySelector("#terminal-cursor"),
   terminalSize: document.querySelector("#terminal-size"),
   commandForm: document.querySelector("#command-form"),
   commandInput: document.querySelector("#command-input"),
   completionMenu: document.querySelector("#completion-menu"),
+  completionCount: document.querySelector("#completion-count"),
+  completionMessage: document.querySelector("#completion-message"),
+  completionOptions: document.querySelector("#completion-options"),
+  completionStatus: document.querySelector("#completion-status"),
   takeControlButton: document.querySelector("#take-control-button"),
   reconnectButton: document.querySelector("#reconnect-button"),
   lifecycleState: document.querySelector("#lifecycle-state"),
@@ -155,7 +168,8 @@ let reconnectGeneration = 0;
 let sessionClosed = false;
 let interactionProtocolReload = false;
 let commandPending = false;
-let completionPending = false;
+const completionShelf = new CompletionShelfController();
+let completionMessageTimer = 0;
 let copyResetTimer = 0;
 let ejectPending = false;
 let floppyDriveState = "absent";
@@ -176,6 +190,8 @@ let historyCursor = 0;
 let historyDraft = "";
 let resizeFrame = 0;
 let terminalRenderFrame = 0;
+let renderedCursorTerminal;
+let renderedCursorPalette;
 let pendingTerminalPayload;
 let renderedTerminalGeometry = "";
 let renderedTerminalMode = "";
@@ -193,15 +209,19 @@ const floppyAudio = new WebFloppyDriveAudio();
 const unlockFloppyAudio = () => void floppyAudio.unlock();
 window.addEventListener("pointerdown", unlockFloppyAudio, { passive: true });
 window.addEventListener("keydown", unlockFloppyAudio);
-window.addEventListener("keydown", updateKeyboardLockIndicators);
-window.addEventListener("keyup", updateKeyboardLockIndicators);
-window.addEventListener("blur", resetKeyboardLockIndicators);
-document.addEventListener("visibilitychange", () => {
-  if (document.hidden) resetKeyboardLockIndicators();
-});
 window.addEventListener("pagehide", () => void floppyAudio.close(), {
   once: true,
 });
+
+for (const [element, label] of [
+  [elements.capsLockIndicator, "Caps Lock"],
+  [elements.numLockIndicator, "Num Lock"],
+  [elements.scrollLockIndicator, "Scroll Lock"],
+]) {
+  element.addEventListener("click", () =>
+    toggleVirtualKeyboardLock(element, label),
+  );
+}
 
 if (location.hash.length > 1) sessionStorage.setItem(tokenStorageKey, token);
 const stableUrl = new URL(location.href);
@@ -235,6 +255,54 @@ elements.commandInput.addEventListener("keydown", (event) => {
     if (key !== undefined) queueEditorKeys([key]);
     return;
   }
+  const completionState = completionShelf.state;
+  if (
+    event.key === "Escape" &&
+    !event.isComposing &&
+    completionState.kind !== "closed"
+  ) {
+    event.preventDefault();
+    hideCompletions();
+    return;
+  }
+  if (completionState.kind === "open" && !event.isComposing) {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      acceptSelectedCompletion();
+      return;
+    }
+    if (
+      event.key === "Tab" ||
+      event.key === "ArrowDown" ||
+      event.key === "ArrowUp"
+    ) {
+      event.preventDefault();
+      const offset =
+        event.key === "ArrowUp" || (event.key === "Tab" && event.shiftKey)
+          ? -1
+          : 1;
+      if (completionShelf.move(offset)) renderCompletionShelf();
+      return;
+    }
+    if (["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
+      hideCompletions();
+    }
+  }
+  if (
+    completionState.kind === "loading" &&
+    event.key === "Tab" &&
+    !event.isComposing
+  ) {
+    event.preventDefault();
+    return;
+  }
+  if (
+    completionState.kind === "message" &&
+    event.key === "Tab" &&
+    !event.isComposing
+  ) {
+    hideCompletions();
+  }
   if (event.key === "Enter" && !event.isComposing) {
     event.preventDefault();
     void sendLine();
@@ -253,33 +321,63 @@ elements.commandInput.addEventListener("keydown", (event) => {
       if (terminalInteraction?.interrupt === true) {
         event.preventDefault();
         void sendInput({ kind: "interrupt" });
+      } else if (
+        terminalInteraction?.inputMode === "line" &&
+        terminalInteraction.secretInput !== true
+      ) {
+        event.preventDefault();
+        elements.commandInput.value = "";
+        refreshLocalLineCursor();
+        void sendInput({ kind: "abort-line" });
       }
       return;
     }
-    if (key === "a" || key === "e") {
+    if (
+      terminalInteraction?.cursorShape === "underline" &&
+      ["a", "d", "e", "k", "u", "w"].includes(key)
+    ) {
+      event.preventDefault();
+      return;
+    }
+    if (
+      terminalInteraction?.cursorShape !== "underline" &&
+      (key === "a" || key === "e")
+    ) {
       event.preventDefault();
       const position = key === "a" ? 0 : elements.commandInput.value.length;
       elements.commandInput.setSelectionRange(position, position);
       return;
     }
-    if (key === "u" || key === "k" || key === "w") {
+    if (
+      terminalInteraction?.cursorShape !== "underline" &&
+      (key === "u" || key === "k" || key === "w")
+    ) {
       event.preventDefault();
       editCommandLine(key);
       return;
     }
-    if (key === "d") {
+    if (terminalInteraction?.cursorShape !== "underline" && key === "d") {
       event.preventDefault();
       if (elements.commandInput.value.length === 0) void closeSession();
       else deleteAtCursor();
       return;
     }
   }
-  if (event.key === "ArrowUp") {
+  if (
+    event.key === "F3" &&
+    terminalInteraction?.cursorShape === "underline" &&
+    terminalInteraction.inputMode === "line"
+  ) {
     event.preventDefault();
-    if (terminalInteraction?.secretInput !== true) moveHistory(-1);
+    elements.commandInput.value = commandHistory.at(-1) ?? "";
+    elements.commandInput.setSelectionRange(128, 128);
+    refreshLocalLineCursor();
+  } else if (event.key === "ArrowUp") {
+    event.preventDefault();
+    if (terminalInteraction?.history === true) moveHistory(-1);
   } else if (event.key === "ArrowDown") {
     event.preventDefault();
-    if (terminalInteraction?.secretInput !== true) moveHistory(1);
+    if (terminalInteraction?.history === true) moveHistory(1);
   }
 });
 elements.commandInput.addEventListener("input", () => {
@@ -291,7 +389,11 @@ elements.commandInput.addEventListener("input", () => {
     historyDraft = elements.commandInput.value;
   }
   elements.commandInput.removeAttribute("aria-invalid");
+  refreshLocalLineCursor();
 });
+elements.commandInput.addEventListener("keyup", refreshLocalLineCursor);
+elements.commandInput.addEventListener("select", refreshLocalLineCursor);
+elements.commandInput.addEventListener("pointerup", refreshLocalLineCursor);
 elements.commandInput.addEventListener("paste", (event) => {
   const pastedText = event.clipboardData?.getData("text/plain");
   if (pastedText === undefined || elements.commandInput.disabled) return;
@@ -761,22 +863,24 @@ async function sendLine() {
     historyCursor = commandHistory.length;
     historyDraft = "";
     elements.commandInput.value = "";
+    refreshLocalLineCursor();
   }
 }
 
 async function completeCommandLine() {
   if (
-    completionPending ||
     commandPending ||
     sessionClosed ||
     terminalInteraction?.inputMode !== "line" ||
-    terminalInteraction.secretInput ||
-    elements.commandInput.disabled
+    elements.commandInput.disabled ||
+    completionShelf.state.kind === "loading" ||
+    completionShelf.state.kind === "open"
   )
     return;
-  completionPending = true;
   const original = elements.commandInput.value;
   const cursor = elements.commandInput.selectionStart;
+  const ticket = completionShelf.begin(original, cursor);
+  renderCompletionShelf();
   try {
     const response = await api("/api/complete", {
       method: "POST",
@@ -787,33 +891,159 @@ async function completeCommandLine() {
       body: JSON.stringify({ value: original, cursor }),
     });
     const completion = await response.json();
-    if (elements.commandInput.value !== original) return;
-    elements.commandInput.value = completion.value;
-    elements.commandInput.setSelectionRange(
-      completion.cursor,
-      completion.cursor,
+    const result = completionShelf.resolve(
+      ticket,
+      completion,
+      elements.commandInput.value,
+      elements.commandInput.selectionStart,
     );
-    if (completion.candidates.length > 1)
-      showCompletions(completion.candidates);
+    if (result.outcome === "stale") return;
+    if (result.completion !== undefined && result.outcome === "applied") {
+      elements.commandInput.value = result.completion.value;
+      elements.commandInput.setSelectionRange(
+        result.completion.cursor,
+        result.completion.cursor,
+      );
+      refreshLocalLineCursor();
+    }
+    renderCompletionShelf();
+    if (completionShelf.state.kind === "message")
+      scheduleCompletionMessageClose();
   } catch (error) {
     if (error?.code === "read_only") setInputAvailable(false, "VIEW ONLY");
     if (error?.code === "out_of_range") {
       setConnection("offline", "OUT OF RANGE");
       setInputAvailable(false, "MOVE WITHIN 3 BLOCKS");
     }
-  } finally {
-    completionPending = false;
+    if (
+      completionShelf.fail(
+        ticket,
+        elements.commandInput.value,
+        elements.commandInput.selectionStart,
+      )
+    ) {
+      renderCompletionShelf();
+      scheduleCompletionMessageClose();
+    }
   }
 }
 
-function showCompletions(candidates) {
-  elements.completionMenu.textContent = candidates.join("  ");
-  elements.completionMenu.hidden = false;
+function acceptSelectedCompletion() {
+  const completion = completionShelf.accept(
+    elements.commandInput.value,
+    elements.commandInput.selectionStart,
+  );
+  if (completion !== undefined) {
+    elements.commandInput.value = completion.value;
+    elements.commandInput.setSelectionRange(
+      completion.cursor,
+      completion.cursor,
+    );
+    refreshLocalLineCursor();
+  }
+  renderCompletionShelf();
+}
+
+function renderCompletionShelf() {
+  const state = completionShelf.state;
+  const open = state.kind !== "closed";
+  elements.completionMenu.hidden = !open;
+  elements.terminalShell.dataset.completionState = state.kind;
+  elements.commandInput.setAttribute(
+    "aria-expanded",
+    String(state.kind === "open"),
+  );
+  elements.commandInput.setAttribute(
+    "aria-busy",
+    String(state.kind === "loading"),
+  );
+  elements.completionOptions.replaceChildren();
+  elements.completionCount.textContent = "";
+  elements.completionMessage.textContent = "";
+  elements.completionMessage.hidden = true;
+  elements.completionMessage.removeAttribute("data-tone");
+  elements.completionOptions.hidden = state.kind !== "open";
+  elements.commandInput.removeAttribute("aria-activedescendant");
+
+  if (state.kind === "closed") {
+    elements.completionStatus.textContent = "";
+    if (terminalInteraction !== undefined)
+      renderInteractionHints(terminalInteraction);
+    return;
+  }
+  if (state.kind === "loading") {
+    elements.completionMessage.hidden = false;
+    elements.completionMessage.textContent = "COMPLETING\u2026";
+    elements.completionStatus.textContent = "Finding completion candidates.";
+    renderKeyboardHints([{ key: "Esc", label: "Cancel completion" }]);
+    return;
+  }
+  if (state.kind === "message") {
+    elements.completionMessage.hidden = false;
+    elements.completionMessage.dataset.tone = state.tone;
+    elements.completionMessage.textContent = state.message;
+    elements.completionStatus.textContent = state.message;
+    renderKeyboardHints([{ key: "Esc", label: "Close completion" }]);
+    return;
+  }
+
+  elements.completionCount.textContent = `${String(state.selected + 1)} / ${String(
+    state.candidates.length,
+  )}${state.truncated ? " +" : ""}`;
+  const fragment = document.createDocumentFragment();
+  state.candidates.forEach((candidate, index) => {
+    const option = document.createElement("div");
+    option.id = `completion-option-${String(state.generation)}-${String(index)}`;
+    option.className = "completion-option";
+    option.setAttribute("role", "option");
+    option.setAttribute("aria-selected", String(index === state.selected));
+    option.dataset.selected = String(index === state.selected);
+    option.addEventListener("pointerdown", (event) => {
+      event.preventDefault();
+      if (!completionShelf.select(index)) return;
+      acceptSelectedCompletion();
+      elements.commandInput.focus();
+    });
+
+    const label = document.createElement("span");
+    label.className = "completion-option-label";
+    label.textContent = candidate.displayText;
+    const kind = document.createElement("span");
+    kind.className = "completion-option-kind";
+    kind.textContent = completionKindLabels[candidate.kind] ?? candidate.kind;
+    option.append(label, kind);
+    fragment.append(option);
+  });
+  elements.completionOptions.append(fragment);
+  const selectedId = `completion-option-${String(state.generation)}-${String(
+    state.selected,
+  )}`;
+  elements.commandInput.setAttribute("aria-activedescendant", selectedId);
+  elements.completionStatus.textContent = `${String(
+    state.candidates.length,
+  )} completion candidates. ${state.candidates[state.selected].displayText} selected.`;
+  const selected = document.getElementById(selectedId);
+  requestAnimationFrame(() => selected?.scrollIntoView({ block: "nearest" }));
+  renderKeyboardHints([
+    { key: "Tab", label: "Next" },
+    { key: "Shift+Tab", label: "Previous" },
+    { key: "Enter", label: "Accept" },
+    { key: "Esc", label: "Close" },
+  ]);
+}
+
+function scheduleCompletionMessageClose() {
+  window.clearTimeout(completionMessageTimer);
+  completionMessageTimer = window.setTimeout(() => {
+    if (completionShelf.state.kind === "message") hideCompletions();
+  }, 1_800);
 }
 
 function hideCompletions() {
-  elements.completionMenu.hidden = true;
-  elements.completionMenu.textContent = "";
+  window.clearTimeout(completionMessageTimer);
+  completionMessageTimer = 0;
+  completionShelf.dismiss();
+  renderCompletionShelf();
 }
 
 async function sendInput(payload) {
@@ -1026,6 +1256,8 @@ function renderTerminalNow(payload) {
   const colorY = Math.max(0, Math.min(terminal.height - 1, cursorY - 1));
   const inputForeground = terminal.foreground?.[colorY]?.[colorX] ?? 0;
   const activePalette = dosTuiPresentation ? dosTuiPalette : palette;
+  renderedCursorTerminal = terminal;
+  renderedCursorPalette = activePalette;
   elements.commandForm.style.setProperty(
     "--input-color",
     activePalette[inputForeground] ?? activePalette[0],
@@ -1070,7 +1302,98 @@ function renderTerminalNow(payload) {
   renderedTerminalMode = nextMode;
   renderedTerminalRowElements = nextElements;
   renderedTerminalRowSignatures = nextSignatures;
+  renderTerminalCursor(terminal, activePalette, cursorX, cursorY);
   setInputAvailable(connectionState === "online", interactionStateLabel());
+}
+
+function cellColors(foreground, background, x, activePalette) {
+  const foregroundIndex = foreground[x] ?? 0;
+  const backgroundIndex = background[x] ?? 15;
+  return {
+    background: activePalette[backgroundIndex] ?? activePalette[15],
+    foreground: activePalette[foregroundIndex] ?? activePalette[0],
+  };
+}
+
+function renderTerminalCursor(terminal, activePalette, cursorX, cursorY) {
+  let x = Math.max(0, Math.min(terminal.width - 1, cursorX - 1));
+  let y = Math.max(0, Math.min(terminal.height - 1, cursorY - 1));
+  if (terminalInteraction?.inputMode === "line") {
+    const local = calculateLineCursorCell({
+      baseX: x,
+      baseY: y,
+      columns: terminal.width,
+      rows: terminal.height,
+      selectionStart:
+        elements.commandInput.selectionStart ??
+        elements.commandInput.value.length,
+      value: elements.commandInput.value,
+    });
+    x = local.x;
+    y = local.y;
+  }
+  const characters = [...(terminal.rows[y] ?? "")];
+  const colors = cellColors(
+    terminal.foreground?.[y] ?? [],
+    terminal.background?.[y] ?? [],
+    x,
+    activePalette,
+  );
+  const shape = terminalInteraction?.cursorShape ?? "underline";
+  elements.terminalCursor.className =
+    `terminal-cell-cursor terminal-cell-cursor--${shape}` +
+    (terminal.cursor?.blink === true ? " terminal-cell-cursor--blink" : "");
+  elements.terminalCursor.style.setProperty(
+    "--cursor-cell-left",
+    `${String(x)}ch`,
+  );
+  elements.terminalCursor.style.setProperty(
+    "--cursor-cell-top",
+    `${String(y)}em`,
+  );
+  elements.terminalCursor.style.setProperty(
+    "--cursor-foreground",
+    colors.foreground,
+  );
+  elements.terminalCursor.style.setProperty(
+    "--cursor-background",
+    colors.background,
+  );
+  let glyph = characters[x] ?? " ";
+  if (
+    shape === "block" &&
+    terminalInteraction?.inputMode === "line" &&
+    elements.commandInput.selectionStart !== null &&
+    elements.commandInput.selectionStart < elements.commandInput.value.length
+  ) {
+    glyph =
+      terminalInteraction.secretInput === true
+        ? "•"
+        : ([
+            ...elements.commandInput.value.slice(
+              elements.commandInput.selectionStart,
+            ),
+          ][0] ?? " ");
+  }
+  elements.terminalCursor.textContent = shape === "block" ? glyph : "";
+}
+
+function refreshLocalLineCursor() {
+  const terminal = renderedCursorTerminal;
+  const activePalette = renderedCursorPalette;
+  if (
+    terminalInteraction?.inputMode !== "line" ||
+    terminal === undefined ||
+    activePalette === undefined
+  ) {
+    return;
+  }
+  renderTerminalCursor(
+    terminal,
+    activePalette,
+    Number.isInteger(terminal.cursor?.x) ? terminal.cursor.x : 1,
+    Number.isInteger(terminal.cursor?.y) ? terminal.cursor.y : 1,
+  );
 }
 
 function terminalRowSignature(row, foreground, background, mode) {
@@ -1094,14 +1417,14 @@ function createTerminalRow(
   characters.forEach((character, x) => {
     const foregroundColor = foreground[x] ?? 0;
     const backgroundColor = background[x] ?? 15;
+    const colors = cellColors(foreground, background, x, activePalette);
     const joinsVertically =
       editorMode && verticallyJoiningTerminalGlyphs.has(character);
     const key = `${String(foregroundColor)}:${String(backgroundColor)}:${joinsVertically ? "join-y" : "plain"}`;
     if (span === undefined || key !== previousKey) {
       span = document.createElement("span");
-      span.style.color = activePalette[foregroundColor] ?? activePalette[0];
-      span.style.backgroundColor =
-        activePalette[backgroundColor] ?? activePalette[15];
+      span.style.color = colors.foreground;
+      span.style.backgroundColor = colors.background;
       if (joinsVertically) span.classList.add("terminal-cell--join-y");
       line.append(span);
       previousKey = key;
@@ -1374,48 +1697,17 @@ function setHardwareIndicator(element, requestedState, label) {
   element.setAttribute("aria-label", label);
 }
 
-function updateKeyboardLockIndicators(event) {
-  const states = keyboardLockStatesFromEvent(event);
-  setKeyboardLockIndicator(
-    elements.capsLockIndicator,
-    "Caps Lock",
-    states.capsLock,
-  );
-  setKeyboardLockIndicator(
-    elements.numLockIndicator,
-    "Num Lock",
-    states.numLock,
-  );
-  setKeyboardLockIndicator(
-    elements.scrollLockIndicator,
-    "Scroll Lock",
-    states.scrollLock,
-  );
-}
-
-function resetKeyboardLockIndicators() {
-  setKeyboardLockIndicator(elements.capsLockIndicator, "Caps Lock", "unknown");
-  setKeyboardLockIndicator(elements.numLockIndicator, "Num Lock", "unknown");
-  setKeyboardLockIndicator(
-    elements.scrollLockIndicator,
-    "Scroll Lock",
-    "unknown",
-  );
-}
-
-function setKeyboardLockIndicator(element, label, requestedState) {
-  const state = ["on", "off", "unknown"].includes(requestedState)
-    ? requestedState
-    : "unknown";
-  const presentation = {
-    off: { glyph: "\u25cb", label: "off" },
-    on: { glyph: "\u25cf", label: "on" },
-    unknown: { glyph: "?", label: "status unknown" },
-  }[state];
+function toggleVirtualKeyboardLock(element, label) {
+  const enabled = element.getAttribute("aria-pressed") !== "true";
+  const state = enabled ? "on" : "off";
+  const presentation = enabled
+    ? { glyph: "\u25cf", label: "on" }
+    : { glyph: "\u25cb", label: "off" };
   element.dataset.state = state;
+  element.setAttribute("aria-pressed", String(enabled));
   element.querySelector(".keyboard-lock-light").textContent =
     presentation.glyph;
-  element.setAttribute("aria-label", `${label} ${presentation.label}`);
+  element.setAttribute("aria-label", `Virtual ${label} ${presentation.label}`);
 }
 
 function machineAcceptsInput(lifecycle) {
@@ -1628,7 +1920,10 @@ function moveHistory(offset) {
     historyCursor === commandHistory.length
       ? historyDraft
       : (commandHistory[historyCursor] ?? "");
-  queueMicrotask(() => elements.commandInput.setSelectionRange(128, 128));
+  queueMicrotask(() => {
+    elements.commandInput.setSelectionRange(128, 128);
+    refreshLocalLineCursor();
+  });
 }
 
 async function api(path, options = {}) {
@@ -1694,6 +1989,7 @@ function setInputAvailable(available, state) {
       : writable
         ? interactionStateLabel()
         : state;
+  if (!writable && completionShelf.state.kind !== "closed") hideCompletions();
   updatePowerButton();
   updateEjectButton();
   if (writable) elements.commandInput.focus();
@@ -1709,23 +2005,33 @@ function interactionStateLabel() {
 }
 
 function renderInteractionHints(interaction) {
+  if (completionShelf.state.kind !== "closed") return;
+  renderKeyboardHints(
+    interaction.hints.length === 0
+      ? [{ key: "", label: "Input unavailable" }]
+      : interaction.hints,
+    interaction.helpTopicId ?? "",
+  );
+}
+
+function renderKeyboardHints(hints, helpTopicId = "") {
   const fragment = document.createDocumentFragment();
-  if (interaction.hints.length === 0) {
-    fragment.append(document.createTextNode("Input unavailable"));
-  } else {
-    interaction.hints.forEach((hint, index) => {
-      if (index > 0) {
-        const separator = document.createElement("span");
-        separator.setAttribute("aria-hidden", "true");
-        separator.textContent = " \u00b7 ";
-        fragment.append(separator);
-      }
+  hints.forEach((hint, index) => {
+    if (index > 0) {
+      const separator = document.createElement("span");
+      separator.setAttribute("aria-hidden", "true");
+      separator.textContent = " \u00b7 ";
+      fragment.append(separator);
+    }
+    if (hint.key.length > 0) {
       const key = document.createElement("kbd");
       key.textContent = hint.key;
       fragment.append(key, document.createTextNode(` ${hint.label}`));
-    });
-  }
-  elements.keyboardHelp.dataset.helpTopicId = interaction.helpTopicId ?? "";
+    } else {
+      fragment.append(document.createTextNode(hint.label));
+    }
+  });
+  elements.keyboardHelp.dataset.helpTopicId = helpTopicId;
   elements.keyboardHelp.replaceChildren(fragment);
 }
 
@@ -1778,6 +2084,7 @@ function editCommandLine(key) {
     input.setSelectionRange(wordStart, wordStart);
   }
   historyDraft = input.value;
+  refreshLocalLineCursor();
 }
 
 function deleteAtCursor() {
@@ -1788,6 +2095,7 @@ function deleteAtCursor() {
   input.value = `${input.value.slice(0, start)}${input.value.slice(deleteEnd)}`;
   input.setSelectionRange(start, start);
   historyDraft = input.value;
+  refreshLocalLineCursor();
 }
 
 async function closeSession() {
@@ -1872,7 +2180,7 @@ function fitTerminal(columns, rows) {
   const lineHeightRatio = 1;
   const raster = calculateTextRasterPresentation({ columns, rows });
   elements.terminalDisplay.dataset.rasterKind = "text";
-  const fitted = calculateFixedGridFontSize({
+  const fitted = calculateIntegerGridPresentation({
     availableHeight: available.height,
     availableWidth: available.width,
     columns,
@@ -1884,16 +2192,17 @@ function fitTerminal(columns, rows) {
   if (fitted.kind === "unmeasurable") return;
   elements.terminalStage.style.setProperty(
     "--terminal-font-size",
-    `${fitted.pixels.toFixed(2)}px`,
+    `${String(fitted.pixels)}px`,
   );
-  elements.terminalStage.style.setProperty(
+  elements.terminalShell.style.setProperty(
     "--terminal-frame-width",
-    `${(columns * raster.physicalCellRatio * fitted.pixels).toFixed(2)}px`,
+    `${String(fitted.frameWidth)}px`,
   );
   elements.terminalStage.style.setProperty(
     "--terminal-frame-height",
-    `${(raster.fittedRows * lineHeightRatio * fitted.pixels).toFixed(2)}px`,
+    `${String(fitted.frameHeight)}px`,
   );
+  elements.terminalDisplay.dataset.integerScale = String(fitted.pixels);
   elements.terminalStage.style.setProperty(
     "--terminal-raster-margin",
     `${String(raster.rasterMarginRows)}em`,

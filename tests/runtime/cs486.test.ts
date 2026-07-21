@@ -5,6 +5,7 @@ import {
   createCs486Flat32MemoryMetadata,
   runCs486,
   Cs486Fault,
+  type Cs486ExecutableV3,
 } from "../../src/domain/cpu/cs486.js";
 
 describe("CS486DX execution core", (): void => {
@@ -160,8 +161,10 @@ describe("CS486DX execution core", (): void => {
   });
 
   it("faults before the downward-growing stack overwrites static data", (): void => {
+    const { dataModel, ...legacy } = assembleCs486("push eax\npush eax\nhalt");
+    expect(dataModel).toBe("cs-word32-v1");
     const executable = {
-      ...assembleCs486("push eax\npush eax\nhalt"),
+      ...legacy,
       dataBytes: 65_532,
       memory: createCs486Flat32MemoryMetadata({ stackBytes: 4 }),
       version: 3 as const,
@@ -186,11 +189,17 @@ describe("CS486DX execution core", (): void => {
     );
     expect(() =>
       runCs486(
-        {
-          ...assembleCs486("mov esp, 0\npop eax\nhalt"),
-          dataBytes: 4,
-          version: 3 as const,
-        },
+        ((): Cs486ExecutableV3 => {
+          const { dataModel, ...legacy } = assembleCs486(
+            "mov esp, 0\npop eax\nhalt",
+          );
+          expect(dataModel).toBe("cs-word32-v1");
+          return {
+            ...legacy,
+            dataBytes: 4,
+            version: 3 as const,
+          };
+        })(),
         { memoryBytes: 65_540 },
       ),
     ).toThrowError(

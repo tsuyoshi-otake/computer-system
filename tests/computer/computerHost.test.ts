@@ -14,7 +14,7 @@ import {
 } from "../../src/domain/computer/hardware.js";
 
 describe("ComputerRuntime", (): void => {
-  it("boots startup.py and stops explicitly when the program completes", (): void => {
+  it("holds guest input and CPU through staged POST before startup completes", (): void => {
     const record = computer(
       "computer-1",
       'import term\nterm.write("booted")\n',
@@ -22,17 +22,36 @@ describe("ComputerRuntime", (): void => {
     const runtime = runtimeWith(record);
     expect(runtime.powerOn(record.computerId)).toMatchObject({
       outcome: "accepted",
-      state: "running",
+      state: "booting",
     });
+    expect(runtime.queueEvent(record.computerId, "key", 42)).toMatchObject({
+      outcome: "ignored",
+      reason: "not_running",
+    });
+    expect(
+      runtime.executeDebugShellCommand(record.computerId, "pwd"),
+    ).toMatchObject({ outcome: "ignored", reason: "not_running" });
+    runTicks(runtime, 70);
+    expect(record.lifecycle.state).toEqual({ kind: "booting" });
+    expect(record.display.state.kind).toBe("post");
+    expect(record.terminal.snapshot().rows.join("\n")).not.toContain("booted");
+    expect(completeBootCycle(runtime, record)).toBe(1);
     runTicks(runtime, 12);
     expect(record.lifecycle.state).toEqual({ kind: "off" });
-    expect(record.terminal.line(1)).toMatch(/^booted/u);
+    expect(
+      record.terminal.snapshot().rows.some((line) => /^booted/u.test(line)),
+    ).toBe(true);
   });
 
   it("runs a bounded MicroPython file through the MCP debug path", (): void => {
-    const record = computer("c-000001", "import os\nos.pull_event()\n");
+    const record = computer(
+      "c-000001",
+      "import os\nos.pull_event()\n",
+      8 * 1_024 * 1_024,
+    );
     const runtime = runtimeWith(record);
     runtime.powerOn(record.computerId);
+    completeBootCycle(runtime, record);
     record.filesystem.writeFile("/tmp/demo.py", "print(6 * 7)\n");
 
     const result = runtime.executeDebugShellCommand(
@@ -52,10 +71,231 @@ describe("ComputerRuntime", (): void => {
     }
   });
 
-  it("schedules MCP Python work and completes it from later ticks", (): void => {
-    const record = computer("c-000020", "import os\nos.pull_event()\n");
+  it("runs template strings through the production Python command and returns RAM to baseline", (): void => {
+    const record = computer(
+      "c-000096",
+      "import os\nos.pull_event()\n",
+      8 * 1_024 * 1_024,
+    );
     const runtime = runtimeWith(record);
     runtime.powerOn(record.computerId);
+    completeBootCycle(runtime, record);
+    const baseline = runtime.guestMemoryStatus(record.computerId)?.usedBytes;
+    expect(baseline).toBeGreaterThan(0);
+    record.filesystem.writeFile(
+      "/tmp/template.py",
+      [
+        "from string.templatelib import Template",
+        'template = t"left={40 + 2!s:04d}"',
+        "print(template.strings[0])",
+        "print(template.values[0])",
+        "print(template.interpolations[0].format_spec)",
+        "print(isinstance(template, Template))",
+        "",
+      ].join("\n"),
+    );
+
+    const result = runtime.executeDebugShellCommand(
+      record.computerId,
+      "python /tmp/template.py",
+    );
+
+    expect(result).toMatchObject({ exitCode: 0, outcome: "completed" });
+    if (result.outcome === "completed") {
+      expect(
+        result.stdout
+          .split("\n")
+          .map((line) => line.trimEnd())
+          .join("\n"),
+      ).toBe("left=\n42\n04d\nTrue\n");
+    }
+    expect(runtime.guestMemoryStatus(record.computerId)?.usedBytes).toBe(
+      baseline,
+    );
+  });
+
+  it("runs descriptors, attribute hooks, and deletion through production Python and returns RAM to baseline", (): void => {
+    const record = computer(
+      "c-000097",
+      "import os\nos.pull_event()\n",
+      8 * 1_024 * 1_024,
+    );
+    const runtime = runtimeWith(record);
+    runtime.powerOn(record.computerId);
+    completeBootCycle(runtime, record);
+    const baseline = runtime.guestMemoryStatus(record.computerId)?.usedBytes;
+    expect(baseline).toBeGreaterThan(0);
+    record.filesystem.writeFile(
+      "/tmp/descriptors.py",
+      [
+        "class Field:",
+        "    def __set_name__(self, owner, name):",
+        "        self.storage = '_' + name",
+        "    def __get__(self, instance, owner):",
+        "        if instance is None:",
+        "            return owner.__name__",
+        "        return instance._value",
+        "    def __set__(self, instance, value):",
+        "        instance._value = value",
+        "    def __delete__(self, instance):",
+        "        del instance._value",
+        "class Base:",
+        "    value = Field()",
+        "    def __getattribute__(self, name):",
+        "        if name == 'answer':",
+        "            return 44",
+        "        return object.__getattribute__(self, name)",
+        "    def __getattr__(self, name):",
+        "        if name == 'virtual':",
+        "            return 45",
+        "        raise AttributeError(name)",
+        "    def __setattr__(self, name, value):",
+        "        object.__setattr__(self, name, value)",
+        "    def __delattr__(self, name):",
+        "        object.__delattr__(self, name)",
+        "    @property",
+        "    def score(self):",
+        "        return self._score",
+        "    @score.setter",
+        "    def score(self, value):",
+        "        self._score = value",
+        "    @score.deleter",
+        "    def score(self):",
+        "        del self._score",
+        "    @staticmethod",
+        "    def add(left, right):",
+        "        return left + right",
+        "    @classmethod",
+        "    def owner(cls):",
+        "        return cls.__name__",
+        "    def method(self):",
+        "        return self.value",
+        "class Child(Base):",
+        "    pass",
+        "item = Child()",
+        "item.value = 42",
+        "item.score = 43",
+        "bound = item.method",
+        "print(item.value)",
+        "print(item.score)",
+        "print(Child.value)",
+        "print(item.add(3, 4))",
+        "print(item.owner())",
+        "print(bound.__self__ is item and bound.__func__ is Base.method)",
+        "print(item.answer)",
+        "print(item.virtual)",
+        "print(setattr(item, 'scratch', 46) is None)",
+        "print(getattr(item, 'scratch'))",
+        "print(delattr(item, 'scratch') is None)",
+        "print(getattr(item, 'scratch', 47))",
+        "del item.score",
+        "print(getattr(item, '_score', 48))",
+        "del item.value",
+        "print(getattr(item, '_value', 49))",
+        "",
+      ].join("\n"),
+    );
+
+    const result = runtime.executeDebugShellCommand(
+      record.computerId,
+      "python /tmp/descriptors.py",
+    );
+
+    expect(result).toMatchObject({ exitCode: 0, outcome: "completed" });
+    if (result.outcome === "completed") {
+      expect(
+        result.stdout
+          .split("\n")
+          .map((line) => line.trimEnd())
+          .join("\n"),
+      ).toBe(
+        "42\n43\nChild\n7\nChild\nTrue\n44\n45\nTrue\n46\nTrue\n47\n48\n49\n",
+      );
+    }
+    expect(runtime.guestMemoryStatus(record.computerId)?.usedBytes).toBe(
+      baseline,
+    );
+  });
+
+  it("runs C3 and cooperative super through production Python and returns RAM to baseline", (): void => {
+    const record = computer(
+      "c-000100",
+      "import os\nos.pull_event()\n",
+      8 * 1_024 * 1_024,
+    );
+    const runtime = runtimeWith(record);
+    runtime.powerOn(record.computerId);
+    completeBootCycle(runtime, record);
+    const baseline = runtime.guestMemoryStatus(record.computerId)?.usedBytes;
+    expect(baseline).toBeGreaterThan(0);
+    record.filesystem.writeFile(
+      "/tmp/mro.py",
+      [
+        "class Root:",
+        "    value = 40",
+        "    def chain(self):",
+        '        return "R"',
+        "class Left(Root):",
+        "    value = 41",
+        "    def chain(self):",
+        '        return "L" + super().chain()',
+        "class Right(Root):",
+        "    value = 99",
+        "    def chain(self):",
+        '        return "T" + super().chain()',
+        "class Diamond(Left, Right):",
+        "    def __new__(cls):",
+        "        item = super().__new__(cls)",
+        "        item.created = 42",
+        "        return item",
+        "    def __init__(self):",
+        "        super().__init__()",
+        "    def chain(self):",
+        '        return "D" + super().chain()',
+        "item = Diamond()",
+        "print(item.value)",
+        "print(Diamond.__bases__[1].__name__)",
+        "print(Diamond.__mro__[3].__name__)",
+        "print(isinstance(item, Right) and issubclass(Diamond, Left))",
+        "print(item.chain())",
+        "print(super(Left, item).__self_class__ is Diamond)",
+        "print(item.created)",
+        "class Redirect:",
+        "    def __new__(cls):",
+        "        return 43",
+        "print(Redirect())",
+        "",
+      ].join("\n"),
+    );
+
+    const result = runtime.executeDebugShellCommand(
+      record.computerId,
+      "python /tmp/mro.py",
+    );
+
+    expect(result).toMatchObject({ exitCode: 0, outcome: "completed" });
+    if (result.outcome === "completed") {
+      expect(
+        result.stdout
+          .split("\n")
+          .map((line) => line.trimEnd())
+          .join("\n"),
+      ).toBe("41\nRight\nRoot\nTrue\nDLTR\nTrue\n42\n43\n");
+    }
+    expect(runtime.guestMemoryStatus(record.computerId)?.usedBytes).toBe(
+      baseline,
+    );
+  });
+
+  it("schedules MCP Python work and completes it from later ticks", (): void => {
+    const record = computer(
+      "c-000020",
+      "import os\nos.pull_event()\n",
+      8 * 1_024 * 1_024,
+    );
+    const runtime = runtimeWith(record);
+    runtime.powerOn(record.computerId);
+    completeBootCycle(runtime, record);
     record.filesystem.writeFile("/tmp/deferred.py", "print(21 * 2)\n");
     let completion: DebugShellCommandCompletion | undefined;
 
@@ -77,9 +317,14 @@ describe("ComputerRuntime", (): void => {
   });
 
   it("runs bounded inline Python through the MCP debug path", (): void => {
-    const record = computer("c-000018", "import os\nos.pull_event()\n");
+    const record = computer(
+      "c-000018",
+      "import os\nos.pull_event()\n",
+      8 * 1_024 * 1_024,
+    );
     const runtime = runtimeWith(record);
     runtime.powerOn(record.computerId);
+    completeBootCycle(runtime, record);
 
     const result = runtime.executeDebugShellCommand(
       record.computerId,
@@ -93,7 +338,7 @@ describe("ComputerRuntime", (): void => {
     });
     if (result.outcome !== "completed") return;
     expect(result.stderr).toMatch(
-      /^Python\/CS486DX: 1532 machine instructions, \d+ CPU cycles,/u,
+      /^Python\/CS486DX: 1536 machine instructions, \d+ CPU cycles,/u,
     );
     expect(result.cpuCycles).toBeGreaterThan(0);
     expect(record.filesystem.exists("/tmp/__mcp_inline__.py")).toBe(false);
@@ -113,7 +358,7 @@ describe("ComputerRuntime", (): void => {
         "print(total)",
       ].join("\n"),
     );
-    runTicks(runtime, 2);
+    completeBootCycle(runtime, record);
 
     runtime.queueEvent(
       record.computerId,
@@ -139,7 +384,7 @@ describe("ComputerRuntime", (): void => {
     const runtime = runtimeWith(record);
     runtime.powerOn(record.computerId);
     record.filesystem.writeFile("/tmp/loop.py", "while True:\n    pass\n");
-    runTicks(runtime, 2);
+    completeBootCycle(runtime, record);
     runtime.queueEvent(
       record.computerId,
       "terminal_line",
@@ -180,6 +425,7 @@ describe("ComputerRuntime", (): void => {
       "/tmp/loop.asm",
       "start:\nadd eax,1\njmp start\n",
     );
+    completeBootCycle(runtime, record);
     expect(
       runtime.executeDebugShellCommand(
         record.computerId,
@@ -211,7 +457,7 @@ describe("ComputerRuntime", (): void => {
       "/tmp/event.py",
       'import os\nos.pull_event("custom")\nprint(42)\n',
     );
-    runTicks(runtime, 2);
+    completeBootCycle(runtime, record);
 
     runtime.queueEvent(
       record.computerId,
@@ -246,7 +492,7 @@ describe("ComputerRuntime", (): void => {
     const runtime = runtimeWith(record);
     runtime.powerOn(record.computerId);
     record.filesystem.writeFile("/tmp/broken.py", "if True print(42)\n");
-    runTicks(runtime, 2);
+    completeBootCycle(runtime, record);
 
     runtime.queueEvent(
       record.computerId,
@@ -262,7 +508,11 @@ describe("ComputerRuntime", (): void => {
   });
 
   it("reports comparable CPU cycles across ASM, C++, and Python/CS486DX", (): void => {
-    const record = computer("c-000002", "import os\nos.pull_event()\n");
+    const record = computer(
+      "c-000002",
+      "import os\nos.pull_event()\n",
+      8 * 1_024 * 1_024,
+    );
     const runtime = runtimeWith(record);
     runtime.powerOn(record.computerId);
     record.filesystem.writeFile(
@@ -280,6 +530,7 @@ describe("ComputerRuntime", (): void => {
       ].join("\n"),
     );
     record.filesystem.writeFile("/tmp/answer.py", "print(6 * 7)\n");
+    completeBootCycle(runtime, record);
 
     expect(
       runtime.executeDebugShellCommand(
@@ -342,12 +593,17 @@ describe("ComputerRuntime", (): void => {
         "",
       ].join("\n"),
     );
+    completeBootCycle(runtime, record);
 
+    const compiled = runtime.executeDebugShellCommand(
+      record.computerId,
+      "cc -I /tmp/inc -D BASE_VALUE=40 /tmp/preprocess.c -o /tmp/preprocess",
+    );
     expect(
-      runtime.executeDebugShellCommand(
-        record.computerId,
-        "cc -I /tmp/inc -D BASE_VALUE=40 /tmp/preprocess.c -o /tmp/preprocess",
-      ),
+      compiled,
+      compiled.outcome === "completed"
+        ? compiled.stderr
+        : JSON.stringify(compiled),
     ).toMatchObject({ outcome: "completed", exitCode: 0 });
     expect(
       runtime.executeDebugShellCommand(
@@ -373,7 +629,11 @@ describe("ComputerRuntime", (): void => {
   });
 
   it("imports a C object from Python through the MCP debug path", (): void => {
-    const record = computer("c-000003", "import os\nos.pull_event()\n");
+    const record = computer(
+      "c-000003",
+      "import os\nos.pull_event()\n",
+      8 * 1_024 * 1_024,
+    );
     const runtime = runtimeWith(record);
     runtime.powerOn(record.computerId);
     record.filesystem.writeFile(
@@ -384,6 +644,7 @@ describe("ComputerRuntime", (): void => {
       "/tmp/use_fastmath.py",
       "import fastmath\nprint(fastmath.answer())\n",
     );
+    completeBootCycle(runtime, record);
 
     expect(
       runtime.executeDebugShellCommand(
@@ -416,8 +677,9 @@ describe("ComputerRuntime", (): void => {
     const runtime = runtimeWith(record);
     expect(runtime.powerOn(record.computerId)).toMatchObject({
       outcome: "accepted",
-      state: "running",
+      state: "booting",
     });
+    completeBootCycle(runtime, record);
     record.filesystem.writeFile("/drives/c/demo.py", "print(6 * 7)\n");
 
     const result = runtime.executeDebugShellCommand(
@@ -441,7 +703,7 @@ describe("ComputerRuntime", (): void => {
     );
     const runtime = runtimeWith(record);
     runtime.powerOn(record.computerId);
-    runtime.runTick();
+    completeBootCycle(runtime, record);
     expect(record.lifecycle.state.kind).toBe("sleeping");
     runtime.runTick();
     runtime.runTick();
@@ -464,6 +726,7 @@ describe("ComputerRuntime", (): void => {
     const shutdown = computer("computer-3", "import os\nos.shutdown()\n");
     const shutdownRuntime = runtimeWith(shutdown);
     shutdownRuntime.powerOn(shutdown.computerId);
+    completeBootCycle(shutdownRuntime, shutdown);
     runTicks(shutdownRuntime, 12);
     expect(shutdown.lifecycle.state).toEqual({ kind: "off" });
     expect(shutdownRuntime.shutdown(shutdown.computerId)).toMatchObject({
@@ -487,22 +750,11 @@ describe("ComputerRuntime", (): void => {
     );
     const rebootRuntime = runtimeWith(rebooted);
     rebootRuntime.powerOn(rebooted.computerId);
-    rebootRuntime.runTick();
+    completeBootCycle(rebootRuntime, rebooted);
     rebootRuntime.queueEvent(rebooted.computerId, "reboot");
-    for (let tick = 0; tick < 100; tick += 1) {
-      if (
-        rebooted.lifecycle.state.kind === "running" &&
-        rebooted.display.state.kind === "post"
-      ) {
-        break;
-      }
-      rebootRuntime.runTick();
-    }
-    expect(rebooted.lifecycle.state.kind).toBe("running");
-    expect(rebooted.terminal.line(2)).toContain("CSBIOS System Configuration");
-    expect(rebooted.display.state.kind).toBe("post");
-    rebootRuntime.runTick();
-    expect(rebooted.terminal.line(1)).toMatch(/^boot/u);
+    expect(completeBootCycle(rebootRuntime, rebooted)).toBeGreaterThan(70);
+    expect(rebooted.lifecycle.state.kind).toBe("waiting_event");
+    expect(rebooted.display.state.kind).toBe("text");
     expect(
       rebooted.terminal.snapshot().rows.filter((line) => /^boot/u.test(line)),
     ).toHaveLength(1);
@@ -529,7 +781,7 @@ describe("ComputerRuntime", (): void => {
     configureInMemoryPersistence(runtime, record);
     runtime.powerOn(record.computerId);
 
-    runtime.runTick();
+    completeBootCycle(runtime, record);
     expect(record.lifecycle.state.kind).toBe("running");
     runTicks(runtime, 1_000);
     expect(record.lifecycle.state).toEqual({ kind: "off" });
@@ -544,7 +796,7 @@ describe("ComputerRuntime", (): void => {
     const fault = computer("computer-7", "missing_name\n");
     const faultRuntime = runtimeWith(fault);
     faultRuntime.powerOn(fault.computerId);
-    faultRuntime.runTick();
+    completeBootCycle(faultRuntime, fault);
     expect(fault.lifecycle.state.kind).toBe("crashed");
     if (fault.lifecycle.state.kind === "crashed") {
       expect(fault.lifecycle.state.message).toMatch(/not defined/u);
@@ -553,8 +805,15 @@ describe("ComputerRuntime", (): void => {
   });
 });
 
-function computer(id: string, startup: string): ComputerRecord {
+function computer(
+  id: string,
+  startup: string,
+  memoryBytes = 2 * 1_024 * 1_024,
+): ComputerRecord {
   const record = new ComputerRecord(id, "standard");
+  if (record.hardware.memoryBytes !== memoryBytes) {
+    record.configureHardware({ ...record.hardware, memoryBytes });
+  }
   record.filesystem.writeFile("/startup.py", startup);
   return record;
 }
@@ -595,4 +854,31 @@ function configureInMemoryPersistence(
 
 function runTicks(runtime: ComputerRuntime, count: number): void {
   for (let tick = 0; tick < count; tick += 1) runtime.runTick();
+}
+
+function completeBootCycle(
+  runtime: ComputerRuntime,
+  record: ComputerRecord,
+  maximumTicks = 200,
+): number {
+  let observedPost = false;
+  for (let tick = 0; tick <= maximumTicks; tick += 1) {
+    if (
+      record.lifecycle.state.kind === "booting" &&
+      record.display.state.kind === "post"
+    ) {
+      observedPost = true;
+    }
+    if (
+      observedPost &&
+      record.lifecycle.state.kind !== "booting" &&
+      record.display.state.kind !== "post"
+    ) {
+      return tick;
+    }
+    if (tick < maximumTicks) runtime.runTick();
+  }
+  throw new Error(
+    `Computer ${record.computerId} did not complete a POST cycle within ${String(maximumTicks)} ticks`,
+  );
 }

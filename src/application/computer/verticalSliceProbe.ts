@@ -97,7 +97,7 @@ export function runVerticalSliceProbe(
           : `missing ${power.computerId}`;
     throw new Error(`Probe computer did not boot: ${reason}`);
   }
-  runtime.runTick();
+  runUntilOutput(runtime, record, 128);
   const outputMask = record.redstone.outputMask;
   const termination = runtime.terminate(record.computerId);
   const terminatedOff =
@@ -116,6 +116,18 @@ export function runVerticalSliceProbe(
     startupPresent: record.filesystem.exists("/startup.py"),
     terminatedOff,
   };
+}
+
+function runUntilOutput(
+  runtime: ComputerRuntime,
+  record: ComputerRecord,
+  maximumTicks: number,
+): void {
+  for (let tick = 0; tick < maximumTicks; tick += 1) {
+    if (record.redstone.outputMask === 2) return;
+    runtime.runTick();
+  }
+  throw new Error("Probe computer did not execute startup after CSBIOS");
 }
 
 function runUntilOff(

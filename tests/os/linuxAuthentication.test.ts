@@ -3,10 +3,11 @@ import { describe, expect, it } from "vitest";
 import { openLinuxAccountDatabase } from "../../src/application/os/linuxAccounts.js";
 import { sha256Hex } from "../../src/application/os/passwordHash.js";
 import { ShellSession } from "../../src/application/os/shellSession.js";
+import { OsRuntimeState } from "../../src/application/os/osRuntimeState.js";
 import { InMemoryFilesystem } from "../../src/domain/filesystem/inMemoryFilesystem.js";
 
 const linuxMotd =
-  "Welcome to CS-Linux 1.0. Type 'help' for commands or 'man cs-linux' for the field guide.";
+  "Welcome to CS-Linux 1.0.\nType 'help' for commands or 'man cs-linux' for the field guide.";
 
 describe("CS-Linux authentication", (): void => {
   it("implements the standard SHA-256 digest", (): void => {
@@ -22,7 +23,7 @@ describe("CS-Linux authentication", (): void => {
     const filesystem = new InMemoryFilesystem();
     const shell = linuxShell(filesystem);
 
-    expect(shell.takeStartupLines()).toEqual([]);
+    expect(shell.takeStartupLines()).toEqual(["CS-Linux 1.0 console tty1"]);
     expect(shell.prompt()).toBe("New password: ");
     expect(shell.isSecretInput()).toBe(true);
     expect(shell.complete("ec", 2).candidates).toEqual([]);
@@ -56,25 +57,81 @@ describe("CS-Linux authentication", (): void => {
     initial.submit("correct-horse");
 
     const shell = linuxShell(filesystem);
-    expect(shell.takeStartupLines()).toEqual([]);
-    expect(shell.prompt()).toBe("login: ");
+    expect(shell.takeStartupLines()).toEqual(["CS-Linux 1.0 console tty1"]);
+    expect(shell.prompt()).toBe("c-000001 login: ");
     expect(shell.submitDebugCommand("whoami").stderr).toContain(
       "login is required",
     );
     expect(shell.submit("cs").exitCode).toBe(0);
     expect(shell.prompt()).toBe("Password: ");
-    expect(shell.submit("wrong-password").sleepTicks).toBeUndefined();
+    const firstFailure = shell.submit("wrong-password");
+    expect(firstFailure.stderr).toBe("Login incorrect\n");
+    expect(firstFailure.sleepTicks).toBeUndefined();
     expect(shell.submit("cs").exitCode).toBe(0);
-    expect(shell.submit("wrong-password").sleepTicks).toBeUndefined();
+    const secondFailure = shell.submit("wrong-password");
+    expect(secondFailure.stderr).toBe("Login incorrect\n");
+    expect(secondFailure.sleepTicks).toBeUndefined();
     expect(shell.submit("cs").exitCode).toBe(0);
-    expect(shell.submit("wrong-password").sleepTicks).toBe(40);
-    expect(shell.prompt()).toBe("login: ");
+    const thirdFailure = shell.submit("wrong-password");
+    expect(thirdFailure.stderr).toBe(
+      "Login incorrect\nToo many attempts; retrying in 2 seconds.\n",
+    );
+    expect(thirdFailure.sleepTicks).toBe(40);
+    expect(shell.prompt()).toBe("c-000001 login: ");
     expect(shell.submit("cs").exitCode).toBe(0);
     expect(shell.prompt()).toBe("Password: ");
-    expect(shell.submit("correct-horse").stdout).toBe(
-      `Login successful.\n${linuxMotd}\n`,
-    );
+    expect(shell.submit("correct-horse").stdout).toBe(`${linuxMotd}\n`);
     expect(shell.submit("whoami").stdout).toBe("cs\n");
+  });
+
+  it("prints MOTD before the prior wall-clock login record", (): void => {
+    const filesystem = new InMemoryFilesystem();
+    const runtime = new OsRuntimeState("c-000001");
+    let wallMilliseconds = Date.UTC(2026, 6, 19, 8, 9, 10);
+    const createSession = (): ShellSession =>
+      new ShellSession(filesystem, {
+        clock: {
+          currentGameTime: (): {
+            absoluteTicks: number;
+            timeOfDay: number;
+          } => ({ absoluteTicks: 0, timeOfDay: 0 }),
+          currentWallTimeMilliseconds: (): number => wallMilliseconds,
+        },
+        computerName: "c-000001",
+        osProfile: "linux",
+        osRuntime: runtime,
+        passwordSalt: (): string => "fixed-test-salt-01",
+        requireLogin: true,
+      });
+
+    const initial = createSession();
+    initial.submit("correct-horse");
+    initial.submit("correct-horse");
+    wallMilliseconds += 5_000;
+    initial.disconnect();
+    runtime.openLoginSession({
+      gid: 1001,
+      sessionId: "legacy-alice",
+      terminal: "tty2",
+      tick: 1,
+      uid: 1001,
+      username: "alice",
+    });
+
+    wallMilliseconds += 45_000;
+    const login = createSession();
+    expect(login.takeStartupLines()).toEqual(["CS-Linux 1.0 console tty1"]);
+    expect(login.prompt()).toBe("c-000001 login: ");
+    login.submit("cs");
+    expect(login.submit("correct-horse").stdout).toBe(
+      `${linuxMotd}\nLast login: Sun Jul 19 08:09:10 2026 on tty1 (disconnect)\n`,
+    );
+    expect(login.submit("who").stdout).toContain("Sun Jul 19 08:10:00 2026");
+    expect(login.submit("who").stdout).toContain("alice");
+    expect(login.submit("who").stdout).toContain("tick 1");
+    expect(login.submit("last").stdout).toContain("Sun Jul 19 08:10:00 2026");
+    expect(login.submit("last").stdout).toContain("alice");
+    expect(login.submit("last").stdout).toContain("tick 1");
   });
 
   it("returns an interrupted first-boot confirmation to setup-new", (): void => {
@@ -114,7 +171,7 @@ describe("CS-Linux authentication", (): void => {
     filesystem.delete("/home/operator");
 
     const login = linuxShell(filesystem);
-    expect(login.prompt()).toBe("login: ");
+    expect(login.prompt()).toBe("c-000001 login: ");
     expect(login.submit("operator").exitCode).toBe(0);
     expect(login.prompt()).toBe("Password: ");
     expect(() => login.submit("correct-horse")).not.toThrow();
@@ -142,12 +199,10 @@ describe("CS-Linux authentication", (): void => {
     });
 
     const login = linuxShell(filesystem);
-    expect(login.prompt()).toBe("login: ");
+    expect(login.prompt()).toBe("c-000001 login: ");
     expect(login.submit("operator").exitCode).toBe(0);
     expect(login.prompt()).toBe("Password: ");
-    expect(login.submit("correct-horse").stdout).toBe(
-      `Login successful.\n${linuxMotd}\n`,
-    );
+    expect(login.submit("correct-horse").stdout).toBe(`${linuxMotd}\n`);
     expect(login.submit("id -u").stdout).toBe("1000\n");
     expect(
       openLinuxAccountDatabase(filesystem).getShadowRecord("cs")?.state,

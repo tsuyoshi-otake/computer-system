@@ -23,11 +23,34 @@
 
 ## Boot, shutdown, and recovery
 
-- `powerOn()` enters `post` and renders the actual hardware profile in 80x25.
-  The next runtime step clears POST, enters text mode, and hands off to the
-  guest. DOS shows its identity, one blank line, and `C:\>`; Linux shows its
-  identity, one blank line, then password setup/login or the shell prompt. Do
-  not fabricate `tty1` or a startup shell-version banner.
+- `powerOn()` enters `post` and starts the deterministic, tick-driven 80x25
+  CSBIOS sequence. At 20 TPS it spans 70 ticks: black, CS-VGA, black,
+  `CSBIOS Revision 1.1`, bounded same-row memory updates, factual device and
+  boot-source detection, handoff black, and the selected OS starting line. Keep
+  the Computer `booting`, the guest CPU paused, and input unavailable until the
+  final handoff. Report only the active CPU, RAM, VGA/VRAM, floppy state, disk
+  quota, source, and target; never add AMI vendor strings, unsupported setup
+  prompts, or fabricated FPU/hardware claims. DOS then shows its identity, one
+  blank line, and `C:\>`.
+- Linux's `/sbin/cs-init` boots from `/etc/inittab`: `sysinit`/`wait`/
+  `initdefault` entries pick the target runlevel and its `respawn` entry owns
+  the tty1 getty; `S`-prefixed entries in that runlevel's `/etc/rcN.d` directory
+  start rc.d services (today: `syslog`, `cron`) via `cs-init-ctl`. This inittab
+  parse and rc.d service start-up runs synchronously inside `ShellSession`
+  construction (see `os/CLAUDE.md`), not paced across additional ComputerRuntime
+  ticks, so a standalone `ShellSession` (used directly by most unit tests, with
+  no external tick driver) still reaches a fully running OS on construction.
+  Once CSBIOS hands off, `ComputerRuntime` renders one authentic
+  `Starting <service>... [ OK ]` (or `[FAIL]`) line per already-started rc.d
+  service as a read-only pass over `OsRuntimeState` before the existing
+  single-tick lifecycle handoff continues; it never mutates service state, so it
+  does not consume extra ticks and does not change the pre-existing
+  CSBIOS-ready-to-running tick contract. Linux then shows its identity, one
+  blank line, then password setup/login or the shell prompt exactly as before;
+  do not fabricate a startup shell-version banner. A malformed `/etc/inittab`
+  (parse-time structural fault, e.g. missing or duplicate `initdefault`) fails
+  the whole boot explicitly; one rc.d service's own start failure does not, and
+  renders `[FAIL]` instead.
 - Syntax/runtime failure terminates display state as `faulted`. Shutdown and
   reboot release VRAM explicitly.
 - Graceful stop is bounded and observable: stop admission, signal owned work,

@@ -8,6 +8,7 @@ import {
   type Cs486ExecutableMemoryRequirements,
 } from "../../domain/cpu/cs486.js";
 import type { DosGuestMemoryManager } from "../os/dosGuestMemoryManager.js";
+import type { LinuxGuestMemoryManager } from "../os/linuxGuestMemoryManager.js";
 
 export interface GuestProcessMemoryIdentity {
   readonly displayName: string;
@@ -19,14 +20,26 @@ export interface GuestProcessMemoryGrant {
   readonly memoryBytes: number;
   readonly physicalReservationBytes: number;
   readonly released: boolean;
+  bindProcess(pid: number): void;
   release(): void;
 }
 
-export interface GuestProcessMemoryAdmission {
-  readonly dosMemoryManager?: DosGuestMemoryManager;
-  readonly identity: GuestProcessMemoryIdentity;
-  readonly ledger: GuestRamLedger;
-}
+export type GuestProcessMemoryAdmission =
+  | {
+      readonly identity: GuestProcessMemoryIdentity;
+      readonly kind: "dos";
+      readonly manager: DosGuestMemoryManager;
+    }
+  | {
+      readonly identity: GuestProcessMemoryIdentity;
+      readonly kind: "ledger";
+      readonly ledger: GuestRamLedger;
+    }
+  | {
+      readonly identity: GuestProcessMemoryIdentity;
+      readonly kind: "linux";
+      readonly manager: LinuxGuestMemoryManager;
+    };
 
 /**
  * Reserves physical guest RAM before constructing a CS486 process.
@@ -51,8 +64,13 @@ export function grantCs486MemoryRequirements(
   admission: GuestProcessMemoryAdmission,
 ): GuestProcessMemoryGrant {
   if (requirements.kind === "legacy") {
-    if (admission.dosMemoryManager !== undefined) {
-      return admission.dosMemoryManager.grantLegacyProcess(admission.identity);
+    if (admission.kind === "dos") {
+      return adaptUnboundGrant(
+        admission.manager.grantLegacyProcess(admission.identity),
+      );
+    }
+    if (admission.kind === "linux") {
+      return admission.manager.grantLegacyProcess(admission.identity);
     }
     const availableBytes = admission.ledger.availableBytes;
     if (availableBytes <= 0) {
@@ -67,8 +85,17 @@ export function grantCs486MemoryRequirements(
     );
   }
 
-  if (admission.dosMemoryManager !== undefined) {
-    return admission.dosMemoryManager.grantProcess({
+  if (admission.kind === "dos") {
+    return adaptUnboundGrant(
+      admission.manager.grantProcess({
+        ...admission.identity,
+        linearAddressSpaceBytes: requirements.linearAddressSpaceBytes,
+        physicalReservationBytes: requirements.physicalReservationBytes,
+      }),
+    );
+  }
+  if (admission.kind === "linux") {
+    return admission.manager.grantProcess({
       ...admission.identity,
       linearAddressSpaceBytes: requirements.linearAddressSpaceBytes,
       physicalReservationBytes: requirements.physicalReservationBytes,
@@ -104,8 +131,42 @@ function leaseGrant(
     get released(): boolean {
       return lease.released;
     },
+    bindProcess(pid: number): void {
+      requirePositivePid(pid);
+    },
     release(): void {
       if (!lease.released) lease.release();
     },
   });
+}
+
+function adaptUnboundGrant(grant: {
+  readonly memoryBytes: number;
+  readonly physicalReservationBytes: number;
+  readonly released: boolean;
+  release(): void;
+}): GuestProcessMemoryGrant {
+  return Object.freeze({
+    get memoryBytes(): number {
+      return grant.memoryBytes;
+    },
+    get physicalReservationBytes(): number {
+      return grant.physicalReservationBytes;
+    },
+    get released(): boolean {
+      return grant.released;
+    },
+    bindProcess(pid: number): void {
+      requirePositivePid(pid);
+    },
+    release(): void {
+      if (!grant.released) grant.release();
+    },
+  });
+}
+
+function requirePositivePid(pid: number): void {
+  if (!Number.isSafeInteger(pid) || pid <= 0) {
+    throw new RangeError("pid must be a positive safe integer");
+  }
 }

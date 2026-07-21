@@ -31,6 +31,10 @@ before effects.
   startup grace period, verify player count/readiness, and wait for join
   completion before UI probes. Retry `competing_form` only a bounded number of
   times.
+- A headless suite must capture the log cursor before BDS startup and wait for
+  the explicit `CS_STORAGE_MIGRATION` complete record before sending its probe.
+  This is required on preserved-world restarts; do not turn an early
+  `storage_migration` rejection into a later generic timeout.
 - Resolve the managed world's current exact `c-xxxxxx` identities and persisted
   hardware profiles. Never reuse an old four-digit browser number, LAN address,
   player name, or stale Computer ID as MCP identity.
@@ -163,6 +167,16 @@ the isolated server. Never point it at the interactive world.
 - Reject unsupported source PNGs explicitly and keep generated file sets
   deterministic. Shipped artwork changes require the Resource Pack version bump
   defined by `packs/CLAUDE.md`.
+
+## Hosted C archive builder
+
+- `generate-hosted-c-archives.mjs` is the only owner of the checked-in hosted-C
+  rootfs archive payloads. Keep its output deterministic and use `--check` in
+  ordinary builds; never compile or compress these archives during BDS module
+  evaluation.
+- A hosted library, header, data-model, object, or archive-format change must
+  run `npm run generate:hosted-c` and commit the exact generated TypeScript
+  payload.
 
 ## Verification
 

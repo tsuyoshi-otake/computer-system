@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { ComputerRuntime } from "../../src/application/computer/computerRuntime.js";
+import { compileCs486Source } from "../../src/application/toolchain/highLevelCompilers.js";
 import type { OsRuntimeState } from "../../src/application/os/osRuntimeState.js";
 import { ShellSession } from "../../src/application/os/shellSession.js";
 import { ComputerRecord } from "../../src/domain/computer/computer.js";
@@ -188,6 +189,31 @@ describe("ComputerRuntime background jobs", (): void => {
     expect(state.process(job.pid)).toBeUndefined();
   });
 
+  it("returns EPERM from CS ABI syscalls in a background process", (): void => {
+    const record = new ComputerRecord("c-000839", "standard");
+    const runtime = poweredRuntime(record);
+    const executable = compileCs486Source(
+      "c",
+      "int __cs_syscall(int selector, int a0, int a1, int a2);\n" +
+        "int main(){int result = __cs_syscall(1, 0, 0, 0); if(result == -1) return 0; return 99;}\n",
+    );
+    record.filesystem.writeFile(
+      "/tmp/abi-denied",
+      `CS486\n${JSON.stringify(executable)}`,
+    );
+    record.filesystem.setMetadata("/tmp/abi-denied", { mode: 0o755 });
+    const state = liveOsState(runtime, record.computerId);
+    runUntil(runtime, () => shellAcceptsInput(runtime, record));
+
+    submitLine(runtime, record, "run /tmp/abi-denied &");
+    const job = state.jobs(1_000)[0]!;
+    runUntil(runtime, () => state.job(job.jobId)?.state === "done");
+    expect(state.process(job.pid)).toMatchObject({
+      exitStatus: 0,
+      state: "zombie",
+    });
+  });
+
   it("rolls back the process atomically when the bounded job table is full", (): void => {
     const record = new ComputerRecord("c-000836", "standard");
     const runtime = poweredRuntime(record);
@@ -240,7 +266,7 @@ describe("ComputerRuntime background jobs", (): void => {
     runUntil(runtime, () => state.loginSessions().length === 1);
 
     runUntil(runtime, () => shellAcceptsInput(runtime, record));
-    expect(terminalText(record)).toContain("Login successful.");
+    expect(terminalText(record)).not.toContain("Login successful");
     expect(state.loginSessions()).toHaveLength(1);
     submitLine(runtime, record, "sleep 30 &");
     const job = state.jobs(1_000)[0]!;

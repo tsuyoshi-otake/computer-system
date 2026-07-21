@@ -30,6 +30,7 @@ describe("DOS memory architecture v2 integration", (): void => {
     const runtime = runtimeWithPersistence();
     runtime.register(record);
     expect(runtime.powerOn(record.computerId).outcome).toBe("accepted");
+    runThroughBoot(runtime, record);
     const firstBoot = runtime.guestMemoryStatus(record.computerId);
     expect(firstBoot).toBeDefined();
     expect(
@@ -41,6 +42,7 @@ describe("DOS memory architecture v2 integration", (): void => {
     powerDown(runtime, record);
 
     expect(runtime.powerOn(record.computerId).outcome).toBe("accepted");
+    runThroughBoot(runtime, record);
     expect(runtime.guestMemoryStatus(record.computerId)).toEqual(firstBoot);
     powerDown(runtime, record);
 
@@ -50,6 +52,7 @@ describe("DOS memory architecture v2 integration", (): void => {
     expect(restoredRuntime.powerOn(restored.computerId).outcome).toBe(
       "accepted",
     );
+    runThroughBoot(restoredRuntime, restored);
     expect(restoredRuntime.guestMemoryStatus(restored.computerId)).toEqual(
       firstBoot,
     );
@@ -102,6 +105,7 @@ describe("DOS memory architecture v2 integration", (): void => {
     const record = dosRecord("c-000463");
     runtime.register(record);
     expect(runtime.powerOn(record.computerId).outcome).toBe("accepted");
+    runThroughBoot(runtime, record);
     const baseline = runtime.guestMemoryStatus(record.computerId);
     expect(baseline).toBeDefined();
     record.filesystem.writeFile(
@@ -150,6 +154,7 @@ describe("DOS memory architecture v2 integration", (): void => {
     const record = dosRecord("c-000464");
     runtime.register(record);
     expect(runtime.powerOn(record.computerId).outcome).toBe("accepted");
+    runThroughBoot(runtime, record);
     const baseline = runtime.guestMemoryStatus(record.computerId);
     expect(baseline).toBeDefined();
     const access = new WebTerminalAccessRegistry();
@@ -197,6 +202,29 @@ function runtimeWithPersistence(): ComputerRuntime {
     }),
   });
   return runtime;
+}
+
+function runThroughBoot(
+  runtime: ComputerRuntime,
+  record: ComputerRecord,
+): void {
+  let observedBoot =
+    record.lifecycle.state.kind === "booting" ||
+    record.display.state.kind === "post";
+  for (let tick = 0; tick < 1_000; tick += 1) {
+    if (
+      observedBoot &&
+      record.lifecycle.state.kind !== "booting" &&
+      record.display.state.kind !== "post"
+    ) {
+      return;
+    }
+    runtime.runTick();
+    observedBoot ||=
+      record.lifecycle.state.kind === "booting" ||
+      record.display.state.kind === "post";
+  }
+  throw new Error("Computer did not complete its bounded CSBIOS boot cycle");
 }
 
 function powerDown(runtime: ComputerRuntime, record: ComputerRecord): void {

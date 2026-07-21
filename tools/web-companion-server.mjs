@@ -31,6 +31,14 @@ const defaultInputTimeoutMs = 2_000;
 const maximumPendingInputs = 32;
 const completionTimeoutMs = 2_000;
 const maximumPendingCompletions = 32;
+const maximumCompletionCandidates = 64;
+const maximumCompletionTextLength = 128;
+const completionCandidateKinds = new Set([
+  "command",
+  "device",
+  "directory",
+  "file",
+]);
 const powerTimeoutMs = 5_000;
 const maximumPendingPowerRequests = 32;
 const ejectTimeoutMs = 5_000;
@@ -325,20 +333,33 @@ export class WebCompanionServer {
     if (completion !== undefined) {
       const payload = JSON.parse(completion);
       const pending = this.pendingCompletions.get(payload.requestId);
+      const candidates = completionCandidatesFromPayload(payload.candidates);
       if (
         pending !== undefined &&
         pending.sessionId === payload.sessionId &&
         typeof payload.value === "string" &&
+        payload.value.length <= maximumCompletionTextLength &&
+        !/[\0\r\n]/u.test(payload.value) &&
         Number.isSafeInteger(payload.cursor) &&
-        Array.isArray(payload.candidates)
+        payload.cursor >= 0 &&
+        payload.cursor <= payload.value.length &&
+        Number.isSafeInteger(payload.replaceStart) &&
+        Number.isSafeInteger(payload.replaceEnd) &&
+        payload.replaceStart >= 0 &&
+        payload.replaceStart <= payload.replaceEnd &&
+        payload.replaceEnd === pending.cursor &&
+        payload.replaceEnd <= pending.value.length &&
+        typeof payload.truncated === "boolean" &&
+        candidates !== undefined
       ) {
         clearTimeout(pending.timer);
         this.pendingCompletions.delete(payload.requestId);
         pending.resolve({
-          candidates: payload.candidates
-            .filter((value) => typeof value === "string")
-            .slice(0, 64),
+          candidates,
           cursor: payload.cursor,
+          replaceEnd: payload.replaceEnd,
+          replaceStart: payload.replaceStart,
+          truncated: payload.truncated,
           value: payload.value,
         });
       }
@@ -825,12 +846,18 @@ export class WebCompanionServer {
     if (
       options.kind !== "line" &&
       options.kind !== "keys" &&
-      options.kind !== "interrupt"
+      options.kind !== "interrupt" &&
+      options.kind !== "abort-line"
     ) {
-      throw new Error("TUI input kind must be line, keys, or interrupt.");
+      throw new Error(
+        "TUI input kind must be line, keys, interrupt, or abort-line.",
+      );
     }
-    if (options.kind === "interrupt" && options.value !== undefined) {
-      throw new Error("TUI interrupt input must not include a value.");
+    if (
+      (options.kind === "interrupt" || options.kind === "abort-line") &&
+      options.value !== undefined
+    ) {
+      throw new Error("TUI control input must not include a value.");
     }
     return this.serializeComputerOperation(identity.computerId, async () => {
       const session = this.requireTuiSession(identity);
@@ -1139,6 +1166,13 @@ export class WebCompanionServer {
       );
       return { outcome: "accepted" };
     }
+    if (body?.kind === "abort-line") {
+      requireInteractionInput(interaction, "abort-line");
+      await this.bds.runWebRelay(
+        `scriptevent computer_system:web-abort-line ${active.sessionId}`,
+      );
+      return { outcome: "accepted" };
+    }
     if (body?.kind === "mouse") {
       const value = body.value;
       if (
@@ -1360,10 +1394,12 @@ export class WebCompanionServer {
       }, completionTimeoutMs);
       timer.unref();
       this.pendingCompletions.set(requestId, {
+        cursor: body.cursor,
         reject: rejectCompletion,
         resolve: resolveCompletion,
         sessionId: active.sessionId,
         timer,
+        value: body.value,
       });
       try {
         await this.bds.runWebRelay(
@@ -1925,13 +1961,17 @@ function requirePublishedTerminalInteraction(payload) {
     Array.isArray(interaction) ||
     interaction.schema !== 1 ||
     !["keys", "line", "none"].includes(interaction.inputMode) ||
+    !["block", "underline"].includes(interaction.cursorShape) ||
     !["cell", "none"].includes(interaction.pointer) ||
     !["dos-tui", "terminal"].includes(interaction.presentation) ||
     ![
       "busy",
+      "cs-abi",
       "csasm",
       "edit",
+      "less",
       "login",
+      "more",
       "pwb",
       "qbasic",
       "secret",
@@ -1944,6 +1984,7 @@ function requirePublishedTerminalInteraction(payload) {
     ].includes(interaction.context) ||
     typeof interaction.secretInput !== "boolean" ||
     typeof interaction.interrupt !== "boolean" ||
+    typeof interaction.history !== "boolean" ||
     (interaction.helpTopicId !== undefined &&
       !boundedInteractionText(interaction.helpTopicId, 64)) ||
     !Array.isArray(interaction.hints) ||
@@ -1959,6 +2000,8 @@ function requirePublishedTerminalInteraction(payload) {
     (interaction.pointer === "cell" &&
       (interaction.inputMode !== "keys" ||
         interaction.presentation !== "dos-tui")) ||
+    (interaction.history &&
+      (interaction.inputMode !== "line" || interaction.secretInput)) ||
     (interaction.secretInput &&
       interaction.inputMode !== "line" &&
       interaction.inputMode !== "none")
@@ -1981,11 +2024,13 @@ function requireInteractionInput(interaction, kind) {
   const allowed =
     kind === "interrupt"
       ? interaction.interrupt
-      : kind === "mouse"
-        ? interaction.pointer === "cell"
-        : kind === "keys"
-          ? interaction.inputMode === "keys"
-          : interaction.inputMode === "line";
+      : kind === "abort-line"
+        ? interaction.inputMode === "line" && !interaction.secretInput
+        : kind === "mouse"
+          ? interaction.pointer === "cell"
+          : kind === "keys"
+            ? interaction.inputMode === "keys"
+            : interaction.inputMode === "line";
   if (allowed) return;
   throw new WebSessionError(
     "input_mode_changed",
@@ -2214,6 +2259,38 @@ function matchesTuiWait(screen, pending) {
 function markerPayload(line, marker) {
   const index = line.indexOf(marker);
   return index === -1 ? undefined : line.slice(index + marker.length).trim();
+}
+
+function completionCandidatesFromPayload(value) {
+  if (
+    !Array.isArray(value) ||
+    value.length > maximumCompletionCandidates ||
+    value.some(
+      (candidate) =>
+        candidate === null ||
+        typeof candidate !== "object" ||
+        Array.isArray(candidate) ||
+        !boundedCompletionText(candidate.displayText) ||
+        !boundedCompletionText(candidate.insertText) ||
+        !completionCandidateKinds.has(candidate.kind),
+    )
+  ) {
+    return undefined;
+  }
+  return value.map((candidate) => ({
+    displayText: candidate.displayText,
+    insertText: candidate.insertText,
+    kind: candidate.kind,
+  }));
+}
+
+function boundedCompletionText(value) {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= maximumCompletionTextLength &&
+    !/[\0\r\n]/u.test(value)
+  );
 }
 
 function bearerToken(request) {

@@ -769,7 +769,7 @@ describe("QBasicSession", (): void => {
       expect(filesystem.exists(path), path).toBe(true);
     }
     expect(filesystem.readFile("/drives/c/proj/app.lst")).toContain(
-      "CS486OBJ v2",
+      "CS486OBJ v4",
     );
     expect(filesystem.readFile("/drives/c/proj/app.map")).toContain(
       "CS-NATIVE-LINK-MAP 1.0",

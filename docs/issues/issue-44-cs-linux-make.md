@@ -7,8 +7,8 @@ and real Chrome.
 
 ## Implemented boundary
 
-- CS-Linux rootfs v8 introduced /usr/bin/make, while immutable v1-v7 images and
-  current CS-DOS remain make-free.
+- CS-Linux rootfs v10 introduced /usr/bin/make; current v11 retains it, while
+  immutable v1-v9 images and current CS-DOS remain make-free.
 - guestMake.ts owns bounded argument parsing, variables, explicit rules, .PHONY,
   dependency planning, automatic variables, cycle detection, and mtime decisions
   in O(source bytes + nodes + edges).
@@ -39,7 +39,7 @@ tests/computer/linuxMakeProbe.test.ts
 tests/bedrock/headlessAuthenticationProbe.test.mjs.
 
 Expect: Parser/planner limits, variable and automatic-variable expansion,
-dependency ordering, cycle and missing-target failures, rootfs v8/v7/DOS
+dependency ordering, cycle and missing-target failures, rootfs v10/v9/DOS
 boundaries, real C compile/link, no-op, content-fingerprint rebuild, dry-run,
 and recipe rejection all pass.
 
@@ -59,7 +59,7 @@ Verify: npm run validate.
 Expect: Prettier, ESLint, TypeScript, all Vitest suites, the Bedrock pack build,
 and the 16-chapter Pages build pass.
 
-Result on 2026-07-20: 165 test files and 1,130 tests passed; both production
+Result on 2026-07-20: 180 test files and 1,248 tests passed; both production
 builds completed.
 
 Verify: set isolated BDS_MCP_WORKDIR, BDS_MCP_PORT, and WEB_COMPANION_PORT

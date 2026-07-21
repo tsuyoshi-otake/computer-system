@@ -1143,6 +1143,21 @@ describe("Web companion HTTP server", () => {
     });
     expect(bds.commands).toHaveLength(commandCountBeforeModeRejection);
 
+    const abortLine = await fetch(`${status.origin}/api/input`, {
+      method: "POST",
+      headers: {
+        ...browserInteractionHeaders,
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+        Origin: status.origin,
+      },
+      body: JSON.stringify({ kind: "abort-line" }),
+    });
+    expect(abortLine.status).toBe(202);
+    expect(bds.commands.at(-1)).toBe(
+      `scriptevent computer_system:web-abort-line ${sessionId}`,
+    );
+
     const input = await fetch(`${status.origin}/api/input`, {
       method: "POST",
       headers: {
@@ -1174,6 +1189,23 @@ describe("Web companion HTTP server", () => {
     expect(bds.commands.at(-1)).toMatch(
       /^scriptevent computer_system:web-input [A-Za-z0-9_-]+ [A-Za-z0-9_-]{6,20} keys %5B%22i%22%2C%22x%22%2C%22Escape%22%5D$/u,
     );
+
+    const commandAfterKeys = bds.commands.at(-1);
+    const editorAbort = await fetch(`${status.origin}/api/input`, {
+      method: "POST",
+      headers: {
+        ...browserInteractionHeaders,
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+        Origin: status.origin,
+      },
+      body: JSON.stringify({ kind: "abort-line" }),
+    });
+    expect(editorAbort.status).toBe(409);
+    expect(await editorAbort.json()).toMatchObject({
+      code: "input_mode_changed",
+    });
+    expect(bds.commands.at(-1)).toBe(commandAfterKeys);
 
     const mouse = await fetch(`${status.origin}/api/input`, {
       method: "POST",
@@ -1255,18 +1287,36 @@ describe("Web companion HTTP server", () => {
     const completionCommand = bds.commands.at(-1).split(" ");
     bds.log(
       `CS_WEB_COMPLETION ${JSON.stringify({
-        candidates: ["whoami"],
+        candidates: [
+          {
+            displayText: "whoami",
+            insertText: "whoami ",
+            kind: "command",
+          },
+        ],
         cursor: 7,
+        replaceEnd: 3,
+        replaceStart: 0,
         requestId: completionCommand[3],
         sessionId: completionCommand[2],
+        truncated: false,
         value: "whoami ",
       })}`,
     );
     const completion = await completionRequest;
     expect(completion.status).toBe(200);
     expect(await completion.json()).toEqual({
-      candidates: ["whoami"],
+      candidates: [
+        {
+          displayText: "whoami",
+          insertText: "whoami ",
+          kind: "command",
+        },
+      ],
       cursor: 7,
+      replaceEnd: 3,
+      replaceStart: 0,
+      truncated: false,
       value: "whoami ",
     });
 
@@ -1283,7 +1333,24 @@ describe("Web companion HTTP server", () => {
     expect(invalidKeys.status).toBe(400);
   });
 
-  it("closes the exact session when Bedrock publishes an incompatible interaction descriptor", async () => {
+  it.each([
+    {
+      label: "missing interaction",
+      mutate: (snapshot) => delete snapshot.terminal.interaction,
+    },
+    {
+      label: "unknown cursor shape",
+      mutate: (snapshot) => {
+        snapshot.terminal.interaction.cursorShape = "beam";
+      },
+    },
+    {
+      label: "history outside line mode",
+      mutate: (snapshot) => {
+        snapshot.terminal.interaction.history = true;
+      },
+    },
+  ])("closes the exact session for $label", async ({ mutate }) => {
     const bds = new FakeBds();
     const server = newTestWebCompanionServer({
       bds,
@@ -1300,7 +1367,7 @@ describe("Web companion HTTP server", () => {
     await exchangeHandoffUrl(bds.commands[0].split(" ").at(-1));
     const sessionId = server.store.activeSessions()[0].sessionId;
     const incompatible = tuiSnapshot(sessionId);
-    delete incompatible.terminal.interaction;
+    mutate(incompatible);
     bds.log(`CS_WEB_TERMINAL ${JSON.stringify(incompatible)}`);
 
     await until(() => server.store.activeSessions().length === 0);
@@ -1310,6 +1377,34 @@ describe("Web companion HTTP server", () => {
           command === `scriptevent computer_system:web-close ${sessionId}`,
       ),
     ).toHaveLength(1);
+  });
+
+  it("keeps the exact session open for a CS ABI foreground snapshot", async () => {
+    const bds = new FakeBds();
+    const server = newTestWebCompanionServer({ bds, port: 0 });
+    servers.push(server);
+    await server.start();
+
+    bds.log(
+      'CS_WEB_SESSION_REQUEST {"requestId":"r1-1","playerId":"player-1","computerId":"c-000001"}',
+    );
+    await until(() => bds.commands.length === 1);
+    const { token } = await exchangeHandoffUrl(
+      bds.commands[0].split(" ").at(-1),
+    );
+    const sessionId = server.store.activeSessions()[0].sessionId;
+    bds.log(
+      `CS_WEB_TERMINAL ${JSON.stringify(
+        tuiSnapshot(sessionId, { interaction: csAbiInteraction() }),
+      )}`,
+    );
+
+    await until(
+      () =>
+        server.store.authenticate(token).terminal?.terminal?.interaction
+          ?.context === "cs-abi",
+    );
+    expect(server.store.activeSessions()).toHaveLength(1);
   });
 
   it("returns input success only after the matching Bedrock admission marker", async () => {
@@ -2028,21 +2123,25 @@ function tuiSnapshot(sessionId, options = {}) {
       ? {
           schema: 1,
           inputMode: "line",
+          cursorShape: "block",
           pointer: "none",
           presentation: "terminal",
           secretInput: true,
           context: "secret",
           interrupt: false,
+          history: false,
           hints: [{ key: "Enter", label: "Continue" }],
         }
       : {
           schema: 1,
           inputMode: "keys",
+          cursorShape: "block",
           pointer: "cell",
           presentation: "dos-tui",
           secretInput: false,
           context: "edit",
           interrupt: false,
+          history: false,
           hints: [{ key: "F10", label: "Menu" }],
         });
   return {
@@ -2071,15 +2170,32 @@ function shellInteraction() {
   return {
     schema: 1,
     inputMode: "line",
+    cursorShape: "block",
     pointer: "none",
     presentation: "terminal",
     secretInput: false,
     context: "shell",
     interrupt: false,
+    history: true,
     hints: [
       { key: "Enter", label: "Run" },
       { key: "Tab", label: "Complete" },
     ],
+  };
+}
+
+function csAbiInteraction() {
+  return {
+    schema: 1,
+    inputMode: "keys",
+    cursorShape: "block",
+    pointer: "none",
+    presentation: "terminal",
+    secretInput: false,
+    context: "cs-abi",
+    interrupt: true,
+    history: false,
+    hints: [{ key: "Ctrl+C", label: "Interrupt" }],
   };
 }
 

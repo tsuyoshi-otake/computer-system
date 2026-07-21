@@ -277,7 +277,7 @@ except NameError:
     });
   });
 
-  it("fails missing and circular imports explicitly", (): void => {
+  it("fails missing imports and preserves partially initialized cycles", (): void => {
     const missing = createFixture("import absent\n");
     run(missing.program.process);
     expect(missing.program.process.state.kind).toBe("crashed");
@@ -286,15 +286,16 @@ except NameError:
 
     const filesystem = new InMemoryFilesystem();
     filesystem.makeDirectory("/app");
-    filesystem.writeFile("/app/a.py", "import b\n");
-    filesystem.writeFile("/app/b.py", "import a\n");
-    const circular = createFixture("import a\n", filesystem, "/app/main.py");
+    filesystem.writeFile("/app/a.py", "import b\nvalue = 1\n");
+    filesystem.writeFile("/app/b.py", "import a\nseen = a.__name__\n");
+    const circular = createFixture(
+      "import a\nsame = a.b.a is a\n",
+      filesystem,
+      "/app/main.py",
+    );
     run(circular.program.process);
-    expect(circular.program.process.state.kind).toBe("crashed");
-    if (circular.program.process.state.kind === "crashed") {
-      expect(circular.program.process.state.error.typeName).toBe("ImportError");
-      expect(circular.program.process.state.error.message).toMatch(/circular/u);
-    }
+    expect(circular.program.process.state.kind).toBe("completed");
+    expect(circular.program.runtime.globals.get("same")).toBe(true);
   });
 });
 

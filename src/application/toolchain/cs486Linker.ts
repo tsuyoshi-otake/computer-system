@@ -1,14 +1,21 @@
 import {
   createCs486Flat32MemoryMetadata,
   validateCs486Executable,
-  type Cs486ExecutableV3,
+  type Cs486ExecutableV5,
+  type Cs486FunctionEntry,
   type Cs486FunctionSignature,
   type Cs486Instruction,
 } from "../../domain/cpu/cs486.js";
+import type { Cs486DataModel } from "../../domain/cpu/cs486Compatibility.js";
+import {
+  cs486FormatLimits,
+  currentCs486ExecutableFormatVersion,
+} from "../../domain/cpu/cs486FormatLimits.js";
 import {
   cs486ObjectDataAlignment,
+  cs486ObjectDataModel,
   cs486RelocationAcceptsSection,
-  isCs486ObjectV2,
+  isCs486StructuredObject,
   objectSection,
   validateCs486Object,
   type Cs486Object,
@@ -30,9 +37,15 @@ export interface Cs486LinkOptions {
   readonly entry?: string;
 }
 
-interface CanonicalObject extends Cs486Object {
+type StructuredObject = Cs486Object & {
   readonly sections: readonly Cs486ObjectSection[];
-  readonly version: 2;
+  readonly version: 2 | 3 | 4;
+};
+
+interface CanonicalObject extends Cs486Object {
+  readonly dataModel: Cs486DataModel;
+  readonly sections: readonly Cs486ObjectSection[];
+  readonly version: 4;
 }
 
 interface Definition {
@@ -41,17 +54,24 @@ interface Definition {
 }
 
 const maximumObjects = 64;
-const maximumDataBytes = 16 * 1_048_576;
-const maximumInitializedDataBytes = 256_000;
-const maximumLinkedInstructions = 4_096;
+const executableLimits = cs486FormatLimits({
+  format: "executable",
+  version: currentCs486ExecutableFormatVersion,
+});
+const maximumDataBytes = executableLimits.dataBytes;
+const maximumInitializedDataBytes = executableLimits.initializedDataBytes;
+const maximumLinkedInstructions = executableLimits.instructions;
+const hostedCHeapBytes = 256 * 1_024;
+export const cs486NullGuardBytes = 4;
 
 export function linkCs486Objects(
   objects: readonly Cs486Object[],
   options: Cs486LinkOptions = {},
-): Cs486ExecutableV3 {
+): Cs486ExecutableV5 {
   if (objects.length === 0) throw new Cs486LinkError("no input objects");
   if (objects.length > maximumObjects)
     throw new Cs486LinkError("object limit exceeded");
+  const dataModel = validateLinkDataModel(objects);
   const canonical = objects.map(normalizeObject);
   const definitions = collectGlobalDefinitions(canonical);
   const localDefinitions = collectObjectDefinitions(canonical);
@@ -68,9 +88,14 @@ export function linkCs486Objects(
     throw new Cs486LinkError(`unresolved entry ${entryName}`);
   if (entry.symbol.section !== "text")
     throw new Cs486LinkError(`entry ${entryName} is not a text symbol`);
+  const atexit =
+    entryName === "main" ? definitions.get("__cs_run_atexit") : undefined;
+  if (atexit !== undefined && atexit.symbol.section !== "text") {
+    throw new Cs486LinkError("__cs_run_atexit is not a text symbol");
+  }
 
   const textBases: number[] = [];
-  let textCursor = 2;
+  let textCursor = atexit === undefined ? 2 : 5;
   for (const object of canonical) {
     textBases.push(textCursor);
     textCursor += objectSection(object, "text").instructions.length;
@@ -78,7 +103,10 @@ export function linkCs486Objects(
       throw new Cs486LinkError("linked instruction limit exceeded");
   }
   const dataBases: number[] = [];
-  let dataBytes = 0;
+  // C reserves the all-zero pointer value. Keep the first word unmapped from
+  // every authored symbol so a valid object or string can never compare null
+  // merely because its object sorted first in the deterministic link order.
+  let dataBytes = cs486NullGuardBytes;
   let initializedDataBytes = 0;
   for (const object of canonical) {
     dataBytes = align(dataBytes, cs486ObjectDataAlignment(object));
@@ -92,10 +120,28 @@ export function linkCs486Objects(
   }
   const layouts = canonical.map((object) => objectDataLayout(object));
 
-  const instructions: Cs486Instruction[] = [
-    { op: "call", target: textBases[entry.objectIndex]! + entry.symbol.offset },
-    { op: "halt" },
-  ];
+  const entryTarget = textBases[entry.objectIndex]! + entry.symbol.offset;
+  const instructions: Cs486Instruction[] =
+    atexit === undefined
+      ? [{ op: "call", target: entryTarget }, { op: "halt" }]
+      : [
+          { op: "call", target: entryTarget },
+          {
+            op: "mov",
+            destination: "esi",
+            source: { kind: "register", register: "eax" },
+          },
+          {
+            op: "call",
+            target: textBases[atexit.objectIndex]! + atexit.symbol.offset,
+          },
+          {
+            op: "mov",
+            destination: "eax",
+            source: { kind: "register", register: "esi" },
+          },
+          { op: "halt" },
+        ];
   const initialData: { bytes: number[]; offset: number }[] = [];
   for (const [objectIndex, object] of canonical.entries()) {
     const dataBase = dataBases[objectIndex]!;
@@ -161,14 +207,23 @@ export function linkCs486Objects(
       (left, right) =>
         left.address - right.address || left.name.localeCompare(right.name),
     );
-  const linked: Cs486ExecutableV3 = {
+  const functionEntries = collectFunctionEntries(canonical, textBases);
+  const linked: Cs486ExecutableV5 = {
     dataBytes,
+    dataModel,
     format: "cs486-executable",
+    ...(functionEntries.length === 0 ? {} : { functionEntries }),
     initialData,
     instructions,
-    memory: createCs486Flat32MemoryMetadata(),
+    memory: createCs486Flat32MemoryMetadata({
+      heapBytes: canonical.some(
+        ({ language }) => language === "c" || language === "cpp",
+      )
+        ? hostedCHeapBytes
+        : 0,
+    }),
     symbols,
-    version: 3,
+    version: currentCs486ExecutableFormatVersion,
   };
   try {
     validateCs486Executable(linked);
@@ -180,13 +235,42 @@ export function linkCs486Objects(
   return linked;
 }
 
+function collectFunctionEntries(
+  objects: readonly CanonicalObject[],
+  textBases: readonly number[],
+): readonly Cs486FunctionEntry[] {
+  const entries = new Map<number, Cs486FunctionSignature>();
+  for (const [objectIndex, object] of objects.entries()) {
+    for (const symbol of object.symbols) {
+      if (
+        symbol.binding === "undefined" ||
+        symbol.offset === undefined ||
+        symbol.section !== "text" ||
+        symbol.type !== "function" ||
+        symbol.functionSignature === undefined
+      )
+        continue;
+      const address = textBases[objectIndex]! + symbol.offset;
+      const existing = entries.get(address);
+      if (existing !== undefined && existing !== symbol.functionSignature)
+        throw new Cs486LinkError(
+          `function entry signature mismatch at ${String(address)}`,
+        );
+      entries.set(address, symbol.functionSignature);
+    }
+  }
+  return [...entries]
+    .map(([address, functionSignature]) => ({ address, functionSignature }))
+    .sort((left, right) => left.address - right.address);
+}
+
 function normalizeObject(object: Cs486Object): CanonicalObject {
   try {
     validateCs486Object(object);
   } catch (error: unknown) {
     throw invalidMetadata(error);
   }
-  if (isCs486ObjectV2(object)) return verifyV2Integrity(object);
+  if (isCs486StructuredObject(object)) return verifyStructuredIntegrity(object);
   const directives = object.symbols.flatMap((symbol) =>
     symbol.binding === "global"
       ? [`global ${symbol.name}`]
@@ -200,6 +284,7 @@ function normalizeObject(object: Cs486Object): CanonicalObject {
       [...directives, object.assembly].join("\n"),
       {
         dataBytes: object.dataBytes,
+        dataModel: cs486ObjectDataModel(object),
         language: object.language,
       },
     );
@@ -207,22 +292,30 @@ function normalizeObject(object: Cs486Object): CanonicalObject {
     throw invalidMetadata(error);
   }
   if (
-    !isCs486ObjectV2(canonical) ||
+    !isCs486StructuredObject(canonical) ||
     canonical.dataBytes !== object.dataBytes ||
     stableLegacySymbols(canonical) !== stableLegacySymbols(object) ||
     stableLegacyRelocations(canonical) !== stableLegacyRelocations(object)
   )
     throw new Cs486LinkError("invalid object metadata");
-  return canonical;
+  if (
+    objectSection(canonical, "text").instructions.length >
+    cs486FormatLimits({ format: "object", version: object.version })
+      .instructions
+  )
+    throw new Cs486LinkError("legacy object instruction limit exceeded");
+  return canonical as CanonicalObject;
 }
 
-function verifyV2Integrity(object: CanonicalObject): CanonicalObject {
+function verifyStructuredIntegrity(object: StructuredObject): CanonicalObject {
+  if (object.assemblyTruncated === true) return upgradeCanonicalObject(object);
   let canonical: Cs486Object | undefined;
   let failure: unknown;
   for (const dialect of ["linux", "dos"] as const) {
     try {
       canonical = assembleCs486Object(object.assembly, {
         dataBytes: object.dataBytes,
+        dataModel: cs486ObjectDataModel(object),
         dialect,
         language: object.language,
       });
@@ -233,14 +326,29 @@ function verifyV2Integrity(object: CanonicalObject): CanonicalObject {
   }
   if (
     canonical === undefined ||
-    !isCs486ObjectV2(canonical) ||
+    !isCs486StructuredObject(canonical) ||
     canonical.dataBytes !== object.dataBytes ||
     stableV2Sections(canonical) !== stableV2Sections(object) ||
     stableV2Symbols(canonical) !== stableV2Symbols(object) ||
     stableV2Relocations(canonical) !== stableV2Relocations(object)
   )
     throw invalidMetadata(failure ?? "canonical object mismatch");
-  return canonical;
+  return canonical as CanonicalObject;
+}
+
+function upgradeCanonicalObject(object: StructuredObject): CanonicalObject {
+  if (object.version === 4) return object as CanonicalObject;
+  const upgraded: CanonicalObject = {
+    ...object,
+    dataModel: cs486ObjectDataModel(object),
+    version: 4,
+  };
+  try {
+    validateCs486Object(upgraded);
+  } catch (error: unknown) {
+    throw invalidMetadata(error);
+  }
+  return upgraded;
 }
 
 function collectGlobalDefinitions(
@@ -377,10 +485,7 @@ function relocateNumericDataAddress(
   instruction: Cs486Instruction,
   dataBase: number,
 ): Cs486Instruction {
-  if (
-    (instruction.op === "load" || instruction.op === "store") &&
-    instruction.address.kind === "immediate"
-  )
+  if ("address" in instruction && instruction.address.kind === "immediate")
     return {
       ...instruction,
       address: {
@@ -389,6 +494,27 @@ function relocateNumericDataAddress(
       },
     };
   return { ...instruction };
+}
+
+function validateLinkDataModel(
+  objects: readonly Cs486Object[],
+): Cs486DataModel {
+  let selected: Cs486DataModel | undefined;
+  for (const object of objects) {
+    try {
+      validateCs486Object(object);
+    } catch (error: unknown) {
+      throw invalidMetadata(error);
+    }
+    const dataModel = cs486ObjectDataModel(object);
+    if (selected !== undefined && selected !== dataModel)
+      throw new Cs486LinkError(
+        `mixed CS486 data models: ${selected} and ${dataModel}`,
+      );
+    selected = dataModel;
+  }
+  if (selected === undefined) throw new Cs486LinkError("no input objects");
+  return selected;
 }
 
 function writeInt32(target: number[], offset: number, value: number): void {
@@ -433,11 +559,11 @@ function stableLegacyRelocations(object: Cs486Object): string {
   );
 }
 
-function stableV2Sections(object: CanonicalObject): string {
+function stableV2Sections(object: StructuredObject): string {
   return stableJson(object.sections);
 }
 
-function stableV2Symbols(object: CanonicalObject): string {
+function stableV2Symbols(object: StructuredObject): string {
   return stableJson(
     [...object.symbols].sort((left, right) =>
       left.name.localeCompare(right.name),
@@ -445,7 +571,7 @@ function stableV2Symbols(object: CanonicalObject): string {
   );
 }
 
-function stableV2Relocations(object: CanonicalObject): string {
+function stableV2Relocations(object: StructuredObject): string {
   return stableJson(
     [...object.relocations]
       .map((relocation) => ({

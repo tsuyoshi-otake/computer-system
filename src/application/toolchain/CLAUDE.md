@@ -2,16 +2,20 @@
 
 ## Sandbox and formats
 
-- `as`, `cc`, `c++`, the DOS-only CS QBASIC frontend, `ld`, `nm`, `objdump`, and
-  the debugger remain entirely inside the guest sandbox. Never invoke a host
-  compiler, assembler, linker, debugger, filesystem, or process. Current
-  CS-Linux exposes neither `basic` nor `basicc`.
-- New writers emit versioned v2 `CS486OBJ`; readers retain v1 compatibility.
-  Objects contain `.text`, `.rodata`, `.data`, and `.bss`, typed symbols,
-  initialized data, alignment, and structured relocations. Executables use the
-  validated `CS486` representation.
+- `as`, `cc`, `c++`, the DOS-only CS QBASIC frontend, `ar`, `ranlib`, `ld`,
+  `nm`, `objdump`, and the debugger remain entirely inside the guest sandbox.
+  Never invoke a host compiler, assembler, archiver, linker, debugger,
+  filesystem, or process. Current CS-Linux exposes neither `basic` nor `basicc`.
+- New writers emit versioned v3 `CS486OBJ`; readers retain v1 and zero-argument
+  v2 compatibility. Objects contain `.text`, `.rodata`, `.data`, and `.bss`,
+  typed symbols, initialized data, alignment, and structured relocations.
+  Executables use the validated `CS486` representation.
 - Neither `CS486OBJ` nor `CS486` is ELF, OMF, native x86, DOS COM, or DOS EXE.
   Do not advertise or accidentally accept those formats.
+- `CS486AR` is a deterministic versioned container for validated CS486OBJ
+  members, not Unix `ar`. Keep member order, digests, the symbol index,
+  compatibility identities, checksum, encoded capacity, and demand-extraction
+  work bounded. A failed mutation preserves the prior archive.
 - Dynamic linking is not implemented. Extend the versioned object/ABI boundary
   rather than dispatching to a host or inventing an unversioned side channel.
 
@@ -30,13 +34,18 @@
   paths or make Linux emit DOS output to share an implementation.
 - Restricted statement-boundary inline assembly cannot introduce labels, control
   flow, stack operations, ESP/EBP access, or hidden ABI changes.
+- CS C strings are decoded 32-bit words plus a zero word. Emit them with `dd` in
+  `.rodata`; never reuse packed-byte `ascii`/`asciz` storage. Keep globals,
+  aggregates, pointer scaling, `printf` conversions, string reads, and output
+  bounds explicit and deterministic.
 
 ## Linker and ABI
 
-- Version 2 symbol metadata exposes zero-argument `()->i32` and `()->void`
-  functions; integer results return through EAX. Keep calling convention, stack
-  bounds, instruction-zero startup, debugger, object readers, Python extensions,
-  tests, and manual synchronized.
+- Version 3 symbol metadata exposes up to 32 `i32` word parameters and `i32` or
+  `void` returns. Callers push right-to-left and clean up; callees read
+  `[ebp+8+4i]`, preserve ESI/EDI/EBP, and return integers through EAX. Keep
+  calling convention, stack bounds, instruction-zero startup, debugger, object
+  readers, Python extensions, tests, and manual synchronized.
 - Use Map-backed symbol and local-relocation lookup. Compute section layout
   once; do not rescan all symbols or rewrite text per relocation.
 - Reject duplicate, unresolved, type-mismatched, out-of-range, misaligned,
@@ -58,7 +67,7 @@
 - Register allocation is bounded deterministic linear scan with checked spills.
   Never allocate ESP or EBP. Values live across calls spill according to the
   ABI; locals/spills use checked EBP-relative frames, and frame epilogues
-  restore ESP and EBP before `RET`.
+  restore ESI, EDI, ESP, and EBP before `RET`.
 - Do not introduce graph-coloring/backtracking allocation or another path with
   input-dependent exponential search. A register/spill/frame overflow terminates
   explicitly before executable installation.

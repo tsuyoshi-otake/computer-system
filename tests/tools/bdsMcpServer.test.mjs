@@ -33,6 +33,7 @@ describe("BDS MCP stdio server", () => {
     expect(listed.tools.map((tool) => tool.name)).toEqual([
       "bds_status",
       "bds_start",
+      "bds_provision_acceptance_fixture",
       "bds_stop",
       "bds_run_probe",
       "bds_run_command",
@@ -131,6 +132,13 @@ describe("BDS MCP stdio server", () => {
     });
     expect(rejected.isError).toBe(true);
     expect(rejected.structuredContent.error).toMatch(/Command rejected/u);
+
+    const noFixture = await client.request("tools/call", {
+      name: "bds_provision_acceptance_fixture",
+      arguments: {},
+    });
+    expect(noFixture.isError).toBe(true);
+    expect(noFixture.structuredContent.error).toMatch(/not active/u);
 
     const noWriter = await client.request("tools/call", {
       name: "bds_get_tui_screen",

@@ -363,6 +363,11 @@ export class TickWorkScope {
     return { outcome: "ran", value, hostMicroseconds, overrun };
   }
 
+  remainingUnits(lane: ComputerWorkLane): number {
+    this.requireActive();
+    return Math.max(0, this.monitor.laneLimit(lane) - this.laneUnits[lane]);
+  }
+
   finish(): TickWorkSummary {
     this.requireActive();
     this.finished = true;

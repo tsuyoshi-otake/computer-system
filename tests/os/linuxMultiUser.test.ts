@@ -12,6 +12,9 @@ describe("CS-Linux multi-user sessions", (): void => {
     const shell = initializedShell(filesystem);
 
     expect(shell.submit("whoami").stdout).toBe("cs\n");
+    expect(shell.submit("echo $PATH").stdout).toBe(
+      "/usr/local/bin:/usr/bin:/bin:/usr/local/games:/usr/games\n",
+    );
     expect(shell.submit("id").stdout).toContain("uid=1000(cs)");
     expect(shell.submit("groups").stdout).toContain("sudo");
     expect(shell.submit("su -").stderr).toContain("Authentication failure");
@@ -40,6 +43,9 @@ describe("CS-Linux multi-user sessions", (): void => {
     expect(shell.prompt()).toBe("root@c-multi1:~# ");
     expect(shell.submit("whoami").stdout).toBe("root\n");
     expect(shell.submit("pwd").stdout).toBe("/root\n");
+    expect(shell.submit("echo $PATH").stdout).toBe(
+      "/usr/local/sbin:/usr/sbin:/sbin:/usr/local/bin:/usr/bin:/bin\n",
+    );
     const elevatedExit = shell.submit("exit");
     expect(elevatedExit).toMatchObject({
       exitCode: 0,
@@ -48,6 +54,9 @@ describe("CS-Linux multi-user sessions", (): void => {
     expect(elevatedExit.action).toBeUndefined();
     expect(shell.prompt()).toBe("cs@c-multi1:~$ ");
     expect(shell.submit("whoami").stdout).toBe("cs\n");
+    expect(shell.submit("echo $PATH").stdout).toBe(
+      "/usr/local/bin:/usr/bin:/bin:/usr/local/games:/usr/games\n",
+    );
 
     expect(shell.submit("sudo passwd root").exitCode).toBe(0);
     expect(shell.prompt()).toBe("New password: ");
@@ -139,20 +148,20 @@ describe("CS-Linux multi-user sessions", (): void => {
       stdout: "logout\n",
     });
     expect(logout.action).toBeUndefined();
-    expect(shell.prompt()).toBe("login: ");
+    expect(shell.prompt()).toBe("c-multi1 login: ");
     expect(shell.submitDebugCommand("whoami").stderr).toContain(
       "login is required",
     );
     expect(shell.submit("alice").exitCode).toBe(0);
     expect(shell.prompt()).toBe("Password: ");
-    expect(shell.submit(alicePassword).stdout).toContain("Login successful");
+    expect(shell.submit(alicePassword).exitCode).toBe(0);
     expect(shell.submit("whoami").stdout).toBe("alice\n");
     expect(shell.submit("sudo -n whoami").stderr).toContain(
       "not in the sudo group",
     );
 
     shell.submit("exit");
-    expect(shell.prompt()).toBe("login: ");
+    expect(shell.prompt()).toBe("c-multi1 login: ");
     shell.submit("cs");
     shell.submit(administratorPassword);
     expect(shell.submit("sudo -n whoami").stderr).toContain(
@@ -342,7 +351,7 @@ describe("CS-Linux multi-user sessions", (): void => {
     expect(shell.submit("sudo export SCOPE=root").exitCode).toBe(0);
     expect(shell.submit("printenv SCOPE").stdout).toBe("caller\n");
     expect(shell.submit("exit").stdout).toBe("logout\n");
-    expect(shell.prompt()).toBe("login: ");
+    expect(shell.prompt()).toBe("c-multi1 login: ");
   });
 
   it("requires the installed executable before dispatching session account commands", (): void => {
@@ -389,7 +398,7 @@ describe("CS-Linux multi-user sessions", (): void => {
 
     expect(shell.isAuthenticated()).toBe(false);
     expect(shell.isSecretInput()).toBe(false);
-    expect(shell.prompt()).toBe("login: ");
+    expect(shell.prompt()).toBe("c-multi1 login: ");
     expect(shell.submitDebugCommand("whoami").stderr).toContain(
       "login is required",
     );

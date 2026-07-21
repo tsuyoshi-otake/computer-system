@@ -15,13 +15,16 @@ import {
   validateCs486Executable,
 } from "../../src/domain/cpu/cs486.js";
 
-describe("CS486 executable v3 flat-memory metadata", (): void => {
-  it("keeps objects at v2 while standalone and linked writers emit v3", (): void => {
+describe("CS486 structured executable flat-memory metadata", (): void => {
+  it("writes v4 objects and v5 executable data-model metadata", (): void => {
     const standalone = assembleCs486("halt");
     const object = assembleCs486Object("global main\nmain:\nhalt");
     const linked = linkCs486Objects([object]);
 
-    expect(object.version).toBe(2);
+    expect(object).toMatchObject({
+      dataModel: "cs-word32-v1",
+      version: 4,
+    });
     expect(standalone).toMatchObject({
       memory: {
         auxiliaryResidentBytes: 0,
@@ -29,9 +32,10 @@ describe("CS486 executable v3 flat-memory metadata", (): void => {
         model: "cs-flat32-v1",
         stackBytes: defaultCs486StackBytes,
       },
-      version: 3,
+      dataModel: "cs-word32-v1",
+      version: 5,
     });
-    expect(linked.version).toBe(3);
+    expect(linked).toMatchObject({ dataModel: "cs-word32-v1", version: 5 });
     expect(Object.isFrozen(standalone.memory)).toBe(true);
     expect(cs486ExecutableMemoryRequirements(standalone)).toEqual({
       alignedDataBytes: 0,
@@ -42,7 +46,7 @@ describe("CS486 executable v3 flat-memory metadata", (): void => {
       model: "cs-flat32-v1",
       physicalReservationBytes: 65_536,
       stackBytes: 65_536,
-      version: 3,
+      version: 5,
     });
   });
 
@@ -78,6 +82,32 @@ describe("CS486 executable v3 flat-memory metadata", (): void => {
       kind: "legacy",
       version: 2,
     });
+  });
+
+  it("accepts bounded v3 argument signatures but keeps v2 zero-argument-only", (): void => {
+    const executable = assembleCs486(
+      "global main\ntype main, function\nsignature main, i32, i32\nmain:\nret",
+    );
+    expect(() => validateCs486Executable(executable)).not.toThrow();
+    expect(executable.symbols).toContainEqual(
+      expect.objectContaining({ functionSignature: "(i32)->i32" }),
+    );
+    expect(() =>
+      validateCs486Executable({
+        dataBytes: 0,
+        format: "cs486-executable",
+        instructions: [{ op: "ret" }],
+        symbols: [
+          {
+            address: 0,
+            functionSignature: "(i32)->i32",
+            name: "main",
+            type: "function",
+          },
+        ],
+        version: 2,
+      }),
+    ).toThrow(/symbol table/u);
   });
 
   it("rejects malformed, unaligned, excessive, and cross-version metadata", (): void => {
@@ -117,8 +147,10 @@ describe("CS486 executable v3 flat-memory metadata", (): void => {
   });
 
   it("derives checked linear and physical reservations and enforces the grant", (): void => {
+    const { dataModel, ...legacy } = assembleCs486("halt");
+    expect(dataModel).toBe("cs-word32-v1");
     const executable = {
-      ...assembleCs486("halt"),
+      ...legacy,
       dataBytes: 1,
       memory: createCs486Flat32MemoryMetadata({
         auxiliaryResidentBytes: 1_024,
@@ -159,7 +191,7 @@ describe("CS486 executable v3 flat-memory metadata", (): void => {
     );
 
     const maximum = cs486ExecutableMemoryRequirements({
-      ...assembleCs486("halt"),
+      ...legacy,
       memory: createCs486Flat32MemoryMetadata({
         auxiliaryResidentBytes: maximumCs486AuxiliaryResidentBytes,
         heapBytes: maximumCs486LinearAddressSpaceBytes - defaultCs486StackBytes,

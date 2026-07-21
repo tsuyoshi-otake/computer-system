@@ -77,6 +77,7 @@ describe("CS-DOS OS presence", (): void => {
     const runtime = new ComputerRuntime();
     expect(runtime.register(record).outcome).toBe("accepted");
     expect(runtime.powerOn(record.computerId).outcome).toBe("accepted");
+    runThroughBoot(runtime, record);
 
     expect(
       runtime.executeDebugShellCommand(record.computerId, "LABEL C: ARCHIVE"),
@@ -87,7 +88,8 @@ describe("CS-DOS OS presence", (): void => {
     const restored = ComputerRecord.restore(persisted);
     const nextRuntime = new ComputerRuntime();
     nextRuntime.register(restored);
-    nextRuntime.powerOn(restored.computerId);
+    expect(nextRuntime.powerOn(restored.computerId).outcome).toBe("accepted");
+    runThroughBoot(nextRuntime, restored);
     const volume = nextRuntime.executeDebugShellCommand(
       restored.computerId,
       "VOL C:",
@@ -898,6 +900,29 @@ describe("CS-DOS OS presence", (): void => {
     ]);
   });
 });
+
+function runThroughBoot(
+  runtime: ComputerRuntime,
+  record: ComputerRecord,
+): void {
+  let observedBoot =
+    record.lifecycle.state.kind === "booting" ||
+    record.display.state.kind === "post";
+  for (let tick = 0; tick < 1_000; tick += 1) {
+    if (
+      observedBoot &&
+      record.lifecycle.state.kind !== "booting" &&
+      record.display.state.kind !== "post"
+    ) {
+      return;
+    }
+    runtime.runTick();
+    observedBoot ||=
+      record.lifecycle.state.kind === "booting" ||
+      record.display.state.kind === "post";
+  }
+  throw new Error("Computer did not complete its bounded CSBIOS boot cycle");
+}
 
 type DosRuntimeSetFatMetadata = DosRuntimeState["setFatMetadata"];
 

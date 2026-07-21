@@ -31,6 +31,7 @@ describe("guest resource accounting", (): void => {
       }),
     });
     expect(runtime.powerOn(record.computerId).outcome).toBe("accepted");
+    completeBoot(runtime, record);
 
     const memory = runtime.guestMemoryStatus(record.computerId)!;
     expect(memory).toMatchObject({
@@ -179,6 +180,7 @@ describe("guest resource accounting", (): void => {
     const record = new ComputerRecord("c-000432", "standard");
     runtime.register(record);
     runtime.powerOn(record.computerId);
+    completeBoot(runtime, record);
     const bootMemory = runtime.guestMemoryStatus(record.computerId);
     expect(bootMemory).toBeDefined();
     record.filesystem.writeFile(
@@ -360,6 +362,7 @@ describe("guest resource accounting", (): void => {
     const record = new ComputerRecord("c-000433", "standard");
     runtime.register(record);
     runtime.powerOn(record.computerId);
+    completeBoot(runtime, record);
     record.filesystem.writeFile(
       "/tmp/disconnect.c",
       'int main() { printf("%d\\n", 42); return 0; }\n',

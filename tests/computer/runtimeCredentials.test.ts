@@ -18,6 +18,31 @@ describe("ComputerRuntime process credentials", (): void => {
     );
     const runtime = registeredRuntime(record, true);
     expect(runtime.powerOn(record.computerId).outcome).toBe("accepted");
+    expect(record.lifecycle.state.kind).toBe("booting");
+    expect(
+      runtime.queueEvent(record.computerId, "terminal_line", "cs"),
+    ).toMatchObject({ outcome: "ignored", reason: "not_running" });
+
+    expect(
+      runtime.executeDebugShellCommand(
+        record.computerId,
+        'python -c print("not allowed during POST")',
+      ),
+    ).toMatchObject({ outcome: "ignored", reason: "not_running" });
+    let postQueued: DebugShellCommandCompletion | undefined;
+    runtime.enqueueDebugShellCommand(
+      record.computerId,
+      "python /startup.py",
+      (result) => {
+        postQueued = result;
+      },
+    );
+    expect(postQueued).toMatchObject({
+      outcome: "ignored",
+      reason: "not_running",
+    });
+
+    completeBoot(runtime, record);
 
     expect(
       runtime.executeDebugShellCommand(
@@ -63,7 +88,7 @@ describe("ComputerRuntime process credentials", (): void => {
     const runtime = registeredRuntime(record, false);
 
     expect(runtime.powerOn(record.computerId).outcome).toBe("accepted");
-    runtime.runTick();
+    completeBoot(runtime, record);
 
     expect(record.filesystem.exists("/root/startup-was-root")).toBe(false);
     expect(record.lifecycle.state.kind).toBe("crashed");
@@ -77,7 +102,7 @@ describe("ComputerRuntime process credentials", (): void => {
 
     const boot = runtime.powerOn(record.computerId);
     expect(boot.outcome).toBe("accepted");
-    runtime.runTick();
+    completeBoot(runtime, record);
 
     expect(record.lifecycle.state.kind).toBe("crashed");
     if (record.lifecycle.state.kind === "crashed")
@@ -107,6 +132,7 @@ describe("ComputerRuntime process credentials", (): void => {
     const runtime = registeredRuntime(record, false);
 
     expect(runtime.powerOn(record.computerId).outcome).toBe("accepted");
+    completeBoot(runtime, record);
     runTicks(runtime, 3);
 
     expect(record.filesystem.readFile("/srv/startup/ready")).toBe("yes");
@@ -131,7 +157,7 @@ describe("ComputerRuntime process credentials", (): void => {
     expect(result).toMatchObject({ outcome: "failed" });
     if (result.outcome === "failed") {
       expect(result.error.message).toBe(
-        "CS-Linux startup account UID 1000 is missing",
+        "CS-Linux startup account UID 1000 is missing [boot phase: native shell initialization]",
       );
     }
     expect(record.lifecycle.state.kind).toBe("crashed");
@@ -139,12 +165,17 @@ describe("ComputerRuntime process credentials", (): void => {
 
   it("keeps direct MCP Python inside the authenticated user's DAC", (): void => {
     const record = new ComputerRecord("c-000204", "standard");
+    record.configureHardware({
+      ...record.hardware,
+      memoryBytes: 8 * 1_024 * 1_024,
+    });
     record.filesystem.writeFile(
       "/startup.py",
       'import os\nos.pull_event("continue")\n',
     );
     const runtime = registeredRuntime(record, false);
     expect(runtime.powerOn(record.computerId).outcome).toBe("accepted");
+    completeBoot(runtime, record);
     record.filesystem.setMetadata("/root", {
       gid: 0,
       mode: 0o700,
@@ -172,6 +203,7 @@ describe("ComputerRuntime process credentials", (): void => {
     );
     const runtime = registeredRuntime(record, false);
     expect(runtime.powerOn(record.computerId).outcome).toBe("accepted");
+    completeBoot(runtime, record);
     record.filesystem.writeFile("/tmp/answer.asm", "mov eax,42\nhalt\n");
 
     const result = runtime.executeDebugShellCommand(
@@ -215,6 +247,7 @@ describe("ComputerRuntime process credentials", (): void => {
     );
     const runtime = registeredRuntime(record, false);
     expect(runtime.powerOn(record.computerId).outcome).toBe("accepted");
+    completeBoot(runtime, record);
     record.filesystem.makeDirectory("/home/custom");
     record.filesystem.setMetadata("/home/custom", {
       gid: 1_000,
@@ -350,7 +383,7 @@ describe("ComputerRuntime process credentials", (): void => {
     const record = new ComputerRecord("c-000213", "standard");
     const runtime = registeredRuntime(record, false);
     expect(runtime.powerOn(record.computerId).outcome).toBe("accepted");
-    runtime.runTick();
+    completeBoot(runtime, record);
     record.filesystem.makeDirectory("/drives/c/lib/python");
     record.filesystem.writeFile("/home/cs/no-shell.py", "import shell\n");
 
@@ -501,12 +534,17 @@ describe("ComputerRuntime process credentials", (): void => {
 
   it("does not leave a phantom debug job when scheduler admission fails", (): void => {
     const record = new ComputerRecord("c-000210", "standard");
+    record.configureHardware({
+      ...record.hardware,
+      memoryBytes: 8 * 1_024 * 1_024,
+    });
     record.filesystem.writeFile(
       "/startup.py",
       'import os\nos.pull_event("continue")\n',
     );
     const runtime = registeredRuntime(record, false);
     expect(runtime.powerOn(record.computerId).outcome).toBe("accepted");
+    completeBoot(runtime, record);
     const scheduler = (
       runtime as unknown as {
         readonly scheduler: {
@@ -556,6 +594,7 @@ describe("ComputerRuntime process credentials", (): void => {
     );
     const runtime = registeredRuntime(record, false);
     expect(runtime.powerOn(record.computerId).outcome).toBe("accepted");
+    completeBoot(runtime, record);
     record.filesystem.writeFile("/home/cs/bad.asm", "not-an-instruction\n");
 
     expect(
@@ -593,7 +632,7 @@ function authenticatedRuntime(record: ComputerRecord): ComputerRuntime {
   setup.submit("correct-horse");
   const runtime = registeredRuntime(record, true);
   expect(runtime.powerOn(record.computerId).outcome).toBe("accepted");
-  runtime.runTick();
+  completeBoot(runtime, record);
   runtime.queueEvent(record.computerId, "terminal_line", "cs");
   runtime.runTick();
   runtime.queueEvent(record.computerId, "terminal_line", "correct-horse");
@@ -603,4 +642,22 @@ function authenticatedRuntime(record: ComputerRecord): ComputerRuntime {
 
 function runTicks(runtime: ComputerRuntime, count: number): void {
   for (let tick = 0; tick < count; tick += 1) runtime.runTick();
+}
+
+function completeBoot(
+  runtime: ComputerRuntime,
+  record: ComputerRecord,
+  maxTicks = 256,
+): void {
+  for (
+    let tick = 0;
+    tick < maxTicks && record.lifecycle.state.kind === "booting";
+    tick += 1
+  ) {
+    runtime.runTick();
+  }
+  if (record.lifecycle.state.kind !== "booting") return;
+  throw new Error(
+    `Computer ${record.computerId} did not complete CSBIOS within ${String(maxTicks)} ticks`,
+  );
 }

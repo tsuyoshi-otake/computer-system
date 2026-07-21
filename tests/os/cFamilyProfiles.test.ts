@@ -141,7 +141,10 @@ describe.each(profiles)("$name C-family profile contract", ({ profile }) => {
       const compilation = fixture.shell.submit(
         compileCommand(profile, command, sourcePath, outputPath),
       );
-      expect(compilation).toMatchObject({ exitCode: 0, stderr: "" });
+      expect(compilation).toMatchObject({
+        exitCode: 0,
+        stderr: "",
+      });
       expect(
         fixture.filesystem.exists(
           storagePath(profile, executableName(language).toLowerCase()),
@@ -218,6 +221,10 @@ describe.each(profiles)("$name C-family profile contract", ({ profile }) => {
               `${command} -I /work/inc -D BASE_VALUE=40 -D REMOVED -U REMOVED ${sourcePath} -o ${outputPath}`,
             );
 
+      if (compilation.exitCode !== 0 || compilation.stderr !== "")
+        throw new Error(
+          `unexpected compilation result: ${JSON.stringify(compilation)}`,
+        );
       expect(compilation).toMatchObject({ exitCode: 0, stderr: "" });
       expect(fixture.shell.submit(outputPath)).toMatchObject({
         exitCode: 0,
@@ -277,6 +284,38 @@ describe.each(profiles)("$name C-family profile contract", ({ profile }) => {
       });
     },
   );
+
+  it("compiles word pointers, globals, structs, and formatted strings through the guest C path", (): void => {
+    const fixture = createFixture(profile);
+    const sourcePath = guestPath(profile, "WORDS.C");
+    const outputPath = guestPath(profile, "WORDS");
+    fixture.filesystem.writeFile(
+      storagePath(profile, "words.c"),
+      [
+        "struct Pair { int left; int right; };",
+        "int values[2] = { 20, 22 };",
+        "struct Pair pair = { 40, 2 };",
+        'char *word = "ok";',
+        "int main(void) {",
+        'printf("sum=%d %c %s\\n", values[0] + *(values + 1), 65, word);',
+        'printf("pair=%d\\n", pair.left + pair.right);',
+        "return 0;",
+        "}",
+        "",
+      ].join(fixture.newline),
+    );
+
+    expect(
+      fixture.shell.submit(
+        compileCommand(profile, "cc", sourcePath, outputPath),
+      ),
+    ).toMatchObject({ exitCode: 0, stderr: "" });
+    expect(fixture.shell.submit(outputPath)).toMatchObject({
+      exitCode: 0,
+      stderr: "",
+      stdout: `sum=42 A ok${fixture.newline}pair=42${fixture.newline}`,
+    });
+  });
 
   it.each(languages)(
     "retains an unused trapping $language division through dead-code elimination",
@@ -559,6 +598,29 @@ describe.each(languages)(
     });
   },
 );
+
+describe("CS-Linux hosted libc source", (): void => {
+  it("builds every non-intrinsic function with the sandboxed guest cc", (): void => {
+    const fixture = createFixture("linux");
+    const result = fixture.shell.submit(
+      "cc -c /usr/src/cs-libc/libc.c -o /work/libc.o",
+    );
+    expect(result).toMatchObject({ exitCode: 0, stderr: "" });
+    const object = decodeObject(fixture.filesystem.readFile("/work/libc.o"));
+    expect(object.symbols).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: "malloc", section: "text" }),
+        expect.objectContaining({ name: "free", section: "text" }),
+        expect.objectContaining({ name: "getenv", section: "text" }),
+        expect.objectContaining({ name: "fopen", section: "text" }),
+        expect.objectContaining({ name: "cs_term_present", section: "text" }),
+      ]),
+    );
+    expect(
+      object.relocations.some(({ symbol }) => symbol === "__cs_syscall"),
+    ).toBe(false);
+  });
+});
 
 function createFixture(profile: ProfileId): ProfileFixture {
   const filesystem = new InMemoryFilesystem();

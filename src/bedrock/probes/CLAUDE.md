@@ -26,6 +26,9 @@
   rebooted `cs` username/password login, authenticated `whoami`, explicit
   runtime shutdown, and absence of the probe password before emitting the stable
   `linux_authentication/PASS` record.
+- CS System Git proves production-path init, ignore, commit, snapshot switch,
+  disjoint merge, inert remote metadata, explicit unavailable push, and runtime
+  shutdown before emitting the stable `linux_git/PASS` record.
 - Serial matrix acceptance uses three machines, six faces, 36 ordered links, and
   72 bidirectional Linux ttyS/DOS COM transmissions before cleanup.
 - UI probes verify the production fixed-cell form and exactly one close result;

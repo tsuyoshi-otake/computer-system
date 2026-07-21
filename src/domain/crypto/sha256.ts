@@ -18,72 +18,118 @@ const initialHash = new Uint32Array([
 ]);
 
 export function sha256Hex(value: string): string {
-  const input = utf8Bytes(value);
-  const paddedLength = Math.ceil((input.length + 9) / 64) * 64;
-  const padded = new Uint8Array(paddedLength);
-  padded.set(input);
-  padded[input.length] = 0x80;
-  const bitLength = input.length * 8;
-  writeUint32(padded, paddedLength - 8, Math.floor(bitLength / 0x1_0000_0000));
-  writeUint32(padded, paddedLength - 4, bitLength >>> 0);
+  return sha256BytesHex(utf8Bytes(value));
+}
 
+/** Hashes an exact guest byte sequence without routing through host crypto. */
+export function sha256BytesHex(input: Uint8Array): string {
+  return sha256BytePartsHex([input]);
+}
+
+/** Hashes bounded byte parts with one fixed-size block buffer. */
+export function sha256BytePartsHex(parts: readonly Uint8Array[]): string {
   const hash = new Uint32Array(initialHash);
   const words = new Uint32Array(64);
-  for (let offset = 0; offset < padded.length; offset += 64) {
-    for (let index = 0; index < 16; index += 1) {
-      const wordOffset = offset + index * 4;
-      words[index] =
-        ((padded[wordOffset]! << 24) |
-          (padded[wordOffset + 1]! << 16) |
-          (padded[wordOffset + 2]! << 8) |
-          padded[wordOffset + 3]!) >>>
-        0;
+  const block = new Uint8Array(64);
+  let blockLength = 0;
+  let totalLength = 0;
+  for (const part of parts) {
+    if (totalLength > Number.MAX_SAFE_INTEGER - part.byteLength) {
+      throw new RangeError("SHA-256 input is too large");
     }
-    for (let index = 16; index < 64; index += 1) {
-      const previous15 = words[index - 15]!;
-      const previous2 = words[index - 2]!;
-      const sigma0 =
-        rotateRight(previous15, 7) ^
-        rotateRight(previous15, 18) ^
-        (previous15 >>> 3);
-      const sigma1 =
-        rotateRight(previous2, 17) ^
-        rotateRight(previous2, 19) ^
-        (previous2 >>> 10);
-      words[index] =
-        (words[index - 16]! + sigma0 + words[index - 7]! + sigma1) >>> 0;
+    totalLength += part.byteLength;
+    let offset = 0;
+    while (offset < part.byteLength) {
+      if (blockLength === 0 && part.byteLength - offset >= 64) {
+        compressBlock(hash, words, part, offset);
+        offset += 64;
+        continue;
+      }
+      const take = Math.min(64 - blockLength, part.byteLength - offset);
+      block.set(part.subarray(offset, offset + take), blockLength);
+      blockLength += take;
+      offset += take;
+      if (blockLength === 64) {
+        compressBlock(hash, words, block, 0);
+        blockLength = 0;
+      }
     }
-
-    let [a, b, c, d, e, f, g, h] = hash;
-    for (let index = 0; index < 64; index += 1) {
-      const sum1 =
-        rotateRight(e!, 6) ^ rotateRight(e!, 11) ^ rotateRight(e!, 25);
-      const choice = (e! & f!) ^ (~e! & g!);
-      const temporary1 =
-        (h! + sum1 + choice + sha256Constants[index]! + words[index]!) >>> 0;
-      const sum0 =
-        rotateRight(a!, 2) ^ rotateRight(a!, 13) ^ rotateRight(a!, 22);
-      const majority = (a! & b!) ^ (a! & c!) ^ (b! & c!);
-      const temporary2 = (sum0 + majority) >>> 0;
-      h = g;
-      g = f;
-      f = e;
-      e = (d! + temporary1) >>> 0;
-      d = c;
-      c = b;
-      b = a;
-      a = (temporary1 + temporary2) >>> 0;
-    }
-    hash[0] = (hash[0]! + a!) >>> 0;
-    hash[1] = (hash[1]! + b!) >>> 0;
-    hash[2] = (hash[2]! + c!) >>> 0;
-    hash[3] = (hash[3]! + d!) >>> 0;
-    hash[4] = (hash[4]! + e!) >>> 0;
-    hash[5] = (hash[5]! + f!) >>> 0;
-    hash[6] = (hash[6]! + g!) >>> 0;
-    hash[7] = (hash[7]! + h!) >>> 0;
   }
+
+  if (totalLength > Math.floor(Number.MAX_SAFE_INTEGER / 8)) {
+    throw new RangeError("SHA-256 input is too large");
+  }
+  block[blockLength] = 0x80;
+  if (blockLength >= 56) {
+    block.fill(0, blockLength + 1);
+    compressBlock(hash, words, block, 0);
+    block.fill(0);
+  } else {
+    block.fill(0, blockLength + 1);
+  }
+  const bitLength = totalLength * 8;
+  writeUint32(block, 56, Math.floor(bitLength / 0x1_0000_0000));
+  writeUint32(block, 60, bitLength >>> 0);
+  compressBlock(hash, words, block, 0);
   return [...hash].map((word) => word.toString(16).padStart(8, "0")).join("");
+}
+
+function compressBlock(
+  hash: Uint32Array,
+  words: Uint32Array,
+  input: Uint8Array,
+  offset: number,
+): void {
+  for (let index = 0; index < 16; index += 1) {
+    const wordOffset = offset + index * 4;
+    words[index] =
+      ((input[wordOffset]! << 24) |
+        (input[wordOffset + 1]! << 16) |
+        (input[wordOffset + 2]! << 8) |
+        input[wordOffset + 3]!) >>>
+      0;
+  }
+  for (let index = 16; index < 64; index += 1) {
+    const previous15 = words[index - 15]!;
+    const previous2 = words[index - 2]!;
+    const sigma0 =
+      rotateRight(previous15, 7) ^
+      rotateRight(previous15, 18) ^
+      (previous15 >>> 3);
+    const sigma1 =
+      rotateRight(previous2, 17) ^
+      rotateRight(previous2, 19) ^
+      (previous2 >>> 10);
+    words[index] =
+      (words[index - 16]! + sigma0 + words[index - 7]! + sigma1) >>> 0;
+  }
+
+  let [a, b, c, d, e, f, g, h] = hash;
+  for (let index = 0; index < 64; index += 1) {
+    const sum1 = rotateRight(e!, 6) ^ rotateRight(e!, 11) ^ rotateRight(e!, 25);
+    const choice = (e! & f!) ^ (~e! & g!);
+    const temporary1 =
+      (h! + sum1 + choice + sha256Constants[index]! + words[index]!) >>> 0;
+    const sum0 = rotateRight(a!, 2) ^ rotateRight(a!, 13) ^ rotateRight(a!, 22);
+    const majority = (a! & b!) ^ (a! & c!) ^ (b! & c!);
+    const temporary2 = (sum0 + majority) >>> 0;
+    h = g;
+    g = f;
+    f = e;
+    e = (d! + temporary1) >>> 0;
+    d = c;
+    c = b;
+    b = a;
+    a = (temporary1 + temporary2) >>> 0;
+  }
+  hash[0] = (hash[0]! + a!) >>> 0;
+  hash[1] = (hash[1]! + b!) >>> 0;
+  hash[2] = (hash[2]! + c!) >>> 0;
+  hash[3] = (hash[3]! + d!) >>> 0;
+  hash[4] = (hash[4]! + e!) >>> 0;
+  hash[5] = (hash[5]! + f!) >>> 0;
+  hash[6] = (hash[6]! + g!) >>> 0;
+  hash[7] = (hash[7]! + h!) >>> 0;
 }
 
 export function utf8Bytes(value: string): Uint8Array {

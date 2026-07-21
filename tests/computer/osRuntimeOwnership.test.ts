@@ -11,6 +11,16 @@ describe("production OS runtime ownership", (): void => {
 
     expect(runtime.register(record).outcome).toBe("accepted");
     expect(runtime.powerOn(record.computerId).outcome).toBe("accepted");
+    for (let tick = 0; tick < 200; tick += 1) {
+      if (
+        record.lifecycle.state.kind !== "booting" &&
+        record.display.state.kind !== "post"
+      ) {
+        break;
+      }
+      runtime.runTick();
+    }
+    expect(record.display.state.kind).not.toBe("post");
 
     const processes = runtime.executeDebugShellCommand(
       record.computerId,

@@ -5,10 +5,10 @@
 - ASM, CS QBASIC, C, C++, and Computer System Python execute through one
   validated CS486 process and executable representation. Never fork a
   language-specific CPU engine or scheduler.
-- Version 2 symbol metadata supports zero-argument `()->i32` and `()->void`
-  functions; integer returns use EAX. Keep object readers, executable
-  validation, toolchain, Python extensions, debugger, tests, and manual
-  synchronized with any versioned change.
+- Version 3 symbol metadata supports up to 32 `i32` word parameters and `i32` or
+  `void` returns; v2 remains zero-argument-only. Integer returns use EAX. Keep
+  object readers, executable validation, toolchain, Python extensions, debugger,
+  tests, and manual synchronized with any versioned change.
 - `CS486OBJ`/`CS486` are sandbox formats, not ELF, OMF, native x86, DOS COM, or
   DOS EXE. Validate versions, sections, symbols, relocations, instructions,
   addresses, stack bounds, and RAM layout before execution. Executables begin at
@@ -19,6 +19,9 @@
 - Objects allow 256,000 assembly-string UTF-16 code units, 16 MiB of data,
   256,000 initialized bytes, 2,048 symbols, and 4,096 relocations. Process RAM
   is at least 64 KiB and never exceeds 16 MiB.
+- `syscall cs.print.character` is the bounded word-character output primitive:
+  EAX must contain one Unicode scalar value. Decimal `PRINT` remains unchanged,
+  and total output still obeys the 64,000-code-unit process limit.
 
 ## Models and timing
 

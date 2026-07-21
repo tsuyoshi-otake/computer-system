@@ -129,6 +129,52 @@ synchronized.
 - #29: EDIT and Web Terminal responsiveness, bounded input admission, and
   multi-session frame scaling.
 - #31: Structural guest disk-capacity, HDD-time, and RAM accounting.
+- #37: CS-Linux memory architecture v2, reclaimable buffers, and per-process
+  VIRT/RSS accounting.
+- #38: Authentic CS-Linux/CS-DOS filesystem layout and command placement.
+- #39: Authentic CS-Linux login and session text with wall-clock history.
+- #40: Web Terminal cell cursor, bounded line editing, and integer grid scaling.
+- #48: CS Make state consistency v2 and scheduler-admitted planning.
+- #42: SysV init and the single `/etc/crontab` command/scheduler surface.
+- #44: Bounded guest-side CS-Linux Make and tick-sliced build ownership.
+- #45: Bounded guest-owned `sed` and `awk` text processors.
+- #46: Binary guest filesystem blobs and bounded `tar`/`gzip`/`zip` utilities.
+- #47: Observable `nice`, detachable `nohup`, and finite tick-paced `watch`.
+- #49-#57: Python 3.14 profile contract, foundations, bindings, calls, integers,
+  expressions, assignments, and unpacking.
+- #58/#61/#62: CS C 2.0, global objects, and large-program capacity.
+- #59: bounded Python slicing and list slice assignment.
+- #60: bounded CS-Linux Git-like VCS architecture; #63 owns CS ABI 1.0.
+- #64: Preserved reduced NetHack prototype. It is frozen unless the user
+  explicitly reauthorizes game implementation and is excluded from current
+  completion percentages.
+- #65-#68: VCS tracking plus Python assignment expressions, assertions, sets,
+  comprehensions, scopes, and evaluation order.
+- #69-#73: hosted C/libc, archives/Make, byte8, and deterministic floating
+  point.
+- #74-#78: Python classes, decorators, iterators, generators, and `send`.
+- #79: Python generator exception suspension, `throw`, `close`, and
+  `GeneratorExit`.
+- #80: Bounded Python `yield from` delegation and nested generator protocols.
+- #81: Bounded synchronous Python generator expressions and lazy comprehension
+  scopes.
+- #82: Bounded synchronous Python context managers and exact finalization.
+- #83: Bounded user-defined Python iterator protocol and managed special-method
+  calls.
+- #85: Bounded generic Python iterable materialization for displays, calls,
+  unpacking, slices, and sets.
+- #87: Bounded Python `__getitem__` sequence-iteration fallback.
+- #88: Bounded Python 3.14 deferred annotations and annotation scopes.
+- #89: Bounded Python callable/sentinel iteration.
+- #90: Bounded Python 3.14 type parameters and lazy type aliases.
+- #91: Bounded Python generic aliases and runtime subscription.
+- #92: Bounded Python 3.14 typing runtime core.
+- #93: Bounded Python 3.14 coroutines and async protocols.
+- #94: Bounded Python 3.14 async generators and comprehensions.
+- #95: Bounded Python exception groups and `except*`.
+- #96: Bounded Python 3.14 template strings and `string.templatelib`.
+- #97/#98/#100/#101/#102: Bounded Python descriptors, attribute customization,
+  deletion, C3 inheritance, `super`/class cells, and `__new__` construction.
 - #33: Compile RAM lease finalization across completion, disconnect, and detach.
 - #34: DOS memory architecture v2, atomic CONFIG, address allocation, MEM
   snapshots, and declared process grants.

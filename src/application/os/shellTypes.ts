@@ -4,12 +4,18 @@ import type { Cs486Object } from "../../domain/cpu/cs486Object.js";
 import type { CpuProcess } from "../../domain/runtime/cpuProcess.js";
 import type { ProcessCredentials } from "./linuxCredentials.js";
 import type { GuestToolchainResult } from "../toolchain/guestToolchainTranscript.js";
+import type { Cs486LinkInput } from "../toolchain/cs486Archive.js";
+import type { Cs486DataModel } from "../../domain/cpu/cs486Compatibility.js";
 
 interface ShellProcessContext {
   /** Immutable credentials captured when the shell admits the process. */
   readonly credentials: ProcessCredentials;
   /** Process umask captured with the credentials. */
   readonly umask: number;
+  /** Linux nice value captured at admission (-20..19). */
+  readonly niceValue?: number;
+  /** Ignores terminal SIGHUP; shutdown remains the final owner. */
+  readonly detached?: boolean;
 }
 
 export type ShellAction = "clear" | "reboot" | "shutdown";
@@ -25,6 +31,12 @@ export interface ShellForegroundCs486 extends ShellProcessContext {
   readonly command: "basic" | "csasm" | "cscc" | "qbasic" | "run";
   readonly compileCycles: number;
   readonly executable: Cs486Executable;
+  /** Immutable CS ABI startup data, present only for Linux foreground `run`. */
+  readonly hostedStartup?: {
+    readonly argv: readonly string[];
+    readonly cwd: string;
+    readonly environment: readonly (readonly [name: string, value: string])[];
+  };
   readonly kind: "cs486";
   readonly stats: boolean;
 }
@@ -38,7 +50,7 @@ export interface ShellForegroundCs486 extends ShellProcessContext {
  * outcome (including newly produced guest output) back into shell text.
  */
 export interface ShellForegroundDebugger extends ShellProcessContext {
-  readonly command: "csdb" | "debug";
+  readonly command: "csdb" | "debug" | "watch";
   readonly complete: () => ShellCommandResult;
   readonly kind: "debugger";
   readonly start: () => CpuProcess;
@@ -77,6 +89,17 @@ export type ShellCompileTask =
       readonly cIncludePaths?: readonly string[];
       /** Bounded command-line names removed after built-in definitions. */
       readonly cUndefines?: readonly string[];
+      /** Selects the bounded raw or optimized CSIR pipeline. */
+      readonly cOptimizationLevel?: 0 | 1;
+      /** Versioned C addressable-byte layout selected by the guest driver. */
+      readonly cDataModel?: Cs486DataModel;
+      /** Guest path installed atomically with a successful compiler output. */
+      readonly dependencyOutputPath?: string;
+      readonly dependencyTarget?: string;
+      /** Ordered object/archive inputs linked before this translation unit. */
+      readonly linkInputsBefore?: readonly Cs486LinkInput[];
+      /** Ordered object/archive inputs linked after this translation unit. */
+      readonly linkInputs?: readonly Cs486LinkInput[];
       readonly outputPath?: string;
       readonly compileOnly: boolean;
       readonly runAfterCompile: boolean;
@@ -166,8 +189,20 @@ export interface ShellCommandResult {
   readonly jobControl?: ShellJobControlRequest;
 }
 
+export type ShellCompletionCandidateKind =
+  "command" | "device" | "directory" | "file";
+
+export interface ShellCompletionCandidate {
+  readonly displayText: string;
+  readonly insertText: string;
+  readonly kind: ShellCompletionCandidateKind;
+}
+
 export interface ShellCompletionResult {
-  readonly candidates: readonly string[];
+  readonly candidates: readonly ShellCompletionCandidate[];
   readonly cursor: number;
+  readonly replaceEnd: number;
+  readonly replaceStart: number;
+  readonly truncated: boolean;
   readonly value: string;
 }

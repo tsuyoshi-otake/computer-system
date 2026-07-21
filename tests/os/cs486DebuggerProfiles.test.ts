@@ -69,7 +69,7 @@ describe("CS486 debugger shell profiles", (): void => {
       stderr: "",
     });
     expect(shell.submit("DEBUG C:\\DEBUGCS").stdout).toMatch(
-      /^Loaded C:\\DEBUGCS: \d+ instructions\r\n[0-9A-F]{8} {2}/u,
+      /^Loaded C:\\DEBUGCS: \d+ instructions, cs-word32-v1\r\n[0-9A-F]{8} {2}/u,
     );
     expect(shell.submit("DEBUG BP MAIN").stdout).toMatch(
       /^breakpoint set at [0-9A-F]{8}\r\n$/u,

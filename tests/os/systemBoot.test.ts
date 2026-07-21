@@ -16,20 +16,26 @@ describe("default Computer System Linux boot", (): void => {
     expect(runtime.powerOn(record.computerId).outcome).toBe("accepted");
     expect(record.terminal.width).toBe(80);
     expect(record.terminal.height).toBe(25);
-    expect(record.terminal.line(2)).toContain("CSBIOS System Configuration");
+    expect(
+      record.terminal.snapshot().rows.every((line) => line.trim() === ""),
+    ).toBe(true);
+    expect(record.lifecycle.state.kind).toBe("booting");
     expect(record.display.state).toEqual({
       kind: "post",
       modeId: "text-80x25",
     });
-    runtime.runTick();
+    expect(
+      runtime.queueEvent(record.computerId, "terminal_line", "ignored"),
+    ).toEqual({ outcome: "ignored", reason: "not_running" });
+    completeBoot(runtime, record);
 
     const screen = record.terminal.snapshot().rows.join("\n");
     expect(screen).not.toContain("stale boot banner");
     expect(screen.match(/Computer System Linux 1\.0/gu)).toHaveLength(1);
     expect(record.terminal.line(1).trimEnd()).toBe("Computer System Linux 1.0");
     expect(record.terminal.line(2).trimEnd()).toBe("");
-    expect(record.terminal.line(3).trimEnd()).toBe("New password:");
-    expect(screen).not.toContain("tty1");
+    expect(record.terminal.line(3).trimEnd()).toBe("CS-Linux 1.0 console tty1");
+    expect(record.terminal.line(4).trimEnd()).toBe("New password:");
     expect(screen).not.toContain("Computer System Bash");
     expect(screen).not.toContain("CS-Linux first boot:");
     expect(screen).not.toContain("login required");
@@ -55,13 +61,15 @@ describe("default Computer System Linux boot", (): void => {
     runtime.register(record);
 
     expect(runtime.powerOn(record.computerId).outcome).toBe("accepted");
+    runTicks(runtime, 51);
     const post = record.terminal.snapshot().rows.join("\n");
-    expect(post).toContain("Main Processor : CS386SX");
-    expect(post).toContain("Video Memory     : 256 KB");
-    expect(post).toContain("Display Panel    : 800x480 LCD");
-    expect(post).toContain("Starting Computer System DOS 1.0");
+    expect(post).toContain("CSBIOS Revision 1.1");
+    expect(post).toContain("CPU            : CS386SX at 16 MHz");
+    expect(post).toContain("Video Adapter  : CS-VGA Portable, 256 KB");
+    expect(post).toContain("Display        : 800x480 LCD / VGA text 80x25");
+    expect(post).toContain("Boot Target    : Computer System DOS 1.0");
 
-    runtime.runTick();
+    completeBoot(runtime, record);
     const dos = record.terminal.snapshot().rows.join("\n");
     expect(record.terminal.line(1).trimEnd()).toBe("Computer System DOS 1.0");
     expect(record.terminal.line(2).trimEnd()).toBe("");
@@ -88,7 +96,7 @@ describe("default Computer System Linux boot", (): void => {
     const runtime = new ComputerRuntime();
     runtime.register(record);
     runtime.powerOn(record.computerId);
-    runtime.runTick();
+    completeBoot(runtime, record);
     record.filesystem.writeFile(
       "/drives/c/demo.bas",
       "FOR I = 1 TO 6\nTOTAL = TOTAL + I\nNEXT\nPRINT TOTAL * 2\nEND\n",
@@ -139,7 +147,7 @@ describe("default Computer System Linux boot", (): void => {
     const runtime = new ComputerRuntime();
     runtime.register(record);
     runtime.powerOn(record.computerId);
-    runtime.runTick();
+    completeBoot(runtime, record);
     record.filesystem.writeFile(
       "/drives/c/main.c",
       ["int main() {", 'printf("%d\\n", 42);', "return 0;", "}", ""].join(
@@ -210,7 +218,7 @@ describe("default Computer System Linux boot", (): void => {
     const runtime = new ComputerRuntime();
     runtime.register(record);
     runtime.powerOn(record.computerId);
-    runtime.runTick();
+    completeBoot(runtime, record);
     record.filesystem.writeFile(
       "/drives/c/main.c",
       ["int main() {", 'printf("%d\\n", 42);', "return 0;", "}", ""].join(
@@ -298,13 +306,13 @@ describe("default Computer System Linux boot", (): void => {
     runtime.register(record);
 
     runtime.powerOn(record.computerId);
-    runtime.runTick();
+    completeBoot(runtime, record);
 
     expect(record.terminal.line(1).trimEnd()).toBe("Computer System Linux 1.0");
     expect(record.terminal.line(2).trimEnd()).toBe("");
-    expect(record.terminal.line(3).trimEnd()).toBe("login:");
+    expect(record.terminal.line(3).trimEnd()).toBe("CS-Linux 1.0 console tty1");
+    expect(record.terminal.line(4).trimEnd()).toBe("computer-87 login:");
     const screen = record.terminal.snapshot().rows.join("\n");
-    expect(screen).not.toContain("tty1");
     expect(screen).not.toContain("Computer System Bash");
     expect(screen).not.toContain("login required");
   });
@@ -320,19 +328,18 @@ describe("default Computer System Linux boot", (): void => {
     const runtime = new ComputerRuntime({ requireLinuxLogin: true });
     runtime.register(record);
     runtime.powerOn(record.computerId);
-    runtime.runTick();
+    completeBoot(runtime, record);
 
     runtime.queueEvent(record.computerId, "terminal_line", "cs");
     runtime.runTick();
-    expect(record.terminal.line(4).trimEnd()).toBe("Password:");
+    expect(record.terminal.line(5).trimEnd()).toBe("Password:");
 
     runtime.queueEvent(record.computerId, "terminal_line", "correct-horse");
     runtime.runTick();
-    expect(record.terminal.line(5).trimEnd()).toBe("Login successful.");
-    expect(record.terminal.line(6).trimEnd()).toBe(
-      "Welcome to CS-Linux 1.0. Type 'help' for commands or 'man cs-linux' for the fiel",
+    expect(record.terminal.line(6).trimEnd()).toBe("Welcome to CS-Linux 1.0.");
+    expect(record.terminal.line(7).trimEnd()).toBe(
+      "Type 'help' for commands or 'man cs-linux' for the field guide.",
     );
-    expect(record.terminal.line(7).trimEnd()).toBe("d guide.");
     expect(record.terminal.line(8).trimEnd()).toBe("cs@computer-88:~$");
 
     runtime.queueEvent(record.computerId, "redstone", "left");
@@ -358,13 +365,13 @@ describe("default Computer System Linux boot", (): void => {
       mode: 0o644,
       uid: 1_000,
     });
-    runtime.runTick();
+    completeBoot(runtime, record);
     expect(record.terminal.line(1).trimEnd()).toBe("Computer System Linux 1.0");
     expect(record.terminal.line(2).trimEnd()).toBe("");
-    expect(record.terminal.line(3).trimEnd()).toBe(
-      "Welcome to CS-Linux 1.0. Type 'help' for commands or 'man cs-linux' for the fiel",
+    expect(record.terminal.line(3).trimEnd()).toBe("Welcome to CS-Linux 1.0.");
+    expect(record.terminal.line(4).trimEnd()).toBe(
+      "Type 'help' for commands or 'man cs-linux' for the field guide.",
     );
-    expect(record.terminal.line(4).trimEnd()).toBe("d guide.");
     expect(record.terminal.line(5).trimEnd()).toBe("cs@computer-30:~$");
     expect(record.terminal.cell(1, 1).foreground).toBe(0);
     expect(record.terminal.cell(1, 5).foreground).toBe(0);
@@ -374,7 +381,9 @@ describe("default Computer System Linux boot", (): void => {
     });
     runtime.queueEvent(record.computerId, "terminal_line", "vi /startup.py");
     runtime.runTick();
-    expect(record.terminal.line(1)).toContain("VI  /startup.py");
+    expect(record.terminal.line(record.terminal.height - 1)).toContain(
+      "/startup.py",
+    );
     runtime.queueEvent(
       record.computerId,
       "terminal_keys",
@@ -412,7 +421,7 @@ describe("default Computer System Linux boot", (): void => {
     });
     runtime.register(record);
     expect(runtime.powerOn(record.computerId).outcome).toBe("accepted");
-    runtime.runTick();
+    completeBoot(runtime, record);
     runtime.queueEvent(record.computerId, "terminal_line", "correct-horse");
     runtime.runTick();
     runtime.queueEvent(record.computerId, "terminal_line", "correct-horse");
@@ -437,7 +446,7 @@ describe("default Computer System Linux boot", (): void => {
     expect(record.filesystem.readFile("/startup.py")).toBe('print("rebooted")');
 
     expect(runtime.reboot(record.computerId).outcome).toBe("accepted");
-    for (let tick = 0; tick < 14; tick += 1) runtime.runTick();
+    completeBoot(runtime, record);
 
     expect(record.terminal.snapshot().rows.join("\n")).toContain("rebooted");
     expect(record.filesystem.getMetadata("/startup.py")).toMatchObject({
@@ -454,7 +463,7 @@ describe("default Computer System Linux boot", (): void => {
       "printf 'alpha\\nbeta\\nalpha\\n' | grep alpha | wc -l > count";
     runtime.register(record);
     runtime.powerOn(record.computerId);
-    runtime.runTick();
+    completeBoot(runtime, record);
 
     runtime.queueEvent(record.computerId, "terminal_line", command);
     runtime.runTick();
@@ -488,11 +497,13 @@ describe("default Computer System Linux boot", (): void => {
     const runtime = new ComputerRuntime();
     runtime.register(record);
     runtime.powerOn(record.computerId);
-    runtime.runTick();
+    completeBoot(runtime, record);
 
     runtime.queueEvent(record.computerId, "terminal_line", "vi demo.py");
     runtime.runTick();
-    expect(record.terminal.line(1)).toContain("VI  /home/cs/demo.py");
+    expect(record.terminal.line(record.terminal.height - 1)).toContain(
+      "/home/cs/demo.py",
+    );
     runtime.queueEvent(
       record.computerId,
       "terminal_keys",
@@ -518,3 +529,29 @@ describe("default Computer System Linux boot", (): void => {
     });
   });
 });
+
+function runTicks(runtime: ComputerRuntime, count: number): void {
+  for (let tick = 0; tick < count; tick += 1) runtime.runTick();
+}
+
+function completeBoot(
+  runtime: ComputerRuntime,
+  record: ComputerRecord,
+  maximumTicks = 400,
+): void {
+  let observedBooting = record.lifecycle.state.kind === "booting";
+  for (let tick = 0; tick < maximumTicks; tick += 1) {
+    if (
+      observedBooting &&
+      record.lifecycle.state.kind !== "booting" &&
+      record.display.state.kind !== "post"
+    ) {
+      return;
+    }
+    runtime.runTick();
+    observedBooting ||= record.lifecycle.state.kind === "booting";
+  }
+  throw new Error(
+    `Computer ${record.computerId} did not complete CSBIOS within ${String(maximumTicks)} ticks`,
+  );
+}

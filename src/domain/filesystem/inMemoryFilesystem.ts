@@ -2,6 +2,11 @@ import {
   quarantineRejectedAsyncTransaction,
   rejectedAsyncTransactionCount,
 } from "../runtime/transactionQuarantine.js";
+import {
+  decodeUtf8,
+  encodeUtf8,
+  utf8ByteLength as utf8Size,
+} from "../text/utf8.js";
 
 export interface FilesystemLimits {
   readonly allocationUnitBytes?: number;
@@ -19,7 +24,7 @@ export const defaultFilesystemLimits: FilesystemLimits = {
   capacityBytes: 40 * 1_048_576,
   directoryEntryBytes: 0,
   maxEntries: 4_096,
-  maxFileBytes: 1_048_576,
+  maxFileBytes: 8 * 1_048_576,
   maxPathLength: 255,
   reservedBytes: 0,
 };
@@ -56,7 +61,9 @@ export interface LegacyInMemoryFilesystemSnapshot {
 
 export interface FilesystemBaseImageFile {
   readonly contents: string;
-  readonly metadata?: Partial<Pick<FilesystemMetadata, "gid" | "mode" | "uid">>;
+  readonly metadata?: Partial<
+    Pick<FilesystemMetadata, "gid" | "mode" | "modifiedAtMilliseconds" | "uid">
+  >;
   readonly path: string;
 }
 
@@ -109,7 +116,7 @@ export function isInMemoryFilesystemSnapshot(
 
   const blobIds = new Set<string>();
   for (const [id, contents] of value.blobs) {
-    if (blobIds.has(id) || contentBlobId(contents) !== id) return false;
+    if (blobIds.has(id) || storedBlobId(contents, id) !== id) return false;
     blobIds.add(id);
   }
   if (!areUniqueValidPaths(value.directories, false)) return false;
@@ -430,9 +437,16 @@ export class InMemoryFilesystem {
           left.length - right.length || left.localeCompare(right),
       );
     const imageFiles = image.files.map((file) => ({
-      ...file,
+      file,
       path: this.normalize(file.path),
     }));
+    const replaceableBaseFiles = new Set(
+      previousBase === undefined
+        ? []
+        : imageFiles
+            .map(({ path }) => path)
+            .filter((path) => this.isUnmodifiedBaseFile(path, previousBase)),
+    );
     const availableDirectories = new Set(this.directories);
     const addedDirectories = new Set<string>();
     for (const path of imageDirectories) {
@@ -456,35 +470,41 @@ export class InMemoryFilesystem {
     let addedFiles = 0;
     let addedBytes = 0;
     const plannedFilePaths = new Set<string>();
-    for (const file of imageFiles) {
-      if (remainsDeleted(file.path)) continue;
-      // An exact existing entry is a per-Computer overlay, including a
-      // deliberate type replacement of an older base entry. Ancestor
-      // conflicts and contradictions inside the new image still fail below.
-      if (this.exists(file.path)) continue;
-      if (availableDirectories.has(file.path)) {
+    for (const { file, path } of imageFiles) {
+      if (remainsDeleted(path)) continue;
+      // A content/metadata/link-identical entry from the previous base can be
+      // rebased. Every other exact entry is a per-Computer overlay, including
+      // a deliberate type replacement of an older base entry.
+      if (this.exists(path) && !replaceableBaseFiles.has(path)) continue;
+      if (availableDirectories.has(path)) {
         throw new FilesystemError(
           "not_directory",
-          `${file.path} is not a regular file`,
+          `${path} is not a regular file`,
         );
       }
-      if (plannedFilePaths.has(file.path)) {
+      if (plannedFilePaths.has(path)) {
         throw new FilesystemError(
           "exists",
-          `${file.path} appears more than once in the base image`,
+          `${path} appears more than once in the base image`,
         );
       }
-      const parent = parentPath(file.path);
+      const parent = parentPath(path);
       if (!availableDirectories.has(parent)) {
         throw new FilesystemError(
           "not_found",
           `Parent directory ${parent} does not exist`,
         );
       }
-      const size = utf8Size(file.contents);
+      const size = baseImageFileFacts(file).size;
       if (size > this.limits.maxFileBytes)
         throw new FilesystemError("file_limit", "File is too large");
-      plannedFilePaths.add(file.path);
+      if (replaceableBaseFiles.has(path)) {
+        const previousSize = previousBase!.sizes.get(path)!;
+        addedBytes +=
+          this.allocatedDataBytes(size) - this.allocatedDataBytes(previousSize);
+        continue;
+      }
+      plannedFilePaths.add(path);
       addedFiles += 1;
       addedBytes += this.allocatedDataBytes(size);
     }
@@ -509,9 +529,18 @@ export class InMemoryFilesystem {
         });
       }
     }
-    for (const file of imageFiles) {
-      const path = file.path;
+    for (const { path } of imageFiles) {
       if (remainsDeleted(path)) continue;
+      if (replaceableBaseFiles.has(path)) {
+        const previousSize = previousBase!.sizes.get(path)!;
+        const size = imageState.sizes.get(path)!;
+        this.files.set(path, imageState.files.get(path)!);
+        this.metadata.set(path, imageState.metadata.get(path)!);
+        this.usedBytesValue +=
+          this.allocatedDataBytes(size) - this.allocatedDataBytes(previousSize);
+        this.revisionValue += 1;
+        continue;
+      }
       if (!this.exists(path)) {
         const size = imageState.sizes.get(path)!;
         if (size > this.limits.maxFileBytes)
@@ -719,7 +748,27 @@ export class InMemoryFilesystem {
     const blobId = this.files.get(normalized);
     if (blobId === undefined)
       throw new FilesystemError("not_found", `${path} is not a file`);
+    if (isBinaryBlobId(blobId)) {
+      try {
+        return decodeUtf8(decodeBase64Bytes(requireBlob(blobId)));
+      } catch {
+        throw new FilesystemError(
+          "binary_file",
+          `${path} contains non-UTF-8 binary data`,
+        );
+      }
+    }
     return requireBlob(blobId);
+  }
+
+  readFileBytes(path: string): Uint8Array {
+    const normalized = this.resolveSymbolicLinks(path);
+    const blobId = this.files.get(normalized);
+    if (blobId === undefined)
+      throw new FilesystemError("not_found", `${path} is not a file`);
+    return isBinaryBlobId(blobId)
+      ? decodeBase64Bytes(requireBlob(blobId))
+      : encodeUtf8(requireBlob(blobId));
   }
 
   writeFile(path: string, contents: string): void {
@@ -733,6 +782,21 @@ export class InMemoryFilesystem {
     }
     this.requireParent(normalized);
     this.commitFile(normalized, contents);
+  }
+
+  writeFileBytes(path: string, contents: Uint8Array): void {
+    this.assertTransactionMutationAllowed();
+    const original = this.normalize(path);
+    const normalized = this.symbolicLinks.has(original)
+      ? this.resolveSymbolicLinks(original)
+      : original;
+    if (normalized === "/" || this.directories.has(normalized)) {
+      throw new FilesystemError("is_directory", `${path} is a directory`);
+    }
+    this.requireParent(normalized);
+    const bytes = new Uint8Array(contents);
+    const blobId = internBinaryBlob(bytes);
+    this.commitStoredFile(normalized, blobId, bytes.byteLength);
   }
 
   appendFile(path: string, contents: string): void {
@@ -765,7 +829,7 @@ export class InMemoryFilesystem {
         const count = this.hardLinkCounts.get(inodeId) ?? 1;
         if (count === 1) {
           this.usedBytesValue -= this.allocatedDataBytes(
-            utf8Size(requireBlob(this.files.get(candidate)!)),
+            blobLogicalSize(this.files.get(candidate)!),
           );
         }
         this.files.delete(candidate);
@@ -828,7 +892,7 @@ export class InMemoryFilesystem {
   getSize(path: string): number {
     const normalized = this.resolveSymbolicLinks(path);
     const blobId = this.files.get(normalized);
-    if (blobId !== undefined) return utf8Size(requireBlob(blobId));
+    if (blobId !== undefined) return blobLogicalSize(blobId);
     if (this.directories.has(normalized)) return 0;
     throw new FilesystemError("not_found", `${path} does not exist`);
   }
@@ -1026,7 +1090,7 @@ export class InMemoryFilesystem {
           ?.find((candidate) => restored.files.has(candidate));
         if (peer !== undefined) restored.createHardLink(peer, path);
       }
-      restored.writeFile(path, requireBlob(blobId));
+      restored.commitStoredFile(path, blobId, blobLogicalSize(blobId));
     }
     for (const paths of snapshot.hardLinks ?? []) {
       if (paths.length < 2) continue;
@@ -1120,12 +1184,18 @@ export class InMemoryFilesystem {
     if (size > this.limits.maxFileBytes)
       throw new FilesystemError("file_limit", "File is too large");
     const blobId = internBlob(contents);
+    this.commitStoredFile(path, blobId, size);
+  }
+
+  private commitStoredFile(path: string, blobId: string, size: number): void {
+    if (size > this.limits.maxFileBytes)
+      throw new FilesystemError("file_limit", "File is too large");
     const previous = this.files.get(path);
     if (previous === blobId) return;
     const previousSize =
       previous === undefined
         ? 0
-        : this.allocatedDataBytes(utf8Size(requireBlob(previous)));
+        : this.allocatedDataBytes(blobLogicalSize(previous));
     const linkId = this.hardLinkIds.get(path);
     const linkedPaths =
       linkId === undefined
@@ -1160,7 +1230,7 @@ export class InMemoryFilesystem {
     if (file !== undefined)
       return {
         directories: [],
-        files: [[path, requireBlob(file)]],
+        files: [[path, file, requireBlob(file)]],
         hardLinkIds: this.hardLinkIds.has(path)
           ? [[path, this.hardLinkIds.get(path)!]]
           : [],
@@ -1185,7 +1255,10 @@ export class InMemoryFilesystem {
     );
     const files = [...this.files]
       .filter(([candidate]) => candidate.startsWith(prefix))
-      .map(([candidate, blobId]) => [candidate, requireBlob(blobId)] as const);
+      .map(
+        ([candidate, blobId]) =>
+          [candidate, blobId, requireBlob(blobId)] as const,
+      );
     const symbolicLinks = [...this.symbolicLinks].filter(([candidate]) =>
       candidate.startsWith(prefix),
     );
@@ -1243,13 +1316,13 @@ export class InMemoryFilesystem {
       const inodeIds = new Map(snapshot.hardLinkIds);
       const copiedInodes = new Set<number>();
       const addedBytes =
-        snapshot.files.reduce((total, [path, contents]) => {
+        snapshot.files.reduce((total, [path, blobId]) => {
           const inodeId = inodeIds.get(path);
           if (inodeId !== undefined) {
             if (copiedInodes.has(inodeId)) return total;
             copiedInodes.add(inodeId);
           }
-          return total + this.allocatedDataBytes(utf8Size(contents));
+          return total + this.allocatedDataBytes(blobLogicalSize(blobId));
         }, 0) +
         snapshot.symbolicLinks.reduce(
           (total, [, target]) =>
@@ -1273,13 +1346,13 @@ export class InMemoryFilesystem {
       this.makeDirectory(this.transferPath(source, destination, path));
     const inodeIds = new Map(snapshot.hardLinkIds);
     const copiedInodes = new Map<number, string>();
-    for (const [path, contents] of snapshot.files) {
+    for (const [path, blobId] of snapshot.files) {
       const destinationPath = this.transferPath(source, destination, path);
       const inodeId = inodeIds.get(path);
       const copiedPeer =
         inodeId === undefined ? undefined : copiedInodes.get(inodeId);
       if (copiedPeer === undefined) {
-        this.writeFile(destinationPath, contents);
+        this.commitStoredFile(destinationPath, blobId, blobLogicalSize(blobId));
         if (inodeId !== undefined) copiedInodes.set(inodeId, destinationPath);
       } else {
         this.createHardLink(copiedPeer, destinationPath);
@@ -1405,7 +1478,7 @@ export class InMemoryFilesystem {
       const inodeId = this.requireInodeId(path);
       if (seen.has(inodeId)) continue;
       seen.add(inodeId);
-      usedBytes += this.allocatedDataBytes(utf8Size(requireBlob(blobId)));
+      usedBytes += this.allocatedDataBytes(blobLogicalSize(blobId));
     }
     for (const target of this.symbolicLinks.values()) {
       usedBytes += this.allocatedDataBytes(utf8Size(target));
@@ -1477,6 +1550,21 @@ export class InMemoryFilesystem {
       );
     }
     return false;
+  }
+
+  private isUnmodifiedBaseFile(
+    path: string,
+    base: FilesystemBaseImageState,
+  ): boolean {
+    const baseBlob = base.files.get(path);
+    const inodeId = this.hardLinkIds.get(path);
+    return (
+      baseBlob !== undefined &&
+      this.files.get(path) === baseBlob &&
+      metadataEquals(base.metadata.get(path), this.metadata.get(path)!) &&
+      inodeId !== undefined &&
+      (this.hardLinkCounts.get(inodeId) ?? 1) === 1
+    );
   }
 
   private addChild(path: string): void {
@@ -1635,7 +1723,11 @@ export class FilesystemError extends Error {
 
 interface FilesystemSnapshot {
   readonly directories: readonly string[];
-  readonly files: readonly (readonly [string, string])[];
+  readonly files: readonly (readonly [
+    path: string,
+    blobId: string,
+    storedContents: string,
+  ])[];
   readonly hardLinkIds: readonly (readonly [string, number])[];
   readonly metadata: readonly (readonly [string, FilesystemMetadata])[];
   readonly symbolicLinks: readonly (readonly [string, string])[];
@@ -1698,6 +1790,29 @@ interface FilesystemBaseImageState {
 }
 
 const baseImageStates = new Map<string, FilesystemBaseImageState>();
+interface BaseImageFileFacts {
+  readonly blobId: string;
+  readonly contents: string;
+  readonly size: number;
+}
+
+const baseImageFileFactsCache = new WeakMap<
+  FilesystemBaseImageFile,
+  BaseImageFileFacts
+>();
+
+function baseImageFileFacts(file: FilesystemBaseImageFile): BaseImageFileFacts {
+  const cached = baseImageFileFactsCache.get(file);
+  if (cached !== undefined && cached.contents === file.contents) return cached;
+  const blobId = contentBlobId(file.contents);
+  const facts = {
+    blobId,
+    contents: file.contents,
+    size: encodedBlobSize(blobId),
+  };
+  baseImageFileFactsCache.set(file, facts);
+  return facts;
+}
 
 function baseImageState(image: FilesystemBaseImage): FilesystemBaseImageState {
   const cached = baseImageStates.get(image.id);
@@ -1714,12 +1829,13 @@ function baseImageState(image: FilesystemBaseImage): FilesystemBaseImageState {
   }
   for (const file of image.files) {
     const path = normalizedImagePath(file.path);
-    files.set(path, internBlob(file.contents));
-    sizes.set(path, utf8Size(file.contents));
+    const facts = baseImageFileFacts(file);
+    registerBlob(facts.blobId, file.contents, true);
+    files.set(path, facts.blobId);
+    sizes.set(path, facts.size);
     metadata.set(path, {
       ...defaultMetadata(false),
       ...file.metadata,
-      modifiedAtMilliseconds: 0,
     });
   }
   const state: FilesystemBaseImageState = {
@@ -1758,12 +1874,16 @@ function metadataEquals(
 
 function internBlob(contents: string): string {
   const id = contentBlobId(contents);
-  registerBlob(id, contents);
+  registerBlob(id, contents, true);
   return id;
 }
 
-function registerBlob(id: string, contents: string): void {
-  if (contentBlobId(contents) !== id) {
+function registerBlob(
+  id: string,
+  contents: string,
+  alreadyValidated = false,
+): void {
+  if (!alreadyValidated && storedBlobId(contents, id) !== id) {
     throw new Error(`Filesystem blob ${id} failed content-address validation`);
   }
   const existing = contentBlobs.get(id);
@@ -1777,6 +1897,88 @@ function registerBlob(id: string, contents: string): void {
   }
 }
 
+function internBinaryBlob(contents: Uint8Array): string {
+  const id = binaryBlobId(contents);
+  registerBlob(id, encodeBase64Bytes(contents), true);
+  return id;
+}
+
+function storedBlobId(contents: string, expectedId: string): string {
+  return isBinaryBlobId(expectedId)
+    ? binaryBlobId(decodeBase64Bytes(contents))
+    : contentBlobId(contents);
+}
+
+function isBinaryBlobId(id: string): boolean {
+  return /^x[0-9a-z]+-[0-9a-z]+-[0-9a-z]+$/u.test(id);
+}
+
+function blobLogicalSize(id: string): number {
+  return encodedBlobSize(id);
+}
+
+function encodedBlobSize(id: string): number {
+  const separator = id.indexOf("-");
+  const size = Number.parseInt(id.slice(1, separator), 36);
+  if (!Number.isSafeInteger(size) || size < 0) {
+    throw new Error(`Invalid binary filesystem blob ${id}`);
+  }
+  return size;
+}
+
+function binaryBlobId(contents: Uint8Array): string {
+  let first = 0x811c9dc5;
+  let second = 0x9e3779b9;
+  for (let index = 0; index < contents.length; index += 1) {
+    const value = contents[index]!;
+    first = Math.imul(first ^ value, 0x01000193) >>> 0;
+    second = Math.imul(second ^ (value + index), 0x85ebca6b) >>> 0;
+  }
+  return `x${contents.length.toString(36)}-${first.toString(36)}-${second.toString(36)}`;
+}
+
+const base64Alphabet =
+  "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+function encodeBase64Bytes(bytes: Uint8Array): string {
+  let output = "";
+  for (let index = 0; index < bytes.length; index += 3) {
+    const first = bytes[index]!;
+    const second = bytes[index + 1];
+    const third = bytes[index + 2];
+    const value = (first << 16) | ((second ?? 0) << 8) | (third ?? 0);
+    output += base64Alphabet[(value >>> 18) & 63]!;
+    output += base64Alphabet[(value >>> 12) & 63]!;
+    output += second === undefined ? "=" : base64Alphabet[(value >>> 6) & 63]!;
+    output += third === undefined ? "=" : base64Alphabet[value & 63]!;
+  }
+  return output;
+}
+
+function decodeBase64Bytes(source: string): Uint8Array {
+  if (
+    source.length % 4 !== 0 ||
+    !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(
+      source,
+    )
+  ) {
+    throw new Error("Invalid binary filesystem blob encoding");
+  }
+  const output: number[] = [];
+  for (let index = 0; index < source.length; index += 4) {
+    const values = [0, 1, 2, 3].map((offset) => {
+      const character = source[index + offset]!;
+      return character === "=" ? 0 : base64Alphabet.indexOf(character);
+    });
+    const value =
+      (values[0]! << 18) | (values[1]! << 12) | (values[2]! << 6) | values[3]!;
+    output.push((value >>> 16) & 0xff);
+    if (source[index + 2] !== "=") output.push((value >>> 8) & 0xff);
+    if (source[index + 3] !== "=") output.push(value & 0xff);
+  }
+  return Uint8Array.from(output);
+}
+
 function requireBlob(id: string): string {
   const contents = contentBlobs.get(id);
   if (contents === undefined) throw new Error(`Missing filesystem blob ${id}`);
@@ -1786,12 +1988,32 @@ function requireBlob(id: string): string {
 function contentBlobId(contents: string): string {
   let first = 0x811c9dc5;
   let second = 0x9e3779b9;
+  let size = 0;
   for (let index = 0; index < contents.length; index += 1) {
     const value = contents.charCodeAt(index);
     first = Math.imul(first ^ value, 0x01000193) >>> 0;
     second = Math.imul(second ^ (value + index), 0x85ebca6b) >>> 0;
+    if (value <= 0x7f) size += 1;
+    else if (value <= 0x7ff) size += 2;
+    else if (
+      value >= 0xd800 &&
+      value <= 0xdbff &&
+      index + 1 < contents.length &&
+      contents.charCodeAt(index + 1) >= 0xdc00 &&
+      contents.charCodeAt(index + 1) <= 0xdfff
+    ) {
+      size += 4;
+    } else if (
+      value >= 0xdc00 &&
+      value <= 0xdfff &&
+      index > 0 &&
+      contents.charCodeAt(index - 1) >= 0xd800 &&
+      contents.charCodeAt(index - 1) <= 0xdbff
+    ) {
+      // The paired high surrogate accounted for this code unit.
+    } else size += 3;
   }
-  return `b${utf8Size(contents).toString(36)}-${first.toString(36)}-${second.toString(36)}`;
+  return `b${size.toString(36)}-${first.toString(36)}-${second.toString(36)}`;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -1987,20 +2209,4 @@ function requireOptionalNonNegative(
   if (value !== undefined && (!Number.isSafeInteger(value) || value < 0)) {
     throw new RangeError(`${name} must be non-negative`);
   }
-}
-
-function utf8Size(value: string): number {
-  let size = 0;
-  for (const character of value) {
-    const codePoint = character.codePointAt(0)!;
-    size +=
-      codePoint <= 0x7f
-        ? 1
-        : codePoint <= 0x7ff
-          ? 2
-          : codePoint <= 0xffff
-            ? 3
-            : 4;
-  }
-  return size;
 }

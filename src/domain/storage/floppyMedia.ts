@@ -3,6 +3,7 @@ import {
   isInMemoryFilesystemSnapshot,
   type InMemoryFilesystemSnapshot,
 } from "../filesystem/inMemoryFilesystem.js";
+import { encodeUtf8 } from "../text/utf8.js";
 
 export const floppyMediaSchema = 1 as const;
 export const floppySectorBytes = 512;
@@ -258,7 +259,7 @@ export class FloppyMedia {
     const timestamp = normalizeFatTime(modifiedAtMilliseconds);
     this.transaction(() => {
       const previous = this.clusterChainsValue.get(normalized) ?? [];
-      const bytes = new TextEncoder().encode(contents).length;
+      const bytes = encodeUtf8(contents).length;
       const requiredClusters = Math.ceil(bytes / floppySectorBytes);
       const nextChain = this.resizeClusterChain(
         previous,
@@ -404,7 +405,7 @@ export class FloppyMedia {
     if (this.filesystemValue.isDirectory(path))
       return this.directoryCluster(path);
     const index = chain.indexOf(cluster);
-    const bytes = new TextEncoder().encode(this.filesystemValue.readFile(path));
+    const bytes = encodeUtf8(this.filesystemValue.readFile(path));
     return paddedSector(
       bytes.slice(index * floppySectorBytes, (index + 1) * floppySectorBytes),
     );
@@ -587,7 +588,7 @@ export class FloppyMedia {
   private bootSector(): Uint8Array {
     const bytes = new Uint8Array(floppySectorBytes);
     bytes.set([0xeb, 0x3c, 0x90], 0);
-    bytes.set(new TextEncoder().encode("CSFAT12 "), 3);
+    bytes.set(encodeUtf8("CSFAT12 "), 3);
     write16(bytes, 11, floppySectorBytes);
     bytes[13] = 1;
     write16(bytes, 14, reservedSectors);
@@ -601,14 +602,11 @@ export class FloppyMedia {
     bytes[36] = 0;
     bytes[38] = 0x29;
     write32(bytes, 39, mediaSerial(this.mediaId));
-    bytes.set(
-      new TextEncoder().encode(this.volumeLabelValue.padEnd(11, " ")),
-      43,
-    );
-    bytes.set(new TextEncoder().encode("FAT12   "), 54);
+    bytes.set(encodeUtf8(this.volumeLabelValue.padEnd(11, " ")), 43);
+    bytes.set(encodeUtf8("FAT12   "), 54);
     if (this.bootable) {
-      bytes.set(new TextEncoder().encode("CS-DOS bootable floppy"), 62);
-    } else bytes.set(new TextEncoder().encode("Non-system disk"), 62);
+      bytes.set(encodeUtf8("CS-DOS bootable floppy"), 62);
+    } else bytes.set(encodeUtf8("Non-system disk"), 62);
     bytes[510] = 0x55;
     bytes[511] = 0xaa;
     return bytes;
@@ -901,19 +899,13 @@ function writeDirectoryEntry(
 ): void {
   const offset = index * 32;
   if ((attributes & fat12Attribute.volumeLabel) !== 0) {
-    bytes.set(
-      new TextEncoder().encode(name.padEnd(11, " ").slice(0, 11)),
-      offset,
-    );
+    bytes.set(encodeUtf8(name.padEnd(11, " ").slice(0, 11)), offset);
     bytes[offset + 11] = attributes;
     return;
   }
   const [base, extension = ""] = name.split(".");
-  bytes.set(new TextEncoder().encode(base!.padEnd(8, " ").slice(0, 8)), offset);
-  bytes.set(
-    new TextEncoder().encode(extension.padEnd(3, " ").slice(0, 3)),
-    offset + 8,
-  );
+  bytes.set(encodeUtf8(base!.padEnd(8, " ").slice(0, 8)), offset);
+  bytes.set(encodeUtf8(extension.padEnd(3, " ").slice(0, 3)), offset + 8);
   bytes[offset + 11] = attributes;
   const date = new Date(modifiedAtMilliseconds || Date.UTC(1980, 0, 1));
   const timeWord =

@@ -208,7 +208,7 @@ describe("Linux OS boot layout", (): void => {
     expect(shell.submit("logout").exitCode).toBe(0);
     expect(shell.submit("root").exitCode).toBe(0);
     expect(shell.prompt()).toBe("Password: ");
-    expect(shell.submit("root-password").stdout).toContain("Login successful");
+    expect(shell.submit("root-password").exitCode).toBe(0);
     expect(shell.submit("whoami").stdout).toBe("root\n");
     expect(
       shell.submit("usermod -l operator -d /home/operator -m cs").exitCode,
@@ -292,7 +292,7 @@ describe("Linux OS boot layout", (): void => {
     const filesystem = new InMemoryFilesystem();
     const shell = new ShellSession(filesystem);
 
-    expect(filesystem.getSize("/usr/bin/ls")).toBe(8_192);
+    expect(filesystem.getSize("/usr/bin/ls")).toBe(13_312);
     expect(filesystem.getMetadata("/usr/bin/ls").mode & 0o111).not.toBe(0);
     expect(shell.submit("ls /").exitCode).toBe(0);
     new CredentialedFilesystem(filesystem, rootCredentials).delete(
@@ -301,7 +301,7 @@ describe("Linux OS boot layout", (): void => {
     expect(shell.submit("ls /")).toMatchObject({ exitCode: 127 });
 
     const snapshot = filesystem.snapshot();
-    expect(snapshot.baseImageId).toBe("cs-linux-1.0-rootfs-v8");
+    expect(snapshot.baseImageId).toBe("cs-linux-1.0-rootfs-v19");
     expect(snapshot.tombstones).toContain("/usr/bin/ls");
     expect(snapshot.files.some(([path]) => path === "/usr/bin/ls")).toBe(false);
 

@@ -110,6 +110,103 @@ describe("CS Make parser and planner", (): void => {
     ).toEqual(["app.csx"]);
   });
 
+  it("plans pattern rules with includes, conditionals, dependency merging, and stems", (): void => {
+    const source = [
+      "MODE = debug",
+      "ifeq ($(MODE),debug)",
+      "CFLAGS = -O0",
+      "else",
+      "CFLAGS = -O1",
+      "endif",
+      "DEPS = main.d util.d",
+      "-include $(DEPS)",
+      "app: main.o util.o",
+      "\tcc $^ -o $@",
+      "%.o: %.c",
+      "\tcc $(CFLAGS) -MMD -MF $*.d -c $< -o $@",
+    ].join("\n");
+    const included = new Map([
+      ["main.d", "main.o: main.c common.h\n"],
+      ["util.d", "util.o: util.c common.h\n"],
+    ]);
+    const makefile = parseGuestMakefile(source, new Map(), {
+      include: ({ path }) => {
+        const contents = included.get(path);
+        return contents === undefined
+          ? undefined
+          : { identity: path, source: contents, sourceName: path };
+      },
+      sourceName: "Makefile",
+    });
+    const plan = planGuestMakeBuild(
+      makefile,
+      source,
+      new Map(),
+      filesystem({ "main.c": 2, "util.c": 2, "common.h": 2 }),
+      ["app"],
+    );
+
+    expect(plan.targets.map(({ target }) => target)).toEqual([
+      "main.o",
+      "util.o",
+      "app",
+    ]);
+    expect(plan.targets[0]).toMatchObject({
+      prerequisites: ["main.c", "common.h"],
+      recipes: [{ command: "cc -O0 -MMD -MF main.d -c main.c -o main.o" }],
+    });
+    expect(plan.targets[1]?.recipes[0]?.command).toContain("-MF util.d");
+    expect(plan).toMatchObject({
+      dependencyEdgesTraversed: 6,
+      patternCandidatesExamined: 2,
+    });
+  });
+
+  it("indexes and bounds pattern candidates at the documented rule limit", (): void => {
+    const patterns = [
+      ...Array.from(
+        { length: GUEST_MAKE_LIMITS.rules - 1 },
+        (_unused, index) => `p${String(index)}%.o: p${String(index)}%.c`,
+      ),
+      "%x.o: %x.c",
+    ];
+    const source = patterns.join("\n");
+    const makefile = parseGuestMakefile(source);
+    const plan = planGuestMakeBuild(
+      makefile,
+      source,
+      new Map(),
+      filesystem({ "filex.c": 1 }),
+      ["filex.o"],
+    );
+
+    expect(plan.patternCandidatesExamined).toBe(GUEST_MAKE_LIMITS.rules);
+    expect(makefile.patternIndex.get(".o")).toHaveLength(
+      GUEST_MAKE_LIMITS.rules - 1,
+    );
+    expect(() => parseGuestMakefile(`${source}\nover%.o: over%.c\n`)).toThrow(
+      /rule count exceeds/u,
+    );
+  });
+
+  it("bounds and finalizes Makefile include and conditional errors", (): void => {
+    expect(() =>
+      parseGuestMakefile("include missing.mk\nall:\n\techo ok"),
+    ).toThrow(/included Makefile not found/u);
+    expect(() =>
+      parseGuestMakefile("include self.mk\n", new Map(), {
+        include: () => ({
+          identity: "Makefile",
+          source: "include self.mk\n",
+          sourceName: "Makefile",
+        }),
+      }),
+    ).toThrow(/circular Makefile include/u);
+    expect(() => parseGuestMakefile("ifeq (a,a)\nall:\n\techo ok\n")).toThrow(
+      /unterminated Make conditional/u,
+    );
+  });
+
   it("rejects cycles, missing prerequisites, unsupported recipe prefixes, and expansion cycles", (): void => {
     expect(() => {
       const source = "a: b\n\ttouch a\nb: a\n\ttouch b";

@@ -10,6 +10,12 @@ import type {
   ShellMakeStepResult,
 } from "../../src/application/os/shellTypes.js";
 import { ComputerRecord } from "../../src/domain/computer/computer.js";
+import {
+  cs486ExecutableMemoryRequirements,
+  runCs486,
+  validateCs486Executable,
+  type Cs486Executable,
+} from "../../src/domain/cpu/cs486.js";
 import { InMemoryFilesystem } from "../../src/domain/filesystem/inMemoryFilesystem.js";
 import {
   GUEST_MAKE_TOOLCHAIN_ID,
@@ -44,17 +50,17 @@ function finishMake(
 }
 
 describe("CS-Linux make", (): void => {
-  it("installs from CS-Linux rootfs v8 onward", (): void => {
+  it("installs from CS-Linux rootfs v10 onward", (): void => {
     registerOsFilesystemImages();
-    const v7 = new InMemoryFilesystem();
-    v7.restore({
-      baseImageId: "cs-linux-1.0-rootfs-v7",
+    const v9 = new InMemoryFilesystem();
+    v9.restore({
+      baseImageId: "cs-linux-1.0-rootfs-v9",
       blobs: [],
       directories: [],
       files: [],
       schema: 2,
     });
-    expect(v7.exists("/usr/bin/make")).toBe(false);
+    expect(v9.exists("/usr/bin/make")).toBe(false);
 
     const linux = new ComputerRecord("c-000944", "standard");
     const shell = new ShellSession(linux.filesystem, {
@@ -183,6 +189,208 @@ describe("CS-Linux make", (): void => {
       "cc -c main.c -o main.o",
     );
   });
+
+  it("fingerprints large object-sized prerequisites within the raised bounded aggregate", (): void => {
+    const record = new ComputerRecord("c-006202", "advanced");
+    const shell = new ShellSession(record.filesystem, {
+      deferGuestExecution: true,
+      osProfile: "linux",
+    });
+    record.filesystem.makeDirectory("/work");
+    record.filesystem.writeFile("/work/large.o", "o".repeat(1_100_000));
+    record.filesystem.writeFile(
+      "/work/Makefile",
+      "app: large.o\n\tcp large.o app\n",
+    );
+
+    expect(
+      finishMake(shell, shell.submitDebugCommand("make -C /work")),
+    ).toMatchObject({ kind: "complete", result: { exitCode: 0 } });
+    expect(record.filesystem.readFile("/work/app")).toHaveLength(1_100_000);
+    expect(
+      finishMake(shell, shell.submitDebugCommand("make -C /work")),
+    ).toMatchObject({
+      kind: "complete",
+      result: { exitCode: 0 },
+    });
+  });
+
+  it("builds, skips, rebuilds, and runs a synthetic 50k-instruction C project", (): void => {
+    const record = new ComputerRecord("c-006203", "advanced");
+    const shell = new ShellSession(record.filesystem, {
+      deferGuestExecution: true,
+      osProfile: "linux",
+    });
+    record.filesystem.makeDirectory("/large");
+    const units = Array.from({ length: 5 }, (_, unit) => `unit${String(unit)}`);
+    for (const [unit, name] of units.entries()) {
+      record.filesystem.writeFile(
+        `/large/${name}.c`,
+        syntheticTranslationUnit(unit, 0),
+      );
+    }
+    record.filesystem.writeFile(
+      "/large/main.c",
+      "int unit0_f0();\nint main(){return unit0_f0();}\n",
+    );
+    const objects = ["main", ...units].map((name) => `${name}.o`);
+    record.filesystem.writeFile(
+      "/large/Makefile",
+      [
+        `app: ${objects.join(" ")}`,
+        `\tld ${objects.join(" ")} -o app`,
+        ...["main", ...units].flatMap((name) => [
+          `${name}.o: ${name}.c`,
+          `\tcc -c ${name}.c -o ${name}.o`,
+        ]),
+      ].join("\n"),
+    );
+
+    expect(
+      finishMake(shell, shell.submitDebugCommand("make -C /large")),
+    ).toMatchObject({ kind: "complete", result: { exitCode: 0 } });
+    const firstEncoded = record.filesystem.readFile("/large/app");
+    const first = decodeExecutable(firstEncoded);
+    expect(first.instructions.length).toBeGreaterThanOrEqual(50_000);
+    expect(
+      runCs486(first, { memoryBytes: declaredLinearMemoryBytes(first) })
+        .registers.eax,
+    ).toBe(0);
+
+    const noOp = finishMake(shell, shell.submitDebugCommand("make -C /large"));
+    expect(JSON.stringify(noOp)).toContain("'app' is up to date");
+    expect(record.filesystem.readFile("/large/app")).toBe(firstEncoded);
+
+    record.filesystem.writeFile(
+      "/large/unit0.c",
+      syntheticTranslationUnit(0, 7),
+    );
+    const rebuilt = finishMake(
+      shell,
+      shell.submitDebugCommand("make -C /large"),
+    );
+    expect(rebuilt).toMatchObject({
+      kind: "complete",
+      result: { exitCode: 0 },
+    });
+    const secondEncoded = record.filesystem.readFile("/large/app");
+    expect(secondEncoded).not.toBe(firstEncoded);
+    const second = decodeExecutable(secondEncoded);
+    expect(
+      runCs486(second, { memoryBytes: declaredLinearMemoryBytes(second) })
+        .registers.eax,
+    ).toBe(7);
+    expect(record.filesystem.readFile("/large/.cs-make-state")).toContain(
+      GUEST_MAKE_TOOLCHAIN_ID,
+    );
+  }, 60_000);
+
+  it("builds 24 translation units into two archives through patterns and MMD includes", (): void => {
+    const record = new ComputerRecord("c-007103", "advanced");
+    const shell = new ShellSession(record.filesystem, {
+      deferGuestExecution: true,
+      osProfile: "linux",
+    });
+    record.filesystem.makeDirectory("/scale");
+    const units = Array.from(
+      { length: 24 },
+      (_, index) => `unit${String(index)}`,
+    );
+    record.filesystem.writeFile("/scale/common.h", "#define BASE 0\n");
+    for (const [index, unit] of units.entries()) {
+      record.filesystem.writeFile(
+        `/scale/${unit}.c`,
+        `#include "common.h"\nint ${unit}(){return BASE+${String(index)};}\n`,
+      );
+    }
+    record.filesystem.writeFile(
+      "/scale/main.c",
+      [
+        ...units.map((unit) => `int ${unit}();`),
+        `int main(){return ${units.map((unit) => `${unit}()`).join("+")};}`,
+      ].join("\n"),
+    );
+    const objects = ["main", ...units].map((unit) => `${unit}.o`);
+    const evenObjects = units
+      .filter((_unit, index) => index % 2 === 0)
+      .map((unit) => `${unit}.o`);
+    const oddObjects = units
+      .filter((_unit, index) => index % 2 !== 0)
+      .map((unit) => `${unit}.o`);
+    const dependencies = ["main", ...units].map((unit) => `${unit}.d`);
+    record.filesystem.writeFile(
+      "/scale/Makefile",
+      [
+        `OBJECTS = ${objects.join(" ")}`,
+        `EVEN_OBJECTS = ${evenObjects.join(" ")}`,
+        `ODD_OBJECTS = ${oddObjects.join(" ")}`,
+        `DEPS = ${dependencies.join(" ")}`,
+        ".PHONY: clean",
+        "app: main.o libeven.csa libodd.csa",
+        "\tld main.o -L. -leven -lodd -o $@",
+        "libeven.csa: $(EVEN_OBJECTS)",
+        "\tar rcs $@ $^",
+        "\tranlib $@",
+        "libodd.csa: $(ODD_OBJECTS)",
+        "\tar rcs $@ $^",
+        "\tranlib $@",
+        "-include $(DEPS)",
+        "%.o: %.c",
+        "\tcc -std=c11 -O1 -Wall -Werror -MMD -MF $*.d -c $< -o $@",
+        "clean:",
+        "\t$(RM) $(OBJECTS) $(DEPS) libeven.csa libodd.csa app .cs-make-state",
+      ].join("\n"),
+    );
+
+    expect(
+      finishMake(shell, shell.submitDebugCommand("make -C /scale")),
+    ).toMatchObject({ kind: "complete", result: { exitCode: 0 } });
+    expect(
+      dependencies.every((dependency) =>
+        record.filesystem.exists(`/scale/${dependency}`),
+      ),
+    ).toBe(true);
+    const first = decodeExecutable(record.filesystem.readFile("/scale/app"));
+    expect(
+      runCs486(first, { memoryBytes: declaredLinearMemoryBytes(first) })
+        .registers.eax,
+    ).toBe(276);
+    expect(
+      JSON.stringify(
+        finishMake(shell, shell.submitDebugCommand("make -C /scale")),
+      ),
+    ).toContain("'app' is up to date");
+
+    const firstEncoded = record.filesystem.readFile("/scale/app");
+    expect(
+      finishMake(shell, shell.submitDebugCommand("make -C /scale clean")),
+    ).toMatchObject({ kind: "complete", result: { exitCode: 0 } });
+    expect(
+      finishMake(shell, shell.submitDebugCommand("make -C /scale")),
+    ).toMatchObject({ kind: "complete", result: { exitCode: 0 } });
+    expect(record.filesystem.readFile("/scale/app")).toBe(firstEncoded);
+
+    record.filesystem.writeFile("/scale/common.h", "#define BASE 1\n");
+    const rebuilt = finishMake(
+      shell,
+      shell.submitDebugCommand("make -C /scale"),
+    );
+    expect(rebuilt).toMatchObject({
+      kind: "complete",
+      result: { exitCode: 0 },
+    });
+    const rebuildTranscript = JSON.stringify(rebuilt);
+    expect(rebuildTranscript).not.toContain("-MF main.d");
+    expect(rebuildTranscript.match(/-MF unit\d+\.d/gu)).toHaveLength(24);
+    expect(rebuildTranscript).toContain("ar rcs libeven.csa");
+    expect(rebuildTranscript).toContain("ar rcs libodd.csa");
+    expect(rebuildTranscript).toContain("ld main.o -L. -leven -lodd -o app");
+    const second = decodeExecutable(record.filesystem.readFile("/scale/app"));
+    expect(
+      runCs486(second, { memoryBytes: declaredLinearMemoryBytes(second) })
+        .registers.eax,
+    ).toBe(300);
+  }, 20_000);
 
   it("supports dry runs and rejects non-admitted recipe control flow", (): void => {
     const record = new ComputerRecord("c-000947", "standard");
@@ -466,3 +674,25 @@ describe("CS-Linux make", (): void => {
     );
   });
 });
+
+function syntheticTranslationUnit(unit: number, firstValue: number): string {
+  return Array.from({ length: 700 }, (_, index) => {
+    const value = index === 0 ? firstValue : index;
+    return `int unit${String(unit)}_f${String(index)}(){return ${String(value)};}`;
+  }).join("\n");
+}
+
+function decodeExecutable(encoded: string): Cs486Executable {
+  expect(encoded.startsWith("CS486\n")).toBe(true);
+  const executable: unknown = JSON.parse(encoded.slice("CS486\n".length));
+  validateCs486Executable(executable);
+  return executable;
+}
+
+function declaredLinearMemoryBytes(executable: Cs486Executable): number {
+  const requirements = cs486ExecutableMemoryRequirements(executable);
+  if (requirements.kind !== "declared") {
+    throw new Error("Make produced a legacy executable");
+  }
+  return requirements.linearAddressSpaceBytes;
+}

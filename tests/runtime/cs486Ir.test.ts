@@ -434,6 +434,113 @@ describe("CS486 integer IR", (): void => {
     ).toThrow(RangeError);
   });
 
+  it("verifies fixed words, variadic words, and the actual-argument boundary", (): void => {
+    const makeProgram = (argumentCount: number): Cs486IrProgram => ({
+      externals: [
+        {
+          name: "consume",
+          parameterTypes: ["i32"],
+          returnType: "void",
+          variadic: true,
+        },
+      ],
+      functions: [
+        {
+          blocks: [
+            {
+              id: "entry",
+              instructions: [
+                ...Array.from({ length: argumentCount }, (_, result) => ({
+                  kind: "constant" as const,
+                  result,
+                  type: "i32" as const,
+                  value: result,
+                })),
+                {
+                  arguments: Array.from(
+                    { length: argumentCount },
+                    (_, value) => value,
+                  ),
+                  callee: "consume",
+                  kind: "call" as const,
+                },
+              ],
+              phis: [],
+              terminator: { kind: "return" },
+            },
+          ],
+          entry: "entry",
+          locals: [],
+          name: "caller",
+          parameters: [],
+          returnType: "void",
+        },
+      ],
+    });
+
+    expect(verifyCs486Ir(makeProgram(2))).toEqual([]);
+    expect(diagnosticCodes(makeProgram(0))).toContain("CSIR_CALL_SIGNATURE");
+    expect(diagnosticCodes(makeProgram(33))).toContain("CSIR_LIMIT");
+  });
+
+  it("verifies floating ABI metadata against its lowered physical words", (): void => {
+    const floating: Cs486IrProgram = {
+      externals: [
+        {
+          abiSignature: "(f64)->f64",
+          name: "sqrt",
+          parameterTypes: ["i32", "i32"],
+          returnType: "i32",
+          wideReturn: true,
+        },
+      ],
+      functions: [
+        {
+          abiSignature: "(f64,f32)->f64",
+          blocks: [
+            {
+              id: "entry",
+              instructions: [],
+              phis: [],
+              terminator: { kind: "return", value: 0, valueHigh: 1 },
+            },
+          ],
+          entry: "entry",
+          locals: [],
+          name: "combine",
+          parameters: [
+            { id: 0, name: "value.low", type: "i32" },
+            { id: 1, name: "value.high", type: "i32" },
+            { id: 2, name: "scale", type: "i32" },
+          ],
+          returnType: "i32",
+          wideReturn: true,
+        },
+      ],
+    };
+
+    expect(verifyCs486Ir(floating)).toEqual([]);
+    const narrowExternal = { ...floating.externals![0]! };
+    delete narrowExternal.wideReturn;
+    expect(
+      diagnosticCodes({
+        ...floating,
+        functions: [
+          {
+            ...floating.functions[0]!,
+            parameters: floating.functions[0]!.parameters.slice(0, 2),
+          },
+        ],
+      }),
+    ).toContain("CSIR_ABI_SIGNATURE");
+    expect(
+      diagnosticCodes({
+        ...floating,
+        externals: [narrowExternal],
+      }),
+    ).toContain("CSIR_ABI_SIGNATURE");
+  });
+
   it("folds signed constants and removes unreachable, copied, and unused pure values", (): void => {
     const input = diamondProgram();
     const report = optimizeCs486IrWithReport(input);

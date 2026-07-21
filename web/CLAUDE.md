@@ -32,13 +32,20 @@ It is not the public Pages site.
 
 - Render the fixed-cell terminal snapshot without creating parallel cursor,
   screen, editor, or process truth. Normalize a writer to 80x25 once; CSS
-  scaling subtracts stage padding and fits both axes without mutating cell
-  geometry or adding stage scrollbars.
+  scaling subtracts stage padding, selects a whole-pixel cell size, and
+  letterboxes both axes without mutating cell geometry or adding stage
+  scrollbars.
+- Render the authoritative cell cursor as an O(1) overlay: block cursors invert
+  the current glyph, underline cursors draw a bar, and CSS-only stepped blink
+  honors reduced-motion preferences without invalidating cached rows.
 - Overlay semantic input at the terminal cursor so physical typing appears at
   the prompt. Physical Enter submits `terminal_line`.
-- Ctrl+C copies selected terminal/command text; with no selection it invokes the
-  bounded interrupt. Plain-text paste is bounded and never auto-submits. Up/Down
-  navigate local command history.
+- Ctrl+C copies selected terminal/command text; with no selection it interrupts
+  advertised foreground work or aborts the current line without shutting down an
+  idle Computer. Plain-text paste is bounded and never auto-submits. Up/Down
+  navigate local history only when the interaction descriptor enables it; Linux
+  enables it normally and DOS enables it after bare `DOSKEY`. DOS F3 recalls the
+  most recently submitted local line without enabling history.
 - Copy acts only on demand and copies the active selection or visible cell grid;
   it must not poll the terminal. Viewers may select/copy but cannot submit
   input.

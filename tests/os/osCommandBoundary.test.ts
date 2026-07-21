@@ -20,6 +20,7 @@ describe("OS command boundary", (): void => {
       "source",
       "history",
       "grep",
+      "git",
       "false",
       "env",
       "shutdown",
@@ -36,12 +37,22 @@ describe("OS command boundary", (): void => {
       });
     }
 
-    expect(shell.complete("l", 1).candidates).not.toContain("ls");
-    expect(shell.complete("ba", 2).candidates).not.toContain("bash");
-    expect(shell.complete("gr", 2).candidates).not.toContain("grep");
-    expect(shell.complete("su", 2).candidates).not.toContain("sudo");
-    expect(shell.complete("di", 2).candidates).toContain("dir");
-    expect(shell.complete("co", 2).candidates).toContain("copy");
+    const completedNames = (value: string): string[] =>
+      shell
+        .complete(value, value.length)
+        .candidates.map(({ displayText }) => displayText.toLowerCase());
+    expect(completedNames("l")).not.toContain("ls");
+    expect(completedNames("ba")).not.toContain("bash");
+    expect(completedNames("gr")).not.toContain("grep");
+    expect(completedNames("gi")).not.toContain("git");
+    expect(completedNames("su")).not.toContain("sudo");
+    expect(completedNames("di")).toContain("dir");
+    expect(completedNames("co")).toContain("copy");
+    expect(shell.complete("DIR C:\\DO", 9).candidates).toContainEqual({
+      displayText: "C:\\DOS\\",
+      insertText: "C:\\DOS\\",
+      kind: "directory",
+    });
 
     expect(shell.submit("CLS")).toMatchObject({
       action: "clear",

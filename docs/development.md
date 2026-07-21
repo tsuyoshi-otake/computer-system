@@ -532,15 +532,31 @@ dirty ring bounds both tile count and payload bytes; write marking is O(1) and a
 batch drain is O(D). Do not include framebuffer revision or data in
 `ComputerRecord.persistenceRevision`, snapshot JSON, or Dynamic Properties.
 
-`ComputerRuntime.powerOn()` leaves an observable 80x25 CSBIOS POST frame. The
-next `runTick()` owns the single handoff to text mode and guest execution. Every
-error branch faults the display explicitly, while completed shutdown/reboot
-releases it. Host tests must verify the minimal post-handoff screens: CS-DOS
-identity, blank line, and `C:\>`; CS-Linux identity, blank line, and its
-password or shell prompt. Neither OS prints a simulated tty name or startup
-shell banner. The graphics Web protocol is intentionally later: generate each
-Computer delta once and fan it out to sessions instead of serializing a full
-640x480 framebuffer per viewer.
+`ComputerRuntime.powerOn()` starts an observable, deterministic 80x25 CSBIOS
+state machine. At 20 TPS its 70-tick schedule is black -> CS-VGA -> black ->
+`CSBIOS Revision 1.1` and at most eight same-row memory updates -> factual
+device detection -> explicit fixed-disk/floppy source and OS target -> handoff
+black -> `Starting ...` -> guest handoff. Every phase is driven by the scheduler
+tick, advances at most one visible stage per admitted Computer pass, and keeps
+aggregate work bounded to 64 Computers per tick. It never uses wall-clock delay
+to rewrite guest timing.
+
+Until the final handoff, the Computer lifecycle remains `booting`, its scheduled
+VM is paused, and terminal/debug input is unavailable. BIOS output is mirrored
+to both `TerminalBuffer` and `DisplayDevice` with the cursor hidden, and it may
+report only the active CPU, RAM, VGA/VRAM, floppy state, disk quota, boot
+source, and target. Do not add AMI vendor text, an unsupported setup prompt, or
+a fabricated FPU. Every cancel, shutdown, detach, reboot, and error branch owns
+explicit sequence finalization; an error faults the display, while completed
+shutdown/reboot releases it.
+
+At successful handoff, clear the BIOS frame once, ensure the prepared OS runtime
+is `running`, transition the Computer to `running`, and unpause the guest. Host
+tests must verify the minimal post-handoff screens: CS-DOS identity, blank line,
+and `C:\>`; CS-Linux identity, blank line, and its password or shell prompt.
+Neither OS prints a simulated tty name or startup shell banner. The graphics Web
+protocol is intentionally later: generate each Computer delta once and fan it
+out to sessions instead of serializing a full 640x480 framebuffer per viewer.
 
 Python-generated CS486 instructions, managed-runtime syscalls, native calls, and
 other CS486 execution all return deterministic cycle debt to the same process.
@@ -555,10 +571,13 @@ persisted and visible clocks are 33 MHz and 66 MHz. `run --stats` is the
 deterministic optimization measurement: compare CPU-cycle totals and virtual
 microseconds, not host wall time or language-specific instruction counts.
 Executables are JSON preceded by `CS486\n`, validated again at load, and never
-passed to a host process. Normal terminal execution is a resumable foreground
-scheduler job capped at 100,000 instructions and returns exit 124 on a bounded
-yield. The scheduler also enforces per-Computer and global instruction ceilings
-on every tick.
+passed to a host process. Non-hosted terminal execution is a resumable
+foreground scheduler job capped at 100,000 instructions and returns exit 124 on
+a bounded yield. A CS-Linux legacy version-4 word executable or current
+version-5 model-declared executable launched through the hosted foreground `run`
+path instead remains a tick-sliced CS ABI 1.0 process until `main` returns,
+`exit` completes it, or its lifecycle owner terminates it. The scheduler still
+enforces per-Computer and global instruction ceilings on every tick.
 
 Host-load admission and remaining scale risks are specified in
 `docs/work-monitor.md`. Keep deterministic guest timing separate from measured
@@ -575,59 +594,165 @@ guest filesystem. Before allocation grows, preprocessing permits at most
 at depth 8, 256 macros at expansion depth 16, 32 parameters per macro, and
 100,000 expanded tokens.
 
-New writers emit `CS486OBJ` v2 with `.text`, `.rodata`, `.data`, and `.bss`
-sections, initialized little-endian bytes, alignment, local/global/undefined
-typed symbols, optional `()->i32`/`()->void` function signatures, and structured
+New writers emit data-model-declared `CS486OBJ` v4 with `.text`, `.rodata`,
+`.data`, and `.bss` sections, initialized little-endian bytes, alignment,
+local/global/undefined typed symbols, bounded signatures such as
+`(i32,i64)->i64`, `(i32,...)->i32`, and `()->void`, and structured
 `text-target`, `data-address`, and `absolute32` relocations. ASM may declare a
-known zero-argument return with `signature name, i32|void`; omitting it retains
-untyped compatibility. Readers retain v1 compatibility. The static linker
-resolves both global and object-local definitions through precomputed maps,
-computes each data layout once, and produces a validated executable in
-O(instructions + initialized bytes + symbols + relocations) work. It never
-reparses or regex-rewrites assembly text. Object counts, instructions,
-initialized bytes, total static data, alignment, symbol types, and relocation
-targets are bounded and fail explicitly. The stack grows down from the top of
-process RAM and faults before it crosses the aligned `.rodata`/`.data`/`.bss`
-boundary. `.rodata` is a layout category, not an MMU-enforced read-only page.
+known return/parameter contract with
+`signature name, i32|i64|void[, i32|i64 ...][, varargs]`; omitting it retains
+untyped compatibility. Readers retain v1-v3 word-object compatibility. The
+static linker rejects mixed models before layout, resolves both global and
+object-local definitions through precomputed maps, computes each data layout
+once, reserves the first data word so no authored symbol equals the null
+pointer, and produces a validated executable in O(instructions + initialized
+bytes + symbols + relocations) work. It never reparses or regex-rewrites
+assembly text. Object counts, instructions, initialized bytes, total static
+data, alignment, symbol types, and relocation targets are bounded and fail
+explicitly. The stack grows down from the top of process RAM and faults before
+it crosses the aligned `.rodata`/`.data`/`.bss` boundary. `.rodata` is a layout
+category, not an MMU-enforced read-only page.
 
-The current ABI supports zero-argument functions returning an integer in EAX or
-returning no value. C/C++ definitions and declarations serialize that
-distinction; the linker rejects conflicting known signatures, while one untyped
-v1/ASM side remains intentionally compatible. Inline C/C++ assembly is a
+The `cs486-cc2` ABI supports up to 32 physical argument words. Callers evaluate
+arguments deterministically, push them right-to-left, and clean the stack after
+the call; callees read `[ebp+8+4i]` and preserve ESI, EDI, and EBP. One-word
+results use EAX. Two-word `i64` and `f64` results and values use low-word-first
+layout, with EAX low and EDX high on return. `f32` occupies one physical word.
+Variadic calls insert a checked variable word count after the fixed words, and
+`<stdarg.h>` consumes exactly the declared word width. `calli` validates an
+executable function entry and its complete signature before pushing a return
+address. C/C++ definitions and declarations serialize parameter and return
+types; the linker rejects conflicting known signatures, while one untyped v1/ASM
+side remains intentionally compatible. Inline C/C++ assembly is a
 statement-boundary escape hatch and rejects labels, branches, calls, stack
 operations, and ESP/EBP access. `CS486OBJ` is not ELF or OMF; `CS486` is not DOS
 COM/EXE or native x86. Dynamic loading remains deliberately unsupported until
 this ABI has stable field evidence.
+
+CS C defaults to `cs-word32-v1`: `CHAR_BIT=32`; signed/unsigned `char`, `short`,
+`int`, `long`, and pointers occupy one word, while signed/unsigned `long long`
+occupy two low-word-first words. `cs-byte8-v1`, selected with `-mbyte8`, uses
+8-bit char, 16-bit short, 32-bit int/long/pointers, 64-bit long long, and
+natural little-endian byte layout. Pointer arithmetic, `sizeof`, alignment,
+arrays, structs, unions, promotion, truncation, initialized data, and NUL
+strings derive only from the declared model. Word strings remain 32-bit code
+points; byte strings are packed bytes. Both layouts are bounded Computer System
+ABIs, not native x86 ABIs. Rootfs v19 installs model-aware headers and per-model
+libc/libcurses/libm static libraries; v17 and the pre-floating v18 payload
+remain immutable.
+
+CS C `float` is binary32 and `double` is binary64; `long double` aliases
+`double`. Both data models use little-endian bits and four-byte alignment. The
+bounded software core in `deterministicFloat.ts` performs parsing, packing,
+arithmetic, conversions, comparison, classification, decomposition, scaling,
+fixed-decimal formatting, and square root with BigInt integer/rational work and
+round-to-nearest ties-to-even. Host `Number` arithmetic, host libm, locale,
+WebAssembly, and native addons are not result authorities. Compiler folding and
+runtime `cs.fp.*` operations call the same core. The latter run inside the
+admitted CS486 process, charge fixed operation cycles plus modeled guest-memory
+access, and retain process-local invalid/divide-by-zero/overflow/underflow/
+inexact status.
+
+Rootfs v19 `<float.h>` and `<math.h>` expose the exact limits and the initial
+guest libm surface: `fabs`, `copysign`, integral rounding, `fmod`, `sqrt`,
+`ldexp`, `frexp`, `modf`, and classification, including appropriate `f`
+variants. libc `%f` default-promotes `float` to a two-word `double`, defaults to
+six fractional places, and caps precision at 18. Trigonometric, exponential,
+logarithmic, `pow`, complex, mutable `<fenv.h>`, x87/SIMD, and fast-math remain
+explicitly unsupported.
+
+`csAbi.ts` owns hosted startup and syscall state. Validate the complete guest
+memory range before admission, then perform every terminal or filesystem atom
+inside exactly one `runHostWork` call. A rejected admission returns `EAGAIN`
+without changing a descriptor position, guest result buffer, terminal frame, or
+filesystem revision. Open, seek, stat, remove, rename, and file reads/writes all
+belong to the block-I/O lane. Standard output is line-buffered; guest `fflush`
+uses a zero-unit write to descriptor 1, while stderr is unbuffered. The
+64,000-unit output ceiling counts admitted stdout and stderr over the whole
+process, not merely the currently buffered string. `ComputerRuntime` is the only
+finalization owner: normal return, `exit`, signal, terminal close, shutdown, and
+detach clear waits/descriptors and release the executable RAM lease once.
+
+Rootfs v17 extends that ABI with selectors 16–25 for wall-clock time, working
+directories, directory creation/removal, access checks, bounded directory
+iteration, and extended stat metadata. Wall-clock time is injected separately
+from deterministic guest CPU ticks. CWD, directory snapshots, and metadata
+operations stay inside the block-I/O admission lane: opening a directory takes
+one bounded O(N) snapshot (at most 256 entries), `readdir` is then O(1), and a
+process may own at most eight directory descriptors. Rootfs v16 remains an
+immutable historical image and does not acquire the v17 headers or sources.
+
+The v17 hosted library adds bounded `qsort` (O(N log N) heapsort), `bsearch`
+(O(log N)), `atexit`, getopt, filesystem/time wrappers, a synchronous
+`signal`/`raise` subset, and fixed-format printing. The CS ABI cannot yet return
+or pass aggregates by value, so `div` writes through a caller-provided `div_t *`
+and `vsnprintf` accepts `va_list *`; document these profile deviations rather
+than implying native ISO C compatibility. The linker bootstrap runs registered
+exit handlers after a normal `main` return. `libcs-curses` is likewise bounded:
+an 80×25 screen, `stdscr` plus seven allocated windows, 16 color pairs, a
+1,024-word format buffer, one terminal frame per refresh, and explicit
+`ENOMEM`/`ERR` results when a limit is reached.
 
 The C-family frontend begins with the bounded token preprocessor in
 `cs486CPreprocessor.ts`. Include callbacks are injected by the shell and read
 only through the credentialed guest filesystem. Both direct shell compilation
 and deferred ComputerRuntime compilation must pass identical `-I/-D/-U` or DOS
 `/I,/D,/U` options, `INCLUDE` directories, source names, provenance, and work
-accounting. Never add a host include fallback. Macro rescan, conditional,
-include, source, token, and diagnostic limits must be checked before an array or
-recursive path grows. Unsupported syntax must terminate explicitly.
+accounting. Dynamic `__FILE__` and `__LINE__`, variadic macros, `#pragma once`,
+and `#line` retain authored spans and normalized include identities. Never add a
+host include fallback or live host `__DATE__`/`__TIME__`. Macro rescan,
+conditional, include, source, token, and diagnostic limits must be checked
+before an array or recursive path grows. Unsupported syntax must terminate
+explicitly.
+
+`cs486Archive.ts` owns current version 2 `CS486AR`: canonical validated CS486OBJ
+members, SHA-256 member digests, one bounded global-symbol index, explicit
+`cs-word32-v1` or `cs-byte8-v1` identity, archive checksum, and deterministic
+compressed serialization. The version-1 legacy reader fixes the archive to the
+historical word model. Guest `ar` and `ranlib` trial and validate a complete
+replacement before one credentialed filesystem transaction. `cc`/`ld` collect
+`-L` directories once and preserve `-l` operand order; demand extraction uses
+Map lookups and a capped queue rather than rescanning all members per unresolved
+symbol. Full assembly transcripts remain canonical linker evidence.
+Function-level pruning is allowed only for installed large-library objects
+already marked with an explicitly truncated transcript.
+
+The immutable hosted-C rootfs archives are checked-in build inputs generated by
+`tools/generate-hosted-c-archives.mjs`. After changing hosted libc, curses,
+libm, their headers, or archive serialization, run `npm run generate:hosted-c`
+and commit the updated `generated/hostedCArchiveContents.ts`. Both
+`npm run build` and the complete validation gate run `npm run check:hosted-c`
+first and reject stale output. Production BDS module startup must only load
+these payloads; compiling or compressing the rootfs libraries during module
+evaluation exceeds the native startup watchdog.
 
 C++ deliberately emits the same unmangled CS ABI as C. Individual `extern "C"`
 declarations are accepted as an explanatory spelling; linkage blocks, other
-linkages, parameters, member functions, overloads, and C++ name mangling are not
-implemented. ASM interoperation is therefore limited to the zero-argument
-EAX/void contract and optional `SIGNATURE`. Do not document MASM, near/far, OMF,
-DOS extender, or Microsoft library compatibility.
+linkages, member functions, overloads, and C++ name mangling are not
+implemented. ASM interoperation uses the bounded word-argument EAX/void contract
+and optional `SIGNATURE name, return[, i32 ...]`. Do not document MASM,
+near/far, OMF, DOS extender, or Microsoft library compatibility.
 
 CS-Linux Makefiles are parsed and planned by `guestMake.ts`; the implementation
 must remain independent of host make, shells, processes, filesystems, and
-network access. Planning is O(source bytes + graph nodes + graph edges), with
-explicit limits on source, rules, prerequisites, expansion depth, graph depth,
-recipes, requested targets, output, and fingerprint input bytes. Mtime checks
-are reinforced by bounded `CSMAKE2` records with SHA-256 input and output
-fingerprints plus an explicit toolchain identity. Legacy `CSMAKE1`, missing,
-evicted, and foreign-toolchain records are untrusted migration inputs that force
-rebuild; malformed state remains an error. Each target takes a fresh pre-recipe
-input snapshot, rejects inputs changed before post-build verification, and
-persists its record only after recipe block I/O completes. State-write I/O
-failure restores the last committed serialized state; failure of a later target
-does not erase records already committed by earlier targets.
+network access. Planning is O(source bytes + indexed pattern candidates + graph
+nodes + graph edges), with explicit limits on aggregate source, included files
+and depth, rules/patterns, prerequisites, expansion depth, graph depth, recipes,
+requested targets, output, and fingerprint input bytes. Pattern candidates are
+indexed by target suffix and preserve authored order. Required and optional
+includes, the documented minimal conditionals, dependency-only rule merging, and
+`$*` do not open a general GNU Make evaluator. Mtime checks are reinforced by
+bounded `CSMAKE2` records with SHA-256 input and output fingerprints plus an
+explicit toolchain identity. Legacy `CSMAKE1`, missing, evicted, and
+foreign-toolchain records are untrusted migration inputs that force rebuild;
+malformed state remains an error. Each target takes a fresh pre-recipe input
+snapshot, rejects inputs changed before post-build verification, and persists
+its record only after recipe block I/O completes. State-write I/O failure
+restores the last committed serialized state; failure of a later target does not
+erase records already committed by earlier targets. After a recipe publishes a
+`.d` file, the verifier reparses the bounded optional includes and commits the
+resolved dependency set immediately; the next identical build is therefore a
+no-op rather than a convergence rebuild.
 
 `ComputerRuntime` owns the single foreground make PID, 128 KiB RAM lease,
 bounded planning/fingerprinting after admission, one-recipe-per-tick progress,
@@ -638,6 +763,55 @@ and output allowlist; aliases, functions, pipelines, redirects, chains,
 background work, TUI/session/lifecycle commands, recursive make, and host
 execution never cross that boundary. CS-DOS continues to use Program Lists and
 PWB and must not gain a MAKE capsule.
+
+The official port boundary is a checked-in or pre-generated `config.h`, one `.d`
+file per object, pattern compile rules, versioned `.csa` libraries, and an
+ordered final link. Autoconf, CMake, arbitrary configure scripts, recursive
+Make, and parallel jobs remain unsupported. The complete executable rubric is
+recorded in `docs/issues/issue-71-build-portability.md`.
+
+CS System Git is split across `linuxGit.ts` (command/application policy),
+`linuxGitRepository.ts` (validated `.git` storage), `linuxGitIgnore.ts` (bounded
+pattern matching), and `linuxGitRemote.ts` (future transport port). These
+modules depend only on guest/application abstractions and pure domain SHA-256;
+they must never import Minecraft, Node networking, child processes, host Git, or
+credential helpers. The v12 Linux image is the first immutable image containing
+`/usr/bin/git`; v11 and earlier command snapshots stay frozen.
+
+Repository work is O(scanned paths + selected content + visited history +
+bounded ignore-state transitions), under explicit entry, object, byte, pattern,
+output, and work ceilings. Tracked-directory membership and history queues use
+sets/cursors rather than repeated serial scans. Object files are immutable and
+content-addressed. Mutable index/worktree/ref changes share a bounded
+synchronous filesystem transaction, and ref writes require the exact previous
+OID. Reads reject unknown schemas, bad checksums/hashes, file/directory path
+collisions, control paths, `.git` symlinks, and an effective UID different from
+the `.git` owner. Worktree traversal never follows a symlink. The 1 MiB
+transient Linux reservation is acquired before command work and released in a
+`finally`; bounded payload/hash/object buffers are consumed sequentially, and
+payload reads and writes go through `ShellCommandRuntime` so the Computer
+block-I/O owner remains authoritative.
+
+Remote URLs are inert local metadata today. The remote port is deliberately a
+bounded, cancellable state machine with connecting, authenticating, negotiating,
+transferring, verifying, and compare-and-swap ref-update phases. Requests carry
+protocol/capability offers, a reconciliation ID, and total ceilings; every
+`step` also receives a smaller per-tick budget and may return a minimum
+guest-tick delay for bounded backoff and peer `Retry-After` handling. A terminal
+result is exactly one of complete, failed, cancelled, or unknown. In particular,
+lost acknowledgement after a possible non-idempotent update must end as unknown;
+the caller reconciles the advertised ref before attempting another update.
+
+Future adapters receive an injected guest repository exchange, guest credential
+provider, and guest byte transport. They read content-addressed objects in
+bounded chunks; incoming objects enter a guest-backed quarantine whose stepped
+verification precedes one transactional promotion and ref CAS. TLS certificates,
+SSH host keys, or the CS authenticated-channel peer are verified against guest
+trust before credential acquisition. The session is the single finalization
+owner for credential handles, object readers, quarantine, and transport leases
+on success, failure, cancellation, disconnect, or unknown acknowledgement. No
+credential is stored in `.git/config`, and no host helper or socket is
+reachable.
 
 CS-DOS Program Lists are parsed by `csDosProgramList.ts` and resolved again to
 canonical credentialed guest paths in `ShellCommandRuntime`. The parser bounds
@@ -658,6 +832,130 @@ menus and help must not imply Make or Debug capabilities.
 Computer System Python no longer uses a bytecode VM. `pythonCs486.ts` resolves a
 bounded module graph, compiles Python control flow to CS486 instructions, and
 uses the allowlisted `python` syscall for managed values and native modules.
+Computer System Python 1.0 is targeting Python 3.14 syntax and core semantics
+under the versioned Python 3.14 CS Profile; the current frontend/runtime remains
+a partial subset. The profile contract and feature statuses are maintained in
+[`python-compatibility.md`](python-compatibility.md) and
+[`python-314-compatibility.json`](python-314-compatibility.json). `pip`,
+`ensurepip`, `venv`, PyPI/wheel installation, and the CPython native ABI are
+deliberately unavailable.
+
+The direct frontend has instance-scoped limits: 512,000 decoded source code
+units, 131,072 tokens, 512 code units per identifier, 65,536 per literal,
+delimiter/indentation/block/expression/scope nesting 64, 16,384 statements, 256
+parameters and arguments, 4,096 items per construct, 256 formatted-string
+expressions, 1,024 scopes, and 4,096 symbols per scope. Limits are checked
+before mutation; exact capacity succeeds and capacity plus one returns a located
+`LanguageSyntaxError` without an AST or registered module. Scope analysis runs
+for every module immediately after parsing and classifies deterministic
+global/local/cell/free bindings. Unicode XID identifiers normalize to NFKC for
+lookup, while AST spans retain authored locations. The compiler annotates every
+name operation with its binding; the runtime creates local cells on function
+entry and shares captured/free cells across nested calls. Whole-function local,
+`global`, `nonlocal`, unbound-local, retained-closure, and failed-import
+rollback semantics have focused runtime evidence. Function descriptors
+distinguish all five Python parameter kinds and definition-time defaults. Call
+operations retain source-order positional, keyword, iterable-unpack, and
+mapping-unpack metadata; the runtime binds them in O(parameters + expanded
+arguments), caps default expansion at 4,096 values, and rejects duplicate or
+non-string mapping keys. Comparison chains retain one middle value,
+short-circuit, and evaluate every operand at most once. Conditional expressions
+compile the condition before two patched CS486 branches and leave only the
+selected value on the managed stack. `lambda` queues the same compiled function
+descriptor as `def`, uses an expression body ending in the existing return
+operation, and shares parameter binding, closure cells, call-depth, and heap
+ownership. A named expression compiles its RHS, copies the top managed value,
+stores one copy through the scope-selected name operation, and leaves the
+original as its expression result. Scope analysis records the target as a
+whole-function assignment after collecting the RHS, so global/nonlocal
+declarations and unbound-local behavior reuse existing rules. An assert compiles
+one truthiness check and one patched CS486 success branch; only its failure lane
+evaluates an optional message before an allowlisted runtime operation throws
+`AssertionError` into the ordinary handler/finalizer path. Ordinary chained
+assignment leaves one RHS value on the managed stack and copies it only while
+later targets remain; target-side expressions run from left to right after that
+RHS. Augmented attribute/subscript assignment retains the evaluated object/index
+beneath the current value so it performs one lookup, then the RHS and bounded
+binary operation, then one store to the same target. Starred list/tuple displays
+carry a per-source-item expansion flag; dictionary display operations carry
+pair/mapping-unpack metadata. Runtime expansion checks the collection ceiling
+before each new element. Destructuring emits a bounded unpack operation that
+pushes target values in reverse stack order so subsequent stores still execute
+left to right; a starred remainder is a new accounted list. Slice operations
+compile the object plus nullable start/stop/step components onto the same
+managed stack. Runtime normalization clips bounded sequence indices, including
+arbitrary-precision extremes, and enumerates at most the selected built-in
+sequence length. List slice stores evaluate the RHS before target-side
+expressions, normalize before inspecting the replacement iterable, copy the
+replacement, and preflight extended arity or final capacity before mutation.
+Eager list/set/dictionary comprehensions lower to ordinary managed-function
+descriptors and the existing CS486 call/return path. The compiler evaluates the
+leftmost iterable in the enclosing scope, passes it as the synthetic positional
+parameter, and emits later iterables, filters, targets, and results inside the
+implicit scope. A comprehension `:=` target resolves to the containing
+non-comprehension binding. Set displays and `set()` store insertion-ordered
+canonical primitive/tuple keys in a `Map`, so membership, equality, and
+duplicate admission are O(1) on average. Canonical-key construction, unique
+growth, and the reachable key/value graph remain bounded by the string,
+collection, and managed RAM ceilings. Class definitions evaluate their bases
+once from left to right in the enclosing frame, then call a compiled class-suite
+target with an isolated local namespace and forwarded enclosing cells.
+Successful completion constructs a bounded C3 MRO and publishes one
+`RuntimeClass`; failure discards that frame and leaves the prior binding
+unchanged. A class that owns methods or lambdas referencing `__class__` or
+builtin `super` also owns one hidden `RuntimeCell`, separate from the class-body
+and outer closure maps. Completion initializes it only after C3 and heap
+admission, before `__set_name__`, and the set-name fault owner clears it before
+unwinding. C3 construction is bounded to 64 retained entries; ordinary lookup
+and super continuation are O(M) in that fixed MRO length. Managed functions,
+properties, custom descriptors, and classmethods bind through that same path.
+Calling a class resolves `__new__` through the same bounded C3 path. A plain
+managed definition is wrapped as an implicit static method before publication,
+receives the requested class and original arguments once, and may use strict
+`object.__new__(cls)` for bare allocation. The normal CS486 after-call marker
+retains the result and constructor arguments: a requested/subclass instance
+continues into the returned type's inherited `__init__`, while another value
+completes unchanged. `object.__init__` terminates cooperative chains, and every
+managed initializer still requires a `None` return. Common name stores preflight
+new global/local bindings before publication, including retained bare instances.
+Classes, instances, super proxies, hidden cells, bound methods, and their
+namespace graphs are accounted through `PythonHeapAccounting`. Decorated
+definitions evaluate decorator expressions into the managed value stack before
+function defaults or class bases. The raw definition then occupies the argument
+position above the innermost decorator, so repeated ordinary
+one-positional-argument call operations apply the stack from bottom to top. A
+dedicated definition store preflights a new destination name and publishes only
+the final value. Failed evaluation, application, class construction, or memory
+admission therefore leaves the earlier binding unchanged without a second
+evaluator. Built-in `iter` and `next` share the same `RuntimeIterator` cursor
+used by `for`, unpacking, starred displays, iterable call expansion, slice
+replacement, and `set()`. Iterator identity and current position survive
+repeated `iter()` calls; every consuming path advances the cursor once, and only
+`next()` converts stable exhaustion to `StopIteration` or its optional default.
+Built-in advancement is O(1); full consumption is O(N) over the bounded
+remaining values, whose reachable graph stays in `PythonHeapAccounting`. A
+function descriptor is marked as a generator only when its directly owned body
+or lambda expression contains `yield`; nested function or class suites are
+excluded from the outer scan. Calling that descriptor creates a bound but
+unstarted `RuntimeGenerator`. `next`, `for`, and `send` issue an ordinary CS486
+call to its stored target. `yield` returns after saving the frame, value-stack
+suffix, and next target; a later resume restores them and pushes `None` or the
+exact sent managed value as the yield-expression result. A non-`None` first send
+fails before the created state changes. Return or an escaping fault owns the
+single close transition. Created/suspended frame values and a bound `send`
+receiver are expanded through the reachable heap graph, so laziness does not
+create an unaccounted RAM path or a second scheduler. Integer literals preserve
+binary/octal/decimal/hexadecimal values exactly beyond the safe-number range.
+Arithmetic, floor/modulo, powers, shifts, and bitwise operations use compact
+safe numbers or arbitrary-precision integers under a default 262,144-bit ceiling
+(minimum 53). Power/left-shift growth is checked before allocation. Reachable
+integer limbs and other managed values are measured by `PythonHeapAccounting`.
+The owner scans the value graph only on allocation pressure or an explicit usage
+observation, deduplicates shared objects and maps, and reclaims unreachable
+values before raising `MemoryError`. It does not acquire RAM itself: the single
+`GuestProcessMemoryGrant` already includes the declared managed-runtime
+residency in its `GuestRamLedger`-backed physical process lease.
+
 Same-directory `.py` files and the Linux/DOS Python library paths initialize at
 most once. A valid `CS486OBJ` `.o` file can be imported as a static extension;
 its global zero-argument integer functions execute in the caller's CS486 process

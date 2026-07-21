@@ -626,19 +626,33 @@ function cloneExecutable(executable: Cs486Executable): Cs486Executable {
           })),
         }),
     instructions: executable.instructions.map(cloneInstruction),
+    ...(executable.functionEntries === undefined
+      ? {}
+      : {
+          functionEntries: executable.functionEntries.map((entry) => ({
+            ...entry,
+          })),
+        }),
     ...(executable.symbols === undefined
       ? {}
       : {
           symbols: executable.symbols.map((symbol) => ({ ...symbol })),
         }),
   };
-  return executable.version === 3
-    ? {
-        ...cloned,
-        memory: Object.freeze({ ...executable.memory }),
-        version: 3,
-      }
-    : { ...cloned, version: executable.version };
+  if (executable.version === 5)
+    return {
+      ...cloned,
+      dataModel: executable.dataModel,
+      memory: Object.freeze({ ...executable.memory }),
+      version: 5,
+    };
+  if (executable.version === 3 || executable.version === 4)
+    return {
+      ...cloned,
+      memory: Object.freeze({ ...executable.memory }),
+      version: executable.version,
+    };
+  return { ...cloned, version: executable.version };
 }
 
 function cloneInstruction(instruction: Cs486Instruction): Cs486Instruction {
@@ -648,20 +662,31 @@ function cloneInstruction(instruction: Cs486Instruction): Cs486Instruction {
     case "sub":
     case "mul":
     case "div":
+    case "udiv":
     case "mod":
+    case "umod":
     case "and":
     case "or":
     case "xor":
     case "shl":
     case "shr":
+    case "ushr":
       return { ...instruction, source: cloneOperand(instruction.source) };
     case "load":
+    case "load8s":
+    case "load8u":
+    case "load16s":
+    case "load16u":
       return { ...instruction, address: cloneOperand(instruction.address) };
     case "store":
+    case "store8":
+    case "store16":
       return { ...instruction, address: cloneOperand(instruction.address) };
     case "cmp":
       return { ...instruction, right: cloneOperand(instruction.right) };
     case "push":
+      return { ...instruction, source: cloneOperand(instruction.source) };
+    case "call_indirect":
       return { ...instruction, source: cloneOperand(instruction.source) };
     case "print":
       return {
@@ -698,17 +723,26 @@ function formatInstruction(instruction: Cs486Instruction): string {
     case "sub":
     case "mul":
     case "div":
+    case "udiv":
     case "mod":
+    case "umod":
     case "and":
     case "or":
     case "xor":
     case "shl":
     case "shr":
+    case "ushr":
       return `${instruction.op} ${instruction.destination}, ${formatOperand(instruction.source)}`;
     case "load":
-      return `load ${instruction.destination}, [${formatOperand(instruction.address)}]`;
+    case "load8s":
+    case "load8u":
+    case "load16s":
+    case "load16u":
+      return `${instruction.op} ${instruction.destination}, [${formatOperand(instruction.address)}]`;
     case "store":
-      return `store [${formatOperand(instruction.address)}], ${instruction.source}`;
+    case "store8":
+    case "store16":
+      return `${instruction.op} [${formatOperand(instruction.address)}], ${instruction.source}`;
     case "cmp":
       return `cmp ${instruction.left}, ${formatOperand(instruction.right)}`;
     case "push":
@@ -724,6 +758,8 @@ function formatInstruction(instruction: Cs486Instruction): string {
     case "jge":
     case "call":
       return `${instruction.op} ${String(instruction.target)}`;
+    case "call_indirect":
+      return `calli ${formatOperand(instruction.source)}, ${JSON.stringify(instruction.functionSignature)}`;
     case "syscall":
       return `syscall ${instruction.name}`;
     case "print":

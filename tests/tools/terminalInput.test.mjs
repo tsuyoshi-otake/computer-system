@@ -2,10 +2,10 @@ import { describe, expect, it } from "vitest";
 
 import {
   BoundedEditorKeyQueue,
+  CompletionShelfController,
   editorKeyFromKeyboardEvent,
   hasCopySelection,
   insertPastedCommand,
-  keyboardLockStatesFromEvent,
   terminalInteractionFromTerminal,
 } from "../../web/terminal-input.js";
 
@@ -87,11 +87,13 @@ describe("Web terminal input helpers", () => {
     const interaction = {
       schema: 1,
       inputMode: "line",
+      cursorShape: "block",
       pointer: "none",
       presentation: "terminal",
       secretInput: false,
       context: "shell",
       interrupt: false,
+      history: true,
       hints: [{ key: "Enter", label: "Run" }],
     };
 
@@ -105,6 +107,25 @@ describe("Web terminal input helpers", () => {
     }
   });
 
+  it("accepts the key-only CS ABI foreground interaction", () => {
+    expect(
+      terminalInteractionFromTerminal({
+        interaction: {
+          ...interactionForValidation(),
+          context: "cs-abi",
+          history: false,
+          inputMode: "keys",
+          interrupt: true,
+        },
+      }),
+    ).toMatchObject({
+      context: "cs-abi",
+      inputMode: "keys",
+      interrupt: true,
+      presentation: "terminal",
+    });
+  });
+
   it("fails closed for missing, unknown, or unbounded interaction schemas", () => {
     expect(() => terminalInteractionFromTerminal({ rows: [] })).toThrow(
       /interaction schema 1/u,
@@ -114,11 +135,13 @@ describe("Web terminal input helpers", () => {
         interaction: {
           schema: 2,
           inputMode: "keys",
+          cursorShape: "block",
           pointer: "cell",
           presentation: "dos-tui",
           secretInput: false,
           context: "edit",
           interrupt: false,
+          history: false,
           hints: [],
         },
       }),
@@ -128,11 +151,13 @@ describe("Web terminal input helpers", () => {
         interaction: {
           schema: 1,
           inputMode: "keys",
+          cursorShape: "block",
           pointer: "cell",
           presentation: "dos-tui",
           secretInput: false,
           context: "edit",
           interrupt: false,
+          history: false,
           hints: Array.from({ length: 6 }, (_, index) => ({
             key: `F${String(index + 1)}`,
             label: "Action",
@@ -140,23 +165,95 @@ describe("Web terminal input helpers", () => {
         },
       }),
     ).toThrow(/contextual hints/u);
+    expect(() =>
+      terminalInteractionFromTerminal({
+        interaction: {
+          ...interactionForValidation(),
+          cursorShape: "beam",
+        },
+      }),
+    ).toThrow(/cursor shape/u);
+    expect(() =>
+      terminalInteractionFromTerminal({
+        interaction: {
+          ...interactionForValidation(),
+          history: true,
+          secretInput: true,
+        },
+      }),
+    ).toThrow(/history requires/u);
   });
 
-  it("reports keyboard lock state without inventing unavailable browser state", () => {
-    const active = new Set(["CapsLock", "ScrollLock"]);
+  it("owns a bounded completion shelf through selection and acceptance", () => {
+    const shelf = new CompletionShelfController();
+    const ticket = shelf.begin("wh", 2);
+    expect(shelf.state.kind).toBe("loading");
+
     expect(
-      keyboardLockStatesFromEvent({
-        getModifierState: (modifier) => active.has(modifier),
-      }),
-    ).toEqual({
-      capsLock: "on",
-      numLock: "off",
-      scrollLock: "on",
+      shelf.resolve(
+        ticket,
+        {
+          candidates: [
+            { displayText: "who", insertText: "who ", kind: "command" },
+            {
+              displayText: "whoami",
+              insertText: "whoami ",
+              kind: "command",
+            },
+          ],
+          cursor: 2,
+          replaceEnd: 2,
+          replaceStart: 0,
+          truncated: false,
+          value: "wh",
+        },
+        "wh",
+        2,
+      ),
+    ).toMatchObject({ outcome: "applied" });
+    expect(shelf.state).toMatchObject({
+      kind: "open",
+      selected: 0,
+      truncated: false,
     });
-    expect(keyboardLockStatesFromEvent({})).toEqual({
-      capsLock: "unknown",
-      numLock: "unknown",
-      scrollLock: "unknown",
+    expect(shelf.move(1)).toBe(true);
+    expect(shelf.accept("wh", 2)).toEqual({
+      cursor: 7,
+      value: "whoami ",
+    });
+    expect(shelf.state.kind).toBe("closed");
+  });
+
+  it("discards late completion responses and reports invalid payloads", () => {
+    const shelf = new CompletionShelfController();
+    const dismissed = shelf.begin("ca", 2);
+    shelf.dismiss();
+    expect(shelf.resolve(dismissed, completionResponse(), "ca", 2)).toEqual({
+      outcome: "stale",
+    });
+
+    const moved = shelf.begin("ca", 2);
+    expect(shelf.resolve(moved, completionResponse(), "cat", 3)).toEqual({
+      outcome: "stale",
+    });
+    expect(shelf.state.kind).toBe("closed");
+
+    const invalid = shelf.begin("ca", 2);
+    expect(
+      shelf.resolve(
+        invalid,
+        {
+          ...completionResponse(),
+          candidates: [{ displayText: "cat", insertText: "", kind: "command" }],
+        },
+        "ca",
+        2,
+      ),
+    ).toEqual({ outcome: "invalid" });
+    expect(shelf.state).toMatchObject({
+      kind: "message",
+      message: "COMPLETION PROTOCOL ERROR",
+      tone: "error",
     });
   });
 
@@ -198,3 +295,32 @@ describe("Web terminal input helpers", () => {
     expect(queue.length).toBe(0);
   });
 });
+
+function completionResponse() {
+  return {
+    candidates: [
+      { displayText: "cat", insertText: "cat ", kind: "command" },
+      { displayText: "case", insertText: "case ", kind: "command" },
+    ],
+    cursor: 2,
+    replaceEnd: 2,
+    replaceStart: 0,
+    truncated: false,
+    value: "ca",
+  };
+}
+
+function interactionForValidation() {
+  return {
+    schema: 1,
+    inputMode: "line",
+    cursorShape: "block",
+    pointer: "none",
+    presentation: "terminal",
+    secretInput: false,
+    context: "shell",
+    interrupt: false,
+    history: true,
+    hints: [],
+  };
+}

@@ -12,6 +12,7 @@ import type { GameClockSnapshot } from "../application/os/clock.js";
 import type { FloppyDriveActivity } from "../application/os/floppyDrive.js";
 import type { ComputerRecord } from "../domain/computer/computer.js";
 import { FloppyMediaService } from "../application/computer/floppyMediaService.js";
+import { acceptanceFixtureBuild } from "./acceptanceFixture.js";
 
 const repository = new DynamicPropertyComputerRepository(world);
 const persistence = new ComputerPersistenceService(repository);
@@ -35,7 +36,7 @@ const workMonitor = new ComputerWorkMonitor({
 });
 export const computerHost = new ComputerHost(
   new ComputerRuntime({
-    requireLinuxLogin: true,
+    requireLinuxLogin: !acceptanceFixtureBuild,
     clock: {
       currentGameTime: (): GameClockSnapshot => ({
         absoluteTicks: world.getAbsoluteTime(),

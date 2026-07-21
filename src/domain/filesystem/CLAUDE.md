@@ -12,7 +12,7 @@
 - Schema 2 is current. `restore` accepts it; the separate
   `migrateLegacyInMemoryFilesystemSnapshot` helper converts supported legacy
   input under application migration ownership. Defaults are 40 MiB total
-  capacity, 4,096 entries, 1 MiB per file, and 255 path characters.
+  capacity, 4,096 entries, 8 MiB per file, and 255 path characters.
   Symbolic-link resolution is capped at 16 rewrite attempts.
 - Hard-link counts and inode lookup remain O(1); directory/listing operations
   may be O(N) in the returned entries but must not rescan the whole filesystem

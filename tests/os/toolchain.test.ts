@@ -120,7 +120,7 @@ describe("CS486DX shell toolchain", (): void => {
     });
 
     expect(result.output).toBe("15\n");
-    expect(result.registers.esp).toBe(65_536);
+    expect(result.registers.esp).toBe(declaredLinearMemoryBytes(executable));
     expect(
       executable.instructions.some((instruction) =>
         ["jg", "jge", "jl", "jle"].includes(instruction.op),
@@ -176,7 +176,7 @@ describe("CS486DX shell toolchain", (): void => {
     ].map((match) => Number(match[1]));
 
     expect(result.output).toBe("78\n");
-    expect(result.registers.esp).toBe(65_536);
+    expect(result.registers.esp).toBe(declaredLinearMemoryBytes(executable));
     expect(object.dataBytes).toBe(0);
     expect(Math.max(...frameOffsets)).toBeGreaterThan(localNames.length * 4);
   });
@@ -272,6 +272,38 @@ describe("CS486DX shell toolchain", (): void => {
     const result = shell.submit("run --stats /work/linked");
     expect(result).toMatchObject({ exitCode: 0, stdout: "42\n" });
     expect(result.stderr).toContain("CPU cycles");
+  });
+
+  it("renders floating ABI signatures in nm and objdump", (): void => {
+    const filesystem = new InMemoryFilesystem();
+    const shell = new ShellSession(filesystem);
+    filesystem.makeDirectory("/work");
+    filesystem.writeFile(
+      "/work/float.c",
+      [
+        "double scale(double value){return value * 2.0;}",
+        "int main(void){return scale(1.5) == 3.0 ? 0 : 1;}",
+      ].join("\n"),
+    );
+
+    expect(shell.submit("cc -c /work/float.c -o /work/float.o")).toMatchObject({
+      exitCode: 0,
+      stderr: "",
+    });
+    expect(shell.submit("nm /work/float.o").stdout).toContain(
+      "scale (f64)->f64",
+    );
+    expect(shell.submit("objdump /work/float.o").stdout).toContain(
+      "scale @0 (f64)->f64",
+    );
+    expect(shell.submit("ld /work/float.o -o /work/float")).toMatchObject({
+      exitCode: 0,
+      stderr: "",
+    });
+    expect(shell.submit("objdump /work/float").stdout).toMatch(
+      /function @\d+ \(f64\)->f64/u,
+    );
+    expect(shell.submit("run /work/float").exitCode).toBe(0);
   });
 
   it("compiles BASIC objects and restricted inline assembly", (): void => {
@@ -478,7 +510,7 @@ describe("CS486DX shell toolchain", (): void => {
         memoryBytes: declaredLinearMemoryBytes(executable),
       });
       expect(result.registers.eax).toBe(42);
-      expect(result.registers.esp).toBe(65_536);
+      expect(result.registers.esp).toBe(declaredLinearMemoryBytes(executable));
     },
   );
 
@@ -509,10 +541,10 @@ describe("CS486DX shell toolchain", (): void => {
         source: "#pragma pack(1)\nint main() {\nreturn 42;\n}\n",
       },
       {
-        detail: /top-level|outside (?:of )?(?:a )?function|global/iu,
+        detail: /global initializer|bounded constant|undeclared identifier/iu,
         extension: "c",
-        name: "initialized top-level global",
-        source: "int answer = 42;\nint main() {\nreturn answer;\n}\n",
+        name: "non-constant top-level global",
+        source: "int answer = missing;\nint main() {\nreturn answer;\n}\n",
       },
       {
         detail: /expression|operand/iu,

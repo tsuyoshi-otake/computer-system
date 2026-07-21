@@ -1,4 +1,13 @@
 import type { Cs486Register } from "../../domain/cpu/instructionSet.js";
+import {
+  isCs486DataModel,
+  type Cs486DataModel,
+} from "../../domain/cpu/cs486Compatibility.js";
+import {
+  cs486FunctionValueWordCount,
+  parseCs486FunctionSignature,
+  type Cs486FunctionSignature,
+} from "../../domain/cpu/cs486.js";
 import type { Cs486SourceSpan } from "./cs486AsmDiagnostics.js";
 
 /** Integer value types understood by the CS486 intermediate representation. */
@@ -21,10 +30,14 @@ export interface Cs486IrLocal {
 }
 
 export interface Cs486IrExternalFunction {
+  /** Optional canonical source ABI; values remain lowered to physical i32 words. */
+  readonly abiSignature?: Cs486FunctionSignature;
   readonly name: string;
   readonly parameterTypes: readonly Cs486IrValueType[];
   readonly returnType: Cs486IrReturnType;
   readonly span?: Cs486SourceSpan;
+  readonly variadic?: boolean;
+  readonly wideReturn?: true;
 }
 
 export interface Cs486IrPhiIncoming {
@@ -56,7 +69,8 @@ export interface Cs486IrCopyInstruction {
   readonly value: Cs486IrValueId;
 }
 
-export type Cs486IrUnaryOperator = "bit-not" | "logical-not" | "neg";
+export type Cs486IrUnaryOperator =
+  "bit-not" | "logical-not" | "neg" | "zero-extend";
 
 export interface Cs486IrUnaryInstruction {
   readonly kind: "unary";
@@ -85,6 +99,13 @@ export type Cs486IrBinaryOperator =
   | "shl"
   | "shr"
   | "sub"
+  | "udiv"
+  | "uge"
+  | "ugt"
+  | "ule"
+  | "ult"
+  | "umod"
+  | "ushr"
   | "xor";
 
 export interface Cs486IrBinaryInstruction {
@@ -103,6 +124,7 @@ export interface Cs486IrLoadLocalInstruction {
   readonly result: Cs486IrValueId;
   readonly span?: Cs486SourceSpan;
   readonly type: Cs486IrValueType;
+  readonly volatile?: true;
 }
 
 export interface Cs486IrStoreLocalInstruction {
@@ -110,6 +132,46 @@ export interface Cs486IrStoreLocalInstruction {
   readonly local: string;
   readonly span?: Cs486SourceSpan;
   readonly value: Cs486IrValueId;
+  readonly volatile?: true;
+}
+
+export interface Cs486IrAddressLocalInstruction {
+  readonly kind: "address-local";
+  readonly local: string;
+  readonly result: Cs486IrValueId;
+  readonly span?: Cs486SourceSpan;
+  readonly type: "i32";
+}
+
+export interface Cs486IrAddressSymbolInstruction {
+  readonly kind: "address-symbol";
+  readonly result: Cs486IrValueId;
+  readonly span?: Cs486SourceSpan;
+  readonly symbol: string;
+  readonly type: "i32";
+}
+
+export interface Cs486IrLoadMemoryInstruction {
+  readonly address: Cs486IrValueId;
+  readonly kind: "load-memory";
+  readonly result: Cs486IrValueId;
+  readonly span?: Cs486SourceSpan;
+  readonly type: "i32";
+  /** Serialized memory width; omitted legacy IR means 32 bits. */
+  readonly width?: 1 | 2 | 4;
+  /** Applies only to 8/16-bit loads. */
+  readonly signed?: true;
+  readonly volatile?: true;
+}
+
+export interface Cs486IrStoreMemoryInstruction {
+  readonly address: Cs486IrValueId;
+  readonly kind: "store-memory";
+  readonly span?: Cs486SourceSpan;
+  readonly value: Cs486IrValueId;
+  /** Serialized memory width; omitted legacy IR means 32 bits. */
+  readonly width?: 1 | 2 | 4;
+  readonly volatile?: true;
 }
 
 export interface Cs486IrCallInstruction {
@@ -119,15 +181,32 @@ export interface Cs486IrCallInstruction {
   readonly result?: Cs486IrValueId;
   readonly span?: Cs486SourceSpan;
   readonly type?: Cs486IrValueType;
+  readonly wideResultLocal?: string;
+}
+
+export interface Cs486IrIndirectCallInstruction {
+  readonly arguments: readonly Cs486IrValueId[];
+  readonly functionSignature: Cs486FunctionSignature;
+  readonly kind: "indirect-call";
+  readonly result?: Cs486IrValueId;
+  readonly span?: Cs486SourceSpan;
+  readonly target: Cs486IrValueId;
+  readonly type?: Cs486IrValueType;
+  readonly wideResultLocal?: string;
 }
 
 export type Cs486IrInstruction =
+  | Cs486IrAddressLocalInstruction
+  | Cs486IrAddressSymbolInstruction
   | Cs486IrBinaryInstruction
   | Cs486IrCallInstruction
+  | Cs486IrIndirectCallInstruction
   | Cs486IrConstantInstruction
   | Cs486IrCopyInstruction
   | Cs486IrLoadLocalInstruction
+  | Cs486IrLoadMemoryInstruction
   | Cs486IrStoreLocalInstruction
+  | Cs486IrStoreMemoryInstruction
   | Cs486IrUnaryInstruction;
 
 export interface Cs486IrJumpTerminator {
@@ -148,6 +227,7 @@ export interface Cs486IrReturnTerminator {
   readonly kind: "return";
   readonly span?: Cs486SourceSpan;
   readonly value?: Cs486IrValueId;
+  readonly valueHigh?: Cs486IrValueId;
 }
 
 export type Cs486IrTerminator =
@@ -163,6 +243,8 @@ export interface Cs486IrBasicBlock {
 }
 
 export interface Cs486IrFunction {
+  /** Optional canonical source ABI; values remain lowered to physical i32 words. */
+  readonly abiSignature?: Cs486FunctionSignature;
   readonly blocks: readonly Cs486IrBasicBlock[];
   readonly entry: Cs486IrBlockId;
   readonly locals: readonly Cs486IrLocal[];
@@ -170,9 +252,13 @@ export interface Cs486IrFunction {
   readonly parameters: readonly Cs486IrParameter[];
   readonly returnType: Cs486IrReturnType;
   readonly span?: Cs486SourceSpan;
+  readonly variadic?: boolean;
+  readonly wideReturn?: true;
 }
 
 export interface Cs486IrProgram {
+  /** Missing legacy CSIR is interpreted as `cs-word32-v1`. */
+  readonly dataModel?: Cs486DataModel;
   readonly externals?: readonly Cs486IrExternalFunction[];
   readonly functions: readonly Cs486IrFunction[];
 }
@@ -197,16 +283,16 @@ export const DEFAULT_CS486_IR_LIMITS: Readonly<Cs486IrLimits> = Object.freeze({
   maxBlocksPerFunction: 256,
   maxCallArguments: 32,
   maxDiagnostics: 256,
-  maxExternals: 128,
-  maxFunctions: 64,
+  maxExternals: 2_048,
+  maxFunctions: 1_024,
   maxIdentifierLength: 128,
-  maxInstructionsPerFunction: 4_096,
+  maxInstructionsPerFunction: 8_192,
   maxLocalsPerFunction: 1_024,
   maxOptimizationPasses: 8,
   maxParametersPerFunction: 32,
   maxPhiInputs: 256,
-  maxRegisterAllocationValues: 4_096,
-  maxValuesPerFunction: 8_192,
+  maxRegisterAllocationValues: 8_192,
+  maxValuesPerFunction: 16_384,
 });
 
 export interface Cs486IrDiagnostic {
@@ -230,8 +316,11 @@ export class Cs486IrVerificationError extends Error {
 }
 
 interface Cs486IrFunctionSignature {
+  readonly abiSignature?: Cs486FunctionSignature;
   readonly parameterTypes: readonly Cs486IrValueType[];
   readonly returnType: Cs486IrReturnType;
+  readonly variadic: boolean;
+  readonly wideReturn: boolean;
 }
 
 interface Cs486IrDefinition {
@@ -282,6 +371,9 @@ export function verifyCs486Ir(
   const signatures = new Map<string, Cs486IrFunctionSignature>();
   const externals = program.externals ?? [];
 
+  if (program.dataModel !== undefined && !isCs486DataModel(program.dataModel))
+    add("CSIR_DATA_MODEL", "invalid CSIR data model");
+
   if (program.functions.length > limits.maxFunctions)
     add(
       "CSIR_LIMIT",
@@ -327,9 +419,23 @@ export function verifyCs486Ir(
       });
     else
       signatures.set(external.name, {
+        ...(external.abiSignature === undefined
+          ? {}
+          : { abiSignature: external.abiSignature }),
         parameterTypes: external.parameterTypes,
         returnType: external.returnType,
+        variadic: external.variadic === true,
+        wideReturn: external.wideReturn === true,
       });
+    verifyPhysicalAbi(
+      external.name,
+      external.abiSignature,
+      external.parameterTypes.length,
+      external.returnType,
+      external.wideReturn === true,
+      external.span,
+      add,
+    );
   }
 
   const boundedFunctions = program.functions.slice(0, limits.maxFunctions);
@@ -345,11 +451,25 @@ export function verifyCs486Ir(
       });
     else
       signatures.set(function_.name, {
+        ...(function_.abiSignature === undefined
+          ? {}
+          : { abiSignature: function_.abiSignature }),
         parameterTypes: function_.parameters
           .slice(0, limits.maxParametersPerFunction)
           .map((parameter) => parameter.type),
         returnType: function_.returnType,
+        variadic: function_.variadic === true,
+        wideReturn: function_.wideReturn === true,
       });
+    verifyPhysicalAbi(
+      function_.name,
+      function_.abiSignature,
+      function_.parameters.length,
+      function_.returnType,
+      function_.wideReturn === true,
+      function_.span,
+      add,
+    );
   }
 
   for (const function_ of boundedFunctions)
@@ -364,6 +484,49 @@ export function assertValidCs486Ir(
 ): void {
   const diagnostics = verifyCs486Ir(program, overrides);
   if (diagnostics.length > 0) throw new Cs486IrVerificationError(diagnostics);
+}
+
+function verifyPhysicalAbi(
+  name: string,
+  abiSignature: Cs486FunctionSignature | undefined,
+  physicalParameters: number,
+  physicalReturn: Cs486IrReturnType,
+  wideReturn: boolean,
+  span: Cs486SourceSpan | undefined,
+  add: (
+    code: string,
+    message: string,
+    context?: Cs486IrDiagnosticContext,
+  ) => void,
+): void {
+  if (abiSignature === undefined) return;
+  const parsed = parseCs486FunctionSignature(abiSignature);
+  if (parsed === undefined) {
+    add("CSIR_ABI_SIGNATURE", `invalid ABI signature for ${name}`, { span });
+    return;
+  }
+  const words = parsed.parameterTypes.reduce(
+    (count, type) => count + cs486FunctionValueWordCount(type),
+    0,
+  );
+  const expectedWide =
+    parsed.returnType === "f64" || parsed.returnType === "i64";
+  if (words !== physicalParameters)
+    add(
+      "CSIR_ABI_SIGNATURE",
+      `ABI signature for ${name} declares ${String(words)} words, physical IR has ${String(physicalParameters)}`,
+      { span },
+    );
+  if (
+    (parsed.returnType === "void") !== (physicalReturn === "void") ||
+    (parsed.returnType !== "void" && physicalReturn !== "i32") ||
+    expectedWide !== wideReturn
+  )
+    add(
+      "CSIR_ABI_SIGNATURE",
+      `ABI return for ${name} is inconsistent with physical IR`,
+      { span },
+    );
 }
 
 function verifyFunction(
@@ -758,6 +921,7 @@ function verifyFunction(
         block,
         block.instructions.length + 1,
         function_.returnType,
+        function_.wideReturn === true,
         use,
         add,
         function_.name,
@@ -816,14 +980,20 @@ function verifyInstruction(
       );
       return;
     case "unary": {
-      const expected = instruction.operator === "logical-not" ? "i1" : "i32";
-      if (instruction.type !== expected)
+      const operandType =
+        instruction.operator === "logical-not" ||
+        instruction.operator === "zero-extend"
+          ? "i1"
+          : "i32";
+      const resultType =
+        instruction.operator === "zero-extend" ? "i32" : operandType;
+      if (instruction.type !== resultType)
         add(
           "CSIR_TYPE",
-          `unary ${instruction.operator} must produce ${expected}`,
+          `unary ${instruction.operator} must produce ${resultType}`,
           context,
         );
-      use(instruction.operand, expected, block, position, instruction.span);
+      use(instruction.operand, operandType, block, position, instruction.span);
       return;
     }
     case "binary":
@@ -852,6 +1022,52 @@ function verifyInstruction(
         );
       return;
     }
+    case "address-local": {
+      const local = locals.get(instruction.local);
+      if (local === undefined)
+        add(
+          "CSIR_UNKNOWN_LOCAL",
+          `unknown local ${instruction.local}`,
+          context,
+        );
+      if (instruction.type !== "i32")
+        add("CSIR_TYPE", "local address must produce i32", context);
+      return;
+    }
+    case "address-symbol":
+      validateName(instruction.symbol, "data symbol", limits, add, context);
+      if (instruction.type !== "i32")
+        add("CSIR_TYPE", "symbol address must produce i32", context);
+      return;
+    case "load-memory":
+      use(instruction.address, "i32", block, position, instruction.span);
+      if (instruction.type !== "i32")
+        add("CSIR_TYPE", "memory load must produce i32", context);
+      if (
+        instruction.width !== undefined &&
+        instruction.width !== 1 &&
+        instruction.width !== 2 &&
+        instruction.width !== 4
+      )
+        add("CSIR_MEMORY_WIDTH", "invalid memory load width", context);
+      if (instruction.signed === true && (instruction.width ?? 4) === 4)
+        add(
+          "CSIR_MEMORY_WIDTH",
+          "signed extension requires an 8- or 16-bit load",
+          context,
+        );
+      return;
+    case "store-memory":
+      use(instruction.address, "i32", block, position, instruction.span);
+      use(instruction.value, "i32", block, position, instruction.span);
+      if (
+        instruction.width !== undefined &&
+        instruction.width !== 1 &&
+        instruction.width !== 2 &&
+        instruction.width !== 4
+      )
+        add("CSIR_MEMORY_WIDTH", "invalid memory store width", context);
+      return;
     case "store-local": {
       const local = locals.get(instruction.local);
       if (local === undefined)
@@ -878,10 +1094,14 @@ function verifyInstruction(
           `unknown function ${instruction.callee}`,
           context,
         );
-      else if (instruction.arguments.length !== signature.parameterTypes.length)
+      else if (
+        instruction.arguments.length < signature.parameterTypes.length ||
+        (!signature.variadic &&
+          instruction.arguments.length !== signature.parameterTypes.length)
+      )
         add(
           "CSIR_CALL_SIGNATURE",
-          `function ${instruction.callee} expects ${String(signature.parameterTypes.length)} arguments, received ${String(instruction.arguments.length)}`,
+          `function ${instruction.callee} expects ${signature.variadic ? "at least " : ""}${String(signature.parameterTypes.length)} arguments, received ${String(instruction.arguments.length)}`,
           context,
         );
       for (
@@ -891,13 +1111,18 @@ function verifyInstruction(
       )
         use(
           instruction.arguments[index]!,
-          signature?.parameterTypes[index],
+          signature?.parameterTypes[index] ??
+            (signature?.variadic === true ? "i32" : undefined),
           block,
           position,
           instruction.span,
         );
       if (signature?.returnType === "void") {
-        if (instruction.result !== undefined || instruction.type !== undefined)
+        if (
+          instruction.result !== undefined ||
+          instruction.type !== undefined ||
+          instruction.wideResultLocal !== undefined
+        )
           add(
             "CSIR_CALL_SIGNATURE",
             `void function ${instruction.callee} cannot define a value`,
@@ -916,6 +1141,18 @@ function verifyInstruction(
             `function ${instruction.callee} returns ${signature.returnType}, not ${instruction.type}`,
             context,
           );
+        if (signature.wideReturn && instruction.wideResultLocal === undefined)
+          add(
+            "CSIR_CALL_SIGNATURE",
+            `function ${instruction.callee} must define a high-word local`,
+            context,
+          );
+        if (!signature.wideReturn && instruction.wideResultLocal !== undefined)
+          add(
+            "CSIR_CALL_SIGNATURE",
+            `function ${instruction.callee} cannot define a high-word local`,
+            context,
+          );
       } else if (
         (instruction.result === undefined) !==
         (instruction.type === undefined)
@@ -925,9 +1162,138 @@ function verifyInstruction(
           `call result and type must either both be present or both be absent`,
           context,
         );
+      verifyWideResultLocal(instruction, locals, add, context);
+      return;
+    }
+    case "indirect-call": {
+      use(instruction.target, "i32", block, position, instruction.span);
+      if (instruction.arguments.length > limits.maxCallArguments)
+        add("CSIR_LIMIT", "indirect call argument limit exceeded", context);
+      const signature = parseCs486FunctionSignature(
+        instruction.functionSignature,
+      );
+      const physicalParameterTypes = signature?.parameterTypes.flatMap(
+        (type) =>
+          type === "i64" || type === "f64"
+            ? (["i32", "i32"] as const)
+            : (["i32"] as const),
+      );
+      if (signature === undefined)
+        add(
+          "CSIR_CALL_SIGNATURE",
+          "indirect call has an invalid function signature",
+          context,
+        );
+      else if (
+        instruction.arguments.length < physicalParameterTypes!.length ||
+        (!signature.variadic &&
+          instruction.arguments.length !== physicalParameterTypes!.length)
+      )
+        add(
+          "CSIR_CALL_SIGNATURE",
+          `indirect function expects ${signature.variadic ? "at least " : ""}${String(physicalParameterTypes!.length)} argument words, received ${String(instruction.arguments.length)}`,
+          context,
+        );
+      for (
+        let index = 0;
+        index < Math.min(instruction.arguments.length, limits.maxCallArguments);
+        index += 1
+      )
+        use(
+          instruction.arguments[index]!,
+          physicalParameterTypes?.[index] ??
+            (signature?.variadic === true ? "i32" : undefined),
+          block,
+          position,
+          instruction.span,
+        );
+      if (signature?.returnType === "void") {
+        if (
+          instruction.result !== undefined ||
+          instruction.type !== undefined ||
+          instruction.wideResultLocal !== undefined
+        )
+          add(
+            "CSIR_CALL_SIGNATURE",
+            "void indirect function cannot define a value",
+            context,
+          );
+      } else if (signature !== undefined) {
+        if (instruction.result === undefined || instruction.type === undefined)
+          add(
+            "CSIR_CALL_SIGNATURE",
+            "indirect function must define an i32 value",
+            context,
+          );
+        else if (instruction.type !== "i32")
+          add(
+            "CSIR_CALL_SIGNATURE",
+            `indirect function low word must be i32, not ${instruction.type}`,
+            context,
+          );
+        if (
+          (signature.returnType === "i64" || signature.returnType === "f64") &&
+          instruction.wideResultLocal === undefined
+        )
+          add(
+            "CSIR_CALL_SIGNATURE",
+            `${signature.returnType} indirect function must define a high-word local`,
+            context,
+          );
+        if (
+          (signature.returnType === "i32" || signature.returnType === "f32") &&
+          instruction.wideResultLocal !== undefined
+        )
+          add(
+            "CSIR_CALL_SIGNATURE",
+            `${signature.returnType} indirect function cannot define a high-word local`,
+            context,
+          );
+      } else if (
+        (instruction.result === undefined) !==
+        (instruction.type === undefined)
+      )
+        add(
+          "CSIR_CALL_SIGNATURE",
+          "indirect call result and type must either both be present or both be absent",
+          context,
+        );
+      verifyWideResultLocal(instruction, locals, add, context);
       return;
     }
   }
+}
+
+function verifyWideResultLocal(
+  instruction: Cs486IrCallInstruction | Cs486IrIndirectCallInstruction,
+  locals: ReadonlyMap<string, Cs486IrLocal>,
+  add: (
+    code: string,
+    message: string,
+    context?: Cs486IrDiagnosticContext,
+  ) => void,
+  context: Cs486IrDiagnosticContext,
+): void {
+  if (instruction.wideResultLocal === undefined) return;
+  const local = locals.get(instruction.wideResultLocal);
+  if (local === undefined)
+    add(
+      "CSIR_UNKNOWN_LOCAL",
+      `unknown wide-result local ${instruction.wideResultLocal}`,
+      context,
+    );
+  else if (local.type !== "i32")
+    add(
+      "CSIR_TYPE",
+      `wide-result local ${instruction.wideResultLocal} must be i32`,
+      context,
+    );
+  if (instruction.result === undefined || instruction.type !== "i32")
+    add(
+      "CSIR_CALL_SIGNATURE",
+      "wide call result requires an i32 low word",
+      context,
+    );
 }
 
 function verifyBinaryInstruction(
@@ -948,9 +1314,18 @@ function verifyBinaryInstruction(
   ) => void,
   functionName: string,
 ): void {
-  const comparison = ["eq", "ge", "gt", "le", "lt", "ne"].includes(
-    instruction.operator,
-  );
+  const comparison = [
+    "eq",
+    "ge",
+    "gt",
+    "le",
+    "lt",
+    "ne",
+    "uge",
+    "ugt",
+    "ule",
+    "ult",
+  ].includes(instruction.operator);
   const logical = ["logical-and", "logical-or"].includes(instruction.operator);
   const operandType = logical ? "i1" : "i32";
   const resultType = comparison || logical ? "i1" : "i32";
@@ -974,6 +1349,7 @@ function verifyTerminator(
   block: Cs486IrBasicBlock,
   position: number,
   returnType: Cs486IrReturnType,
+  wideReturn: boolean,
   use: (
     id: Cs486IrValueId,
     expectedType: Cs486IrValueType | undefined,
@@ -1001,7 +1377,10 @@ function verifyTerminator(
       return;
     case "return":
       if (returnType === "void") {
-        if (terminator.value !== undefined)
+        if (
+          terminator.value !== undefined ||
+          terminator.valueHigh !== undefined
+        )
           add(
             "CSIR_RETURN_TYPE",
             `void function ${functionName} returns a value`,
@@ -1013,7 +1392,24 @@ function verifyTerminator(
           `function ${functionName} must return ${returnType}`,
           context,
         );
-      else use(terminator.value, returnType, block, position, terminator.span);
+      else {
+        use(terminator.value, returnType, block, position, terminator.span);
+        if (wideReturn) {
+          if (terminator.valueHigh === undefined)
+            add(
+              "CSIR_RETURN_TYPE",
+              "wide function return is missing its high word",
+              context,
+            );
+          else
+            use(terminator.valueHigh, "i32", block, position, terminator.span);
+        } else if (terminator.valueHigh !== undefined)
+          add(
+            "CSIR_RETURN_TYPE",
+            "one-word function return cannot define a high word",
+            context,
+          );
+      }
   }
 }
 
@@ -1174,8 +1570,10 @@ function instructionResult(
   { readonly id: Cs486IrValueId; readonly type: Cs486IrValueType } | undefined {
   switch (instruction.kind) {
     case "store-local":
+    case "store-memory":
       return undefined;
     case "call":
+    case "indirect-call":
       return instruction.result === undefined || instruction.type === undefined
         ? undefined
         : { id: instruction.result, type: instruction.type };
@@ -1189,6 +1587,8 @@ function instructionOperands(
 ): readonly Cs486IrValueId[] {
   switch (instruction.kind) {
     case "constant":
+    case "address-local":
+    case "address-symbol":
     case "load-local":
       return [];
     case "copy":
@@ -1199,8 +1599,14 @@ function instructionOperands(
       return [instruction.left, instruction.right];
     case "store-local":
       return [instruction.value];
+    case "load-memory":
+      return [instruction.address];
+    case "store-memory":
+      return [instruction.address, instruction.value];
     case "call":
       return instruction.arguments;
+    case "indirect-call":
+      return [instruction.target, ...instruction.arguments];
   }
 }
 
@@ -1213,7 +1619,14 @@ function terminatorOperands(
     case "branch":
       return [terminator.condition];
     case "return":
-      return terminator.value === undefined ? [] : [terminator.value];
+      return terminator.value === undefined
+        ? []
+        : [
+            terminator.value,
+            ...(terminator.valueHigh === undefined
+              ? []
+              : [terminator.valueHigh]),
+          ];
   }
 }
 
@@ -1454,6 +1867,7 @@ function foldConstants(
         value === undefined ||
         instruction.kind === "constant" ||
         instruction.kind === "call" ||
+        instruction.kind === "indirect-call" ||
         instruction.kind === "load-local"
       )
         return instruction;
@@ -1520,6 +1934,8 @@ function evaluateConstantInstruction(
           return ~operand;
         case "logical-not":
           return operand === 0 ? 1 : 0;
+        case "zero-extend":
+          return operand === 0 ? 0 : 1;
       }
       return undefined;
     }
@@ -1530,6 +1946,7 @@ function evaluateConstantInstruction(
       return evaluateBinary(instruction.operator, left, right);
     }
     case "call":
+    case "indirect-call":
     case "load-local":
     case "store-local":
       return undefined;
@@ -1562,6 +1979,14 @@ function evaluateBinary(
       return left << (right & 31);
     case "shr":
       return left >> (right & 31);
+    case "ushr":
+      return left >>> (right & 31);
+    case "udiv":
+      return right === 0
+        ? undefined
+        : Math.trunc((left >>> 0) / (right >>> 0)) | 0;
+    case "umod":
+      return right === 0 ? undefined : ((left >>> 0) % (right >>> 0)) | 0;
     case "eq":
       return left === right ? 1 : 0;
     case "ne":
@@ -1574,6 +1999,14 @@ function evaluateBinary(
       return left > right ? 1 : 0;
     case "ge":
       return left >= right ? 1 : 0;
+    case "ult":
+      return left >>> 0 < right >>> 0 ? 1 : 0;
+    case "ule":
+      return left >>> 0 <= right >>> 0 ? 1 : 0;
+    case "ugt":
+      return left >>> 0 > right >>> 0 ? 1 : 0;
+    case "uge":
+      return left >>> 0 >= right >>> 0 ? 1 : 0;
     case "logical-and":
       return left !== 0 && right !== 0 ? 1 : 0;
     case "logical-or":
@@ -1695,6 +2128,8 @@ function rewriteInstruction(
 ): Cs486IrInstruction {
   switch (instruction.kind) {
     case "constant":
+    case "address-local":
+    case "address-symbol":
     case "load-local":
       return instruction;
     case "copy":
@@ -1709,10 +2144,24 @@ function rewriteInstruction(
       };
     case "store-local":
       return { ...instruction, value: rewrite(instruction.value) };
+    case "load-memory":
+      return { ...instruction, address: rewrite(instruction.address) };
+    case "store-memory":
+      return {
+        ...instruction,
+        address: rewrite(instruction.address),
+        value: rewrite(instruction.value),
+      };
     case "call":
       return {
         ...instruction,
         arguments: instruction.arguments.map(rewrite),
+      };
+    case "indirect-call":
+      return {
+        ...instruction,
+        arguments: instruction.arguments.map(rewrite),
+        target: rewrite(instruction.target),
       };
   }
 }
@@ -1729,7 +2178,13 @@ function rewriteTerminator(
     case "return":
       return terminator.value === undefined
         ? terminator
-        : { ...terminator, value: rewrite(terminator.value) };
+        : {
+            ...terminator,
+            value: rewrite(terminator.value),
+            ...(terminator.valueHigh === undefined
+              ? {}
+              : { valueHigh: rewrite(terminator.valueHigh) }),
+          };
   }
 }
 
@@ -1799,7 +2254,17 @@ function eliminateDeadPureValues(
 }
 
 function isDeadCodeRemovable(instruction: Cs486IrInstruction): boolean {
-  if (instruction.kind === "call" || instruction.kind === "store-local")
+  if (
+    "volatile" in instruction &&
+    (instruction as { readonly volatile?: true }).volatile === true
+  )
+    return false;
+  if (
+    instruction.kind === "call" ||
+    instruction.kind === "indirect-call" ||
+    instruction.kind === "store-local" ||
+    instruction.kind === "store-memory"
+  )
     return false;
   return !(
     instruction.kind === "binary" &&
@@ -1964,7 +2429,7 @@ export function allocateCs486IrRegistersLinearScan(
     for (const phi of block.phis) phiPositions.set(phi, position++);
     for (const instruction of block.instructions) {
       positions.set(instruction, position);
-      if (instruction.kind === "call")
+      if (instruction.kind === "call" || instruction.kind === "indirect-call")
         clobberPoints.push({
           position,
           reason: "call-live",

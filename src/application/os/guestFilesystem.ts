@@ -55,6 +55,7 @@ export interface GuestFilesystem {
   move(from: string, to: string): void;
   normalize(path: string): string;
   readFile(path: string): string;
+  readFileBytes(path: string): Uint8Array;
   readLink(path: string): string;
   resolveSymbolicLinks(path: string): string;
   setMetadata(
@@ -68,6 +69,7 @@ export interface GuestFilesystem {
     operation: SynchronousTransactionOperation<Result>,
   ): Result;
   writeFile(path: string, contents: string, mode?: number): void;
+  writeFileBytes(path: string, contents: Uint8Array, mode?: number): void;
 }
 
 /** A trusted/DOS view which preserves the old unrestricted filesystem rules. */
@@ -192,6 +194,10 @@ export class UnrestrictedGuestFilesystem implements GuestFilesystem {
     return this.filesystem.readFile(path);
   }
 
+  readFileBytes(path: string): Uint8Array {
+    return this.filesystem.readFileBytes(path);
+  }
+
   readLink(path: string): string {
     return this.filesystem.readLink(path);
   }
@@ -240,6 +246,18 @@ export class UnrestrictedGuestFilesystem implements GuestFilesystem {
     const normalized = this.filesystem.normalize(path);
     const existed = this.filesystem.exists(normalized);
     this.filesystem.writeFile(normalized, contents);
+    if (!existed) {
+      this.filesystem.setMetadata(normalized, {
+        mode: creationMode(mode, this.umaskValue),
+      });
+    }
+  }
+
+  writeFileBytes(path: string, contents: Uint8Array, mode = 0o666): void {
+    validMode(mode);
+    const normalized = this.filesystem.normalize(path);
+    const existed = this.filesystem.exists(normalized);
+    this.filesystem.writeFileBytes(normalized, contents);
     if (!existed) {
       this.filesystem.setMetadata(normalized, {
         mode: creationMode(mode, this.umaskValue),

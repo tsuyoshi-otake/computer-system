@@ -1,22 +1,36 @@
-import { utf8ByteLength } from "../../domain/text/utf8.js";
+import { encodeUtf8, utf8ByteLength } from "../../domain/text/utf8.js";
 import type { SynchronousTransactionOperation } from "../../domain/filesystem/inMemoryFilesystem.js";
-import { DosPathError, type OsProfile } from "./osProfile.js";
+import {
+  DosPathError,
+  linuxRootDefaultPath,
+  linuxUserDefaultPath,
+  type OsProfile,
+} from "./osProfile.js";
 import type { ShellClockSource } from "./clock.js";
 import type { ComputerHardwareProfile } from "../../domain/computer/hardware.js";
 import type {
   DosGuestMemoryRegionSnapshot,
   DosGuestMemorySnapshot,
 } from "./dosGuestMemoryManager.js";
+import type { LinuxGuestMemorySnapshot } from "./linuxGuestMemoryManager.js";
 import type { VirtualDevice } from "./osProfile.js";
 import { formatOsIdentity } from "./osIdentity.js";
 import {
+  cs486ExecutableDataModel,
   runCs486,
   validateCs486Executable,
   type Cs486Executable,
 } from "../../domain/cpu/cs486.js";
 import { cpuModelSpecification } from "../../domain/cpu/models.js";
+import {
+  cs486Byte8DataModel,
+  cs486Word32DataModel,
+  type Cs486DataModel,
+} from "../../domain/cpu/cs486Compatibility.js";
 import type { CpuMicroarchitectureStats } from "../../domain/cpu/memoryHierarchy.js";
 import { cpuCyclesToMicroseconds } from "../../domain/cpu/timing.js";
+import { TerminalBuffer } from "../../domain/terminal/terminalBuffer.js";
+import { CsAbiRuntime, prepareCsAbiStartup } from "../runtime/csAbi.js";
 import {
   assembleCs486,
   assembleCs486Object,
@@ -24,6 +38,7 @@ import {
   type Cs486AssemblerOptions,
 } from "../toolchain/cs486Assembler.js";
 import {
+  cs486ObjectDataModel,
   validateCs486Object,
   type Cs486Object,
 } from "../../domain/cpu/cs486Object.js";
@@ -34,9 +49,11 @@ import {
 } from "../toolchain/highLevelCompilers.js";
 import type { Cs486CFrontendOptions } from "../toolchain/cs486CFrontend.js";
 import {
+  cs486CPreprocessorLimits,
   preprocessCs486C,
   type Cs486CPreprocessorInclude,
 } from "../toolchain/cs486CPreprocessor.js";
+import { cs486AsmPreprocessorLimits } from "../toolchain/cs486AsmPreprocessor.js";
 import {
   fingerprintCsDosProgram,
   parseCsDosProgramList,
@@ -44,11 +61,30 @@ import {
 } from "../toolchain/csDosProgramList.js";
 import { Cs486LinkError, linkCs486Objects } from "../toolchain/cs486Linker.js";
 import {
+  createCs486Archive,
+  deleteCs486ArchiveMembers,
+  parseCs486Archive,
+  refreshCs486ArchiveIndex,
+  replaceCs486ArchiveMembers,
+  selectParsedCs486LinkInputs,
+  serializeCs486Archive,
+  type Cs486Archive,
+  type Cs486LinkInput,
+} from "../toolchain/cs486Archive.js";
+import {
   Cs486Debugger,
   type Cs486DebuggerOutcome,
 } from "../toolchain/cs486Debugger.js";
 import { sha256Hex } from "./passwordHash.js";
-import { commandRegistryFor, type CommandRegistry } from "./commandRegistry.js";
+import { md5Hex } from "./md5Hash.js";
+import { parseInstalledHostedCArchive } from "./hostedCLibcImage.js";
+import { base64Decode, base64Encode } from "./base64.js";
+import {
+  commandRegistryFor,
+  isDosInternalCommand,
+  isLinuxBuiltinCommand,
+  type CommandRegistry,
+} from "./commandRegistry.js";
 import {
   commandExecutablePath,
   decodeSystemUtility,
@@ -62,6 +98,7 @@ import type { DosFileDialogSnapshot } from "../editor/editorScreen.js";
 import type {
   ShellAction,
   ShellCommandResult,
+  ShellCompletionCandidate,
   ShellCompletionResult,
   ShellToolchainCommandResult,
 } from "./shellTypes.js";
@@ -90,6 +127,16 @@ import type {
   OsProcessSignal,
   OsRuntimeState,
 } from "./osRuntimeState.js";
+import { parseLinuxCrontab } from "./linuxCrontab.js";
+import { executeLinuxAwk, executeLinuxSed } from "./linuxTextProcessors.js";
+import {
+  executeLinuxGzip,
+  executeLinuxTar,
+  executeLinuxUnzip,
+  executeLinuxZip,
+  type LinuxArchiveResult,
+} from "./linuxArchives.js";
+import { executeLinuxGit } from "./linuxGit.js";
 import {
   DosDriveError,
   DosRuntimeState,
@@ -128,9 +175,10 @@ export interface ShellCommandRuntimeOptions {
   readonly profile: OsProfile;
   readonly ticksPerSecond: number;
   readonly hardware: ComputerHardwareProfile;
-  readonly memoryUsageBytes: () => number;
   readonly dosMemorySnapshot?: () => DosGuestMemorySnapshot;
-  readonly admitProcessMemory?: ShellProcessMemoryAdmission;
+  readonly linuxMemorySnapshot?: () => LinuxGuestMemorySnapshot;
+  readonly admitProcessMemory: ShellProcessMemoryAdmission;
+  readonly admitUtilityMemory: ShellUtilityMemoryAdmission;
   readonly virtualDevices?: ReadonlyMap<string, VirtualDevice>;
   readonly peripherals?: PeripheralBusBroker;
   readonly deferGuestExecution?: boolean;
@@ -161,6 +209,7 @@ export interface ShellProcessMemoryAdmissionRequest {
 export interface ShellProcessMemoryGrant {
   readonly memoryBytes: number;
   readonly released: boolean;
+  bindProcess(pid: number): void;
   release(): void;
 }
 
@@ -168,13 +217,34 @@ export type ShellProcessMemoryAdmission = (
   request: ShellProcessMemoryAdmissionRequest,
 ) => ShellProcessMemoryGrant;
 
+export interface ShellUtilityMemoryAdmissionRequest {
+  readonly displayName: string;
+  readonly moduleId: string;
+  readonly residentBytes: number;
+}
+
+export interface ShellUtilityMemoryGrant {
+  readonly released: boolean;
+  readonly residentBytes: number;
+  release(): void;
+}
+
+export type ShellUtilityMemoryAdmission = (
+  request: ShellUtilityMemoryAdmissionRequest,
+) => ShellUtilityMemoryGrant;
+
 interface CFamilyCommandOptions {
   readonly arguments: readonly string[];
   readonly definitions: readonly {
     readonly name: string;
     readonly replacement?: string;
   }[];
+  readonly dependencyFile?: string;
+  readonly dependencyGeneration: boolean;
+  readonly dataModel: Cs486DataModel;
   readonly includePaths: readonly string[];
+  readonly optimizationLevel: 0 | 1;
+  readonly standard: string;
   readonly undefines: readonly string[];
 }
 
@@ -225,7 +295,14 @@ interface DosDirectoryGroup {
 }
 
 const maximumOutputLength = 256_000;
+const maximumCompletionCandidates = 64;
+const maximumCompletionLineLength = 128;
+const linuxGitResidentBytes = 1_048_576;
 const maximumEnvironmentVariables = 256;
+const initManagedServiceNames: ReadonlySet<string> = new Set([
+  "syslog",
+  "cron",
+]);
 const dosShortDisplayNamePattern =
   /^[A-Za-z0-9!#$%&'()@^_`{}~-]{1,8}(?:\.[A-Za-z0-9!#$%&'()@^_`{}~-]{1,3})?$/u;
 
@@ -413,6 +490,26 @@ export class ShellCommandRuntime {
         },
         media.generation,
       );
+      if (current === "/drives/c/io.sys" || current === "/drives/c/msdos.sys") {
+        state.setFatAttribute(
+          current,
+          dosFatAttribute.hidden,
+          true,
+          media.generation,
+        );
+        state.setFatAttribute(
+          current,
+          dosFatAttribute.system,
+          true,
+          media.generation,
+        );
+        state.setFatAttribute(
+          current,
+          dosFatAttribute.readOnly,
+          true,
+          media.generation,
+        );
+      }
     }
     return state.fatMetadata(path, media.generation);
   }
@@ -544,34 +641,59 @@ export class ShellCommandRuntime {
 
   complete(line: string, cursor: number): ShellCompletionResult {
     if (
-      line.length > 128 ||
+      line.length > maximumCompletionLineLength ||
       !Number.isSafeInteger(cursor) ||
       cursor < 0 ||
       cursor > line.length
     ) {
-      return { candidates: [], cursor, value: line };
+      return emptyShellCompletion(line, cursor);
     }
     const beforeCursor = line.slice(0, cursor);
     const tokenStart = findCompletionTokenStart(beforeCursor);
     const token = beforeCursor.slice(tokenStart);
-    if (/['"]/u.test(token)) return { candidates: [], cursor, value: line };
+    if (/['"]/u.test(token))
+      return emptyShellCompletion(line, cursor, tokenStart, cursor);
     const commandPosition = isCommandCompletionPosition(
       beforeCursor.slice(0, tokenStart),
     );
-    const candidates = commandPosition
+    const completionSet = commandPosition
       ? this.commandCompletions(token)
       : this.pathCompletions(token);
-    if (candidates.length === 0) return { candidates, cursor, value: line };
+    const maximumReplacementLength =
+      maximumCompletionLineLength - (line.length - (cursor - tokenStart));
+    const candidates = completionSet.candidates.flatMap((candidate) => {
+      if (candidate.insertText.length <= maximumReplacementLength)
+        return [candidate];
+      if (
+        candidate.insertText.endsWith(" ") &&
+        candidate.displayText.length <= maximumReplacementLength
+      ) {
+        return [{ ...candidate, insertText: candidate.displayText }];
+      }
+      return [];
+    });
+    const truncated =
+      completionSet.truncated ||
+      candidates.length < completionSet.candidates.length;
+    if (candidates.length === 0)
+      return {
+        ...emptyShellCompletion(line, cursor, tokenStart, cursor),
+        truncated,
+      };
 
-    const common = longestCommonPrefix(candidates);
+    const common = longestCommonPrefix(
+      candidates.map((candidate) => candidate.displayText),
+      this.options.profile.id === "dos",
+    );
     const replacement =
-      candidates.length === 1 && !candidates[0]!.endsWith("/")
-        ? `${candidates[0]} `
-        : common;
+      candidates.length === 1 ? candidates[0]!.insertText : common;
     const value = `${line.slice(0, tokenStart)}${replacement}${line.slice(cursor)}`;
     return {
       candidates,
       cursor: tokenStart + replacement.length,
+      replaceEnd: cursor,
+      replaceStart: tokenStart,
+      truncated,
       value,
     };
   }
@@ -591,6 +713,10 @@ export class ShellCommandRuntime {
     for (const [name, value] of this.options.profile.environment)
       this.setEnvironmentEntry(name, value);
     this.setEnvironmentEntry("HOME", user.home);
+    this.setEnvironmentEntry(
+      "PATH",
+      user.uid === 0 ? linuxRootDefaultPath : linuxUserDefaultPath,
+    );
     this.setEnvironmentEntry("USER", user.name);
     this.setEnvironmentEntry("LOGNAME", user.name);
     this.setEnvironmentEntry("SHELL", user.shell);
@@ -619,6 +745,10 @@ export class ShellCommandRuntime {
     this.setEnvironmentEntry("SHELL", user.shell);
     if (login) {
       this.setEnvironmentEntry("HOME", user.home);
+      this.setEnvironmentEntry(
+        "PATH",
+        user.uid === 0 ? linuxRootDefaultPath : linuxUserDefaultPath,
+      );
       this.previousDirectory = this.currentDirectory;
       this.currentDirectory = user.home;
     }
@@ -831,9 +961,9 @@ export class ShellCommandRuntime {
     }
 
     const [requestedCommand = "", ...arguments_] = words;
-    const command =
-      this.installedSystemUtility(requestedCommand) ??
-      this.canonicalCommand(requestedCommand);
+    const installed = this.installedSystemUtility(requestedCommand);
+    const canonical = this.canonicalCommand(requestedCommand);
+    const command = installed ?? canonical;
     if (this.registry.has(requestedCommand)) {
       const executablePath = commandExecutablePath(
         this.options.profile.id,
@@ -844,6 +974,14 @@ export class ShellCommandRuntime {
       }
     }
     try {
+      if (
+        this.options.profile.id === "dos" &&
+        this.registry.has(requestedCommand) &&
+        !isDosInternalCommand(canonical) &&
+        installed === undefined
+      ) {
+        return this.commandNotFound(requestedCommand);
+      }
       const profileResult = this.dosCommands?.execute(
         requestedCommand,
         arguments_,
@@ -851,8 +989,17 @@ export class ShellCommandRuntime {
       );
       if (profileResult !== undefined) return profileResult;
       if (
-        (!this.registry.has(requestedCommand) ||
-          this.installedSystemUtility(requestedCommand) === undefined) &&
+        this.options.profile.id === "linux" &&
+        installed === undefined &&
+        !this.registry.has(requestedCommand) &&
+        !isExecutableCommand(command)
+      ) {
+        const resolved = this.resolveLinuxExecutableName(requestedCommand);
+        if (resolved !== undefined)
+          return this.runExecutable([resolved, ...arguments_]);
+      }
+      if (
+        (!this.registry.has(requestedCommand) || installed === undefined) &&
         !isExecutableCommand(command)
       ) {
         return this.commandNotFound(requestedCommand);
@@ -1650,6 +1797,7 @@ export class ShellCommandRuntime {
               : cOptions === undefined
                 ? {}
                 : {
+                    cDataModel: cOptions.dataModel,
                     cDefinitions: cOptions.definitions,
                     cIncludePaths: cOptions.includePaths,
                     cUndefines: cOptions.undefines,
@@ -1675,6 +1823,8 @@ export class ShellCommandRuntime {
                   cOptions.includePaths,
                   cOptions.definitions,
                   cOptions.undefines,
+                  cOptions.optimizationLevel,
+                  cOptions.dataModel,
                 ),
           );
     const compileCycles = Math.max(
@@ -1897,6 +2047,8 @@ export class ShellCommandRuntime {
             parsed.includePaths,
             parsed.definitions,
             parsed.undefines,
+            parsed.optimizationLevel,
+            parsed.dataModel,
           );
           frontendOptions = {
             ...baseOptions,
@@ -2219,17 +2371,19 @@ export class ShellCommandRuntime {
           [
             "Computer System BusyBox shell",
             "files: pwd cd ls cat mkdir rmdir touch rm cp mv ln readlink realpath find du quota",
-            "text: echo printf head tail wc grep sort uniq tr",
-            "text+: tee cmp diff sha256sum od hexdump xargs",
+            "text: echo printf head tail wc grep sed awk sort uniq tr nl",
+            "text+: tee cmp diff sha256sum md5sum base64 od hexdump xargs",
             "shell: sh bash source env printenv export unset alias unalias command read local shift getopts",
-            "system: clear vi shutdown reboot exit login logout passwd su sudo true false",
+            "system: clear vi more less crontab shutdown reboot exit login logout passwd su sudo true false",
             "accounts: useradd userdel usermod groupadd groupdel getent groups umask",
-            "process: ps top kill jobs fg bg wait service",
+            "process: ps top kill pgrep pkill killall jobs fg bg wait nice nohup watch service",
             "sessions: tty who w last",
             "info: whoami id hostname uname date uptime stat df du quota man apropos",
             "hardware: cpuinfo free mount dmesg spi i2c /proc/cpuinfo /proc/meminfo",
+            "archive: tar gzip gunzip zip unzip",
             "utility: history time sleep seq cut test [",
             "toolchain: as cc c++ ld make nm run objdump csdb",
+            "version control: git (local repositories; remote transport unavailable)",
             "syntax: |  >  >>  <  &&  ||  ;  '...'  \"...\"  $VAR  $?",
           ].join("\n") + "\n",
         );
@@ -2245,6 +2399,12 @@ export class ShellCommandRuntime {
         return this.list(arguments_);
       case "cat":
         return this.cat(arguments_, stdin);
+      case "awk":
+        return this.linuxAwk(arguments_, stdin);
+      case "sed":
+        return this.linuxSed(arguments_, stdin);
+      case "crontab":
+        return this.linuxCrontab(arguments_);
       case "echo":
         return this.echo(arguments_);
       case "printf":
@@ -2263,10 +2423,23 @@ export class ShellCommandRuntime {
         return this.headOrTail("head", arguments_, stdin);
       case "tail":
         return this.headOrTail("tail", arguments_, stdin);
+      case "tar":
+      case "zip":
+      case "unzip":
+        return this.linuxArchiveCommand(command, arguments_);
       case "wc":
         return this.wordCount(arguments_, stdin);
       case "grep":
         return this.grep(arguments_, stdin);
+      case "gzip":
+      case "gunzip":
+        return this.linuxArchiveCommand(command, arguments_);
+      case "nohup":
+        return failure(
+          "nohup",
+          "use nohup {sleep|python|micropython|run} ... &",
+          2,
+        );
       case "sort":
         return this.sort(arguments_, stdin);
       case "uniq":
@@ -2301,6 +2474,12 @@ export class ShellCommandRuntime {
         return this.linuxTop(arguments_);
       case "kill":
         return this.linuxKill(arguments_);
+      case "pgrep":
+        return this.linuxPgrep(arguments_);
+      case "pkill":
+        return this.linuxPkill(arguments_);
+      case "killall":
+        return this.linuxKillAll(arguments_);
       case "jobs":
         return this.linuxJobs(arguments_);
       case "fg":
@@ -2319,6 +2498,12 @@ export class ShellCommandRuntime {
         return this.linuxLast(arguments_);
       case "service":
         return this.linuxService(arguments_);
+      case "telinit":
+        return this.linuxTelinit(arguments_);
+      case "runlevel":
+        return this.linuxRunlevel(arguments_);
+      case "cs-init-ctl":
+        return this.linuxInitCtl(arguments_);
       case "man":
         return this.linuxMan(arguments_);
       case "apropos":
@@ -2351,6 +2536,8 @@ export class ShellCommandRuntime {
         return this.linuxCompare(arguments_);
       case "diff":
         return this.linuxDiff(arguments_);
+      case "git":
+        return this.linuxGit(arguments_);
       case "dmesg":
         return this.linuxDmesg(arguments_);
       case "file":
@@ -2384,6 +2571,12 @@ export class ShellCommandRuntime {
         return this.linuxRemoveDirectory(arguments_);
       case "sha256sum":
         return this.linuxSha256Sum(arguments_, stdin);
+      case "md5sum":
+        return this.linuxMd5Sum(arguments_, stdin);
+      case "base64":
+        return this.linuxBase64(arguments_, stdin);
+      case "nl":
+        return this.linuxNumberLines(arguments_, stdin);
       case "sync":
         if (arguments_.length !== 0) return usage("sync");
         if (this.options.syncFilesystem === undefined)
@@ -2398,12 +2591,16 @@ export class ShellCommandRuntime {
         return this.linuxYes(arguments_);
       case "as":
         return this.compileExecutable("asm", arguments_);
+      case "ar":
+        return this.staticArchive(arguments_);
       case "cc":
         return this.compileExecutable("c", arguments_);
       case "c++":
         return this.compileExecutable("cpp", arguments_);
       case "run":
         return this.runExecutable(arguments_);
+      case "ranlib":
+        return this.refreshStaticArchive(arguments_);
       case "csdb":
         return this.debugExecutable(arguments_);
       case "objdump":
@@ -2421,6 +2618,8 @@ export class ShellCommandRuntime {
         return this.commandNotFound(command);
       case "uptime":
         return this.linuxUptime(arguments_);
+      case "vmstat":
+        return this.linuxVmstat(arguments_);
       case "sleep":
         return this.sleep(arguments_);
       case "seq":
@@ -3377,12 +3576,13 @@ export class ShellCommandRuntime {
     for (const name of arguments_) {
       if (this.installedSystemUtility(name) === undefined)
         return status(1, "", `${name}: not found\n`);
+      const canonical = this.registry.canonical(name);
       output.push(
-        command === "type"
+        command === "type" && isLinuxBuiltinCommand(canonical)
           ? `${name} is a shell builtin`
-          : this.options.profile.id === "dos"
-            ? `C:\\COMMAND\\${name.toUpperCase()}.COM`
-            : `/usr/bin/${name}`,
+          : this.options.profile.pathDialect.display(
+              commandExecutablePath(this.options.profile.id, canonical),
+            ),
       );
     }
     return success(`${output.join("\n")}\n`);
@@ -3405,6 +3605,29 @@ export class ShellCommandRuntime {
       device === undefined ? this.filesystem.readFile(resolved) : device.read();
     if (device === undefined) this.ioReadBytes += utf8ByteLength(contents);
     return contents;
+  }
+
+  readFileBytes(path: string): Uint8Array {
+    const resolved = this.resolvePath(path);
+    if (this.virtualDevice(resolved) !== undefined) {
+      throw new Error(`${path}: binary device I/O is not supported`);
+    }
+    if (!this.filesystem.hasAccess(resolved, 0b100)) {
+      throw new Error(`${path}: Permission denied`);
+    }
+    const contents = this.filesystem.readFileBytes(resolved);
+    this.ioReadBytes += contents.byteLength;
+    return contents;
+  }
+
+  private readSymbolicLink(path: string): string {
+    const resolved = this.resolvePath(path);
+    if (!this.filesystem.isSymbolicLink(resolved)) {
+      throw new Error(`${path}: not a symbolic link`);
+    }
+    const target = this.filesystem.readLink(resolved);
+    this.ioReadBytes += utf8ByteLength(target);
+    return target;
   }
 
   pathExists(path: string): boolean {
@@ -3452,6 +3675,22 @@ export class ShellCommandRuntime {
     if (append) this.filesystem.appendFile(resolved, contents);
     else this.filesystem.writeFile(resolved, contents);
     this.ioWriteBytes += utf8ByteLength(contents);
+  }
+
+  writeFileBytes(path: string, contents: Uint8Array): void {
+    const resolved = this.resolvePath(path);
+    if (this.virtualDevice(resolved) !== undefined) {
+      throw new Error(`${path}: binary device I/O is not supported`);
+    }
+    const accessPath = this.filesystem.exists(resolved)
+      ? resolved
+      : parentPath(resolved);
+    const required = this.filesystem.exists(resolved) ? 0b010 : 0b011;
+    if (!this.filesystem.hasAccess(accessPath, required)) {
+      throw new Error(`${path}: Permission denied`);
+    }
+    this.filesystem.writeFileBytes(resolved, contents);
+    this.ioWriteBytes += contents.byteLength;
   }
 
   currentTick(): number {
@@ -3533,6 +3772,12 @@ export class ShellCommandRuntime {
       return undefined;
     }
     if (!this.filesystem.hasAccess(path, filesystemExecute)) return undefined;
+    if (
+      (this.options.profile.id === "dos" && isDosInternalCommand(canonical)) ||
+      (this.options.profile.id === "linux" && isLinuxBuiltinCommand(canonical))
+    ) {
+      return canonical;
+    }
     return decodeSystemUtility(this.filesystem.readFile(path));
   }
 
@@ -3540,43 +3785,90 @@ export class ShellCommandRuntime {
     return this.textPolicy.displayName(name);
   }
 
-  private commandCompletions(prefix: string): string[] {
-    return this.registry
+  private commandCompletions(prefix: string): {
+    readonly candidates: readonly ShellCompletionCandidate[];
+    readonly truncated: boolean;
+  } {
+    const matches = this.registry
       .names(prefix)
-      .filter((name) => this.installedSystemUtility(name) !== undefined)
-      .slice(0, 64);
+      .filter((name) => this.installedSystemUtility(name) !== undefined);
+    return {
+      candidates: matches.slice(0, maximumCompletionCandidates).map((name) => {
+        const displayText =
+          this.options.profile.id === "dos" ? this.displayName(name) : name;
+        return {
+          displayText,
+          insertText: `${displayText} `,
+          kind: "command",
+        };
+      }),
+      truncated: matches.length > maximumCompletionCandidates,
+    };
   }
 
-  private pathCompletions(token: string): string[] {
-    const slash = token.lastIndexOf("/");
-    const directoryToken = slash < 0 ? "." : token.slice(0, slash) || "/";
-    const displayPrefix = slash < 0 ? "" : token.slice(0, slash + 1);
-    const namePrefix = slash < 0 ? token : token.slice(slash + 1);
+  private pathCompletions(token: string): {
+    readonly candidates: readonly ShellCompletionCandidate[];
+    readonly truncated: boolean;
+  } {
+    const dos = this.options.profile.id === "dos";
+    const { directoryToken, displayPrefix, namePrefix, separator } =
+      completionPathParts(token, dos);
     let resolvedDirectory: string;
     let names: string[];
     try {
       resolvedDirectory = this.resolvePath(directoryToken);
       names = [...this.filesystem.list(resolvedDirectory)];
     } catch {
-      return [];
+      return { candidates: [], truncated: false };
     }
+    const virtualNames = new Set<string>();
     for (const devicePath of this.virtualDevicePaths()) {
-      if (parentPath(devicePath) === resolvedDirectory)
-        names.push(baseName(devicePath));
+      if (parentPath(devicePath) !== resolvedDirectory) continue;
+      const name = baseName(devicePath);
+      names.push(name);
+      virtualNames.add(dos ? name.toLowerCase() : name);
     }
-    return [...new Set(names)]
-      .filter((name) => name.startsWith(namePrefix))
-      .sort()
-      .slice(0, 64)
-      .map((name) => {
-        const resolved = joinPath(resolvedDirectory, name);
-        const suffix =
-          this.filesystem.exists(resolved) &&
-          this.filesystem.isDirectory(resolved)
-            ? "/"
-            : "";
-        return `${displayPrefix}${name}${suffix}`;
+    const comparablePrefix = dos ? namePrefix.toLowerCase() : namePrefix;
+    const matches = [...new Set(names)]
+      .filter((name) => {
+        if (!dos && comparablePrefix.length === 0 && name.startsWith("."))
+          return false;
+        const comparableName = dos ? name.toLowerCase() : name;
+        return comparableName.startsWith(comparablePrefix);
+      })
+      .sort((left, right) => {
+        const comparableLeft = dos ? left.toLowerCase() : left;
+        const comparableRight = dos ? right.toLowerCase() : right;
+        return comparableLeft < comparableRight
+          ? -1
+          : comparableLeft > comparableRight
+            ? 1
+            : 0;
       });
+    return {
+      candidates: matches.slice(0, maximumCompletionCandidates).map((name) => {
+        const resolved = joinPath(resolvedDirectory, name);
+        const directory =
+          this.filesystem.exists(resolved) &&
+          this.filesystem.isDirectory(resolved);
+        const renderedName = dos ? this.displayName(name) : name;
+        const displayText = `${displayPrefix}${renderedName}${
+          directory ? separator : ""
+        }`;
+        const virtualKey = dos ? name.toLowerCase() : name;
+        const kind: ShellCompletionCandidate["kind"] = directory
+          ? "directory"
+          : virtualNames.has(virtualKey)
+            ? "device"
+            : "file";
+        return {
+          displayText,
+          insertText: directory ? displayText : `${displayText} `,
+          kind,
+        };
+      }),
+      truncated: matches.length > maximumCompletionCandidates,
+    };
   }
 
   private commandNotFound(command: string): ShellCommandResult {
@@ -3604,6 +3896,23 @@ export class ShellCommandRuntime {
       selfPid !== undefined && path.startsWith("/proc/self/")
         ? `/proc/${String(selfPid)}/${path.slice("/proc/self/".length)}`
         : path;
+    const processStatusMatch = /^\/proc\/([1-9][0-9]*)\/status$/u.exec(
+      runtimePath,
+    );
+    if (processStatusMatch !== null && this.options.osRuntime !== undefined) {
+      const pid = Number(processStatusMatch[1]);
+      if (
+        Number.isSafeInteger(pid) &&
+        this.options.osRuntime.process(pid) !== undefined
+      ) {
+        return this.readOnlyDevice(path, () => {
+          const memory = this.requireLinuxMemorySnapshot().processes.find(
+            (process) => process.pid === pid,
+          ) ?? { pid, residentBytes: 0, virtualBytes: 0 };
+          return this.options.osRuntime!.renderProcStatus(pid, memory);
+        });
+      }
+    }
     const runtimeProc = this.options.osRuntime?.readProc(runtimePath);
     if (runtimeProc !== undefined)
       return this.readOnlyDevice(path, () =>
@@ -3698,22 +4007,19 @@ export class ShellCommandRuntime {
   }
 
   private linuxMemoryInfo(): string {
-    const total = this.options.hardware.memoryBytes;
-    const memory = this.linuxMemorySnapshot();
+    const memory = this.requireLinuxMemorySnapshot();
+    const physical = memory.physical;
     const resident = memory.resident;
-    const runtime = memory.guest;
-    const used = memory.used;
-    const free = total - used;
     return (
       [
-        `MemTotal: ${total} B`,
-        `MemUsed:  ${used} B`,
-        `MemFree:  ${free} B`,
-        `MemAvailable: ${free} B`,
-        `KernelResident: ${resident.kernel} B`,
-        `SystemServices: ${resident.services} B`,
-        `Buffers: ${resident.buffers} B`,
-        `GuestRuntime: ${runtime} B`,
+        `MemTotal: ${physical.totalBytes} B`,
+        `MemUsed:  ${physical.usedBytes} B`,
+        `MemFree:  ${physical.freeBytes} B`,
+        `MemAvailable: ${physical.availableBytes} B`,
+        `KernelResident: ${resident.kernelBytes} B`,
+        `SystemServices: ${resident.servicesBytes} B`,
+        `Buffers: ${resident.buffersBytes} B`,
+        `GuestRuntime: ${resident.guestRuntimeBytes} B`,
         "SwapTotal: 0 B",
         "SwapFree:  0 B",
         "MemoryModel: 32-bit protected flat sandbox",
@@ -3721,56 +4027,12 @@ export class ShellCommandRuntime {
     );
   }
 
-  private usedMemoryBytes(): number {
-    const guest = this.guestRuntimeBytes();
-    if (this.options.profile.id === "dos") return guest;
-    return this.linuxMemorySnapshot(guest).used;
-  }
-
-  private guestRuntimeBytes(): number {
-    return Math.min(
-      this.options.hardware.memoryBytes,
-      Math.max(0, Math.floor(this.options.memoryUsageBytes())),
-    );
-  }
-
-  private linuxMemorySnapshot(guest = this.guestRuntimeBytes()): {
-    readonly guest: number;
-    readonly resident: {
-      readonly buffers: number;
-      readonly kernel: number;
-      readonly services: number;
-    };
-    readonly used: number;
-  } {
-    const resident = this.linuxResidentMemory(guest);
-    return {
-      guest,
-      resident,
-      used: Math.min(
-        this.options.hardware.memoryBytes,
-        guest + resident.kernel + resident.services + resident.buffers,
-      ),
-    };
-  }
-
-  private linuxResidentMemory(guest: number): {
-    readonly buffers: number;
-    readonly kernel: number;
-    readonly services: number;
-  } {
-    const kib = 1_024;
-    const total = this.options.hardware.memoryBytes;
-    let available = Math.max(0, total - guest);
-    const take = (target: number): number => {
-      const bytes = Math.min(available, target);
-      available -= bytes;
-      return bytes;
-    };
-    const kernel = take(384 * kib + Math.min(384 * kib, total / 16));
-    const services = take(192 * kib);
-    const buffers = take(Math.min(256 * kib, total / 32));
-    return { buffers, kernel, services };
+  private requireLinuxMemorySnapshot(): LinuxGuestMemorySnapshot {
+    const snapshot = this.options.linuxMemorySnapshot?.();
+    if (snapshot === undefined) {
+      throw new Error("CS-Linux memory snapshot is unavailable");
+    }
+    return snapshot;
   }
 
   private uptimeSeconds(): number {
@@ -3968,7 +4230,7 @@ export class ShellCommandRuntime {
             "Usage: ASM [/C] <source> [/OUT:output]",
             "Use CSASM [source] or PWB [source] for the full-screen WorkBench.",
             "WorkBench keys: F2 Save, F3 Next Error, F5 Debug, F7 Build, Shift+F5 Build and Run.",
-            "ABI: zero arguments, optional SIGNATURE name,I32 or VOID, integer return in EAX.",
+            "ABI: up to 32 word arguments, SIGNATURE name,return[,I32...], integer return in EAX.",
             "This is CS486OBJ/CSX, not MASM, OMF, COM, EXE, near/far, or DOS interrupts.",
             "",
           ].join("\r\n"),
@@ -3982,7 +4244,7 @@ export class ShellCommandRuntime {
             "Use CSCC [source], CSCPP [source], or PWB [source] for the full-screen WorkBench.",
             "Options: /I:path, /Dname[=value], /Uname; Linux uses -I, -D, and -U.",
             "WorkBench keys: F2 Save, F3 Next Error, F5 Debug, F7 Build, Shift+F5 Build and Run.",
-            'C++ is a limited subset; extern "C" declarations use the unmangled zero-argument CS ABI.',
+            'C++ is a limited subset; extern "C" declarations use the unmangled word-argument CS ABI.',
             "",
           ].join("\r\n"),
         );
@@ -4170,6 +4432,134 @@ export class ShellCommandRuntime {
     );
   }
 
+  private staticArchive(arguments_: readonly string[]): ShellCommandResult {
+    const usageText = "ar {rcs|r|d|t|x} <archive> [members ...]";
+    if (this.options.profile.id !== "linux" || arguments_.length < 2) {
+      return this.toolchainUsage(usageText);
+    }
+    const flags = arguments_[0]!.replace(/^-+/u, "");
+    const operations = [...flags].filter((flag) => "rdtx".includes(flag));
+    if (
+      !/^[cdrstx]+$/u.test(flags) ||
+      operations.length !== 1 ||
+      new Set(operations).size !== 1
+    ) {
+      return this.toolchainUsage(usageText);
+    }
+    const operation = operations[0]!;
+    const archivePath = this.resolvePath(arguments_[1]!);
+    const operands = arguments_.slice(2);
+    const archiveExists = this.filesystem.exists(archivePath);
+    if (archiveExists && this.filesystem.isDirectory(archivePath)) {
+      return this.toolchainFailure("ar", `${arguments_[1]}: is a directory`);
+    }
+    const readArchive = (): Cs486Archive => {
+      if (!archiveExists)
+        throw new Error(`${arguments_[1]}: archive does not exist`);
+      return parseCs486Archive(this.readFile(archivePath));
+    };
+
+    if (operation === "t") {
+      if (operands.length !== 0) return this.toolchainUsage(usageText);
+      const archive = readArchive();
+      return success(
+        archive.members.map((member) => member.name).join("\n") +
+          (archive.members.length === 0 ? "" : "\n"),
+      );
+    }
+    if (operation === "r") {
+      if (operands.length === 0 && !flags.includes("s")) {
+        return this.toolchainUsage(usageText);
+      }
+      const prior = archiveExists
+        ? parseCs486Archive(this.readFile(archivePath))
+        : undefined;
+      const replacements = operands.map((path) => ({
+        name: archiveMemberName(path),
+        object: this.readCs486Object(path),
+      }));
+      const candidate =
+        replacements.length === 0
+          ? prior === undefined
+            ? createCs486Archive([])
+            : refreshCs486ArchiveIndex(prior)
+          : replaceCs486ArchiveMembers(prior, replacements);
+      const encoded = serializeCs486Archive(candidate);
+      this.filesystem.transaction(() => this.writeFile(archivePath, encoded));
+      return {
+        cpuCycles: archiveWorkCycles(candidate),
+        exitCode: 0,
+        stderr: "",
+        stdout: "",
+      };
+    }
+    if (operation === "d") {
+      if (operands.length === 0) return this.toolchainUsage(usageText);
+      const candidate = deleteCs486ArchiveMembers(
+        readArchive(),
+        operands.map(archiveMemberName),
+      );
+      const encoded = serializeCs486Archive(candidate);
+      this.filesystem.transaction(() => this.writeFile(archivePath, encoded));
+      return {
+        cpuCycles: archiveWorkCycles(candidate),
+        exitCode: 0,
+        stderr: "",
+        stdout: "",
+      };
+    }
+    if (operation === "x") {
+      const archive = readArchive();
+      const requested =
+        operands.length === 0
+          ? archive.members
+          : operands.map((operand) => {
+              const name = archiveMemberName(operand);
+              const member = archive.members.find(
+                (candidate) => candidate.name === name,
+              );
+              if (member === undefined)
+                throw new Error(`archive member not found: ${name}`);
+              return member;
+            });
+      this.filesystem.transaction(() => {
+        for (const member of requested) {
+          this.writeFile(
+            this.resolvePath(member.name),
+            `CS486OBJ\n${JSON.stringify(member.object)}`,
+          );
+        }
+      });
+      return {
+        cpuCycles: archiveWorkCycles(archive),
+        exitCode: 0,
+        stderr: "",
+        stdout: "",
+      };
+    }
+    return this.toolchainUsage(usageText);
+  }
+
+  private refreshStaticArchive(
+    arguments_: readonly string[],
+  ): ShellCommandResult {
+    if (this.options.profile.id !== "linux" || arguments_.length !== 1) {
+      return this.toolchainUsage("ranlib <archive>");
+    }
+    const path = this.resolvePath(arguments_[0]!);
+    const archive = refreshCs486ArchiveIndex(
+      parseCs486Archive(this.readFile(path)),
+    );
+    const encoded = serializeCs486Archive(archive);
+    this.filesystem.transaction(() => this.writeFile(path, encoded));
+    return {
+      cpuCycles: archiveWorkCycles(archive),
+      exitCode: 0,
+      stderr: "",
+      stdout: "",
+    };
+  }
+
   private compileExecutable(
     language: Exclude<Cs486SourceLanguage, "basic"> | "asm",
     arguments_: readonly string[],
@@ -4202,11 +4592,9 @@ export class ShellCommandRuntime {
       );
     }
     arguments_ = this.normalizeCompileOptions(arguments_);
-    const cOptions =
-      language === "asm"
-        ? undefined
-        : this.parseCFamilyCommandOptions(arguments_, language);
-    if (cOptions !== undefined) arguments_ = cOptions.arguments;
+    if (language !== "asm") {
+      return this.compileCFamilyDriver(language, arguments_, usageText);
+    }
     const compileOnly = arguments_.filter(
       (argument) => argument === "-c",
     ).length;
@@ -4235,7 +4623,8 @@ export class ShellCommandRuntime {
         : filtered[2]!,
     );
     const source = this.readFile(sourceName);
-    if (source.length > 128_000)
+    const sourceLimit = cs486AsmPreprocessorLimits.sourceCharacters;
+    if (source.length > sourceLimit)
       return this.toolchainFailure(language, "source limit exceeded");
     if (
       this.options.deferGuestExecution === true &&
@@ -4250,22 +4639,14 @@ export class ShellCommandRuntime {
           task: {
             compileOnly: compileOnly === 1,
             kind: "source",
-            language,
+            language: "asm",
             outputPath,
             runAfterCompile: false,
             source,
             sourceName,
-            ...(language === "asm"
-              ? {
-                  assemblerDialect: this.options.profile.id,
-                  assemblerHome:
-                    this.environment.get("HOME") ?? this.options.profile.home,
-                }
-              : {
-                  cDefinitions: cOptions!.definitions,
-                  cIncludePaths: cOptions!.includePaths,
-                  cUndefines: cOptions!.undefines,
-                }),
+            assemblerDialect: this.options.profile.id,
+            assemblerHome:
+              this.environment.get("HOME") ?? this.options.profile.home,
           },
           umask: this.filesystem.getUmask(),
         },
@@ -4274,23 +4655,10 @@ export class ShellCommandRuntime {
       };
     }
     const includeBytesBefore = this.ioReadBytes;
-    const cFrontendOptions =
-      language === "asm"
-        ? undefined
-        : this.cFamilyFrontendOptions(
-            sourceName,
-            cOptions!.includePaths,
-            cOptions!.definitions,
-            cOptions!.undefines,
-          );
     const output =
       compileOnly === 1
-        ? language === "asm"
-          ? assembleCs486Object(source, this.assemblerOptions(sourceName))
-          : compileCs486Object(language, source, cFrontendOptions)
-        : language === "asm"
-          ? assembleCs486(source, this.assemblerOptions(sourceName))
-          : compileCs486Source(language, source, cFrontendOptions);
+        ? assembleCs486Object(source, this.assemblerOptions(sourceName))
+        : assembleCs486(source, this.assemblerOptions(sourceName));
     const object = output.format === "cs486-object";
     this.writeFile(
       outputPath,
@@ -4310,41 +4678,383 @@ export class ShellCommandRuntime {
     };
   }
 
+  private compileCFamilyDriver(
+    language: "c" | "cpp",
+    arguments_: readonly string[],
+    usageText: string,
+  ): ShellCommandResult {
+    const options = this.parseCFamilyCommandOptions(arguments_, language);
+    const compileOnlyCount = options.arguments.filter(
+      (argument) => argument === "-c",
+    ).length;
+    if (compileOnlyCount > 1) return this.toolchainUsage(usageText);
+    const compileOnly = compileOnlyCount === 1;
+    const linkOperands: string[] = [];
+    const libraryPathTokens: string[] = [];
+    const ordinaryOperands: string[] = [];
+    let outputOperand: string | undefined;
+    for (let index = 0; index < options.arguments.length; index += 1) {
+      const argument = options.arguments[index]!;
+      if (argument === "-c") continue;
+      if (argument === "-o") {
+        if (
+          outputOperand !== undefined ||
+          options.arguments[index + 1] === undefined
+        )
+          return this.toolchainUsage(usageText);
+        outputOperand = options.arguments[++index]!;
+        continue;
+      }
+      if (argument === "-L") {
+        const directory = options.arguments[++index];
+        if (directory === undefined) return this.toolchainUsage(usageText);
+        libraryPathTokens.push("-L", directory);
+        continue;
+      }
+      if (argument.startsWith("-L") || argument.startsWith("-l")) {
+        if (argument.startsWith("-L")) libraryPathTokens.push(argument);
+        else linkOperands.push(argument);
+        continue;
+      }
+      if (argument.startsWith("-")) {
+        return this.toolchainFailure(
+          language,
+          `unsupported compiler-driver option '${argument}'`,
+          2,
+        );
+      }
+      ordinaryOperands.push(argument);
+      linkOperands.push(argument);
+    }
+    if (ordinaryOperands.length === 0 || ordinaryOperands.length > 64) {
+      return this.toolchainUsage(usageText);
+    }
+    const expectedExtension =
+      language === "c" ? /\.c$/iu : /\.(?:cc|cpp|cxx)$/iu;
+    let sourceOperands = ordinaryOperands.filter((operand) =>
+      expectedExtension.test(operand),
+    );
+    if (sourceOperands.length === 0 && ordinaryOperands.length === 1) {
+      const candidate = this.readFile(this.resolvePath(ordinaryOperands[0]!));
+      if (
+        !candidate.startsWith("CS486OBJ\n") &&
+        !candidate.startsWith("CS486AR\n")
+      ) {
+        sourceOperands = [ordinaryOperands[0]!];
+      }
+    }
+    if (sourceOperands.length > 1) {
+      return this.toolchainFailure(
+        language,
+        "multiple source files require separate bounded compile steps",
+        2,
+      );
+    }
+    const sourcePath = sourceOperands[0];
+    const modelLibraryTokens =
+      this.options.profile.id === "linux"
+        ? ["-L", `/usr/lib/${options.dataModel}`]
+        : [];
+    if (sourcePath === undefined) {
+      if (compileOnly || options.dependencyGeneration)
+        return this.toolchainUsage(usageText);
+      const linkerArguments = [
+        ...modelLibraryTokens,
+        ...options.arguments,
+        ...(this.options.profile.id === "linux" ? ["-lc"] : []),
+      ];
+      return this.linkObjects(linkerArguments);
+    }
+    if (
+      compileOnly &&
+      (ordinaryOperands.length !== 1 ||
+        linkOperands.length !== 1 ||
+        libraryPathTokens.length > 0)
+    ) {
+      return this.toolchainFailure(
+        language,
+        "compile-only mode accepts exactly one source and no link inputs",
+        2,
+      );
+    }
+    if (!compileOnly && this.options.profile.id === "linux") {
+      libraryPathTokens.unshift(...modelLibraryTokens);
+      linkOperands.push("-lc");
+    }
+    const sourceOperandIndex = linkOperands.indexOf(sourcePath);
+    const linkInputsBefore = compileOnly
+      ? []
+      : this.readCompilerLinkInputs([
+          ...libraryPathTokens,
+          ...linkOperands.slice(0, sourceOperandIndex),
+        ]);
+    const linkInputs = compileOnly
+      ? []
+      : this.readCompilerLinkInputs([
+          ...libraryPathTokens,
+          ...linkOperands.slice(sourceOperandIndex + 1),
+        ]);
+    const sourceName = this.resolvePath(sourcePath);
+    const outputName =
+      outputOperand ??
+      (this.options.profile.id === "dos"
+        ? replacePathExtension(sourcePath, compileOnly ? ".OBJ" : ".CSX")
+        : compileOnly
+          ? "a.o"
+          : "a.out");
+    const outputPath = this.resolvePath(outputName);
+    const dependencyOutputPath = options.dependencyGeneration
+      ? this.resolvePath(
+          options.dependencyFile ?? replacePathExtension(outputPath, ".d"),
+        )
+      : undefined;
+    const source = this.readFile(sourceName);
+    if (source.length > cs486CPreprocessorLimits.rootSourceCharacters) {
+      return this.toolchainFailure(language, "source limit exceeded");
+    }
+    if (
+      this.options.deferGuestExecution === true &&
+      this.admittedMakeRecipeDepth === 0
+    ) {
+      return {
+        exitCode: 0,
+        foreground: {
+          command: language === "cpp" ? "c++" : "c",
+          credentials: this.options.credentials(),
+          kind: "compile",
+          task: {
+            cDefinitions: options.definitions,
+            cDataModel: options.dataModel,
+            cIncludePaths: options.includePaths,
+            cOptimizationLevel: options.optimizationLevel,
+            cUndefines: options.undefines,
+            compileOnly,
+            ...(dependencyOutputPath === undefined
+              ? {}
+              : {
+                  dependencyOutputPath,
+                  dependencyTarget: outputName,
+                }),
+            kind: "source",
+            language,
+            ...(linkInputs.length === 0 ? {} : { linkInputs }),
+            ...(linkInputsBefore.length === 0 ? {} : { linkInputsBefore }),
+            outputPath,
+            runAfterCompile: false,
+            source,
+            sourceName,
+          },
+          umask: this.filesystem.getUmask(),
+        },
+        stderr: "",
+        stdout: "",
+      };
+    }
+
+    const includeBytesBefore = this.ioReadBytes;
+    const dependencies = [sourceName];
+    const frontendOptions = this.cFamilyFrontendOptions(
+      sourceName,
+      options.includePaths,
+      options.definitions,
+      options.undefines,
+      options.optimizationLevel,
+      options.dataModel,
+      dependencies,
+    );
+    const object = compileCs486Object(language, source, frontendOptions);
+    const output = compileOnly
+      ? object
+      : linkCs486Objects(
+          selectParsedCs486LinkInputs([
+            ...linkInputsBefore,
+            { kind: "object", object },
+            ...linkInputs,
+          ]).objects,
+        );
+    const encoded = `${output.format === "cs486-object" ? "CS486OBJ" : "CS486"}\n${JSON.stringify(output)}`;
+    this.filesystem.transaction(() => {
+      this.writeFile(outputPath, encoded);
+      if (dependencyOutputPath !== undefined) {
+        this.writeFile(
+          dependencyOutputPath,
+          renderCompilerDependencies(outputName, dependencies),
+        );
+      }
+    });
+    return {
+      cpuCycles: Math.max(
+        1,
+        Math.ceil((source.length + this.ioReadBytes - includeBytesBefore) / 4) +
+          (output.format === "cs486-object"
+            ? output.assembly.split("\n").length * 2
+            : output.instructions.length * 4),
+      ),
+      exitCode: 0,
+      stderr: "",
+      stdout: "",
+    };
+  }
+
+  private readCompilerLinkInputs(
+    arguments_: readonly string[],
+  ): readonly Cs486LinkInput[] {
+    const libraryPaths: string[] = [];
+    const operands: string[] = [];
+    for (let index = 0; index < arguments_.length; index += 1) {
+      const argument = arguments_[index]!;
+      const libraryPath =
+        argument === "-L"
+          ? arguments_[++index]
+          : argument.startsWith("-L")
+            ? argument.slice(2)
+            : undefined;
+      if (libraryPath !== undefined) {
+        if (
+          this.options.profile.id !== "linux" ||
+          libraryPath.length === 0 ||
+          libraryPath.length > 128
+        ) {
+          throw new Error("invalid compiler library path");
+        }
+        const resolved = this.resolvePath(libraryPath);
+        if (!libraryPaths.includes(resolved)) libraryPaths.push(resolved);
+        if (libraryPaths.length > 16)
+          throw new Error("library path count limit exceeded");
+        continue;
+      }
+      operands.push(argument);
+    }
+    const searchPaths = [...libraryPaths, "/usr/lib"];
+    return operands.map((operand): Cs486LinkInput => {
+      if (operand.startsWith("-l")) {
+        if (!/^-l[A-Za-z0-9_+.-]{1,64}$/u.test(operand)) {
+          throw new Error(`invalid library option '${operand}'`);
+        }
+        const library = operand.slice(2);
+        const path = searchPaths
+          .map((directory) =>
+            this.filesystem.normalize(
+              `${directory.replace(/\/$/u, "")}/lib${library}.csa`,
+            ),
+          )
+          .find(
+            (candidate) =>
+              this.filesystem.exists(candidate) &&
+              !this.filesystem.isDirectory(candidate),
+          );
+        if (path === undefined) throw new Error(`cannot find -l${library}`);
+        return {
+          archive: this.parseCompilerArchive(this.readFile(path)),
+          kind: "archive",
+        };
+      }
+      const encoded = this.readFile(this.resolvePath(operand));
+      return encoded.startsWith("CS486AR\n")
+        ? { archive: this.parseCompilerArchive(encoded), kind: "archive" }
+        : { kind: "object", object: this.parseCs486Object(encoded, operand) };
+    });
+  }
+
   private linkObjects(arguments_: readonly string[]): ShellCommandResult {
     const usageText =
       this.options.profile.id === "dos"
         ? "LINK <objects...> [/OUT:output] [/ENTRY:symbol]"
-        : "ld <objects...> [-o output] [-e symbol]";
+        : "ld <objects|archives...> [-L directory] [-l library] [-o output] [-e symbol]";
     arguments_ = this.normalizeLinkOptions(arguments_);
-    const outputIndex = arguments_.indexOf("-o");
-    const entryLongIndex = arguments_.indexOf("--entry");
-    const entryShortIndex = arguments_.indexOf("-e");
-    if (entryLongIndex >= 0 && entryShortIndex >= 0)
-      return this.toolchainUsage(usageText);
-    const entryIndex = Math.max(entryLongIndex, entryShortIndex);
-    const consumed = new Set<number>();
     let outputPath = this.options.profile.id === "dos" ? "" : "a.out";
     let entry: string | undefined;
-    if (outputIndex >= 0) {
-      if (arguments_[outputIndex + 1] === undefined)
-        return this.toolchainUsage(usageText);
-      outputPath = arguments_[outputIndex + 1]!;
-      consumed.add(outputIndex);
-      consumed.add(outputIndex + 1);
+    const libraryPaths: string[] = [];
+    const orderedOperands: string[] = [];
+    let outputSeen = false;
+    let entrySeen = false;
+    for (let index = 0; index < arguments_.length; index += 1) {
+      const argument = arguments_[index]!;
+      if (argument === "-o" || argument === "-e" || argument === "--entry") {
+        const value = arguments_[++index];
+        if (value === undefined) return this.toolchainUsage(usageText);
+        if (argument === "-o") {
+          if (outputSeen) return this.toolchainUsage(usageText);
+          outputSeen = true;
+          outputPath = value;
+        } else {
+          if (entrySeen) return this.toolchainUsage(usageText);
+          entrySeen = true;
+          entry = value;
+        }
+        continue;
+      }
+      const libraryPath =
+        argument === "-L"
+          ? arguments_[++index]
+          : argument.slice(0, 2) === "-L"
+            ? argument.slice(2)
+            : undefined;
+      if (libraryPath !== undefined) {
+        if (
+          this.options.profile.id !== "linux" ||
+          libraryPath.length === 0 ||
+          libraryPath.length > 128
+        ) {
+          return this.toolchainUsage(usageText);
+        }
+        const resolved = this.resolvePath(libraryPath);
+        if (!libraryPaths.includes(resolved)) libraryPaths.push(resolved);
+        if (libraryPaths.length > 16)
+          return this.toolchainFailure("ld", "library path limit exceeded");
+        continue;
+      }
+      if (argument.startsWith("-") && !argument.startsWith("-l")) {
+        return this.toolchainFailure(
+          "ld",
+          `unsupported option '${argument}'`,
+          2,
+        );
+      }
+      orderedOperands.push(argument);
     }
-    if (entryIndex >= 0) {
-      if (arguments_[entryIndex + 1] === undefined)
-        return this.toolchainUsage(usageText);
-      entry = arguments_[entryIndex + 1]!;
-      consumed.add(entryIndex);
-      consumed.add(entryIndex + 1);
-    }
-    const paths = arguments_.filter((_argument, index) => !consumed.has(index));
-    if (paths.length === 0 || paths.length > 64)
+    if (orderedOperands.length === 0 || orderedOperands.length > 64)
       return this.toolchainUsage(usageText);
-    const objects = paths.map((path) => this.readCs486Object(path));
+    const searchPaths = [...libraryPaths, "/usr/lib"];
+    const inputs: Cs486LinkInput[] = orderedOperands.map((operand) => {
+      if (operand.startsWith("-l")) {
+        if (
+          this.options.profile.id !== "linux" ||
+          !/^-l[A-Za-z0-9_+.-]{1,64}$/u.test(operand)
+        ) {
+          throw new Error(`invalid library option '${operand}'`);
+        }
+        const library = operand.slice(2);
+        const path = searchPaths
+          .map((directory) =>
+            this.filesystem.normalize(
+              `${directory.replace(/\/$/u, "")}/lib${library}.csa`,
+            ),
+          )
+          .find(
+            (candidate) =>
+              this.filesystem.exists(candidate) &&
+              !this.filesystem.isDirectory(candidate),
+          );
+        if (path === undefined) throw new Error(`cannot find -l${library}`);
+        return {
+          archive: this.parseCompilerArchive(this.readFile(path)),
+          kind: "archive",
+        };
+      }
+      const encoded = this.readFile(this.resolvePath(operand));
+      return encoded.startsWith("CS486AR\n")
+        ? { archive: this.parseCompilerArchive(encoded), kind: "archive" }
+        : { kind: "object", object: this.parseCs486Object(encoded, operand) };
+    });
+    const selection = selectParsedCs486LinkInputs(inputs);
+    const objects = selection.objects;
     if (outputPath.length === 0) {
-      outputPath = replacePathExtension(paths[0]!, ".CSX");
+      const firstPath = orderedOperands.find(
+        (operand) => !operand.startsWith("-l"),
+      );
+      if (firstPath === undefined) return this.toolchainUsage(usageText);
+      outputPath = replacePathExtension(firstPath, ".CSX");
     }
     outputPath = this.resolvePath(outputPath);
     if (
@@ -4376,9 +5086,15 @@ export class ShellCommandRuntime {
           (total, object) =>
             total + object.symbols.length * 4 + object.relocations.length * 4,
           executable.instructions.length * 4,
-        ),
+        ) +
+          selection.symbolIndexLookups * 2 +
+          selection.archiveMembersExamined * 8,
       ),
     };
+  }
+
+  private parseCompilerArchive(encoded: string): Cs486Archive {
+    return parseInstalledHostedCArchive(encoded) ?? parseCs486Archive(encoded);
   }
 
   private runExecutable(arguments_: readonly string[]): ShellCommandResult {
@@ -4387,25 +5103,33 @@ export class ShellCommandRuntime {
         ? "--stats"
         : this.dosOption(argument),
     );
-    const statsOptions = arguments_.filter(
-      (argument) => argument === "--stats" || argument === "-v",
-    );
-    const stats = statsOptions.length === 1;
-    const paths = arguments_.filter(
-      (argument) => argument !== "--stats" && argument !== "-v",
-    );
-    const path = paths[0];
+    let stats = false;
+    const trailingOption = arguments_[arguments_.length - 1];
+    if (
+      this.options.profile.id === "dos" &&
+      (trailingOption === "--stats" || trailingOption === "-v")
+    ) {
+      stats = true;
+      arguments_ = arguments_.slice(0, -1);
+    }
+    if (arguments_[0] === "--stats" || arguments_[0] === "-v") {
+      if (stats) return this.toolchainUsage("run [--stats] <executable>");
+      stats = true;
+      arguments_ = arguments_.slice(1);
+    }
+    const [path, ...programArguments] = arguments_;
     if (path === undefined)
+      return this.toolchainUsage("run [--stats] <executable> [arguments ...]");
+    if (this.options.profile.id === "dos" && programArguments.length > 0) {
       return this.toolchainUsage("run [--stats] <executable>");
-    const encoded = this.readFile(path);
+    }
+    const resolvedPath = this.resolvePath(path);
+    const encoded = this.readFile(resolvedPath);
     const utility = decodeSystemUtility(encoded);
     if (utility !== undefined) {
       if (stats)
         return failure(path, "system utilities do not accept run --stats");
-      return this.dispatch(utility, arguments_.slice(1), "");
-    }
-    if (statsOptions.length > 1 || paths.length !== 1) {
-      return this.toolchainUsage("run [--stats] <executable>");
+      return this.dispatch(utility, programArguments, "");
     }
     if (!encoded.startsWith("CS486\n"))
       return failure(path, "not a CS486 executable");
@@ -4416,13 +5140,72 @@ export class ShellCommandRuntime {
       return failure(path, "invalid executable encoding");
     }
     validateCs486Executable(executable);
-    return this.executeCs486(executable, stats);
+    return this.executeCs486(
+      executable,
+      stats,
+      0,
+      this.options.profile.id === "linux" &&
+        (executable.version === 4 || executable.version === 5) &&
+        executable.symbols?.some(
+          ({ name, section, type }) =>
+            name === "main" && section === "text" && type === "function",
+        ) === true
+        ? {
+            argv: [resolvedPath, ...programArguments],
+            cwd: this.currentDirectory,
+            environment: this.hostedEnvironmentSnapshot(),
+          }
+        : undefined,
+    );
+  }
+
+  private resolveLinuxExecutableName(name: string): string | undefined {
+    if (
+      name.length < 1 ||
+      name.length > 64 ||
+      name.includes("/") ||
+      name.includes("\\") ||
+      !/^[A-Za-z0-9+_.-]+$/u.test(name)
+    )
+      return undefined;
+    const path = this.environment.get("PATH") ?? "";
+    if (path.length > 4_096) throw new Error("PATH exceeds the lookup limit");
+    for (const directory of path.split(":").slice(0, 16)) {
+      if (directory.length === 0 || directory.length > 255) continue;
+      let candidate: string;
+      try {
+        const normalizedDirectory = this.resolvePath(directory);
+        candidate = this.filesystem.normalize(
+          joinPath(normalizedDirectory, name),
+        );
+      } catch {
+        continue;
+      }
+      try {
+        if (!this.filesystem.exists(candidate)) continue;
+        if (this.filesystem.isDirectory(candidate))
+          throw new Error(`${name}: resolved PATH entry is a directory`);
+        if (!this.filesystem.hasAccess(candidate, 0b101))
+          throw new Error(`${name}: permission denied`);
+      } catch (error: unknown) {
+        const detail = error instanceof Error ? error.message : "";
+        if (detail.startsWith(`${name}:`)) throw error;
+        continue;
+      }
+      return candidate;
+    }
+    return undefined;
   }
 
   private executeCs486(
     executable: Cs486Executable,
     stats: boolean,
     compileCycles = 0,
+    hostedStartup?: {
+      readonly argv: readonly string[];
+      readonly cwd: string;
+      readonly environment: readonly (readonly [string, string])[];
+    },
   ): ShellCommandResult {
     if (this.options.deferGuestExecution === true) {
       return {
@@ -4432,6 +5215,7 @@ export class ShellCommandRuntime {
           compileCycles,
           credentials: this.options.credentials(),
           executable,
+          ...(hostedStartup === undefined ? {} : { hostedStartup }),
           kind: "cs486",
           stats,
           umask: this.filesystem.getUmask(),
@@ -4451,6 +5235,9 @@ export class ShellCommandRuntime {
       moduleId: "cs486-process",
     });
     let result;
+    let csAbi: CsAbiRuntime | undefined;
+    let hostedStdout = "";
+    let hostedStderr = "";
     try {
       if (
         !Number.isSafeInteger(grant.memoryBytes) ||
@@ -4461,32 +5248,92 @@ export class ShellCommandRuntime {
           "process memory admission returned an invalid grant",
         );
       }
-      result = runCs486(executable, {
+      const runOptions = {
         cpuModel: this.options.hardware.cpuModel,
         // Keep guest execution bounded, but allow medium-sized benchmark and
         // compiled workloads to complete in the same 100k-instruction envelope
         // used by the core CS486 runner.
         instructionLimit: 100_000,
         memoryBytes: grant.memoryBytes,
-      });
+      } as const;
+      if (hostedStartup === undefined) {
+        result = runCs486(executable, runOptions);
+      } else {
+        const credentials = this.options.credentials();
+        const prepared = prepareCsAbiStartup(
+          executable,
+          hostedStartup,
+          credentials,
+        );
+        csAbi = new CsAbiRuntime({
+          computerId: String(this.options.computerId),
+          credentials,
+          currentTick: this.options.currentTick,
+          currentWallTimeMilliseconds: (): number =>
+            this.options.clock.currentWallTimeMilliseconds(),
+          cwd: hostedStartup.cwd,
+          filesystem: this.filesystem,
+          heapBaseBytes: prepared.heapBaseBytes,
+          heapWords: prepared.heapWords,
+          outputObserver: (descriptor, text): void => {
+            if (descriptor === 1) hostedStdout += text;
+            else hostedStderr += text;
+          },
+          runHostWork: (_lane, _deterministicUnits, action): boolean => {
+            action();
+            return true;
+          },
+          startupAddress: prepared.startupAddress,
+          terminal: new TerminalBuffer(80, 25),
+        });
+        result = runCs486(executable, {
+          ...runOptions,
+          processImage: prepared.image,
+          syscallHandler: csAbi.syscallHandler,
+        });
+      }
     } finally {
+      csAbi?.finalize();
       if (!grant.released) grant.release();
     }
     const runtimeName = cpuModelSpecification(
       this.options.hardware.cpuModel,
     ).runtimeName;
     const newline = this.textPolicy.newline;
-    const stderr = stats
+    const runtimeStderr = stats
       ? `${runtimeName}: ${result.executedInstructions} instructions, ${result.cycles} CPU cycles, ${cpuCyclesToMicroseconds(result.cycles, this.options.hardware.clockHz).toFixed(3)} us at ${formatClock(this.options.hardware.clockHz)}, ${result.state}${newline}${formatMicroarchitectureStats(result.microarchitecture)}${newline}`
       : result.state === "yielded"
         ? `${runtimeName}: execution limit reached${newline}`
         : "";
     return {
       exitCode: result.state === "halted" ? 0 : 124,
-      stderr,
-      stdout: normalizeGuestProgramOutput(result.output, newline),
+      stderr:
+        normalizeGuestProgramOutput(hostedStderr, newline) + runtimeStderr,
+      stdout: normalizeGuestProgramOutput(
+        result.output + hostedStdout,
+        newline,
+      ),
       cpuCycles: Math.min(1_000_000, compileCycles + result.cycles),
     };
+  }
+
+  private hostedEnvironmentSnapshot(): readonly (readonly [string, string])[] {
+    const credentials = this.options.credentials();
+    const values = new Map<string, string>([
+      ["CS_ABI", "cs-abi-1"],
+      ["CS_PROFILE", "cs-linux-word32"],
+      ["PWD", this.currentDirectory],
+      ["USER", this.environment.get("USER") ?? credentials.loginName],
+    ]);
+    for (const name of ["HOME", "PATH", "SHELL", "TERM"] as const) {
+      const value = this.environment.get(name);
+      if (value !== undefined) values.set(name, value);
+    }
+    return Object.freeze(
+      [...values]
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([name, value]) => Object.freeze([name, value] as const)),
+    );
   }
 
   private debugExecutable(arguments_: readonly string[]): ShellCommandResult {
@@ -4562,11 +5409,7 @@ export class ShellCommandRuntime {
         }
         validateCs486Executable(executable);
         this.closeDebugger();
-        const admit = this.options.admitProcessMemory;
-        if (admit === undefined) {
-          throw new Error("process memory admission is unavailable");
-        }
-        const grant = admit({
+        const grant = this.options.admitProcessMemory({
           displayName: "CS486 debugger",
           executable,
           kind: "debugger",
@@ -4587,6 +5430,8 @@ export class ShellCommandRuntime {
             cpuModel: this.options.hardware.cpuModel,
             memoryBytes: grant.memoryBytes,
           });
+          const pid = this.options.selfPid?.();
+          if (pid !== undefined) grant.bindProcess(pid);
         } catch (error: unknown) {
           if (!grant.released) grant.release();
           throw error;
@@ -4604,7 +5449,7 @@ export class ShellCommandRuntime {
           ? this.options.profile.pathDialect.display(this.resolvePath(path))
           : this.resolvePath(path);
         return success(
-          `${dos ? "Loaded" : "loaded"} ${displayPath}: ${String(executable.instructions.length)} instructions${newline}${
+          `${dos ? "Loaded" : "loaded"} ${displayPath}: ${String(executable.instructions.length)} instructions, ${cs486ExecutableDataModel(executable)}${newline}${
             first === undefined
               ? ""
               : `${this.formatDebuggerInstruction(first)}${newline}`
@@ -4885,7 +5730,7 @@ export class ShellCommandRuntime {
       const object = this.parseCs486Object(encoded, arguments_[0]!);
       return success(
         [
-          `format ${object.format} v${String(object.version)} ${object.language}`,
+          `format ${object.format} v${String(object.version)} ${object.language} ${cs486ObjectDataModel(object)}`,
           `data ${String(object.dataBytes)} bytes`,
           ...(object.sections ?? []).map((section) =>
             section.name === "text"
@@ -4896,7 +5741,7 @@ export class ShellCommandRuntime {
           ),
           ...object.symbols.map(
             (symbol) =>
-              `symbol ${symbol.binding.padEnd(9)} ${symbol.section.padEnd(6)} ${(symbol.type ?? "notype").padEnd(8)} ${symbol.name}${symbol.offset === undefined ? "" : ` @${String(symbol.offset)}`}`,
+              `symbol ${symbol.binding.padEnd(9)} ${symbol.section.padEnd(6)} ${(symbol.type ?? "notype").padEnd(8)} ${symbol.name}${symbol.offset === undefined ? "" : ` @${String(symbol.offset)}`}${symbol.functionSignature === undefined ? "" : ` ${symbol.functionSignature}`}`,
           ),
           ...object.relocations.map(
             (relocation) =>
@@ -4911,12 +5756,17 @@ export class ShellCommandRuntime {
     const executable: unknown = JSON.parse(encoded.slice(6));
     validateCs486Executable(executable);
     return success(
-      executable.instructions
-        .map(
+      [
+        `format ${executable.format} v${String(executable.version)} ${cs486ExecutableDataModel(executable)}`,
+        ...(executable.functionEntries ?? []).map(
+          (entry) =>
+            `function @${String(entry.address)} ${entry.functionSignature}`,
+        ),
+        ...executable.instructions.map(
           (instruction, index) =>
             `${index.toString(16).padStart(4, "0")} ${JSON.stringify(instruction)}`,
-        )
-        .join(newline) + newline,
+        ),
+      ].join(newline) + newline,
     );
   }
 
@@ -4928,12 +5778,13 @@ export class ShellCommandRuntime {
     if (encoded.startsWith("CS486OBJ\n")) {
       const object = this.parseCs486Object(encoded, arguments_[0]!);
       return success(
-        object.symbols
-          .map(
+        [
+          `# data-model ${cs486ObjectDataModel(object)}`,
+          ...object.symbols.map(
             (symbol) =>
-              `${symbol.offset?.toString(16).padStart(8, "0") ?? "        "} ${nmSymbolCode(symbol.section, symbol.binding)} ${symbol.name}`,
-          )
-          .join(newline) + newline,
+              `${symbol.offset?.toString(16).padStart(8, "0") ?? "        "} ${nmSymbolCode(symbol.section, symbol.binding)} ${symbol.name}${symbol.functionSignature === undefined ? "" : ` ${symbol.functionSignature}`}`,
+          ),
+        ].join(newline) + newline,
       );
     }
     if (!encoded.startsWith("CS486\n"))
@@ -4941,12 +5792,13 @@ export class ShellCommandRuntime {
     const executable: unknown = JSON.parse(encoded.slice(6));
     validateCs486Executable(executable);
     return success(
-      (executable.symbols ?? [])
-        .map(
+      [
+        `# data-model ${cs486ExecutableDataModel(executable)}`,
+        ...(executable.symbols ?? []).map(
           (symbol) =>
-            `${symbol.address.toString(16).padStart(8, "0")} ${nmSymbolCode(symbol.section ?? "text", "global")} ${symbol.name}`,
-        )
-        .join(newline) + newline,
+            `${symbol.address.toString(16).padStart(8, "0")} ${nmSymbolCode(symbol.section ?? "text", "global")} ${symbol.name}${symbol.functionSignature === undefined ? "" : ` ${symbol.functionSignature}`}`,
+        ),
+      ].join(newline) + newline,
     );
   }
 
@@ -4980,12 +5832,10 @@ export class ShellCommandRuntime {
     ) {
       return usage("free [-h]");
     }
-    const total = this.options.hardware.memoryBytes;
-    const used = this.usedMemoryBytes();
-    const free = total - used;
+    const memory = this.requireLinuxMemorySnapshot().physical;
     const display = arguments_[0] === "-h" ? formatBinaryBytes : String;
     return success(
-      `              total        used        free   available\nMem:     ${display(total).padStart(10)}  ${display(used).padStart(10)}  ${display(free).padStart(10)}  ${display(free).padStart(10)}\nSwap:             0           0           0           0\n`,
+      `              total        used        free   available\nMem:     ${display(memory.totalBytes).padStart(10)}  ${display(memory.usedBytes).padStart(10)}  ${display(memory.freeBytes).padStart(10)}  ${display(memory.availableBytes).padStart(10)}\nSwap:             0           0           0           0\n`,
     );
   }
 
@@ -5509,6 +6359,21 @@ export class ShellCommandRuntime {
         normalized.push("-c");
         continue;
       }
+      if (/^\/mbyte8$/iu.test(argument)) {
+        normalized.push("-mbyte8");
+        continue;
+      }
+      if (/^\/mword32$/iu.test(argument)) {
+        normalized.push("-mword32");
+        continue;
+      }
+      const dataModel = /^\/mdata-model:(cs-(?:byte8|word32)-v1)$/iu.exec(
+        argument,
+      );
+      if (dataModel !== null) {
+        normalized.push(`-mdata-model=${dataModel[1]!.toLowerCase()}`);
+        continue;
+      }
       const output = /^\/out:(.+)$/iu.exec(argument);
       if (output !== null) {
         normalized.push("-o", output[1]!);
@@ -5538,6 +6403,11 @@ export class ShellCommandRuntime {
       { name: "__CS__", replacement: "1" },
       { name: "__CS486__", replacement: "1" },
       { name: "__STDC__", replacement: "1" },
+      { name: "__STDC_HOSTED__", replacement: "1" },
+      { name: "__STDC_VERSION__", replacement: "201112L" },
+      { name: "__CS_ABI_VERSION__", replacement: "100" },
+      { name: "__CS_DATA_MODEL__", replacement: "1" },
+      { name: "__CS_WORD_BITS__", replacement: "32" },
       {
         name: this.options.profile.id === "dos" ? "__CS_DOS__" : "__CS_LINUX__",
         replacement: "1",
@@ -5548,6 +6418,11 @@ export class ShellCommandRuntime {
     ];
     const undefines: string[] = [];
     const includePaths: string[] = [];
+    let dependencyGeneration = false;
+    let dependencyFile: string | undefined;
+    let optimizationLevel: 0 | 1 = 1;
+    let dataModel: Cs486DataModel = cs486Word32DataModel;
+    let standard = language === "c" ? "c11" : "c++11";
     const appendInclude = (value: string): void => {
       if (value.length === 0 || value.length > 128)
         throw new Error("include path limit exceeded");
@@ -5577,6 +6452,52 @@ export class ShellCommandRuntime {
 
     for (let index = 0; index < arguments_.length; index += 1) {
       const argument = arguments_[index]!;
+      if (argument === "-MMD") {
+        if (this.options.profile.id !== "linux")
+          throw new Error("-MMD is available only on CS-Linux");
+        dependencyGeneration = true;
+        continue;
+      }
+      if (argument === "-MF" || argument.startsWith("-MF")) {
+        const value =
+          argument === "-MF" ? arguments_[++index] : argument.slice(3);
+        if (value === undefined || value.length === 0 || value.length > 128)
+          throw new Error("-MF requires a bounded guest path");
+        dependencyFile = value;
+        continue;
+      }
+      if (argument === "-O0" || argument === "-O1") {
+        optimizationLevel = argument === "-O0" ? 0 : 1;
+        continue;
+      }
+      if (argument === "-mbyte8" || argument === "-mdata-model=cs-byte8-v1") {
+        dataModel = cs486Byte8DataModel;
+        continue;
+      }
+      if (argument === "-mword32" || argument === "-mdata-model=cs-word32-v1") {
+        dataModel = cs486Word32DataModel;
+        continue;
+      }
+      if (argument.startsWith("-m"))
+        throw new Error(`unsupported data-model option '${argument}'`);
+      if (argument.startsWith("-O")) {
+        throw new Error(`unsupported optimization option '${argument}'`);
+      }
+      if (argument.startsWith("-std=")) {
+        const requested = argument.slice(5);
+        const supported =
+          language === "c" ? requested === "c11" : requested === "c++11";
+        if (!supported)
+          throw new Error(`unsupported language standard '${requested}'`);
+        standard = requested;
+        continue;
+      }
+      if (argument === "-g" || argument === "-Wall" || argument === "-Werror") {
+        continue;
+      }
+      if (argument.startsWith("-W")) {
+        throw new Error(`unsupported warning option '${argument}'`);
+      }
       const exact = /^-([IDU])$/u.exec(argument);
       const attached = /^-([IDU])(.+)$/u.exec(argument);
       if (exact === null && attached === null) {
@@ -5602,10 +6523,29 @@ export class ShellCommandRuntime {
         if (value.trim().length > 0) appendInclude(value.trim());
       }
     }
+    if (dependencyFile !== undefined && !dependencyGeneration) {
+      throw new Error("-MF requires -MMD");
+    }
     return {
       arguments: structural,
-      definitions,
+      dataModel,
+      ...(dependencyFile === undefined ? {} : { dependencyFile }),
+      dependencyGeneration,
+      definitions: [
+        ...definitions.filter(
+          ({ name }) => name !== "__CS_DATA_MODEL__" && name !== "__CS_BYTE8__",
+        ),
+        {
+          name: "__CS_DATA_MODEL__",
+          replacement: dataModel === cs486Byte8DataModel ? "2" : "1",
+        },
+        ...(dataModel === cs486Byte8DataModel
+          ? [{ name: "__CS_BYTE8__", replacement: "1" }]
+          : []),
+      ],
       includePaths,
+      optimizationLevel,
+      standard,
       undefines,
     };
   }
@@ -5615,10 +6555,14 @@ export class ShellCommandRuntime {
     includePaths: readonly string[],
     definitions: CFamilyCommandOptions["definitions"],
     undefines: readonly string[],
+    optimizationLevel: 0 | 1 = 1,
+    dataModel: Cs486DataModel = cs486Word32DataModel,
+    dependencies?: string[],
   ): Cs486CFrontendOptions {
     const systemDirectory =
       this.options.profile.id === "dos" ? "/drives/c/include" : "/usr/include";
     return {
+      dataModel,
       definitions,
       include: (request): Cs486CPreprocessorInclude | undefined => {
         const directories = request.quoted
@@ -5646,10 +6590,14 @@ export class ShellCommandRuntime {
           }
           const source = this.filesystem.readFile(resolved);
           this.ioReadBytes += utf8ByteLength(source);
+          if (dependencies !== undefined && !dependencies.includes(resolved)) {
+            dependencies.push(resolved);
+          }
           return { identity: resolved, source, sourceName: resolved };
         }
         return undefined;
       },
+      optimizationLevel,
       sourceName,
       undefines,
     };
@@ -6051,6 +6999,71 @@ export class ShellCommandRuntime {
     return success(`${lines.join("\n")}\n`);
   }
 
+  private linuxMd5Sum(
+    arguments_: readonly string[],
+    stdin: string,
+  ): ShellCommandResult {
+    if (arguments_.length > 32) return failure("md5sum", "too many files", 1);
+    const paths = arguments_.length === 0 ? ["-"] : arguments_;
+    const lines = paths.map((path) => {
+      const contents = path === "-" ? stdin : this.readFile(path);
+      return `${md5Hex(contents)}  ${path}`;
+    });
+    return success(`${lines.join("\n")}\n`);
+  }
+
+  private linuxBase64(
+    arguments_: readonly string[],
+    stdin: string,
+  ): ShellCommandResult {
+    let decode = false;
+    const paths: string[] = [];
+    for (const argument of arguments_) {
+      if (argument === "-d" || argument === "--decode") decode = true;
+      else if (argument.startsWith("-") && argument !== "-")
+        return failure("base64", `invalid option -- '${argument}'`, 2);
+      else paths.push(argument);
+    }
+    if (paths.length > 1) return usage("base64 [-d] [file]");
+    const input = paths.length === 0 ? stdin : this.readFile(paths[0]!);
+    if (decode) {
+      try {
+        return success(base64Decode(input));
+      } catch (error: unknown) {
+        return failure("base64", message(error), 1);
+      }
+    }
+    return success(`${wrapAtWidth(base64Encode(input), 76)}\n`);
+  }
+
+  private linuxNumberLines(
+    arguments_: readonly string[],
+    stdin: string,
+  ): ShellCommandResult {
+    if (
+      arguments_.some(
+        (argument) => argument.startsWith("-") && argument !== "-",
+      )
+    )
+      return usage("nl [file ...]");
+    const paths = arguments_.length === 0 ? ["-"] : arguments_;
+    if (paths.length > 32) return failure("nl", "too many files", 1);
+    let counter = 0;
+    const lines: string[] = [];
+    for (const path of paths) {
+      const input = path === "-" ? stdin : this.readFile(path);
+      for (const line of splitLines(input)) {
+        if (line.length === 0) {
+          lines.push("      \t");
+        } else {
+          counter += 1;
+          lines.push(`${String(counter).padStart(6)}\t${line}`);
+        }
+      }
+    }
+    return success(lines.length === 0 ? "" : `${lines.join("\n")}\n`);
+  }
+
   private linuxTee(
     arguments_: readonly string[],
     stdin: string,
@@ -6116,6 +7129,35 @@ export class ShellCommandRuntime {
     return status(1, `${lines.join("\n")}\n`);
   }
 
+  private linuxGit(arguments_: readonly string[]): ShellCommandResult {
+    if (this.options.profile.id !== "linux") {
+      return failure("git", "not available on CS-DOS", 1);
+    }
+    const grant = this.options.admitUtilityMemory({
+      displayName: "CS System Git",
+      moduleId: "git",
+      residentBytes: linuxGitResidentBytes,
+    });
+    try {
+      const credentials = this.options.credentials();
+      return executeLinuxGit(arguments_, {
+        computerName: this.options.computerName,
+        currentDirectory: this.currentDirectory,
+        effectiveUserId: credentials.effectiveUserId,
+        filesystem: this.filesystem,
+        loginName: credentials.loginName,
+        nowMilliseconds: () => this.options.clock.currentWallTimeMilliseconds(),
+        readFile: (path) => this.readFile(path),
+        readFileBytes: (path) => this.readFileBytes(path),
+        readLink: (path) => this.readSymbolicLink(path),
+        writeFile: (path, contents) => this.writeFile(path, contents),
+        writeFileBytes: (path, contents) => this.writeFileBytes(path, contents),
+      });
+    } finally {
+      grant.release();
+    }
+  }
+
   private linuxHexDump(
     command: "hexdump" | "od",
     arguments_: readonly string[],
@@ -6127,7 +7169,7 @@ export class ShellCommandRuntime {
     );
     if (paths.length > 1) return usage(`${command} [-C] [file]`);
     const contents = paths[0] === undefined ? stdin : this.readFile(paths[0]);
-    const bytes = new TextEncoder().encode(contents);
+    const bytes = encodeUtf8(contents);
     if (bytes.length > 65_536)
       return failure(command, "input limit exceeded", 1);
     const lines: string[] = [];
@@ -6372,17 +7414,17 @@ export class ShellCommandRuntime {
     const processes = state.processes();
     const rows = full
       ? [
-          "UID        PID  PPID S      CYCLES START COMMAND",
+          "UID        PID  PPID  NI S      CYCLES START COMMAND",
           ...processes.map(
             (process) =>
-              `${String(process.uid).padEnd(10)} ${String(process.pid).padStart(5)} ${String(process.parentPid).padStart(5)} ${processStateCode(process)} ${String(process.cpuCycles).padStart(11)} ${String(process.startTick).padStart(5)} ${process.command}`,
+              `${String(process.uid).padEnd(10)} ${String(process.pid).padStart(5)} ${String(process.parentPid).padStart(5)} ${String(process.niceValue).padStart(3)} ${processStateCode(process)} ${String(process.cpuCycles).padStart(11)} ${String(process.startTick).padStart(5)} ${process.command}`,
           ),
         ]
       : [
-          "  PID S      CYCLES COMMAND",
+          "  PID  NI S      CYCLES COMMAND",
           ...processes.map(
             (process) =>
-              `${String(process.pid).padStart(5)} ${processStateCode(process)} ${String(process.cpuCycles).padStart(11)} ${process.command}`,
+              `${String(process.pid).padStart(5)} ${String(process.niceValue).padStart(3)} ${processStateCode(process)} ${String(process.cpuCycles).padStart(11)} ${process.command}`,
           ),
         ];
     return success(`${rows.join("\n")}\n`);
@@ -6394,6 +7436,12 @@ export class ShellCommandRuntime {
     if (state === undefined)
       return failure("top", "OS process table is unavailable", 1);
     const processes = state.processes();
+    const memoryByPid = new Map(
+      this.requireLinuxMemorySnapshot().processes.map((memory) => [
+        memory.pid,
+        memory,
+      ]),
+    );
     const states = new Map<string, number>();
     for (const process of processes)
       states.set(process.state, (states.get(process.state) ?? 0) + 1);
@@ -6405,11 +7453,60 @@ export class ShellCommandRuntime {
       [
         `top - up ${this.uptimeSeconds().toFixed(0)}s, load average: ${state.renderProcLoadAverage().trim().split(" ").slice(0, 3).join(", ")}`,
         `Tasks: ${String(processes.length)} total${summary.length === 0 ? "" : `, ${summary}`}`,
-        "  PID UID   S      CYCLES COMMAND",
-        ...processes.map(
-          (process) =>
-            `${String(process.pid).padStart(5)} ${String(process.uid).padStart(5)} ${processStateCode(process)} ${String(process.cpuCycles).padStart(11)} ${process.command}`,
-        ),
+        "  PID UID    NI S       VIRT        RES      CYCLES COMMAND",
+        ...processes.map((process) => {
+          const memory = memoryByPid.get(process.pid) ?? {
+            residentBytes: 0,
+            virtualBytes: 0,
+          };
+          return `${String(process.pid).padStart(5)} ${String(process.uid).padStart(5)} ${String(process.niceValue).padStart(3)} ${processStateCode(process)} ${String(memory.virtualBytes).padStart(10)} ${String(memory.residentBytes).padStart(10)} ${String(process.cpuCycles).padStart(11)} ${process.command}`;
+        }),
+        "",
+      ].join("\n"),
+    );
+  }
+
+  private linuxVmstat(arguments_: readonly string[]): ShellCommandResult {
+    if (arguments_.length !== 0) return usage("vmstat");
+    const state = this.options.osRuntime;
+    if (state === undefined)
+      return failure("vmstat", "OS process table is unavailable", 1);
+    const memory = this.requireLinuxMemorySnapshot();
+    const processes = state.processes();
+    const runnable = processes.filter(
+      ({ state: processState }) =>
+        processState === "ready" || processState === "running",
+    ).length;
+    const blocked = processes.filter(
+      ({ state: processState }) => processState === "waiting",
+    ).length;
+    const kibibyte = 1_024;
+    const columns: readonly (readonly [value: number, width: number])[] = [
+      [runnable, 2],
+      [blocked, 2],
+      [0, 6],
+      [Math.floor(memory.physical.freeBytes / kibibyte), 6],
+      [Math.floor(memory.resident.buffersBytes / kibibyte), 6],
+      [0, 6],
+      [0, 4],
+      [0, 4],
+      [0, 5],
+      [0, 5],
+      [0, 4],
+      [0, 4],
+      [0, 2],
+      [0, 2],
+      [100, 2],
+      [0, 2],
+      [0, 2],
+    ];
+    return success(
+      [
+        "procs -----------memory---------- ---swap-- -----io---- -system-- ------cpu-----",
+        " r  b   swpd   free   buff  cache   si   so    bi    bo   in   cs us sy id wa st",
+        columns
+          .map(([value, width]) => String(value).padStart(width))
+          .join(" "),
         "",
       ].join("\n"),
     );
@@ -6423,9 +7520,106 @@ export class ShellCommandRuntime {
     if ("error" in parsed) return failure("kill", parsed.error, 2);
     if (parsed.pids.length > 16)
       return failure("kill", "at most 16 process IDs may be signalled", 2);
+    return this.signalPids("kill", state, parsed.pids, parsed.signal);
+  }
+
+  private linuxPgrep(arguments_: readonly string[]): ShellCommandResult {
+    const state = this.options.osRuntime;
+    if (state === undefined)
+      return failure("pgrep", "OS process table is unavailable", 1);
+    let listNames = false;
+    let exact = false;
+    const rest: string[] = [];
+    for (const argument of arguments_) {
+      if (argument === "-l") listNames = true;
+      else if (argument === "-x") exact = true;
+      else if (argument.startsWith("-"))
+        return failure("pgrep", `invalid option -- '${argument}'`, 2);
+      else rest.push(argument);
+    }
+    if (rest.length !== 1) return usage("pgrep [-l] [-x] pattern");
+    const pattern = rest[0]!;
+    const matches = state
+      .processes()
+      .filter((process) => matchesProcessName(process, pattern, exact))
+      .sort((left, right) => left.pid - right.pid);
+    if (matches.length === 0) return status(1);
+    return success(
+      `${matches
+        .map((process) =>
+          listNames
+            ? `${String(process.pid)} ${processName(process)}`
+            : String(process.pid),
+        )
+        .join("\n")}\n`,
+    );
+  }
+
+  private linuxPkill(arguments_: readonly string[]): ShellCommandResult {
+    const state = this.options.osRuntime;
+    if (state === undefined)
+      return failure("pkill", "OS process table is unavailable", 1);
+    const parsed = parseSignalPatternArguments(arguments_);
+    if ("error" in parsed) return failure("pkill", parsed.error, 2);
+    const matches = state
+      .processes()
+      .filter((process) =>
+        matchesProcessName(process, parsed.pattern, parsed.exact),
+      );
+    if (matches.length === 0) return status(1);
+    return this.signalPids(
+      "pkill",
+      state,
+      matches.map((process) => process.pid),
+      parsed.signal,
+    );
+  }
+
+  private linuxKillAll(arguments_: readonly string[]): ShellCommandResult {
+    const state = this.options.osRuntime;
+    if (state === undefined)
+      return failure("killall", "OS process table is unavailable", 1);
+    const parsed = parseSignalNamesArguments(arguments_);
+    if ("error" in parsed) return failure("killall", parsed.error, 2);
+    if (parsed.names.length > 16)
+      return failure("killall", "at most 16 process names may be signalled", 2);
+    const failures: string[] = [];
+    const pids: number[] = [];
+    for (const name of parsed.names) {
+      const matches = state
+        .processes()
+        .filter((process) => processName(process) === name);
+      if (matches.length === 0) {
+        failures.push(`${name}: no process found`);
+        continue;
+      }
+      pids.push(...matches.map((process) => process.pid));
+    }
+    if (pids.length === 0) {
+      return status(
+        1,
+        "",
+        `${failures.map((detail) => `killall: ${detail}`).join("\n")}\n`,
+      );
+    }
+    const signalled = this.signalPids("killall", state, pids, parsed.signal);
+    if (failures.length === 0) return signalled;
+    return status(
+      1,
+      signalled.stdout,
+      `${failures.map((detail) => `killall: ${detail}`).join("\n")}\n${signalled.stderr}`,
+    );
+  }
+
+  private signalPids(
+    commandName: string,
+    state: OsRuntimeState,
+    pids: readonly number[],
+    signal: OsProcessSignal,
+  ): ShellCommandResult {
     const caller = this.options.credentials();
     const failures: string[] = [];
-    for (const pid of parsed.pids) {
+    for (const pid of pids) {
       const process = state.process(pid);
       if (process === undefined) {
         failures.push(`${String(pid)}: no such process`);
@@ -6444,9 +7638,9 @@ export class ShellCommandRuntime {
       }
       try {
         if (this.options.signalProcess === undefined) {
-          state.signalProcess(pid, parsed.signal, this.options.currentTick());
+          state.signalProcess(pid, signal, this.options.currentTick());
         } else {
-          this.options.signalProcess(pid, parsed.signal);
+          this.options.signalProcess(pid, signal);
         }
       } catch (error: unknown) {
         failures.push(`${String(pid)}: ${message(error)}`);
@@ -6457,7 +7651,7 @@ export class ShellCommandRuntime {
       : status(
           1,
           "",
-          `${failures.map((detail) => `kill: ${detail}`).join("\n")}\n`,
+          `${failures.map((detail) => `${commandName}: ${detail}`).join("\n")}\n`,
         );
   }
 
@@ -6597,10 +7791,13 @@ export class ShellCommandRuntime {
     return success(
       state
         .loginSessions()
-        .map(
-          (session) =>
-            `${session.username.padEnd(12)} ${session.terminal.padEnd(8)} tick ${String(session.loginTick)}${session.remote === undefined ? "" : ` (${session.remote})`}\n`,
-        )
+        .map((session) => {
+          const timestamp =
+            session.loginWallMilliseconds === undefined
+              ? `tick ${String(session.loginTick)}`
+              : formatLastLoginTimestamp(session.loginWallMilliseconds);
+          return `${session.username.padEnd(12)} ${session.terminal.padEnd(8)} ${timestamp}${session.remote === undefined ? "" : ` (${session.remote})`}\n`;
+        })
         .join(""),
     );
   }
@@ -6634,10 +7831,19 @@ export class ShellCommandRuntime {
     );
     return success(
       records
-        .map(
-          (record) =>
-            `${record.username.padEnd(12)} ${record.terminal.padEnd(8)} tick ${String(record.loginTick)} - ${record.logoutTick === undefined ? "still logged in" : `tick ${String(record.logoutTick)} (${record.logoutReason ?? "logout"})`}\n`,
-        )
+        .map((record) => {
+          const loginTimestamp =
+            record.loginWallMilliseconds === undefined
+              ? `tick ${String(record.loginTick)}`
+              : formatLastLoginTimestamp(record.loginWallMilliseconds);
+          const logoutTimestamp =
+            record.logoutTick === undefined
+              ? "still logged in"
+              : record.logoutWallMilliseconds === undefined
+                ? `tick ${String(record.logoutTick)} (${record.logoutReason ?? "logout"})`
+                : `${formatLastLoginTimestamp(record.logoutWallMilliseconds)} (${record.logoutReason ?? "logout"})`;
+          return `${record.username.padEnd(12)} ${record.terminal.padEnd(8)} ${loginTimestamp} - ${logoutTimestamp}\n`;
+        })
         .join(""),
     );
   }
@@ -6676,13 +7882,246 @@ export class ShellCommandRuntime {
     );
   }
 
+  private linuxCrontab(arguments_: readonly string[]): ShellCommandResult {
+    if (arguments_.length !== 1 || arguments_[0] !== "-l") {
+      return usage("crontab -l | crontab -e");
+    }
+    return success(this.readFile("/etc/crontab"));
+  }
+
+  private linuxSed(
+    arguments_: readonly string[],
+    stdin: string,
+  ): ShellCommandResult {
+    const result = executeLinuxSed(arguments_, stdin, (path) =>
+      this.readFile(path),
+    );
+    return status(result.exitCode, result.stdout, result.stderr);
+  }
+
+  private linuxAwk(
+    arguments_: readonly string[],
+    stdin: string,
+  ): ShellCommandResult {
+    const result = executeLinuxAwk(arguments_, stdin, (path) =>
+      this.readFile(path),
+    );
+    return status(result.exitCode, result.stdout, result.stderr);
+  }
+
+  private linuxArchiveCommand(
+    command: string,
+    arguments_: readonly string[],
+  ): ShellCommandResult {
+    const io = {
+      filesystem: this.filesystem,
+      readBytes: (path: string): Uint8Array => this.readFileBytes(path),
+      writeBytes: (path: string, contents: Uint8Array): void =>
+        this.writeFileBytes(path, contents),
+    };
+    let result: LinuxArchiveResult;
+    switch (command) {
+      case "tar":
+        result = executeLinuxTar(arguments_, this.currentDirectory, io);
+        break;
+      case "gzip":
+      case "gunzip":
+        result = executeLinuxGzip(
+          command,
+          arguments_,
+          this.currentDirectory,
+          io,
+        );
+        break;
+      case "zip":
+        result = executeLinuxZip(arguments_, this.currentDirectory, io);
+        break;
+      case "unzip":
+        result = executeLinuxUnzip(arguments_, this.currentDirectory, io);
+        break;
+      default:
+        return failure(command, "archive implementation is unavailable", 127);
+    }
+    return status(result.exitCode, result.stdout, result.stderr);
+  }
+
+  private linuxRunlevel(arguments_: readonly string[]): ShellCommandResult {
+    if (arguments_.length !== 0) return usage("runlevel");
+    const state = this.options.osRuntime;
+    if (state === undefined)
+      return failure("runlevel", "runlevel is unavailable", 1);
+    const { current, previous } = state.runlevel();
+    if (current === undefined) return success("unknown\n");
+    return success(`${previous ?? "N"} ${current}\n`);
+  }
+
+  private linuxTelinit(arguments_: readonly string[]): ShellCommandResult {
+    if (this.options.credentials().effectiveUserId !== 0) {
+      return failure("telinit", "must be superuser", 1);
+    }
+    if (arguments_.length !== 1) return usage("telinit {0-6|S}");
+    const requested = arguments_[0]!;
+    const normalized = requested === "s" ? "S" : requested;
+    if (normalized.length !== 1 || !"0123456S".includes(normalized)) {
+      return failure("telinit", `${requested}: invalid runlevel`, 1);
+    }
+    if (normalized === "0") return success("", { action: "shutdown" });
+    if (normalized === "6") return success("", { action: "reboot" });
+    const state = this.options.osRuntime;
+    if (state === undefined)
+      return failure("telinit", "runlevel table is unavailable", 1);
+    const tick = this.options.currentTick();
+    this.runRcDirectoryTransition(state, normalized, tick);
+    state.setRunlevel(normalized, tick);
+    return success();
+  }
+
+  private runRcDirectoryTransition(
+    state: OsRuntimeState,
+    runlevel: string,
+    tick: number,
+  ): void {
+    const directory = `/etc/rc${runlevel === "S" ? "1" : runlevel}.d`;
+    if (
+      !this.filesystem.exists(directory) ||
+      !this.filesystem.isDirectory(directory)
+    )
+      return;
+    const entries = this.filesystem
+      .list(directory)
+      .map((entry) => /^([SK])(\d{2})([a-z][a-z0-9_-]*)$/u.exec(entry))
+      .filter((match): match is RegExpExecArray => match !== null)
+      .map((match) => ({
+        kind: match[1] as "S" | "K",
+        order: Number(match[2]),
+        name: match[3]!,
+      }))
+      .sort((left, right) => left.order - right.order);
+    for (const entry of entries.filter((item) => item.kind === "K")) {
+      this.stopInitManagedService(state, entry.name, tick);
+    }
+    for (const entry of entries.filter((item) => item.kind === "S")) {
+      this.startInitManagedService(state, entry.name, tick);
+    }
+  }
+
+  private linuxInitCtl(arguments_: readonly string[]): ShellCommandResult {
+    if (this.options.credentials().effectiveUserId !== 0) {
+      return failure("cs-init-ctl", "must be superuser", 1);
+    }
+    if (arguments_.length !== 2) {
+      return usage("cs-init-ctl <name> start|stop|restart|status");
+    }
+    const [name = "", action = ""] = arguments_;
+    if (!initManagedServiceNames.has(name)) {
+      return failure("cs-init-ctl", `${name}: unrecognized service`, 1);
+    }
+    const state = this.options.osRuntime;
+    if (state === undefined) {
+      return failure("cs-init-ctl", "service table is unavailable", 1);
+    }
+    const tick = this.options.currentTick();
+    switch (action) {
+      case "start":
+        return this.startInitManagedService(state, name, tick);
+      case "stop":
+        return this.stopInitManagedService(state, name, tick);
+      case "restart":
+        this.stopInitManagedService(state, name, tick);
+        return this.startInitManagedService(state, name, tick);
+      case "status": {
+        const service = state.service(name);
+        if (service === undefined) return status(3, `${name} is not running\n`);
+        return status(
+          service.state === "running" ? 0 : 3,
+          `${name} is ${service.state}${service.pid === undefined ? "" : ` (pid ${String(service.pid)})`}\n`,
+        );
+      }
+      default:
+        return usage("cs-init-ctl <name> start|stop|restart|status");
+    }
+  }
+
+  private startInitManagedService(
+    state: OsRuntimeState,
+    name: string,
+    tick: number,
+  ): ShellCommandResult {
+    let service = state.service(name);
+    if (service === undefined) {
+      service = state.registerService({ enabled: true, name, tick });
+    }
+    if (service.state === "running" || service.state === "starting") {
+      return status(0, `${name} is already running\n`);
+    }
+    state.transitionService(name, { kind: "start", tick });
+    const daemon = state.spawnProcess({
+      command: `/etc/init.d/${name}`,
+      gid: 0,
+      parentPid: 1,
+      startTick: tick,
+      state: "running",
+      uid: 0,
+    });
+    state.transitionProcess(daemon.pid, {
+      kind: "sleep",
+      reason: `${name}-daemon`,
+      tick,
+    });
+    state.transitionService(name, { kind: "running", pid: daemon.pid, tick });
+    if (name === "cron") this.validateCrontabOnStart(state, tick);
+    return success();
+  }
+
+  private stopInitManagedService(
+    state: OsRuntimeState,
+    name: string,
+    tick: number,
+  ): ShellCommandResult {
+    const service = state.service(name);
+    if (service === undefined || service.state === "inactive") {
+      return status(0, `${name} is not running\n`);
+    }
+    state.transitionService(name, { kind: "stop", tick });
+    if (service.pid !== undefined && state.process(service.pid) !== undefined) {
+      // Signaling the bound process to exit while the service is "stopping"
+      // makes synchronizeProcessDependents finish the service transition to
+      // "inactive" automatically; do not also call transitionService(kind:
+      // "stopped") here or it double-transitions an already-inactive service.
+      state.signalProcess(service.pid, "SIGTERM", tick);
+      state.reapProcess(service.pid);
+    } else {
+      state.transitionService(name, { kind: "stopped", tick });
+    }
+    return success();
+  }
+
+  private validateCrontabOnStart(state: OsRuntimeState, tick: number): void {
+    if (!this.filesystem.exists("/etc/crontab")) return;
+    const parsed = parseLinuxCrontab(this.filesystem.readFile("/etc/crontab"));
+    for (const warning of parsed.warnings) {
+      state.appendSystemJournal(tick, `cron: ${warning}`, "warning");
+    }
+  }
+
   private linuxMan(arguments_: readonly string[]): ShellCommandResult {
-    if (arguments_.length !== 1) return usage("man <topic>");
-    const topic = arguments_[0] ?? "";
+    if (arguments_.length < 1 || arguments_.length > 2)
+      return usage("man [section] <topic>");
+    const requestedSection =
+      arguments_.length === 2 ? arguments_[0] : undefined;
+    if (
+      requestedSection !== undefined &&
+      !["1", "5", "6", "7", "8"].includes(requestedSection)
+    ) {
+      return failure("man", `unsupported section ${requestedSection}`, 1);
+    }
+    const topic = arguments_.at(-1) ?? "";
     if (topic.length > 64)
       return failure("man", "topic exceeds the 64-character limit", 2);
     const entry = linuxManualPage(topic);
-    return entry === undefined
+    return entry === undefined ||
+      (requestedSection !== undefined &&
+        String(entry.section) !== requestedSection)
       ? failure("man", `no manual entry for ${topic}`, 1)
       : success(renderLinuxManualPage(entry));
   }
@@ -6836,43 +8275,36 @@ function formatLinuxSize(bytes: number, human: boolean): string {
     .replace(" bytes", "B");
 }
 
+const linuxWeekdayNames = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const linuxMonthNames = [
+  "Jan",
+  "Feb",
+  "Mar",
+  "Apr",
+  "May",
+  "Jun",
+  "Jul",
+  "Aug",
+  "Sep",
+  "Oct",
+  "Nov",
+  "Dec",
+];
+
+export function formatLastLoginTimestamp(milliseconds: number): string {
+  const date = new Date(milliseconds);
+  if (!Number.isFinite(date.getTime())) return "";
+  return `${linuxWeekdayNames[date.getUTCDay()]} ${linuxMonthNames[date.getUTCMonth()]} ${String(date.getUTCDate()).padStart(2)} ${formatDate(date, "%H:%M:%S")} ${String(date.getUTCFullYear())}`;
+}
+
 function formatLinuxTimestamp(milliseconds: number): string {
   const date = new Date(milliseconds);
   if (!Number.isFinite(date.getTime())) return "Jan  1 00:00";
-  const months = [
-    "Jan",
-    "Feb",
-    "Mar",
-    "Apr",
-    "May",
-    "Jun",
-    "Jul",
-    "Aug",
-    "Sep",
-    "Oct",
-    "Nov",
-    "Dec",
-  ];
-  return `${months[date.getUTCMonth()]} ${String(date.getUTCDate()).padStart(2)} ${String(date.getUTCHours()).padStart(2, "0")}:${String(date.getUTCMinutes()).padStart(2, "0")}`;
+  return `${linuxMonthNames[date.getUTCMonth()]} ${String(date.getUTCDate()).padStart(2)} ${String(date.getUTCHours()).padStart(2, "0")}:${String(date.getUTCMinutes()).padStart(2, "0")}`;
 }
 
 function formatLinuxDate(date: Date): string {
-  const weekdays = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-  const months = [
-    "Jan",
-    "Feb",
-    "Mar",
-    "Apr",
-    "May",
-    "Jun",
-    "Jul",
-    "Aug",
-    "Sep",
-    "Oct",
-    "Nov",
-    "Dec",
-  ];
-  return `${weekdays[date.getUTCDay()]} ${months[date.getUTCMonth()]} ${String(date.getUTCDate()).padStart(2)} ${formatDate(date, "%H:%M:%S")} UTC ${String(date.getUTCFullYear())}`;
+  return `${linuxWeekdayNames[date.getUTCDay()]} ${linuxMonthNames[date.getUTCMonth()]} ${String(date.getUTCDate()).padStart(2)} ${formatDate(date, "%H:%M:%S")} UTC ${String(date.getUTCFullYear())}`;
 }
 
 function stablePathInode(path: string): number {
@@ -6906,14 +8338,93 @@ function isCommandCompletionPosition(prefix: string): boolean {
   return prefix.slice(separator + 1).trim().length === 0;
 }
 
-function longestCommonPrefix(values: readonly string[]): string {
+function completionPathParts(
+  token: string,
+  dos: boolean,
+): {
+  readonly directoryToken: string;
+  readonly displayPrefix: string;
+  readonly namePrefix: string;
+  readonly separator: "/" | "\\";
+} {
+  if (!dos) {
+    const slash = token.lastIndexOf("/");
+    return {
+      directoryToken: slash < 0 ? "." : token.slice(0, slash) || "/",
+      displayPrefix: slash < 0 ? "" : token.slice(0, slash + 1),
+      namePrefix: slash < 0 ? token : token.slice(slash + 1),
+      separator: "/",
+    };
+  }
+
+  const normalized = token.replaceAll("/", "\\");
+  const slash = normalized.lastIndexOf("\\");
+  if (slash >= 0) {
+    const rawDirectory = normalized.slice(0, slash);
+    return {
+      directoryToken: rawDirectory.length === 0 ? "\\" : rawDirectory,
+      displayPrefix: dosCompletionDisplayPrefix(normalized.slice(0, slash + 1)),
+      namePrefix: normalized.slice(slash + 1),
+      separator: "\\",
+    };
+  }
+  const drive = /^([A-Za-z]:)(.*)$/u.exec(normalized);
+  if (drive !== null) {
+    const displayPrefix = `${drive[1]!.toUpperCase()}\\`;
+    return {
+      directoryToken: displayPrefix,
+      displayPrefix,
+      namePrefix: drive[2] ?? "",
+      separator: "\\",
+    };
+  }
+  return {
+    directoryToken: ".",
+    displayPrefix: "",
+    namePrefix: normalized,
+    separator: "\\",
+  };
+}
+
+function dosCompletionDisplayPrefix(value: string): string {
+  return value.replace(/^([a-z]):/iu, (drive) => drive.toUpperCase());
+}
+
+function emptyShellCompletion(
+  value: string,
+  requestedCursor: number,
+  replaceStart?: number,
+  replaceEnd?: number,
+): ShellCompletionResult {
+  const cursor =
+    Number.isSafeInteger(requestedCursor) &&
+    requestedCursor >= 0 &&
+    requestedCursor <= value.length
+      ? requestedCursor
+      : value.length;
+  return {
+    candidates: [],
+    cursor,
+    replaceEnd: replaceEnd ?? cursor,
+    replaceStart: replaceStart ?? cursor,
+    truncated: false,
+    value,
+  };
+}
+
+function longestCommonPrefix(
+  values: readonly string[],
+  caseInsensitive = false,
+): string {
   let prefix = values[0] ?? "";
   for (const value of values.slice(1)) {
     let length = 0;
     while (
       length < prefix.length &&
       length < value.length &&
-      prefix[length] === value[length]
+      (caseInsensitive
+        ? prefix[length]!.toLowerCase() === value[length]!.toLowerCase()
+        : prefix[length] === value[length])
     ) {
       length += 1;
     }
@@ -7011,7 +8522,7 @@ function renderCsNativeListing(
     }
     return [
       `; CS ASM 1.0 native listing: ${source.path}`,
-      `; Language: ${source.language}; object format: CS486OBJ v${String(object.version)}`,
+      `; Language: ${source.language}; object format: CS486OBJ v${String(object.version)}; data model: ${cs486ObjectDataModel(object)}`,
       object.assembly,
     ].join("\r\n");
   });
@@ -7037,7 +8548,8 @@ function renderCsNativeMap(entry: string, executable: Cs486Executable): string {
   return [
     "CS-NATIVE-LINK-MAP 1.0",
     `Entry: ${entry}`,
-    "Format: validated CS486 executable / CS486OBJ v2 inputs",
+    `Data model: ${cs486ExecutableDataModel(executable)}`,
+    "Format: validated CS486 v5 executable / CS486OBJ v1-v4 inputs",
     ...rows,
     "",
   ].join("\r\n");
@@ -7419,6 +8931,74 @@ function parseSignal(value: string): OsProcessSignal | undefined {
   }
 }
 
+function processName(process: OsProcessRecord): string {
+  const head = process.command.split(" ", 1)[0] ?? process.command;
+  const segments = head.split("/");
+  return segments.at(-1) ?? head;
+}
+
+function matchesProcessName(
+  process: OsProcessRecord,
+  pattern: string,
+  exact: boolean,
+): boolean {
+  const name = processName(process);
+  return exact ? name === pattern : name.includes(pattern);
+}
+
+function parseSignalPatternArguments(arguments_: readonly string[]):
+  | { readonly error: string }
+  | {
+      readonly exact: boolean;
+      readonly pattern: string;
+      readonly signal: OsProcessSignal;
+    } {
+  let signal: OsProcessSignal = "SIGTERM";
+  let exact = false;
+  const rest: string[] = [];
+  for (const argument of arguments_) {
+    if (argument === "-x") {
+      exact = true;
+    } else if (argument.startsWith("-") && argument.length > 1) {
+      const parsed = parseSignal(argument.slice(1));
+      if (parsed === undefined) return { error: `${argument}: invalid option` };
+      signal = parsed;
+    } else {
+      rest.push(argument);
+    }
+  }
+  if (rest.length !== 1) return { error: "missing pattern operand" };
+  return { exact, pattern: rest[0]!, signal };
+}
+
+function parseSignalNamesArguments(
+  arguments_: readonly string[],
+):
+  | { readonly error: string }
+  | { readonly names: readonly string[]; readonly signal: OsProcessSignal } {
+  let signal: OsProcessSignal = "SIGTERM";
+  const rest: string[] = [];
+  for (const argument of arguments_) {
+    if (argument.startsWith("-") && argument.length > 1) {
+      const parsed = parseSignal(argument.slice(1));
+      if (parsed === undefined) return { error: `${argument}: invalid option` };
+      signal = parsed;
+    } else {
+      rest.push(argument);
+    }
+  }
+  if (rest.length === 0) return { error: "missing process name operand" };
+  return { names: rest, signal };
+}
+
+function wrapAtWidth(value: string, width: number): string {
+  if (value.length <= width) return value;
+  const lines: string[] = [];
+  for (let index = 0; index < value.length; index += width)
+    lines.push(value.slice(index, index + width));
+  return lines.join("\n");
+}
+
 function formatBinaryBytes(bytes: number): string {
   if (bytes >= 1_048_576) return `${(bytes / 1_048_576).toFixed(1)} MiB`;
   if (bytes >= 1_024) return `${(bytes / 1_024).toFixed(1)} KiB`;
@@ -7488,6 +9068,49 @@ function dosAttributeForToken(token: string): number | undefined {
     default:
       return undefined;
   }
+}
+
+function archiveMemberName(path: string): string {
+  const name = path.replaceAll("\\", "/").split("/").at(-1) ?? "";
+  if (
+    name.length === 0 ||
+    name.length > 64 ||
+    !/^[A-Za-z0-9_.+-]+$/u.test(name) ||
+    name === "." ||
+    name === ".."
+  ) {
+    throw new Error(`invalid archive member name: ${path}`);
+  }
+  return name;
+}
+
+function archiveWorkCycles(archive: Cs486Archive): number {
+  return Math.min(
+    1_000_000,
+    Math.max(
+      1,
+      archive.members.length * 8 +
+        archive.symbols.length * 4 +
+        Math.ceil(serializeCs486Archive(archive).length / 16),
+    ),
+  );
+}
+
+function renderCompilerDependencies(
+  target: string,
+  paths: readonly string[],
+): string {
+  return `${escapeMakeDependency(target)}: ${paths
+    .map(escapeMakeDependency)
+    .join(" ")}\n`;
+}
+
+function escapeMakeDependency(path: string): string {
+  return path
+    .replaceAll("\\", "\\\\")
+    .replaceAll("$", () => "$$")
+    .replaceAll("#", "\\#")
+    .replaceAll(" ", "\\ ");
 }
 
 function message(error: unknown): string {

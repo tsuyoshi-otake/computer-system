@@ -11,7 +11,7 @@ describe("ComputerRuntime CS486 debugger scheduling", (): void => {
     const record = computer("c-000041");
     const runtime = runtimeWith(record, 8);
     runtime.powerOn(record.computerId);
-    runTicks(runtime, 2);
+    completeBoot(runtime, record);
     record.filesystem.writeFile(
       "/tmp/loop.asm",
       "global main\nmain:\nadd eax, 1\njmp main\n",
@@ -159,4 +159,13 @@ function runUntil(runtime: ComputerRuntime, predicate: () => boolean): void {
     runtime.runTick();
   }
   throw new Error("runtime did not reach the expected terminal state");
+}
+
+function completeBoot(runtime: ComputerRuntime, record: ComputerRecord): void {
+  runUntil(
+    runtime,
+    () =>
+      record.lifecycle.state.kind !== "booting" &&
+      record.display.state.kind !== "post",
+  );
 }

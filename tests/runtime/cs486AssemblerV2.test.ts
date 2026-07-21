@@ -4,10 +4,22 @@ import {
   assembleCs486,
   assembleCs486Object,
 } from "../../src/application/toolchain/cs486Assembler.js";
+import {
+  cs486AsmPreprocessorLimits,
+  preprocessCs486Assembly,
+} from "../../src/application/toolchain/cs486AsmPreprocessor.js";
 import { linkCs486Objects } from "../../src/application/toolchain/cs486Linker.js";
-import { runCs486 } from "../../src/domain/cpu/cs486.js";
+import {
+  cs486ExecutableMemoryRequirements,
+  runCs486,
+  type Cs486Executable,
+} from "../../src/domain/cpu/cs486.js";
+import {
+  validateCs486Object,
+  type Cs486Object,
+} from "../../src/domain/cpu/cs486Object.js";
 
-describe("CS486 assembler v2", (): void => {
+describe("CS486 structured assembler", (): void => {
   it("tokenizes strings safely and expands bounded includes and macros", (): void => {
     const executable = assembleCs486(
       [
@@ -32,6 +44,25 @@ describe("CS486 assembler v2", (): void => {
     expect(runCs486(executable, { memoryBytes: 65_536 }).output).toBe("42A;B");
   });
 
+  it("prints validated word characters through the bounded runtime syscall", (): void => {
+    const executable = assembleCs486(
+      [
+        "mov eax, 65",
+        "syscall cs.print.character",
+        "mov eax, 128512",
+        "syscall cs.print.character",
+        "halt",
+      ].join("\n"),
+    );
+
+    expect(runCs486(executable, { memoryBytes: 65_536 }).output).toBe("A😀");
+    expect(() =>
+      runCs486(assembleCs486("mov eax, -1\nsyscall cs.print.character\nhalt"), {
+        memoryBytes: 65_536,
+      }),
+    ).toThrow(/invalid Unicode code point/u);
+  });
+
   it("lays out initialized data, BSS, alignment, and typed symbols", (): void => {
     const source = [
       "section .data",
@@ -53,7 +84,7 @@ describe("CS486 assembler v2", (): void => {
     const object = assembleCs486Object(source);
     const executable = linkCs486Objects([object], { entry: "main" });
 
-    expect(object.version).toBe(2);
+    expect(object).toMatchObject({ dataModel: "cs-word32-v1", version: 4 });
     expect(object.sections?.map(({ name }) => name)).toEqual([
       "text",
       "rodata",
@@ -69,10 +100,10 @@ describe("CS486 assembler v2", (): void => {
       }),
     );
     expect(executable.initialData).toEqual([
-      { bytes: [42, 0, 0, 0], offset: 0 },
+      { bytes: [42, 0, 0, 0], offset: 8 },
     ]);
-    expect(executable.dataBytes).toBe(8);
-    expect(runCs486(executable, { memoryBytes: 65_544 }).output).toBe("42");
+    expect(executable.dataBytes).toBe(16);
+    expect(runDeclared(executable).output).toBe("42");
   });
 
   it("serializes and validates optional zero-argument function signatures", (): void => {
@@ -115,7 +146,85 @@ describe("CS486 assembler v2", (): void => {
       assembleCs486Object(
         "global bad\ntype bad, function\nsignature bad, pointer\nbad:\nhalt",
       ),
-    ).toThrow(/return type must be i32 or void/u);
+    ).toThrow(/return type must be f32, f64, i32, i64, or void/u);
+  });
+
+  it("serializes bounded multi-argument v3 function signatures", (): void => {
+    const object = assembleCs486Object(
+      [
+        "global add",
+        "type add, function",
+        "signature add, i32, i32, i32",
+        "add:",
+        "mov eax, 0",
+        "ret",
+      ].join("\n"),
+    );
+
+    expect(object).toMatchObject({ dataModel: "cs-word32-v1", version: 4 });
+    expect(object.symbols).toContainEqual(
+      expect.objectContaining({
+        functionSignature: "(i32,i32)->i32",
+        name: "add",
+      }),
+    );
+    expect(() =>
+      assembleCs486Object(
+        "global bad\ntype bad, function\nsignature bad, i32, pointer\nbad:\nret",
+      ),
+    ).toThrow(/parameter types must be f32, f64, i32/u);
+  });
+
+  it("serializes canonical bounded variadic function signatures", (): void => {
+    const object = assembleCs486Object(
+      [
+        "global format",
+        "type format, function",
+        "signature format, i32, i32, varargs",
+        "format:",
+        "mov eax, 0",
+        "ret",
+      ].join("\n"),
+    );
+
+    expect(object.symbols).toContainEqual(
+      expect.objectContaining({
+        functionSignature: "(i32,...)->i32",
+        name: "format",
+      }),
+    );
+    expect(() =>
+      assembleCs486Object(
+        [
+          "global excessive",
+          "type excessive, function",
+          `signature excessive, i32, ${Array.from({ length: 33 }, () => "i32").join(", ")}, varargs`,
+          "excessive:",
+          "ret",
+        ].join("\n"),
+      ),
+    ).toThrow(/more than 32 fixed parameters/u);
+  });
+
+  it("retains v2 zero-argument reads while rejecting v3-only signatures", (): void => {
+    const current = assembleCs486Object(
+      "global main\ntype main, function\nsignature main, i32\nmain:\nmov eax, 42\nret",
+    );
+    const { dataModel, ...legacyFields } = current;
+    expect(dataModel).toBe("cs-word32-v1");
+    const legacy: Cs486Object = { ...legacyFields, version: 2 };
+
+    expect(() => validateCs486Object(legacy)).not.toThrow();
+    expect(runDeclared(linkCs486Objects([legacy])).registers.eax).toBe(42);
+    expect(() =>
+      validateCs486Object({
+        ...legacy,
+        symbols: legacy.symbols.map((symbol) => ({
+          ...symbol,
+          functionSignature: "(i32)->i32",
+        })),
+      }),
+    ).toThrow(/invalid CS486 object symbol/u);
   });
 
   it("resolves a cross-object typed data symbol through structured relocation", (): void => {
@@ -177,12 +286,12 @@ describe("CS486 assembler v2", (): void => {
         field: "data",
         section: "data",
         symbol: "values",
-        type: "absolute32",
+        type: "data-address",
       }),
     );
     expect(executable.initialData).toContainEqual({
-      bytes: [40, 0, 0, 0, 42, 0, 0, 0, 4, 0, 0, 0],
-      offset: 0,
+      bytes: [40, 0, 0, 0, 42, 0, 0, 0, 8, 0, 0, 0],
+      offset: 4,
     });
   });
 
@@ -264,31 +373,38 @@ describe("CS486 assembler v2", (): void => {
   });
 
   it("enforces source, lexical-token, and expanded-token budgets incrementally", (): void => {
+    expect(cs486AsmPreprocessorLimits).toMatchObject({
+      expandedTokens: 2_000_000,
+      lexicalTokens: 2_000_000,
+      sourceCharacters: 8 * 1_048_576,
+    });
     expect(() =>
-      assembleCs486('%include "huge.inc"', {
+      preprocessCs486Assembly('%include "huge.inc"', {
         include: () => ({
-          source: `;${"x".repeat(1_000_000)}`,
+          source: `;${"x".repeat(64)}`,
           sourceName: "/src/huge.inc",
         }),
+        limits: { sourceCharacters: 64 },
         sourceName: "/src/main.asm",
       }),
     ).toThrow(/assembly source character limit exceeded/u);
 
     expect(() =>
-      assembleCs486('%include "tokens.inc"', {
-        include: () => ({
-          source: Array.from({ length: 100_001 }, () => "x").join(" "),
-          sourceName: "/src/tokens.inc",
-        }),
-        sourceName: "/src/main.asm",
+      preprocessCs486Assembly(Array.from({ length: 9 }, () => "x").join(" "), {
+        limits: { lexicalTokens: 8 },
+        sourceName: "/src/tokens.asm",
       }),
     ).toThrow(/preprocessor lexical token limit exceeded/u);
 
-    const replacements = Array.from({ length: 20_001 }, () => "X").join(" ");
+    const replacements = Array.from({ length: 4 }, () => "X").join(" ");
     expect(() =>
-      assembleCs486(`%define X eax eax eax eax eax\n${replacements}`, {
-        sourceName: "/src/macro-limit.asm",
-      }),
+      preprocessCs486Assembly(
+        `%define X eax eax eax eax eax\n${replacements}`,
+        {
+          limits: { expandedTokens: 16 },
+          sourceName: "/src/macro-limit.asm",
+        },
+      ),
     ).toThrow(/preprocessor token limit exceeded/u);
   });
 
@@ -301,3 +417,12 @@ describe("CS486 assembler v2", (): void => {
     ).toThrow(/ORG would imply unsupported native DOS\/x86 behavior/u);
   });
 });
+
+function runDeclared(executable: Cs486Executable): ReturnType<typeof runCs486> {
+  const requirements = cs486ExecutableMemoryRequirements(executable);
+  if (requirements.kind !== "declared")
+    throw new Error("expected declared CS486 memory metadata");
+  return runCs486(executable, {
+    memoryBytes: requirements.linearAddressSpaceBytes,
+  });
+}

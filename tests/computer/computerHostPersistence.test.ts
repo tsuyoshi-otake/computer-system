@@ -46,7 +46,7 @@ describe("ComputerHost persistence bridge", (): void => {
     expect(host.runtime.tickNumber).toBe(1);
   });
 
-  it("accounts runtime, RS-232C, and persistence in one finished host scope", (): void => {
+  it("accounts staged boot, runtime, and persistence in finished host scopes", (): void => {
     const repository = new MemoryRepository();
     let microseconds = 10;
     const monitor = new ComputerWorkMonitor({
@@ -56,18 +56,20 @@ describe("ComputerHost persistence bridge", (): void => {
       maxPersistenceChecksPerTick: 1,
       workMonitor: monitor,
     });
-    host.register(new ComputerRecord("computer-23", "standard"));
-    expect(host.runtime.powerOn("computer-23").outcome).toBe("accepted");
+    const record = new ComputerRecord("computer-23", "standard");
+    host.register(record);
+    expect(host.runtime.powerOn(record.computerId).outcome).toBe("accepted");
+    runHostThroughBoot(host, record);
 
-    host.runTick();
-
-    expect(host.lastWorkSummary).toMatchObject({ tick: 1 });
+    expect(host.lastWorkSummary).toMatchObject({
+      tick: host.runtime.tickNumber,
+    });
     expect(host.workMetrics()).toMatchObject({
-      completedTicks: 1,
+      completedTicks: host.runtime.tickNumber,
       lanes: {
         guest_cpu: { admitted: 1 },
-        event_delivery: { admitted: 1 },
-        persistence: { admitted: 1 },
+        event_delivery: { admitted: host.runtime.tickNumber },
+        persistence: { admitted: host.runtime.tickNumber },
         rs232: { admitted: 0 },
       },
     });
@@ -163,7 +165,7 @@ describe("ComputerHost persistence bridge", (): void => {
     const record = new ComputerRecord("c-000413", "standard");
     host.register(record);
     host.runtime.powerOn(record.computerId);
-    for (let tick = 0; tick < 3; tick += 1) host.runTick();
+    runHostThroughBoot(host, record);
 
     host.runtime.queueEvent(record.computerId, "terminal_line", "ls /");
     host.runTick();
@@ -289,7 +291,7 @@ describe("ComputerHost persistence bridge", (): void => {
     host.register(record);
     host.insertFloppyMedia(record.computerId, media);
     host.runtime.powerOn(record.computerId);
-    for (let tick = 0; tick < 3; tick += 1) host.runTick();
+    runHostThroughBoot(host, record);
 
     host.runtime.queueEvent(record.computerId, "terminal_line", "FORMAT A: /S");
     host.runTick();
@@ -339,10 +341,12 @@ describe("ComputerHost persistence bridge", (): void => {
     host.insertFloppyMedia(record.computerId, media);
 
     expect(host.runtime.powerOn(record.computerId).outcome).toBe("accepted");
+    const bootStartTick = host.runtime.tickNumber;
+    while (host.runtime.tickNumber - bootStartTick < 51) host.runTick();
     const post = record.terminal.snapshot().rows.join("\n");
-    expect(post).toContain("Operating Sys. : Computer System DOS");
-    expect(post).toContain("Starting Computer System DOS 1.0 from Floppy A:");
-    for (let tick = 0; tick < 4; tick += 1) host.runTick();
+    expect(post).toContain("Boot Source    : Floppy A:");
+    expect(post).toContain("Boot Target    : Computer System DOS 1.0");
+    runHostThroughBoot(host, record);
 
     const version = host.runtime.executeDebugShellCommand(
       record.computerId,
@@ -407,7 +411,7 @@ describe("ComputerHost persistence bridge", (): void => {
       sectorCount: 1,
     });
 
-    for (let index = 0; index < 3; index += 1) host.runTick();
+    runHostThroughBoot(host, record);
     host.runtime.queueEvent(
       record.computerId,
       "terminal_line",
@@ -467,6 +471,26 @@ describe("ComputerHost persistence bridge", (): void => {
     }
   });
 });
+
+function runHostThroughBoot(host: ComputerHost, record: ComputerRecord): void {
+  let observedBoot =
+    record.lifecycle.state.kind === "booting" ||
+    record.display.state.kind === "post";
+  for (let tick = 0; tick < 1_000; tick += 1) {
+    if (
+      observedBoot &&
+      record.lifecycle.state.kind !== "booting" &&
+      record.display.state.kind !== "post"
+    ) {
+      return;
+    }
+    host.runTick();
+    observedBoot ||=
+      record.lifecycle.state.kind === "booting" ||
+      record.display.state.kind === "post";
+  }
+  throw new Error("Computer did not complete its bounded CSBIOS boot cycle");
+}
 
 function hostWith(
   repository: MemoryRepository,

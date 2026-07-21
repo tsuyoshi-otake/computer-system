@@ -35,6 +35,7 @@ const defaultWorkRoot = path.join(
   "mcp-runtime",
 );
 const defaultWorldName = "ComputerSystemMcpDebug";
+export const acceptanceFixtureWorldName = "ComputerSystemAcceptance";
 const allowedPlayerProbes = new Set([
   "compete",
   "computer",
@@ -82,6 +83,21 @@ export function parseBdsPort(value) {
 
 export function isDiagnosticLine(line) {
   if (line.includes(workMonitorLogPrefix)) return false;
+  for (const marker of [
+    "CS_DEBUG_ACCEPTANCE_FIXTURE ",
+    "CS_DEBUG_COMMAND ",
+    "CS_DEBUG_COMPUTER_LIST ",
+    "CS_DEBUG_WEB_REQUEST ",
+  ]) {
+    const markerIndex = line.indexOf(marker);
+    if (markerIndex < 0) continue;
+    try {
+      JSON.parse(line.slice(markerIndex + marker.length));
+      return false;
+    } catch {
+      return true;
+    }
+  }
   return /\[(?:Blocks|Item|Items|Json|Scripting|UI)\].*(?:error|warning)|(?:exception|stack trace|syntax error)/iu.test(
     line,
   );
@@ -161,6 +177,12 @@ export function isAllowedBdsCommand(command) {
   }
   if (command === "list") return true;
   if (
+    /^scriptevent computer_system:debug-acceptance-fixture a[a-z0-9]+-[a-z0-9]+$/u.test(
+      command,
+    )
+  )
+    return true;
+  if (
     /^scriptevent computer_system:debug-command d[a-z0-9]+-[a-z0-9]+ c-[0-9a-hjkmnp-tv-z]{6} v[^\s]{1,180}$/u.test(
       command,
     )
@@ -193,6 +215,36 @@ export function isAllowedBdsCommand(command) {
   return playerProbe !== null && allowedPlayerProbes.has(playerProbe[1] ?? "");
 }
 
+export function validateAcceptanceFixtureStart(options) {
+  const acceptanceFixture = options.acceptanceFixture ?? false;
+  if (typeof acceptanceFixture !== "boolean") {
+    throw new Error("acceptanceFixture must be a boolean.");
+  }
+  if (!acceptanceFixture) return;
+  if (options.resetWorld !== true) {
+    throw new Error("The acceptance fixture requires resetWorld: true.");
+  }
+  if (!options.explicitWorkRoot) {
+    throw new Error(
+      "The acceptance fixture requires an explicit BDS_MCP_WORKDIR.",
+    );
+  }
+  if (options.worldName !== acceptanceFixtureWorldName) {
+    throw new Error(
+      `The acceptance fixture requires BDS_MCP_WORLD=${acceptanceFixtureWorldName}.`,
+    );
+  }
+  const temporaryRoot = path.resolve(
+    options.temporaryRoot ?? path.join(os.homedir(), "tmp"),
+  );
+  const workRoot = path.resolve(options.workRoot);
+  if (!isWithin(workRoot, temporaryRoot)) {
+    throw new Error(
+      "The acceptance fixture work directory must be a child of the user tmp directory.",
+    );
+  }
+}
+
 export function isAllowedWebRelayCommand(command) {
   if (
     typeof command !== "string" ||
@@ -210,7 +262,13 @@ export function isAllowedWebRelayCommand(command) {
     return true;
   }
   return (
-    /^scriptevent computer_system:web-(?:interrupt|close|take-control) [A-Za-z0-9_-]{12,32}$/u.test(
+    /^scriptevent computer_system:web-(?:interrupt|abort-line|close|take-control) [A-Za-z0-9_-]{12,32}$/u.test(
+      command,
+    ) ||
+    /^scriptevent computer_system:web-power [A-Za-z0-9_-]{12,32} [A-Za-z0-9_-]{6,20} (?:power_on|safe_boot|shutdown)$/u.test(
+      command,
+    ) ||
+    /^scriptevent computer_system:web-floppy-eject [A-Za-z0-9_-]{12,32} [A-Za-z0-9_-]{6,20}$/u.test(
       command,
     ) ||
     /^scriptevent computer_system:web-input [A-Za-z0-9_-]{12,32} [A-Za-z0-9_-]{6,20} (?:line|keys|mouse) [^\s]{0,180}$/u.test(
@@ -245,6 +303,9 @@ export class BdsDebugSession {
     this.pendingWebRequests = 0;
     this.nextComputerListRequest = 1;
     this.pendingComputerListRequests = 0;
+    this.nextAcceptanceFixtureRequest = 1;
+    this.pendingAcceptanceFixtureRequests = 0;
+    this.acceptanceFixture = false;
     this.workMonitor = undefined;
     this.serverPort = parseBdsPort(this.environment.BDS_MCP_PORT);
     this.worldName = this.environment.BDS_MCP_WORLD ?? defaultWorldName;
@@ -255,6 +316,7 @@ export class BdsDebugSession {
       this.environment.BDS_MCP_WORKDIR ?? defaultWorkRoot,
     );
     this.managedWorkRoot = this.environment.BDS_MCP_WORKDIR === undefined;
+    this.packOutputRoot = path.join(this.projectRoot, "dist");
   }
 
   getStatus() {
@@ -268,6 +330,7 @@ export class BdsDebugSession {
       world: this.worldName,
       sourceRoot: this.sourceRoot,
       workRoot: this.workRoot,
+      acceptanceFixture: this.acceptanceFixture,
       logCursor: this.logCursor,
       diagnostics: this.logLines.filter((entry) => entry.diagnostic).length,
       lastError: this.lastError ?? null,
@@ -328,6 +391,55 @@ export class BdsDebugSession {
     );
     this.commandTail = operation.catch(() => undefined);
     return operation.then(() => ({ command, afterCursor: cursor }));
+  }
+
+  async provisionAcceptanceFixture(options = {}) {
+    if (!this.acceptanceFixture) {
+      throw new Error("The MCP acceptance fixture is not active.");
+    }
+    if (this.pendingAcceptanceFixtureRequests >= 2) {
+      throw new Error("Acceptance fixture capacity has been reached.");
+    }
+    const timeoutMs = Math.min(
+      asPositiveInteger(options.timeoutMs ?? 10_000),
+      30_000,
+    );
+    const requestId = `a${Date.now().toString(36)}-${this.nextAcceptanceFixtureRequest.toString(36)}`;
+    this.nextAcceptanceFixtureRequest =
+      this.nextAcceptanceFixtureRequest === Number.MAX_SAFE_INTEGER
+        ? 1
+        : this.nextAcceptanceFixtureRequest + 1;
+    this.pendingAcceptanceFixtureRequests += 1;
+    try {
+      const sent = await this.runCommand(
+        `scriptevent computer_system:debug-acceptance-fixture ${requestId}`,
+      );
+      const entry = await this.waitForLog({
+        contains: `"requestId":"${requestId}"`,
+        afterCursor: sent.afterCursor,
+        timeoutMs,
+      });
+      const marker = "CS_DEBUG_ACCEPTANCE_FIXTURE ";
+      const markerIndex = entry.line.indexOf(marker);
+      if (markerIndex < 0) {
+        throw new Error("Malformed acceptance fixture response.");
+      }
+      const response = JSON.parse(
+        entry.line.slice(markerIndex + marker.length),
+      );
+      if (response.requestId !== requestId) {
+        throw new Error("Mismatched acceptance fixture response.");
+      }
+      if (
+        response.status === "completed" &&
+        !/^c-[0-9a-hjkmnp-tv-z]{6}$/u.test(response.computerId)
+      ) {
+        throw new Error("Malformed acceptance fixture Computer identity.");
+      }
+      return response;
+    } finally {
+      this.pendingAcceptanceFixtureRequests -= 1;
+    }
   }
 
   runWebRelay(command) {
@@ -609,18 +721,43 @@ export class BdsDebugSession {
     return result;
   }
 
-  async #start({ resetWorld = false } = {}) {
+  async #start({ resetWorld = false, acceptanceFixture = false } = {}) {
     if (typeof resetWorld !== "boolean") {
       throw new Error("resetWorld must be a boolean.");
     }
-    if (this.state === "running") return this.getStatus();
+    validateAcceptanceFixtureStart({
+      acceptanceFixture,
+      resetWorld,
+      explicitWorkRoot: !this.managedWorkRoot,
+      worldName: this.worldName,
+      workRoot: this.workRoot,
+    });
+    if (this.state === "running") {
+      if (this.acceptanceFixture !== acceptanceFixture) {
+        throw new Error(
+          "The running BDS mode does not match the requested acceptance fixture mode.",
+        );
+      }
+      return this.getStatus();
+    }
     this.#setState("starting");
     this.lastError = undefined;
 
     try {
       await this.#validateRoots();
-      await this.#runBuild();
-      const runtimeCreated = await this.#prepareRuntime(resetWorld);
+      let runtimeCreated;
+      if (acceptanceFixture) {
+        runtimeCreated = await this.#prepareRuntime(resetWorld);
+        this.packOutputRoot = path.join(
+          this.workRoot,
+          ".computer-system-acceptance-packs",
+        );
+        await this.#runBuild(true);
+      } else {
+        this.packOutputRoot = path.join(this.projectRoot, "dist");
+        await this.#runBuild(false);
+        runtimeCreated = await this.#prepareRuntime(resetWorld);
+      }
       await this.#configureServer();
 
       if (runtimeCreated || !(await exists(this.#worldRoot()))) {
@@ -665,9 +802,11 @@ export class BdsDebugSession {
         );
       }
       this.#setState("running");
+      this.acceptanceFixture = acceptanceFixture;
       return this.getStatus();
     } catch (error) {
       this.lastError = errorMessage(error);
+      this.acceptanceFixture = false;
       this.#setState("failed");
       const activeHandle = this.handle;
       if (activeHandle !== undefined) {
@@ -684,9 +823,13 @@ export class BdsDebugSession {
   }
 
   async #stop() {
-    if (this.state === "idle") return this.getStatus();
+    if (this.state === "idle") {
+      this.acceptanceFixture = false;
+      return this.getStatus();
+    }
     const handle = this.handle;
     if (handle === undefined) {
+      this.acceptanceFixture = false;
       this.#setState("idle");
       return this.getStatus();
     }
@@ -708,10 +851,12 @@ export class BdsDebugSession {
         throw error;
       }
       this.handle = undefined;
+      this.acceptanceFixture = false;
       this.#setState("idle");
       return this.getStatus();
     } catch (error) {
       this.handle = undefined;
+      this.acceptanceFixture = false;
       this.#setState("failed");
       this.lastError = errorMessage(error);
       throw error;
@@ -728,12 +873,19 @@ export class BdsDebugSession {
     await access(path.join(this.sourceRoot, executableName));
   }
 
-  async #runBuild() {
+  async #runBuild(acceptanceFixture) {
     const handle = this.#spawnChild(
       process.execPath,
       [path.join(this.projectRoot, "tools", "build.mjs")],
       this.projectRoot,
       "build",
+      {
+        ...this.environment,
+        COMPUTER_SYSTEM_ACCEPTANCE_FIXTURE: acceptanceFixture ? "1" : "0",
+        ...(acceptanceFixture
+          ? { COMPUTER_SYSTEM_PACK_OUTPUT: this.packOutputRoot }
+          : { COMPUTER_SYSTEM_PACK_OUTPUT: undefined }),
+      },
     );
     let result;
     try {
@@ -818,13 +970,13 @@ export class BdsDebugSession {
     await access(worldRoot);
     const behaviorManifest = JSON.parse(
       await readFile(
-        path.join(this.projectRoot, "dist", "behavior_pack", "manifest.json"),
+        path.join(this.packOutputRoot, "behavior_pack", "manifest.json"),
         "utf8",
       ),
     );
     const resourceManifest = JSON.parse(
       await readFile(
-        path.join(this.projectRoot, "dist", "resource_pack", "manifest.json"),
+        path.join(this.packOutputRoot, "resource_pack", "manifest.json"),
         "utf8",
       ),
     );
@@ -832,12 +984,12 @@ export class BdsDebugSession {
       {
         kind: "behavior",
         manifest: behaviorManifest,
-        source: path.join(this.projectRoot, "dist", "behavior_pack"),
+        source: path.join(this.packOutputRoot, "behavior_pack"),
       },
       {
         kind: "resource",
         manifest: resourceManifest,
-        source: path.join(this.projectRoot, "dist", "resource_pack"),
+        source: path.join(this.packOutputRoot, "resource_pack"),
       },
     ];
     for (const pack of packs) {
@@ -949,6 +1101,7 @@ export class BdsDebugSession {
       resolveClosed({ code, signal });
       if (handle === this.handle && this.state === "running") {
         this.handle = undefined;
+        this.acceptanceFixture = false;
         if (code === 0) {
           this.#setState("idle");
         } else {

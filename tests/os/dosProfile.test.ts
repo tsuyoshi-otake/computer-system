@@ -10,12 +10,45 @@ describe("DOS profile contract", (): void => {
     const filesystem = new InMemoryFilesystem();
     const shell = new ShellSession(filesystem, { osProfile: "dos" });
 
-    expect(filesystem.getSize("/drives/c/command/edit.com")).toBe(65_536);
-    expect(shell.submit("DEL C:\\COMMAND\\EDIT.COM").exitCode).toBe(0);
+    expect(filesystem.getSize("/drives/c/dos/edit.com")).toBe(69_886);
+    expect(shell.submit("DEL C:\\DOS\\EDIT.COM").exitCode).toBe(0);
     expect(shell.submit("EDIT README.TXT")).toMatchObject({ exitCode: 127 });
     expect(filesystem.snapshot().tombstones).toContain(
-      "/drives/c/command/edit.com",
+      "/drives/c/dos/edit.com",
     );
+  });
+
+  it("fails boot explicitly when COMMAND.COM is missing", (): void => {
+    const filesystem = new InMemoryFilesystem();
+    new ShellSession(filesystem, { osProfile: "dos" });
+    filesystem.delete("/drives/c/command.com");
+
+    expect(() => new ShellSession(filesystem, { osProfile: "dos" })).toThrow(
+      "Bad or missing Command Interpreter",
+    );
+  });
+
+  it("advertises DOS line editing and enables history only after bare DOSKEY", (): void => {
+    const historyOnly = new ShellSession(new InMemoryFilesystem(), {
+      osProfile: "dos",
+    });
+    expect(historyOnly.terminalInteraction()).toMatchObject({
+      cursorShape: "underline",
+      history: false,
+      inputMode: "line",
+    });
+    historyOnly.submit("DOSKEY /HISTORY");
+    expect(historyOnly.terminalInteraction().history).toBe(false);
+
+    const loaded = new ShellSession(new InMemoryFilesystem(), {
+      osProfile: "dos",
+    });
+    expect(loaded.submit("DOSKEY").stdout).toContain("DOSKey installed");
+    expect(loaded.terminalInteraction()).toMatchObject({
+      cursorShape: "underline",
+      history: true,
+      inputMode: "line",
+    });
   });
 
   it("uses DOS command names, CRLF output, and bounded compatibility utilities", (): void => {
@@ -171,7 +204,6 @@ describe("DOS profile contract", (): void => {
     const shell = new ShellSession(new InMemoryFilesystem(), {
       computerName: "c-dos002",
       hardware: portableComputerHardware,
-      memoryUsageBytes: (): number => 65_536,
       osProfile: "dos",
       ticksPerSecond: 20,
     });
@@ -207,7 +239,7 @@ describe("DOS profile contract", (): void => {
     expect(shell.submit("VER").lines[0]).toBe(
       "Computer System DOS Version 1.00",
     );
-    expect(shell.submit("ECHO %OS%").lines).toEqual(["CS-DOS"]);
+    expect(shell.submit("ECHO %OS%").lines).toEqual(["ECHO is off."]);
     expect(shell.submit("SYSTEMINFO").lines).toContain("OS Alias: CS-DOS 1.0");
     expect(shell.submit("SYSTEMINFO").stdout).toContain(
       "CPU: Computer System 386SX, 16 MHz",

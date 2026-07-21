@@ -16,18 +16,25 @@ starts with cold caches.
 Run before attempting live graphics work:
 
 ```powershell
-npm run test -- --run tests/domains/display.test.ts tests/computer/hardwareProfiles.test.ts tests/os/systemBoot.test.ts
+npm run test -- --run tests/domains/display.test.ts tests/computer/hardwareProfiles.test.ts tests/computer/csBios.test.ts tests/os/systemBoot.test.ts
 ```
 
 - `Verify:` Inspect the focused test result. `Expect:` Portable has 256 KiB VRAM
   and rejects 640x480x8; both desktops have 512 KiB and accept it; no guest mode
   exceeds 640x480.
-- `Verify:` Power-on assertions run before the first runtime tick. `Expect:` An
-  80x25 CSBIOS frame reports the actual CPU, RAM, panel, and VRAM profile.
-- `Verify:` Advance one runtime tick for DOS and Linux. `Expect:` POST is
-  cleared exactly once. CS-DOS shows its identity, a blank line, and `C:\>`;
-  CS-Linux shows its identity, a blank line, and the password or shell prompt.
-  Neither profile shows a tty label or startup shell banner.
+- `Verify:` Inspect power-on before the first runtime tick. `Expect:` The 80x25
+  display is black, the Computer is `booting`, the guest CPU is paused, the
+  cursor is hidden, and terminal/debug input is rejected.
+- `Verify:` Advance the 70-tick schedule at 20 TPS. `Expect:` CS-VGA,
+  `CSBIOS Revision 1.1`, the bounded memory count, factual detected devices,
+  fixed-disk or floppy source, selected OS target, handoff blackout, and
+  `Starting ...` appear at their tested stages. Terminal cells and display VRAM
+  agree throughout.
+- `Verify:` Advance the final handoff tick for DOS and Linux. `Expect:` POST is
+  cleared exactly once and guest execution becomes available. CS-DOS shows its
+  identity, a blank line, and `C:\>`; CS-Linux shows its identity, a blank line,
+  and the password or shell prompt. Neither profile shows a tty label or startup
+  shell banner.
 - `Verify:` Inspect a saved Computer snapshot. `Expect:` It contains a compact
   `displayProfileId` and no VRAM, framebuffer, dirty-tile, or palette payload.
 
@@ -73,8 +80,8 @@ Verify lifecycle and persistence:
   for the initial `cs` account; no additional simulated first-boot notice or
   startup transcript is printed. Input is masked and absent from command
   history. Reboot and verify the prior display is cleared, `/etc/shadow` remains
-  present, `login:` accepts `cs`, a wrong password is rejected, and the correct
-  password reaches `/home/cs` with a `$` prompt.
+  present, `<computer-id> login:` accepts `cs`, a wrong password is rejected,
+  and the correct password reaches `/home/cs` with a `$` prompt.
 - On a DOS-profile Portable Computer, run `EDIT C:\DEMO.TXT`, enter text in the
   blue full-screen viewport, save with F2, and exit through File > Exit. Modify
   it again and verify the Save/Discard/Cancel prompt owns the dirty exit. On a
@@ -355,6 +362,15 @@ The deployment must contain only `dist/pages`. A successful Pages check proves
 static-document publication only; it is never evidence of BDS reachability or a
 live Web Terminal session.
 
+Issue #59 received a local generated-site check on 2026-07-20. `Verify:` Serve
+`dist/pages` on loopback, open `manual/#chapter-micropython` in real Chrome at
+the default viewport and at 390x844, and inspect the document width plus browser
+diagnostics. `Expect:` 16 `article.manual-chapter` elements, visible built-in
+slicing documentation, `scrollWidth == clientWidth` at both widths, and no
+console warning/error. `Result:` all expectations passed. This was a local
+preview check; repeat the complete publication checklist before claiming a
+deployed update.
+
 ## Persistent Web companion networking checklist
 
 Use a temporary configuration path for this verification so the system-wide
@@ -537,6 +553,16 @@ does not migrate the previous sequential `computer-N` registry.
     page** is offered. Restart the companion and Computer components together
     before using it; no terminal-text compatibility fallback occurs.
 
+    `Verify:` Use pointer input, then Tab with Enter and Space, to toggle each
+    footer CAPS, NUM, and SCROLL control independently. Type a command between
+    toggles, inspect the host keyboard LEDs, and reload the page.
+
+    `Expect:` Each control starts hollow/off, becomes filled/on, returns to
+    hollow/off, and exposes the same state through `aria-pressed`. The other two
+    controls, host operating-system locks, command text, guest behavior, and
+    terminal frames do not change. Reloading resets all three virtual indicators
+    to off, and the 390-pixel layout has no horizontal overflow.
+
 11. Paste a single-line command and a multiline command. Confirm insertion
     occurs at the current selection, line breaks become spaces, the value stops
     at 128 characters, and neither paste runs a command before physical Enter.
@@ -548,11 +574,28 @@ does not migrate the previous sequential `computer-N` registry.
     the identity is the sandbox user `cs`, the hostname is the compact Computer
     ID, Linux profile directories are present, and `null` is listed but is not
     an ordinary persisted file.
-14. Type `who` and press Tab, then type `cat /et` and press Tab. Confirm the
-    values become `whoami ` and `cat /etc/` without submitting. Resize the
-    browser and confirm the reported cell size remains 80x25, the glyphs scale
-    to fit both axes without a scrollbar, and no duplicate resize relay or
-    command is produced.
+14. At a CS-Linux prompt, type `who` and press Tab. Confirm the shared prefix
+    remains in the line and a completion shelf opens below, rather than over,
+    the 80x25 display with `who` and `whoami` labeled as commands. Use Tab/Down
+    and Shift+Tab/Up to wrap selection, Enter to accept `whoami `, and Escape to
+    close without submitting. Type `cat /et` and press Tab; confirm the unique
+    match becomes `cat /etc/` immediately. On CS-DOS, type `DI` and confirm
+    case-insensitive command candidates use uppercase display names; type
+    `DIR C:\\DO` and confirm `C:\\DOS\\` is offered as a directory. While a
+    shelf request is pending, type or move the caret and confirm its late
+    response is ignored. Lose writer control and confirm the shelf closes.
+    Resize the browser and confirm the reported cell size remains 80x25, the
+    shelf stays outside the guest raster, glyphs scale to fit both axes without
+    a scrollbar, and no duplicate resize relay or command is produced.
+
+    `Verify:` Repeat the unique, multiple, dismissed, caret-moved, writer-loss,
+    CS-Linux path, and CS-DOS drive-path cases in Chrome with the network
+    response delayed once.
+
+    `Expect:` No completion submits a command. At most 64 typed candidates are
+    shown; a truncated set has a trailing plus. Only the current request may
+    change the line, and the fixed guest display remains an exact 80x25 grid.
+
 15. Run `date`, `date --game`, `date --virtual`, `du -s /home`, and `quota`.
     Confirm wall UTC, Minecraft time, deterministic VM time, subtree bytes, and
     enforced capacity/file/entry limits are distinguishable.
@@ -560,34 +603,57 @@ does not migrate the previous sequential `computer-N` registry.
     `echo $FAVORITE`. Run a Bash script using `$1`, `if`, `for`, and a function;
     confirm it stays inside the Computer filesystem and loop limits fail
     explicitly rather than hanging the server.
-17. Run `vi /home/cs/demo.py` and confirm syntax colors, line numbers, rainbow
-    indentation, autoindent, whitespace markers, and wrapping initially remain
-    off. Exercise `:syntax on`, `:set number rainbow autoindent list wrap`,
-    `:set all`, `:set number?`, `tabstop`/`shiftwidth` values, `expandtab`,
-    `>>`/`<<`, and each matching `no` option. Put the same settings in
-    `~/.vimrc`, reopen, and repeat on DOS with `C:\_VIMRC`. Run `:!pwd` and
-    `:r !echo inserted`; confirm output stays in the guest, parent shell state
-    is restored, and an asynchronous/TUI command fails explicitly. Then verify
-    Normal/Insert/Command states, `:wq`, dirty `:q` blocking, `:q!`, bare `vi`,
-    `:w demo2.py`, empty-command Backspace, `gg`/`G`, and `ZZ`/`ZQ`. In Python,
-    C, C++, and ASM files, confirm `:syntax on` colors keywords, strings,
-    numbers, comments, C preprocessor directives, ASM instructions, registers,
-    and labels without rejecting incomplete source. Type a two-letter prefix and
-    exercise `Ctrl+N`, `Ctrl+P`, and `Ctrl+E`; confirm Tab still indents. Verify
-    current-file, visited-buffer, symbol, keyword, and opted-in direct-include
-    candidates appear in that order, with at most 64 candidates. Exercise
-    `:symbols`, `gd`, and `Ctrl+O`; confirm an external jump is blocked while
-    dirty. Set `ft=asm`, `completecase=insensitive`, `completeprefix=3`,
+17. Open bare `vi`. Confirm content starts on the first row, a cell-wide block
+    cursor is visible at 1,1, and the clean `[No Name]` status has no `[+]`.
+    Confirm there is no top header, persistent Normal banner, or fixed shortcut
+    help; the reverse-video penultimate row contains file/cursor/viewport state,
+    and the final command/message row is blank. Insert one character and confirm
+    `[+]` plus `-- INSERT --`; Escape must clear the mode line, `:` must move
+    the block cursor to the command row, and a successful named write must clear
+    `[+]`. Then run `vi /home/cs/demo.py` and confirm syntax colors, line
+    numbers, rainbow indentation, autoindent, whitespace markers, and wrapping
+    initially remain off. Exercise `:syntax on`,
+    `:set number rainbow autoindent list wrap`, `:set all`, `:set number?`,
+    `tabstop`/`shiftwidth` values, `expandtab`, `>>`/`<<`, and each matching
+    `no` option. Put the same settings in `~/.vimrc`, reopen, and repeat on DOS
+    with `C:\_VIMRC`. Run `:!pwd` and `:r !echo inserted`; confirm output stays
+    in the guest, parent shell state is restored, and an asynchronous/TUI
+    command fails explicitly. Then verify Normal/Insert/Command states, `:wq`,
+    dirty `:q` blocking, `:q!`, bare `vi`, `:w demo2.py`, empty-command
+    Backspace, `gg`/`G`, and `ZZ`/`ZQ`. In Python, C, C++, and ASM files,
+    confirm `:syntax on` colors keywords, strings, numbers, comments, C
+    preprocessor directives, ASM instructions, registers, and labels without
+    rejecting incomplete source. Type a two-letter prefix and exercise `Ctrl+N`,
+    `Ctrl+P`, and `Ctrl+E`; confirm Tab still indents. Verify current-file,
+    visited-buffer, symbol, keyword, and opted-in direct-include candidates
+    appear in that order, with at most 64 candidates. Exercise `:symbols`, `gd`,
+    and `Ctrl+O`; confirm an external jump is blocked while dirty. Set `ft=asm`,
+    `completecase=insensitive`, `completeprefix=3`,
     `completesources=current,includes`, and
     `definitionsources=current,buffers,includes`, query each with `?`, and
     confirm include reads remain inside the credentialed guest filesystem.
-18. Run `free` and `/proc/meminfo`; confirm used memory exceeds guest runtime
-    and the kernel, services, buffers, and guest fields sum to the reported
-    usage. On CS-DOS run `MEM`, `MEM /C`, `MEM /D`, and `MEM /F`; confirm DOS
-    system/driver plus guest runtime accounting agrees with the conventional,
-    upper, two reserved-aperture, and XMS totals. Confirm HMA is included in
-    XMS, COMMAND.COM remains conventional, and free extents match the
-    largest-block lines.
+
+    `Verify:` Run
+    `npm test -- tests/editor/viSession.test.ts tests/os/systemBoot.test.ts`,
+    then repeat the clean, insert, command, and saved states in real Chrome
+    through `npm run dev:bds:web`.
+
+    `Expect:` The focused suite passes. The browser retains one fixed 80x25
+    grid; its visible block cursor and the final two rows match authoritative
+    editor state, `[+]` changes only with the dirty flag, and no legacy header,
+    duplicated Normal label, or fixed shortcut bar returns.
+
+18. Run `free` and `/proc/meminfo`; confirm total equals used plus free,
+    available equals free plus reclaimable buffers, and kernel, services,
+    buffers, and guest runtime sum to used. While one admitted Linux process is
+    active, compare `top` with `/proc/<pid>/status`; VIRT must equal VmSize and
+    RES must equal VmRSS. After completion, confirm the process allocation
+    disappears and buffers refill to the baseline. On CS-DOS run `MEM`,
+    `MEM /C`, `MEM /D`, and `MEM /F`; confirm DOS system/driver plus guest
+    runtime accounting agrees with the conventional, upper, two
+    reserved-aperture, and XMS totals. Confirm HMA is included in XMS,
+    COMMAND.COM remains conventional, and free extents match the largest-block
+    lines.
 19. Restart the Computer. Confirm `/home/cs/demo.py` and `/etc` survive, `/tmp`
     is empty, and BDS logs contain no persistence failure. Stop BDS before
     backing up the complete world directory; restore the stopped-world copy and
@@ -740,8 +806,9 @@ record or BDS diagnostics.
      empty at mode 0644 with UID/GID 1000 while `/` remains root-owned and
      non-writable; saving it with `vi` succeeds without granting permission to
      create another root-level file.
-2. Reboot, enter `cs` at `login:`, then enter its password at `Password:`.
-   Attempt an unknown user, a wrong password, and the locked root account first.
+2. Reboot, enter `cs` at `<computer-id> login:`, then enter its password at
+   `Password:`. Attempt an unknown user, a wrong password, and the locked root
+   account first.
    - `Verify:` Observe every prompt and return state.
    - `Expect:` Only the correct unlocked account reaches a shell; secret input
      is masked; repeated failures incur the bounded delay; no startup script
@@ -875,9 +942,10 @@ live pass. Record the exact `c-xxxxxx` identities and retain terminal captures.
    - `Verify:` Inspect the second login, run `history`, and run
      `stat /home/cs/.bash_history`.
    - `Expect:` The prompt is `cs@<computer-id>:~$`; `/etc/motd` is displayed;
-     the second login includes the previous tty/tick; `history` includes the
-     ordinary command; the file is mode 0600 and owned by the authenticated
-     account. Neither password entry appears in terminal history or the file.
+     the second login shows MOTD before the previous tty and wall-clock time;
+     `history` includes the ordinary command; the file is mode 0600 and owned by
+     the authenticated account. Neither password entry appears in terminal
+     history or the file.
 2. Start `sleep 30 &`, then run `jobs`, `ps -f`, and
    `cat /proc/<sleep-pid>/status`. Run `kill -STOP <pid>`, wait several ticks,
    run `jobs`, then use `bg %1`, `kill -TERM <pid>`, and `wait %1`.
@@ -1063,7 +1131,7 @@ without `/OUT:`, and link `C:\WORK\MAIN.OBJ` without an output name.
 `Expect:` Compile-only creates `C:\WORK\MAIN.OBJ`; executable compilation and
 linking create `C:\WORK\MAIN.CSX`. Linux continues to default to `a.o`/`a.out`.
 
-`Verify:` In the CS-DOS Web Terminal, confirm `C:\COMMAND\QBASIC.EXE`, open bare
+`Verify:` In the CS-DOS Web Terminal, confirm `C:\DOS\QBASIC.EXE`, open bare
 `QBASIC`, and open the same text file with both `EDIT` and `QBASIC /EDITOR`. In
 EDIT, open F1 help, use Ctrl+Shift+S to save under a new strict 8.3 path,
 exercise Save/Discard/Cancel, and click outside an open menu. Drag-select text
@@ -1208,10 +1276,11 @@ access those privileged paths. A shared application/display/input ABI for future
 TUI, graphics, DOOM-class programs, or CS Windows 1.0 remains future work and is
 not reported as shipped.
 
-`Verify:` Compile a C or C++ `main` and an ASM zero-argument function with `-c`,
-inspect both objects with `nm` and `objdump`, link them with `ld`, and execute
-the result with `run --stats`. Also compile statement-boundary inline assembly
-that moves `6` into EAX and attempt an unsafe `asm("push eax")` statement.
+`Verify:` Compile a C or C++ `main` and an ASM function taking two word
+arguments with `-c`, inspect both objects with `nm` and `objdump`, link them
+with `ld`, and execute the result with `run --stats`. Also compile
+statement-boundary inline assembly that moves `6` into EAX and attempt an unsafe
+`asm("push eax")` statement.
 
 `Expect:` The external ASM symbol resolves, the mixed program produces the
 expected output under deterministic CPU-cycle accounting, object-relative data
@@ -1219,28 +1288,31 @@ does not overlap, and unsafe inline assembly fails explicitly. Missing and
 duplicate symbols must not produce an executable. No command invokes a host
 compiler or linker.
 
-`Verify:` Compile one object declaring `extern int helper()` and another
-defining `void helper()`. Reverse the return types in a second pair. Inspect
-their JSON symbol records, then attempt both links. Also link the integer caller
-against an untyped legacy ASM definition and import an object containing only a
-known `()->void` function from Python.
+`Verify:` Compile one object declaring `extern int helper(int, int)` and another
+defining `int helper(int)`. Test a return-type mismatch in a second pair.
+Inspect their JSON symbol records, then attempt both links. Also link the
+integer caller against an untyped legacy ASM definition and import an object
+containing only a known `()->void` function and an `(i32)->i32` function from
+Python.
 
-`Expect:` C/C++ defined and undefined function symbols serialize `()->i32` or
-`()->void` identically on Linux and DOS. Both known mismatches fail with an
-explicit deterministic function-signature diagnostic. The untyped ASM link
-remains compatible, while Python does not expose the known void function through
-its integer/EAX extension ABI.
+`Expect:` C/C++ defined and undefined function symbols serialize parameter and
+return contracts such as `(i32,i32)->i32` or `()->void` identically on Linux and
+DOS. Both known mismatches fail with an explicit deterministic
+function-signature diagnostic. The untyped ASM link remains compatible, while
+Python exposes neither known void nor parameterized functions through its
+zero-argument integer/EAX extension ABI.
 
 `Verify:` Assemble one Linux program using a relative `%include`, `%define`, a
 bounded `%macro`, `.rodata`, `.data`, `.bss`, `align`, `db`/`dw`/`dd`, and a
 typed data symbol. Build with `as -c`, inspect with `nm` and `objdump`, link
 with `ld -e`, and execute it. Link a second object that reads the exported data.
 
-`Expect:` `CS486OBJ` v2 reports all four sections, typed symbols, and structured
-relocations. Initialized bytes and BSS addresses do not overlap, cross-object
-alignment is preserved, and the program reads the expected data. A circular
-include, recursive macro, `call` to data, `load` from text, corrupt relocation,
-and cumulative size overflow each terminate explicitly without an output file.
+`Expect:` current `CS486OBJ` v4 reports its data model, all four sections, typed
+symbols, bounded function signatures, and structured relocations. Initialized
+bytes and BSS addresses do not overlap, cross-object alignment is preserved, and
+the program reads the expected data. A circular include, recursive macro, `call`
+to data, `load` from text, corrupt relocation, and cumulative size overflow each
+terminate explicitly without an output file.
 
 `Verify:` On the Portable CS-DOS profile, build the equivalent source with
 strict 8.3 names and CRLF using `ASM MAIN.ASM /C /OUT:MAIN.CSO`, then
@@ -1264,23 +1336,47 @@ static byte is read or overwritten as stack storage.
 
 `Verify:` Run
 `npm exec vitest run tests/os/cFamilyProfiles.test.ts tests/runtime/cs486Ir.test.ts`.
-Then compile equivalent zero-argument C and C++ programs under CS-Linux with
-`cc`/`c++` and under CS-DOS with `CC`/`C++`. Include nested lexical scopes, a
-compound function-call expression, a canonical `for` loop, and a local whose
-lifetime crosses a call. Inspect the objects with `nm` and `objdump`.
+Then compile equivalent parameterized/recursive C and C++ programs under
+CS-Linux with `cc`/`c++` and under CS-DOS with `CC`/`C++`. Include nested
+lexical scopes, a compound function-call expression, a canonical `for` loop, and
+a local whose lifetime crosses a call. Inspect the objects with `nm` and
+`objdump`.
 
 `Expect:` The dedicated bounded tokenizer and parser produce source-span
 diagnostics and a typed AST; case-sensitive lexical scopes reject undeclared or
 duplicate names. CSIR verification accepts one definition per computed SSA value
 and explicit local loads/stores, rejects bad types, dominance, targets, or block
-termination, and stops at its documented limits. Optimization is deterministic
-and pass-capped. Register assignment reports deterministic linear-scan
-allocation and checked spills; ESP/EBP are never allocated, values across calls
-are safely spilled, and locals use EBP-relative stack slots. No graph-coloring
-or unbounded/backtracking allocator path is entered. Both OS profiles emit typed
-function symbols and structured relocations for the same validated CS486 ABI,
-including matching defined/undefined return signatures, with LF diagnostics on
-Linux and CRLF on DOS.
+termination, parameter arity/type, and stops at its documented limits.
+Optimization is deterministic and pass-capped. Register assignment reports
+deterministic linear-scan allocation and checked spills; ESP/EBP are never
+allocated, values across calls are safely spilled, and locals use EBP-relative
+stack slots. Calls push at most 32 word arguments right-to-left, callers restore
+ESP, and callees load `[ebp+8+4i]` while preserving ESI/EDI/EBP. No
+graph-coloring or unbounded/backtracking allocator path is entered. Both OS
+profiles emit typed function symbols and structured relocations for the same
+validated CS486 ABI, including matching defined/undefined return signatures,
+with LF diagnostics on Linux and CRLF on DOS.
+
+`Verify:` Compile and run a source using a decoded `"A\\n"` literal, fixed and
+multidimensional arrays, pointer arithmetic and subtraction, a pointer-passed
+struct, typedefs/enums, initialized and zero-initialized globals, a cross-object
+`extern` global, and one `printf` containing literal text, `%%`, and multiple
+`%d`/`%c`/`%s` conversions. Compile the same source twice and inspect both
+objects with `objdump`.
+
+`Expect:` The objects are byte-identical. `.rodata` contains the words 65, 10,
+and 0 rather than packed UTF-8 bytes; `.data` and `.bss` contain the correct
+global layouts; array, field, and relocation addresses advance in four-byte word
+steps; output matches exactly; and ESP returns to its entry value.
+
+`Verify:` Exceed each aggregate, format-character, conversion, worst-case
+output, and string-read bound. Also try incomplete/duplicate structs,
+incompatible pointers, an excessive initializer, a non-constant global, bad
+`printf` conversion/type/arity, and a rejected shell compile over a previously
+installed output path.
+
+`Expect:` Every case fails with one bounded source-span diagnostic. No rejected
+compile installs a partial object/executable or replaces the prior output.
 
 `Verify:` Build the same C and C++ source on Linux and DOS using nested quoted
 and angle includes, object/function macros, rescanning, line continuation,
@@ -1296,18 +1392,18 @@ and charge deferred preprocessing work. Missing/unreadable/circular/oversized
 input and unsupported directives terminate explicitly with no host read and no
 output artifact.
 
-`Verify:` Compile C++ with an individual `extern "C" int helper();`, link it to
-ASM exporting `helper` with `SIGNATURE helper, I32`, and run it. Then try an
-`extern "C" { ... }` block, another language linkage, parameters, overloads,
-class/member calls, near/far declarations, and an OMF/MASM object.
+`Verify:` Compile C++ with an individual `extern "C" int helper(int, int);`,
+link it to ASM exporting `helper` with `SIGNATURE helper, I32, I32, I32`, and
+run it. Then try an `extern "C" { ... }` block, another language linkage,
+overloads, class/member calls, near/far declarations, and an OMF/MASM object.
 
-`Expect:` The individual declaration emits the same unmangled zero-argument
-`()->i32` symbol and returns through EAX. Every unsupported C++/MASM/16-bit ABI
-construct fails explicitly; no documentation or UI claims ISO C++, MASM,
-Microsoft C/C++ 7.0, OMF, near/far, exceptions, RTTI, templates, or member ABI.
+`Expect:` The individual declaration emits the same unmangled `(i32,i32)->i32`
+symbol and returns through EAX. Every unsupported C++/MASM/16-bit ABI construct
+fails explicitly; no documentation or UI claims ISO C++, MASM, Microsoft C/C++
+7.0, OMF, near/far, exceptions, RTTI, templates, or member ABI.
 
 `Verify:` Compile source containing `#define`, a global data declaration, an
-undeclared identifier, a duplicate local, a parameterized function, a C++ class,
+undeclared identifier, a duplicate local, a pointer declaration, a C++ class,
 and malformed syntax. Also link an unresolved function and attempt to load ELF,
 OMF, COM, and EXE artifacts.
 
@@ -1315,6 +1411,25 @@ OMF, COM, and EXE artifacts.
 format diagnostic and leaves no executable artifact. No path invokes a host
 compiler/linker, performs dynamic linking, or interprets native x86, ELF, OMF,
 COM, or EXE input.
+
+### Versioned byte-oriented C profile
+
+`Verify:` Run
+`npm run test -- --run tests/runtime/cs486ByteDataModel.test.ts tests/runtime/csAbiByteProfile.test.ts tests/runtime/cs486CByteFixtures.test.ts tests/runtime/cs486CHostedHeaders.test.ts tests/os/cByteProfile.test.ts`.
+In CS-Linux, compile the same layout probe with `cc -mword32` and `cc -mbyte8`,
+inspect both with `nm`, `objdump`, and `csdb`, and attempt to link their objects
+together. The byte probe must write and read a file containing every value from
+0 through 255.
+
+`Expect:` word output reports `cs-word32-v1`, `CHAR_BIT=32`, one-word character
+stride, and word strings. Byte output reports `cs-byte8-v1`, `CHAR_BIT=8`,
+8/16/32-bit exact integer types, natural little-endian aggregate layout, packed
+NUL strings, and exact binary stream counts. Current artifacts are `CS486OBJ`
+v4, `CS486` v5, and `CS486AR` v2; legacy word readers remain accepted. Mixed
+objects/archives/extensions fail before output. CRC32, bounded record parsing,
+and RLE fixtures succeed; truncated, bomb/capacity-plus-one, unaligned, and
+out-of-range inputs retain their previous memory/file state. A filesystem cold
+restore returns the same 256 bytes.
 
 ### Bounded CS486 instruction debugger
 
@@ -1385,3 +1500,169 @@ delete the file, and run it a third time.
 
 `Expect:` `DIR` shows one logical byte, allocated/free capacity changes by one
 2,048-byte unit, and deletion returns the capacity to its original value.
+
+## Issue #44 CS-Linux Make
+
+`Verify:` Run
+`npm exec vitest run tests/runtime/guestMake.test.ts tests/os/makeCommand.test.ts tests/computer/guestResourceAccounting.test.ts`.
+Create `/home/cs/make-demo/Makefile` with one C compile-only rule, one link
+rule, and an `all` target. Run `make -C /home/cs/make-demo`, run it again,
+change the source contents while setting its guest mtime older than the target,
+and run it a third time.
+
+`Expect:` The first invocation executes dependency-first and creates validated
+`CS486OBJ` and `CS486` artifacts. The second reports the requested target as up
+to date. The content change forces a rebuild through the bounded
+`.cs-make-state` fingerprint even though mtime alone would not. `ps` and guest
+RAM evidence show one make PID and one 128 KiB lease while work is active.
+
+`Verify:` Use a three-recipe target and interrupt after the first scheduler
+tick, then repeat and close the exact Web Terminal session while make is active.
+Try a pipeline, redirect, command chain, background recipe, `sh`, `python`,
+`run`, `vi`, lifecycle command, recursive make, `-j4`, an include, an implicit
+rule, and a dependency cycle. Boot one CS-DOS Computer and run `MAKE`.
+
+`Expect:` At most one recipe advances per tick. Interrupt and disconnect each
+publish one terminal status, reap the PID, and return the RAM lease exactly
+once; already successful target artifacts remain. Every non-admitted form fails
+explicitly without host execution. CS-DOS reports MAKE unavailable and retains
+CS PROGRAM LIST/PWB as its build workflow.
+
+## Issue #48 CS Make state consistency v2
+
+`Verify:` Run
+`npm exec vitest run tests/runtime/guestMake.test.ts tests/os/makeCommand.test.ts tests/computer/guestResourceAccounting.test.ts tests/computer/linuxMakeProbe.test.ts`.
+Delete `.cs-make-state`, remove one target record, replace the toolchain
+identity, tamper with a target while giving it an older mtime, mutate an input
+between recipe execution and verification, fail recipe I/O, and fail state-file
+I/O completion.
+
+`Expect:` Missing, evicted, legacy, foreign-toolchain, and output-mismatched
+state rebuilds and converges to `CSMAKE2`. Mid-build input change and recipe I/O
+failure do not advance target state. A later failed target retains earlier
+committed records. State I/O failure restores the last committed state.
+Malformed state and DAC-denied Makefile, state, input, or output reads fail
+explicitly.
+
+`Verify:` Enqueue a three-recipe make through `ComputerRuntime`, inspect guest
+RAM and processes before ticking, then tick once for planning and once for the
+first recipe before interrupting.
+
+`Expect:` The make PID and 128 KiB compiler lease exist before Makefile parsing.
+The first scheduler tick performs bounded planning without running a recipe; the
+second runs only the first recipe. Interrupt publishes exit 130 once, reaps the
+PID, returns the lease, and prevents later recipes.
+
+## Issue #60 CS System Git 1.0
+
+`Verify:` Run
+`rtk vitest run tests/os/gitRepository.test.ts tests/os/gitIgnore.test.ts tests/os/gitCommand.test.ts tests/application/gitRemoteArchitecture.test.ts tests/computer/linuxGitProbe.test.ts tests/architecture/osShellBoundaries.test.ts`.
+
+`Expect:` Local init/add/commit/status/log/show/diff, executable and
+symbolic-link blobs, branches, whole-tree switch/checkout, fast-forward and
+disjoint three-way merge, lightweight tags, config, remotes, ignore precedence,
+corruption rejection, ownership checks, block-I/O accounting, and lease release
+pass. A conflicting merge leaves refs, index, and worktree byte-for-byte
+unchanged. The remote port exposes bounded terminal
+complete/failed/cancelled/unknown results without a Minecraft, Node network,
+child-process, PowerShell, or cmd dependency.
+
+`Verify:` In a new subdirectory on CS-Linux, run `git init`, create `.gitignore`
+with `*.tmp`, create one text file and one ignored `.tmp` file, then run
+`git add .`, `git status --short`, `git commit -m base`, `git branch feature`,
+make disjoint commits on `main` and `feature`, and run `git merge feature`.
+Inspect `git log --oneline`, `git show`, `.git/CS_SYSTEM_VCS`, `.git/config`,
+and the final files. Repeat with both branches changing the same line.
+
+`Expect:` Only the non-ignored files stage. The marker identifies
+`CS-SYSTEM-VCS 1`, config requires `computerSystemVcs = 1`, and the successful
+merge retains both disjoint files. The conflicting merge reports every conflict
+and makes no partial mutation. `free`/guest RAM snapshots return to their prior
+value after success and error because the 1 MiB Git lease has one `finally`
+owner. CS-DOS reports `git` unavailable.
+
+`Verify:` Run `git remote add origin cs+tcp://example.invalid/team/repo`,
+`git remote -v`, and `git push origin main`. Try raw `git://`, an inline
+`ssh://user@host/...` credential, a `../` repository segment, a `.git` symlink,
+an over-384-KiB file, capacity-plus-one tracked paths, and a repository whose
+`.git` owner differs from the current effective UID.
+
+`Expect:` Remote metadata round-trips without credentials. Push fails explicitly
+because authenticated guest TCP/IP transport is unavailable; no host Git or host
+socket is contacted. Every unsafe URL, control directory, object, capacity, and
+ownership case terminates nonzero without exposing a new ref or partial index.
+
+`Verify:` Restore `cs-linux-1.0-rootfs-v11` before boot and inspect it, then
+boot and inspect the current image. Run `rtk npm run test:mcp:bds` and retain
+the `linux_git/PASS` record.
+
+`Expect:` Immutable v11 has no `/usr/bin/git`; boot upgrades to v12, which does.
+The production ComputerRuntime probe reports initialized, committed, ignored,
+switched, merged, remoteUnavailable, and finalized as true, then reaches the off
+state within the bounded tick ceiling.
+
+### 2026-07-20 Issue #68 host/manual build evidence
+
+`Verify:` Run `rtk npm run test:python314` and `rtk npm run validate` after
+synchronizing the Python 3.14 compatibility manifest, public manual, README, and
+roadmap with bounded sets and eager comprehensions.
+
+`Expect:` The Python contract covers implicit non-leaking scopes, leftmost
+iterable and dictionary key/value evaluation order, containing-scope `:=`
+binding, deterministic bounded sets, explicit exclusions, and resource limits.
+The full host gate builds the production pack and all 16 manual chapters.
+
+`Result:` The Python suite passed 29 files and 261 tests. The full gate passed
+211 files and 1,508 tests, then built the production Bedrock pack and 16-chapter
+Pages site. This is host/build evidence only; the post-change real-Chrome
+desktop and mobile-width check remains part of the final Python profile
+publication gate.
+
+### 2026-07-20 Issue #74 host/manual build evidence
+
+`Verify:` Run the focused Issue #74 class/scope/runtime/heap/contract command,
+`rtk npm run test:python314`, and `rtk npm run validate` after synchronizing the
+Python 3.14 manifest, compatibility contract, public manual, README, and
+roadmap.
+
+`Expect:` Zero/one-base class definitions execute suites in isolated namespaces
+and publish atomically. Enclosing cells pass through without making class locals
+method closure bindings. Instance/class/base lookup, managed method binding,
+inherited `__init__`, `None` return enforcement, foundational built-ins,
+exact/capacity-plus-one namespaces, and reachable heap accounting all pass. The
+full gate builds the production pack and all 16 manual chapters.
+
+`Result:` Focused verification passed 6 files and 41 tests; the Python aggregate
+passed 31 files and 279 tests. Focused ESLint also passed. The repository-wide
+gate is waiting for the concurrently edited C frontend to return to a
+type-checking state. This is host/build evidence only; real-BDS Python execution
+and the post-change real-Chrome desktop/mobile manual check remain in the final
+profile publication gate.
+
+### 2026-07-20 Issue #78 generator send evidence
+
+`Verify:` Run the focused Issue #78 language/runtime/heap command, then
+`rtk npm run test:python314` and `rtk npm run validate` after synchronizing the
+Python 3.14 manifest, compatibility contract, README, roadmap, scoped guidance,
+and canonical manual.
+
+`Expect:` Yield expressions preserve directly containing function ownership.
+`next`/`for`/`send(None)` supply `None`; `send(value)` supplies the exact
+managed value. First-send, capacity, arity, keyword, re-entry, exhaustion, and
+fault paths terminate explicitly without corrupting generator state. Suspended
+frames and stored bound methods remain reachable without a second VM, scheduler,
+instruction pointer, or RAM lease. The full gate builds the production pack and
+all 16 manual chapters.
+
+`Result:` Focused verification passed 3 files and 33 tests; the synchronized
+contract/manual run passed 5 files and 50 tests. The Python aggregate passed 36
+files and 317 tests. The repository-wide gate passed formatting, ESLint,
+TypeScript, all 226 test files and 1,621 tests, the production Bedrock pack, and
+the 16-chapter Pages build. Chrome control and Computer Use could not start
+because their configured Node runtime path was unavailable. The required headed
+Playwright fallback retained the Python chapter title and stable hash at
+1440x900 and 390x844, displayed the generator heading, `send(value)`, and
+first-send restriction, and reported no horizontal overflow. The only console
+entry was the local static server's unrelated favicon 404; there were no
+page-script warnings or exceptions. Browser, snapshot/log files, and owned
+loopback servers were finalized.

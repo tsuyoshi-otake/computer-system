@@ -9,7 +9,11 @@ import {
   type FloppyMedia,
   type FloppyIoExtent,
 } from "../../domain/storage/floppyMedia.js";
-import { utf8ByteLength } from "../../domain/text/utf8.js";
+import {
+  decodeUtf8,
+  encodeUtf8,
+  utf8ByteLength,
+} from "../../domain/text/utf8.js";
 import type { ComputerOsProfile } from "../../domain/computer/computer.js";
 import type {
   FilesystemAccess,
@@ -351,6 +355,11 @@ export class FloppyGuestFilesystem implements GuestFilesystem {
     this.drive.access("read", target);
     return contents;
   }
+  readFileBytes(path: string): Uint8Array {
+    const target = this.target(path);
+    if (target === undefined) return this.base.readFileBytes(path);
+    return encodeUtf8(this.readFile(path));
+  }
   readLink(path: string): string {
     if (this.target(path) !== undefined)
       throw new Error("FAT12 does not support symbolic links");
@@ -410,6 +419,18 @@ export class FloppyGuestFilesystem implements GuestFilesystem {
       media.writeFile(target, contents, this.drive.timestamp()),
     );
     this.drive.access("write", target);
+  }
+  writeFileBytes(path: string, contents: Uint8Array, mode?: number): void {
+    const target = this.target(path);
+    if (target === undefined)
+      return this.base.writeFileBytes(path, contents, mode);
+    let text: string;
+    try {
+      text = decodeUtf8(contents);
+    } catch {
+      throw new Error("FAT12 byte files must contain valid UTF-8 text");
+    }
+    this.writeFile(path, text, mode);
   }
 
   private target(path: string): string | undefined {

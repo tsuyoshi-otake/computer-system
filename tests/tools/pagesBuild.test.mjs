@@ -202,6 +202,15 @@ describe("GitHub Pages publication", () => {
     expect(manual).toContain(
       `rel="canonical" href="${new URL("manual/", siteUrl).href}"`,
     );
+    expect(landing).toMatch(
+      /rel="icon"\s+type="image\/png"\s+href="\.\/assets\/machines\/cs-advanced-computer\.png"/u,
+    );
+    expect(manual).toMatch(
+      /rel="icon"\s+type="image\/png"\s+href="\.\.\/assets\/machines\/cs-advanced-computer\.png"/u,
+    );
+    expect(fallback).toContain(
+      `href="${siteUrl.href}assets/machines/cs-advanced-computer.png"`,
+    );
     expect(landing).toContain(
       `name="build-revision" content="${buildRevision.slice(0, 12)}"`,
     );

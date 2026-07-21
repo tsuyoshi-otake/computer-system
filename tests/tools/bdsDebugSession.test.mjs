@@ -1,12 +1,14 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  acceptanceFixtureWorldName,
   BdsDebugSession,
   isAllowedBdsCommand,
   isAllowedWebRelayCommand,
   isDiagnosticLine,
   parseWorkMonitorLine,
   parseBdsPort,
+  validateAcceptanceFixtureStart,
 } from "../../tools/bds-debug-session.mjs";
 
 describe("BDS debug session", () => {
@@ -55,6 +57,11 @@ describe("BDS debug session", () => {
         "scriptevent computer_system:debug-computer-list labc-1 0 64",
       ),
     ).toBe(true);
+    expect(
+      isAllowedBdsCommand(
+        "scriptevent computer_system:debug-acceptance-fixture aabc-1",
+      ),
+    ).toBe(true);
 
     expect(isAllowedBdsCommand("stop")).toBe(false);
     expect(isAllowedBdsCommand("op @a")).toBe(false);
@@ -88,6 +95,48 @@ describe("BDS debug session", () => {
         "scriptevent computer_system:debug-computer-list labc-1 0 65",
       ),
     ).toBe(false);
+    expect(
+      isAllowedBdsCommand(
+        "scriptevent computer_system:debug-acceptance-fixture aabc-1 stop",
+      ),
+    ).toBe(false);
+  });
+
+  it("requires a fresh dedicated tmp world for the acceptance fixture", () => {
+    const valid = {
+      acceptanceFixture: true,
+      resetWorld: true,
+      explicitWorkRoot: true,
+      worldName: acceptanceFixtureWorldName,
+      temporaryRoot: "C:/Users/tester/tmp",
+      workRoot: "C:/Users/tester/tmp/computer-system-acceptance-1",
+    };
+    expect(() => validateAcceptanceFixtureStart(valid)).not.toThrow();
+    expect(() =>
+      validateAcceptanceFixtureStart({ ...valid, resetWorld: false }),
+    ).toThrow(/resetWorld/u);
+    expect(() =>
+      validateAcceptanceFixtureStart({ ...valid, explicitWorkRoot: false }),
+    ).toThrow(/explicit BDS_MCP_WORKDIR/u);
+    expect(() =>
+      validateAcceptanceFixtureStart({ ...valid, worldName: "Production" }),
+    ).toThrow(/ComputerSystemAcceptance/u);
+    expect(() =>
+      validateAcceptanceFixtureStart({
+        ...valid,
+        workRoot: "C:/Users/tester/project",
+      }),
+    ).toThrow(/user tmp/u);
+    expect(() =>
+      validateAcceptanceFixtureStart({
+        ...valid,
+        acceptanceFixture: false,
+        resetWorld: false,
+        explicitWorkRoot: false,
+        worldName: "Production",
+        workRoot: "C:/Users/tester/project",
+      }),
+    ).not.toThrow();
   });
 
   it("validates ports without silently accepting trailing text", () => {
@@ -161,6 +210,41 @@ describe("BDS debug session", () => {
     ).toBe(true);
     expect(
       isAllowedWebRelayCommand(
+        "scriptevent computer_system:web-abort-line abcdefghijkl",
+      ),
+    ).toBe(true);
+    expect(
+      isAllowedWebRelayCommand(
+        "scriptevent computer_system:web-power abcdefghijkl request1 power_on",
+      ),
+    ).toBe(true);
+    expect(
+      isAllowedWebRelayCommand(
+        "scriptevent computer_system:web-power abcdefghijkl request2 safe_boot",
+      ),
+    ).toBe(true);
+    expect(
+      isAllowedWebRelayCommand(
+        "scriptevent computer_system:web-power abcdefghijkl request3 shutdown",
+      ),
+    ).toBe(true);
+    expect(
+      isAllowedWebRelayCommand(
+        "scriptevent computer_system:web-floppy-eject abcdefghijkl request4",
+      ),
+    ).toBe(true);
+    expect(
+      isAllowedWebRelayCommand(
+        "scriptevent computer_system:web-power abcdefghijkl request5 reboot",
+      ),
+    ).toBe(false);
+    expect(
+      isAllowedWebRelayCommand(
+        "scriptevent computer_system:web-floppy-eject abcdefghijkl short",
+      ),
+    ).toBe(false);
+    expect(
+      isAllowedWebRelayCommand(
         "scriptevent computer_system:web-complete abcdefghijkl request1 3 vhel",
       ),
     ).toBe(true);
@@ -196,6 +280,16 @@ describe("BDS debug session", () => {
         '[Scripting][warning]-CS_WORK_MONITOR {"completedTicks":1}',
       ),
     ).toBe(false);
+    expect(
+      isDiagnosticLine(
+        '[Scripting][warning]-CS_DEBUG_COMMAND {"status":"ignored","error":"not_running"}',
+      ),
+    ).toBe(false);
+    expect(
+      isDiagnosticLine(
+        "[Scripting][warning]-CS_DEBUG_COMMAND malformed error response",
+      ),
+    ).toBe(true);
   });
 
   it("parses only bounded WorkMonitor status records", () => {
@@ -367,6 +461,43 @@ describe("BDS debug session", () => {
     );
     await expect(session.listComputers({ limit: 65 })).rejects.toThrow(
       /between 1 and 64/u,
+    );
+  });
+
+  it("provisions only an active acceptance fixture and validates its identity", async () => {
+    class AcceptanceSession extends BdsDebugSession {
+      async runCommand(command) {
+        this.command = command;
+        return { command, afterCursor: 50 };
+      }
+
+      async waitForLog(options) {
+        const requestId = options.contains.match(/"requestId":"([^"]+)"/u)?.[1];
+        return {
+          line: `CS_DEBUG_ACCEPTANCE_FIXTURE ${JSON.stringify({
+            requestId,
+            status: "completed",
+            computerId: "c-00696j",
+          })}`,
+        };
+      }
+    }
+
+    const session = new AcceptanceSession({
+      environment: { BDS_HOME: "C:/not-accessed-by-acceptance" },
+    });
+    await expect(session.provisionAcceptanceFixture()).rejects.toThrow(
+      /not active/u,
+    );
+    session.acceptanceFixture = true;
+    await expect(
+      session.provisionAcceptanceFixture({ timeoutMs: 1_000 }),
+    ).resolves.toMatchObject({
+      status: "completed",
+      computerId: "c-00696j",
+    });
+    expect(session.command).toMatch(
+      /^scriptevent computer_system:debug-acceptance-fixture a[^ ]+$/u,
     );
   });
 

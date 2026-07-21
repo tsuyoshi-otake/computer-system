@@ -8,9 +8,10 @@
   leads/continuations, overlong sequences, surrogates, and out-of-range code
   points emit U+FFFD and advance one input byte once enough bytes arrive. There
   is no final-flush API, so an incomplete suffix remains pending at stream end.
-- The encoder does not normalize lone JavaScript surrogates. Scope round-trip
-  guarantees to valid Unicode scalar strings, or harden encoder behavior before
-  broadening that contract.
+- The encoder deterministically replaces every lone JavaScript surrogate with
+  U+FFFD, matching the Unicode scalar-value boundary without depending on a host
+  `TextEncoder`. The complete-sequence decoder rejects malformed input; the
+  streaming chunk decoder retains its replacement-and-progress behavior.
 
 ## Verification
 

@@ -20,6 +20,12 @@ const projectRoot = path.resolve(
 );
 const defaultOutputRoot = path.join(projectRoot, "dist", "pages");
 const allowedOutputParent = path.join(projectRoot, "dist");
+const outputCleanupOptions = {
+  force: true,
+  maxRetries: 5,
+  recursive: true,
+  retryDelay: 50,
+};
 const defaultSiteUrl = "https://tsuyoshi-otake.github.io/computer-system/";
 const allowedAssetExtensions = new Set([".png"]);
 const expectedOutputFiles = new Set([
@@ -76,7 +82,7 @@ export async function buildPages(options = {}) {
     SITE_URL: escapeHtml(siteUrl.href),
   };
 
-  await rm(outputRoot, { force: true, recursive: true });
+  await rm(outputRoot, outputCleanupOptions);
   try {
     await allOrThrow([
       mkdir(path.join(outputRoot, "manual"), { recursive: true }),
@@ -142,7 +148,7 @@ export async function buildPages(options = {}) {
       siteUrl: siteUrl.href,
     };
   } catch (error) {
-    await rm(outputRoot, { force: true, recursive: true });
+    await rm(outputRoot, outputCleanupOptions);
     throw error;
   }
 }

@@ -1,4 +1,5 @@
 import { cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
@@ -40,7 +41,10 @@ import {
 } from "./machine-textures.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const outputRoot = path.join(root, "dist");
+const outputRoot = resolveOutputRoot(process.env.COMPUTER_SYSTEM_PACK_OUTPUT);
+const acceptanceFixtureBuild = parseAcceptanceFixtureBuild(
+  process.env.COMPUTER_SYSTEM_ACCEPTANCE_FIXTURE,
+);
 const behaviorOutput = path.join(outputRoot, "behavior_pack");
 const resourceOutput = path.join(outputRoot, "resource_pack");
 
@@ -173,6 +177,9 @@ await Promise.all(
 
 await build({
   bundle: true,
+  define: {
+    __CS_ACCEPTANCE_FIXTURE__: JSON.stringify(acceptanceFixtureBuild),
+  },
   entryPoints: [path.join(root, "src", "bedrock", "main.ts")],
   external: ["@minecraft/server", "@minecraft/server-ui"],
   format: "esm",
@@ -193,3 +200,29 @@ for (const manifestPath of [
 }
 
 console.log(`Built feasibility packs in ${outputRoot}`);
+
+function resolveOutputRoot(value) {
+  if (value === undefined) return path.join(root, "dist");
+  if (!path.isAbsolute(value)) {
+    throw new Error("COMPUTER_SYSTEM_PACK_OUTPUT must be an absolute path.");
+  }
+  const resolved = path.resolve(value);
+  const temporaryRoot = path.resolve(os.homedir(), "tmp");
+  const relative = path.relative(temporaryRoot, resolved);
+  if (
+    relative === "" ||
+    relative.startsWith("..") ||
+    path.isAbsolute(relative)
+  ) {
+    throw new Error(
+      "COMPUTER_SYSTEM_PACK_OUTPUT must be a child of the user tmp directory.",
+    );
+  }
+  return resolved;
+}
+
+function parseAcceptanceFixtureBuild(value) {
+  if (value === undefined || value === "0") return false;
+  if (value === "1") return true;
+  throw new Error("COMPUTER_SYSTEM_ACCEPTANCE_FIXTURE must be 0 or 1.");
+}

@@ -557,7 +557,9 @@ export class DosIdeSession {
     if (this.editor.state === "closed") {
       return createTerminalInteractionDescriptor({
         context: "unavailable",
+        cursorShape: "underline",
         helpTopicId: this.editorProfileValue,
+        history: false,
         inputMode: "none",
         interrupt: false,
         pointer: "none",
@@ -567,7 +569,9 @@ export class DosIdeSession {
     }
     return createTerminalInteractionDescriptor({
       context: this.editorProfileValue,
+      cursorShape: this.editor.isInsertMode ? "block" : "underline",
       helpTopicId: this.editorProfileValue,
+      history: false,
       hints: this.interactionHints(),
       inputMode: "keys",
       interrupt: false,

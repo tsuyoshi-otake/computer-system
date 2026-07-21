@@ -64,6 +64,10 @@ const maximumCommandCharacters = 512;
 const maximumInsertedCommandCharacters = 4_096;
 const maximumInsertedCommandLines = 128;
 const maximumVisibleCommandCharacters = 4_096;
+const viBackground = 15;
+const viForeground = 0;
+const viMutedForeground = 7;
+const viModeForeground = 9;
 
 type UndoOperation =
   | { readonly index: number; readonly kind: "replace"; readonly line: string }
@@ -131,7 +135,7 @@ export class ViSession {
     | undefined;
   private pendingNormal = "";
   private stateValue: ViState = "editing";
-  private status = "NORMAL  i insert  : command";
+  private status = "";
   private viewLeft = 0;
   private viewTop = 0;
   private viewTopSegment = 0;
@@ -179,7 +183,9 @@ export class ViSession {
     if (this.stateValue === "closed") {
       return createTerminalInteractionDescriptor({
         context: "unavailable",
+        cursorShape: "underline",
         helpTopicId: "vi",
+        history: false,
         inputMode: "none",
         interrupt: false,
         pointer: "none",
@@ -209,7 +215,9 @@ export class ViSession {
     }
     return createTerminalInteractionDescriptor({
       context,
+      cursorShape: "block",
       helpTopicId: "vi",
+      history: false,
       hints,
       inputMode: "keys",
       interrupt: false,
@@ -235,19 +243,12 @@ export class ViSession {
     if (this.output !== undefined) return this.outputScreen();
     this.ensureVisible();
     const rows: HighlightedCell[][] = [];
-    rows.push(
-      this.plainRow(
-        `VI  ${this.fileNameValue ?? "[No Name]"}${this.dirty ? " [+]" : ""}`,
-        15,
-        11,
-      ),
-    );
     let lineIndex = this.viewTop;
     let segment = this.optionsValue.wrap ? this.viewTopSegment : 0;
     let lexState: ViLexState = { multiline: null };
     for (let offset = 0; offset < this.contentRows; offset += 1) {
       if (lineIndex >= this.lines.length) {
-        rows.push(this.plainRow("~", 9, 15));
+        rows.push(this.plainRow("~", viMutedForeground, viBackground));
         continue;
       }
       const rendered = this.renderLineRow(lineIndex, segment, lexState);
@@ -263,26 +264,19 @@ export class ViSession {
         segment = 0;
       }
     }
-    const mode = `-- ${this.modeValue.toUpperCase()} --`;
-    rows.push(this.plainRow(`${mode} ${this.status}`, 0, 15));
+    const viewport = this.viewportLabel(lineIndex);
+    rows.push(this.statusRow(viewport));
+    const message = this.messageLine();
     rows.push(
       this.plainRow(
-        this.modeValue === "command"
-          ? `:${this.command}`
-          : "Esc normal  :w save  :q quit",
-        0,
-        15,
+        message,
+        message === "-- INSERT --" ? viModeForeground : viForeground,
+        viBackground,
       ),
     );
-    const cursorSegment = this.optionsValue.wrap
-      ? Math.floor(this.cursorColumn / this.contentWidth)
-      : 0;
-    const cursorDisplayColumn = this.optionsValue.wrap
-      ? this.cursorColumn - cursorSegment * this.contentWidth
-      : this.cursorColumn - this.viewLeft;
-    const y = this.cursorScreenRow() + 2;
-    const x = Math.min(this.width, this.gutterWidth + cursorDisplayColumn + 1);
-    return { cursor: { x, y }, rows };
+    const cursor = this.screenCursor();
+    this.renderBlockCursor(rows, cursor);
+    return { cursor, rows };
   }
 
   key(key: string): ViResult {
@@ -573,8 +567,8 @@ export class ViSession {
     else if (key === "G") {
       this.cursorLine = this.lines.length - 1;
       this.cursorColumn = 0;
-    } else if (key === "PageUp") this.cursorLine -= this.height - 3;
-    else if (key === "PageDown") this.cursorLine += this.height - 3;
+    } else if (key === "PageUp") this.cursorLine -= this.contentRows;
+    else if (key === "PageDown") this.cursorLine += this.contentRows;
     else return this.continue("NORMAL");
     this.clampCursor();
     return this.continue(`Line ${this.cursorLine + 1}`);
@@ -1191,7 +1185,7 @@ export class ViSession {
   }
 
   private get contentRows(): number {
-    return this.height - 3;
+    return this.height - 2;
   }
 
   private get contentWidth(): number {
@@ -1239,25 +1233,121 @@ export class ViSession {
   private outputScreen(): ViScreen {
     const output = this.output;
     if (output === undefined) throw new Error("vi output state is unavailable");
-    const rows: HighlightedCell[][] = [
-      this.plainRow(
-        `VI  ${this.fileNameValue ?? "[No Name]"}  command output`,
-        15,
-        11,
-      ),
-    ];
+    const rows: HighlightedCell[][] = [];
     const maximumLines = this.height - 2;
     for (let index = 0; index < maximumLines; index += 1) {
-      rows.push(this.plainRow(output.lines[index] ?? "", 0, 15));
+      rows.push(
+        this.plainRow(output.lines[index] ?? "", viForeground, viBackground),
+      );
     }
-    rows.push(
-      this.plainRow(
-        `${output.prompt}${output.truncated ? "  [truncated]" : ""}`,
-        0,
-        15,
+    rows.push(this.statusRow("Output"));
+    const prompt = `${output.prompt}${output.truncated ? "  [truncated]" : ""}`;
+    rows.push(this.plainRow(prompt, viForeground, viBackground));
+    const cursor = {
+      x: Math.min(this.width, [...prompt].length + 1),
+      y: this.height,
+    };
+    this.renderBlockCursor(rows, cursor);
+    return { cursor, rows };
+  }
+
+  private screenCursor(): { readonly x: number; readonly y: number } {
+    if (this.modeValue === "command") {
+      return {
+        x: Math.min(this.width, [...this.command].length + 2),
+        y: this.height,
+      };
+    }
+    const cursorSegment = this.optionsValue.wrap
+      ? Math.floor(this.cursorColumn / this.contentWidth)
+      : 0;
+    const cursorDisplayColumn = this.optionsValue.wrap
+      ? this.cursorColumn - cursorSegment * this.contentWidth
+      : this.cursorColumn - this.viewLeft;
+    return {
+      x: Math.min(this.width, this.gutterWidth + cursorDisplayColumn + 1),
+      y: this.cursorScreenRow() + 1,
+    };
+  }
+
+  private renderBlockCursor(
+    rows: HighlightedCell[][],
+    cursor: { readonly x: number; readonly y: number },
+  ): void {
+    const row = rows[cursor.y - 1];
+    const cell = row?.[cursor.x - 1];
+    if (row === undefined || cell === undefined) return;
+    row[cursor.x - 1] = {
+      background: cell.foreground,
+      character: cell.character,
+      foreground: cell.background,
+    };
+  }
+
+  private statusRow(viewport: string): HighlightedCell[] {
+    const modified = this.dirty ? " [+]" : "";
+    const right = `${String(this.cursorLine + 1)},${String(this.cursorColumn + 1)}  ${viewport}`;
+    const value = this.fitStatusLine(
+      this.fileNameValue ?? "[No Name]",
+      modified,
+      right,
+    );
+    return this.plainRow(value, viBackground, viForeground);
+  }
+
+  private fitStatusLine(left: string, suffix: string, right: string): string {
+    const rightCharacters = [...right].slice(-Math.max(1, this.width - 1));
+    const leftBudget = Math.max(0, this.width - rightCharacters.length - 1);
+    const suffixCharacters = [...suffix].slice(-leftBudget);
+    const nameBudget = Math.max(0, leftBudget - suffixCharacters.length);
+    const leftCharacters = [...left];
+    const visibleLeft =
+      leftCharacters.length <= nameBudget
+        ? leftCharacters
+        : nameBudget === 0
+          ? []
+          : ["<", ...leftCharacters.slice(-(nameBudget - 1))];
+    const gap = " ".repeat(
+      Math.max(
+        1,
+        this.width -
+          visibleLeft.length -
+          suffixCharacters.length -
+          rightCharacters.length,
       ),
     );
-    return { cursor: { x: 1, y: this.height }, rows };
+    return `${visibleLeft.join("")}${suffixCharacters.join("")}${gap}${rightCharacters.join("")}`;
+  }
+
+  private viewportLabel(nextLineIndex: number): string {
+    const atTop =
+      this.viewTop === 0 &&
+      (!this.optionsValue.wrap || this.viewTopSegment === 0);
+    const atBottom = nextLineIndex >= this.lines.length;
+    if (atTop && atBottom) return "All";
+    if (atTop) return "Top";
+    if (atBottom) return "Bot";
+    const percentage = Math.max(
+      1,
+      Math.min(
+        100,
+        Math.floor(((this.cursorLine + 1) * 100) / this.lines.length),
+      ),
+    );
+    return `${String(percentage)}%`;
+  }
+
+  private messageLine(): string {
+    if (this.modeValue === "command") return `:${this.command}`;
+    if (
+      this.status !== "" &&
+      this.status !== "NORMAL" &&
+      this.status !== "INSERT" &&
+      this.status !== "COMMAND"
+    ) {
+      return this.status;
+    }
+    return this.modeValue === "insert" ? "-- INSERT --" : "";
   }
 
   private plainRow(
@@ -1283,7 +1373,11 @@ export class ViSession {
   private padRow(cells: readonly HighlightedCell[]): HighlightedCell[] {
     const row = cells.slice(0, this.width);
     while (row.length < this.width) {
-      row.push({ background: 15, character: " ", foreground: 0 });
+      row.push({
+        background: viBackground,
+        character: " ",
+        foreground: viForeground,
+      });
     }
     return row;
   }

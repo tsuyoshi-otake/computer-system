@@ -1,7 +1,21 @@
 import type { InMemoryFilesystem } from "../../domain/filesystem/inMemoryFilesystem.js";
+import type {
+  CpuProcess,
+  CpuProcessSliceResult,
+  CpuProcessState,
+} from "../../domain/runtime/cpuProcess.js";
+import { VmRuntimeError } from "../../domain/runtime/errors.js";
 import { utf8ByteLength } from "../../domain/text/utf8.js";
+import { parseLinuxInittab } from "./linuxInittab.js";
+import {
+  cronEntryDue,
+  parseLinuxCrontab,
+  virtualCalendarFields,
+  type CronEntry,
+} from "./linuxCrontab.js";
 import {
   ShellCommandRuntime,
+  formatLastLoginTimestamp,
   type ShellCommandRuntimeOptions,
   type ShellAction,
   type ShellBackgroundRequest,
@@ -9,10 +23,11 @@ import {
   type ShellCompletionResult,
   type ShellForegroundRequest,
   type ShellJobControlRequest,
-  type ShellProcessMemoryAdmission,
   type ShellProcessMemoryAdmissionRequest,
   type ShellProcessMemoryGrant,
   type ShellRuntimeIdentityState,
+  type ShellUtilityMemoryAdmissionRequest,
+  type ShellUtilityMemoryGrant,
 } from "./shellCommands.js";
 import type { ComputerOsProfile } from "../../domain/computer/computer.js";
 import {
@@ -27,6 +42,11 @@ import {
   type DosGuestMemoryReservation,
   type DosGuestMemorySnapshot,
 } from "./dosGuestMemoryManager.js";
+import {
+  LinuxGuestMemoryManager,
+  type LinuxGuestMemoryReservation,
+  type LinuxGuestMemorySnapshot,
+} from "./linuxGuestMemoryManager.js";
 import {
   planDosMemoryConfiguration,
   type DosConfigurationDriverResolution,
@@ -54,6 +74,7 @@ import {
 } from "./linuxAccounts.js";
 import {
   CredentialContext,
+  createLoginCredentials,
   createEffectiveCredentials,
   initialUserCredentials,
   initialUserId,
@@ -63,6 +84,7 @@ import {
 } from "./linuxCredentials.js";
 import { credentialedFilesystem } from "./credentialedFilesystem.js";
 import {
+  filesystemExecute,
   type GuestFilesystem,
   unrestrictedGuestFilesystem,
 } from "./guestFilesystem.js";
@@ -82,6 +104,11 @@ import {
   type QBasicSessionResult,
 } from "../editor/qbasicSession.js";
 import { ViSession, type ViResult } from "../editor/viSession.js";
+import {
+  PagerSession,
+  type PagerMode,
+  type PagerResult,
+} from "../editor/pagerSession.js";
 import {
   createTerminalInteractionDescriptor,
   type TerminalInteractionDescriptor,
@@ -104,6 +131,7 @@ import {
   parseGuestMakefile,
   parseGuestMakeState,
   planGuestMakeBuild,
+  resolveGuestMakeRule,
   serializeGuestMakeState,
   type GuestMakeArguments,
   type GuestMakeFingerprintFile,
@@ -164,7 +192,6 @@ export interface ShellResult {
 }
 
 export interface ShellSessionOptions {
-  readonly admitProcessMemory?: ShellProcessMemoryAdmission;
   readonly clock?: ShellClockSource;
   readonly computerId?: number;
   readonly computerName?: string;
@@ -174,7 +201,6 @@ export interface ShellSessionOptions {
   readonly terminalHeight?: number;
   readonly terminalWidth?: number;
   readonly hardware?: ComputerHardwareProfile;
-  readonly memoryUsageBytes?: () => number;
   readonly guestRamLedger?: GuestRamLedger;
   readonly requireLogin?: boolean;
   readonly passwordSalt?: () => string;
@@ -204,6 +230,7 @@ const maximumScriptLoopIterations = 1_024;
 const maximumPipelineBuffer = 256_000;
 const dosEditorResidentBytes = 256 * 1_024;
 const viResidentBytes = 192 * 1_024;
+const pagerResidentBytes = 96 * 1_024;
 const maximumBackgroundCommandBytes = 512;
 const maximumAuthenticationFailures = 3;
 const maximumIdentityAliases = 128;
@@ -215,6 +242,7 @@ const sudoCredentialLifetimeSeconds = 5 * 60;
 const variableMarkerStart = "\u{e000}";
 const variableMarkerEnd = "\u{e001}";
 const linuxMakeRecipeCommands: ReadonlySet<string> = new Set([
+  "ar",
   "as",
   "c++",
   "cc",
@@ -226,6 +254,7 @@ const linuxMakeRecipeCommands: ReadonlySet<string> = new Set([
   "nm",
   "objdump",
   "printf",
+  "ranlib",
   "rm",
   "rmdir",
   "touch",
@@ -242,7 +271,7 @@ const dosEmm386Capsule = "CS-DOS UMB manager\n".padEnd(
 );
 
 type SessionMemoryReservation = Pick<
-  MemoryLease | DosGuestMemoryReservation,
+  MemoryLease | DosGuestMemoryReservation | LinuxGuestMemoryReservation,
   "release" | "released"
 >;
 
@@ -315,11 +344,15 @@ export class ShellSession {
   private pendingEditorTranscriptPrefix = emptyGuestToolchainTranscript();
   private vi: ViSession | undefined;
   private viMemoryLease: SessionMemoryReservation | undefined;
+  private pager: PagerSession | undefined;
+  private pagerMemoryLease: SessionMemoryReservation | undefined;
   private readonly commands: ShellCommandRuntime;
   private readonly dosMemory: DosGuestMemoryManager | undefined;
+  private readonly linuxMemory: LinuxGuestMemoryManager | undefined;
   private readonly frontend: ShellFrontend;
   private readonly hardware: ComputerHardwareProfile;
   private readonly guestRamLedger: GuestRamLedger;
+  private readonly clock: ShellClockSource;
   private readonly ownsGuestRamLedger: boolean;
   private readonly history: string[] = [];
   private historyPath: string | undefined;
@@ -331,10 +364,15 @@ export class ShellSession {
   private aliasDepth = 0;
   private scriptLoopIterations = 0;
   private readonly startupLines: string[] = [];
+  private cronServicePid: number | undefined;
+  private cronEntries: readonly CronEntry[] = [];
+  private readonly cronQueue: CronEntry[] = [];
+  private cronLastMinute: number | undefined;
   private terminalHeight: number;
   private terminalWidth: number;
   private cpuCyclesValue = 0;
   private dosBatchDepth = 0;
+  private doskeyLoaded = false;
   private suppressFilesystemWait = false;
   private debugSubmission = false;
   private scopedElevationDepth = 0;
@@ -364,6 +402,8 @@ export class ShellSession {
     this.frontend = shellFrontendFor(profile.id);
     const currentTick = options.currentTick ?? ((): number => 0);
     const ticksPerSecond = options.ticksPerSecond ?? 20;
+    this.clock =
+      options.clock ?? createVirtualShellClock(currentTick, ticksPerSecond);
     this.onOsRuntimeChanged = options.onOsRuntimeChanged;
     this.signalProcess = options.signalProcess;
     this.osRuntime =
@@ -394,6 +434,7 @@ export class ShellSession {
     try {
       profile.boot(filesystem, {
         computerName: options.computerName ?? "c-000000",
+        dosRuntime: options.dosRuntime,
       });
     } catch (error: unknown) {
       restoreLegacyHome(error);
@@ -409,6 +450,7 @@ export class ShellSession {
         throw new Error("CS-Linux account migration did not terminate");
       this.accounts = accounts;
       this.authentication = new LinuxAuthentication(accounts, {
+        computerName: options.computerName ?? "c-000000",
         enabled: options.requireLogin === true,
         salt: options.passwordSalt,
       });
@@ -432,14 +474,22 @@ export class ShellSession {
       profile.id === "dos"
         ? new DosGuestMemoryManager(this.guestRamLedger)
         : undefined;
+    this.linuxMemory =
+      profile.id === "linux"
+        ? new LinuxGuestMemoryManager(this.guestRamLedger)
+        : undefined;
     if (this.osRuntime !== undefined) {
-      ensureLinuxRuntimePresence(this.osRuntime, currentTick(), this.hardware);
+      ensureLinuxRuntimePresence(
+        this.osRuntime,
+        currentTick(),
+        this.hardware,
+        filesystem,
+      );
       this.notifyOsRuntimeChanged();
     }
     const runtimeOptions: ShellCommandRuntimeOptions = {
       accounts: this.accounts,
-      clock:
-        options.clock ?? createVirtualShellClock(currentTick, ticksPerSecond),
+      clock: this.clock,
       computerId: options.computerId ?? 0,
       computerName: options.computerName ?? "c-000000",
       currentTick,
@@ -447,20 +497,26 @@ export class ShellSession {
       profile,
       ticksPerSecond,
       hardware: this.hardware,
-      memoryUsageBytes: options.memoryUsageBytes ?? ((): number => 0),
       ...(this.dosMemory === undefined
         ? {}
         : {
             dosMemorySnapshot: (): DosGuestMemorySnapshot =>
               this.dosMemory!.snapshot(),
           }),
+      ...(this.linuxMemory === undefined
+        ? {}
+        : {
+            linuxMemorySnapshot: (): LinuxGuestMemorySnapshot =>
+              this.linuxMemory!.snapshot(),
+          }),
       admitProcessMemory:
         this.dosMemory === undefined
-          ? (options.admitProcessMemory ??
-            ((request): ShellProcessMemoryGrant =>
-              this.admitLedgerProcessMemory(request)))
+          ? (request): ShellProcessMemoryGrant =>
+              this.admitLinuxProcessMemory(request)
           : (request): ShellProcessMemoryGrant =>
               this.admitDosProcessMemory(request),
+      admitUtilityMemory: (request): ShellUtilityMemoryGrant =>
+        this.admitLinuxUtilityMemory(request),
       virtualDevices: options.virtualDevices,
       peripherals: options.peripherals,
       deferGuestExecution: options.deferGuestExecution,
@@ -483,8 +539,12 @@ export class ShellSession {
       runtimeOptions,
     );
     if (profile.id === "linux") {
-      if (this.authentication?.isAuthenticated() === true)
+      if (this.authentication?.isAuthenticated() === true) {
         this.activateAuthenticatedSession(this.startupLines);
+      } else {
+        const issue = this.readIssue();
+        if (issue !== undefined) this.startupLines.push(...issue);
+      }
     } else {
       for (const loaded of [
         this.configureDosMemory("C:\\CONFIG.SYS"),
@@ -498,7 +558,12 @@ export class ShellSession {
   }
 
   prompt(): string {
-    if (this.vi !== undefined || this.editor !== undefined) return "";
+    if (
+      this.vi !== undefined ||
+      this.editor !== undefined ||
+      this.pager !== undefined
+    )
+      return "";
     const conversationPrompt = this.linuxConversationPrompt();
     if (conversationPrompt !== undefined) return conversationPrompt;
     const authenticationPrompt = this.authentication?.prompt();
@@ -510,6 +575,8 @@ export class ShellSession {
     if (this.disconnected) {
       return createTerminalInteractionDescriptor({
         context: "unavailable",
+        cursorShape: "underline",
+        history: false,
         inputMode: "none",
         interrupt: false,
         pointer: "none",
@@ -519,6 +586,7 @@ export class ShellSession {
     }
     if (this.vi !== undefined) return this.vi.terminalInteraction();
     if (this.editor !== undefined) return this.editor.terminalInteraction();
+    if (this.pager !== undefined) return this.pager.terminalInteraction();
     const secretInput =
       this.linuxConversation !== undefined ||
       (this.authentication?.isSecretInput() ?? false);
@@ -527,6 +595,7 @@ export class ShellSession {
       this.authentication?.isAuthenticated() === false;
     return createTerminalInteractionDescriptor({
       context: secretInput ? "secret" : login ? "login" : "shell",
+      cursorShape: profileCursorShape(this.frontend.id),
       helpTopicId: login ? "login" : "shell",
       hints: login
         ? [{ key: "Enter", label: "Continue" }]
@@ -536,6 +605,8 @@ export class ShellSession {
             { key: "Up/Down", label: "History" },
           ],
       inputMode: "line",
+      history:
+        !secretInput && (this.frontend.id === "linux" || this.doskeyLoaded),
       interrupt: false,
       pointer: "none",
       presentation: "terminal",
@@ -570,6 +641,10 @@ export class ShellSession {
     return this.dosMemory;
   }
 
+  linuxMemoryManager(): LinuxGuestMemoryManager | undefined {
+    return this.linuxMemory;
+  }
+
   disconnect(): readonly string[] {
     if (this.disconnected) return [];
     this.disconnected = true;
@@ -584,13 +659,16 @@ export class ShellSession {
     };
     finalize(() => this.releaseViMemory());
     finalize(() => this.releaseEditorMemory());
+    finalize(() => this.releasePagerMemory());
     this.vi = undefined;
     this.editor = undefined;
+    this.pager = undefined;
     this.pendingEditorCommand = undefined;
     finalize(() => this.commands.closeDebugger());
-    if (this.ownsGuestRamLedger && this.dosMemory !== undefined) {
+    if (this.ownsGuestRamLedger) {
       finalize(() => {
-        this.dosMemory!.close();
+        this.dosMemory?.close();
+        this.linuxMemory?.close();
       });
     }
     const result = this.logoutAuthenticatedSession("disconnect");
@@ -622,10 +700,10 @@ export class ShellSession {
     this.credentialContext.replace(credentials);
     const homeWarning = this.commands.activateUser(user);
     if (homeWarning !== undefined) (errors ?? output).push(homeWarning);
-    const runtimeSession = this.openRuntimeLoginSession(user);
-    if (runtimeSession !== undefined) output.push(runtimeSession);
     const motd = this.readMotd();
     if (motd !== undefined) output.push(...motd);
+    const runtimeSession = this.openRuntimeLoginSession(user);
+    if (runtimeSession !== undefined) output.push(runtimeSession);
     const historyWarning = this.loadHistory(user);
     if (historyWarning !== undefined) (errors ?? output).push(historyWarning);
     const loaded = this.loadLinuxLoginScripts(user);
@@ -642,6 +720,7 @@ export class ShellSession {
     let result: ShellResult;
     if (this.vi !== undefined) result = this.submitViLine(line);
     else if (this.editor !== undefined) result = this.submitEditor(line);
+    else if (this.pager !== undefined) result = this.submitPager(line);
     else if (this.linuxConversation !== undefined)
       result = this.submitLinuxConversation(line);
     else if (this.authentication?.isAuthenticated() === false) {
@@ -970,7 +1049,14 @@ export class ShellSession {
       this.vi !== undefined ||
       this.editor !== undefined
     ) {
-      return { candidates: [], cursor, value: line };
+      return {
+        candidates: [],
+        cursor,
+        replaceEnd: cursor,
+        replaceStart: cursor,
+        truncated: false,
+        value: line,
+      };
     }
     return this.commands.complete(line, cursor);
   }
@@ -978,7 +1064,11 @@ export class ShellSession {
   resize(width: number, height: number): EditorScreen | undefined {
     this.terminalWidth = width;
     this.terminalHeight = height;
-    return this.editor?.resize(width, height) ?? this.vi?.resize(width, height);
+    return (
+      this.editor?.resize(width, height) ??
+      this.vi?.resize(width, height) ??
+      this.pager?.resize(width, height)
+    );
   }
 
   keys(keys: readonly string[]): ShellResult {
@@ -986,7 +1076,11 @@ export class ShellSession {
     this.cpuCyclesValue = keys.length;
     if (!this.isAuthenticated())
       return this.withCpuCycles(resultFromStreams("", "", 0));
-    if (this.vi === undefined && this.editor === undefined)
+    if (
+      this.vi === undefined &&
+      this.editor === undefined &&
+      this.pager === undefined
+    )
       return this.withCpuCycles(resultFromStreams("", "", 0));
     if (keys.length > 32) {
       return this.withCpuCycles(
@@ -1011,6 +1105,15 @@ export class ShellSession {
         if (this.editor === editor && result.terminalScreen !== undefined) {
           result = { ...result, terminalScreen: finalScreen };
         }
+      }
+    } else if (this.pager !== undefined) {
+      result = this.pagerResult({
+        kind: "continue",
+        screen: this.pager.screen(),
+      });
+      for (const key of keys) {
+        if (this.pager === undefined) break;
+        result = this.pagerResult(this.pager.key(key));
       }
     } else {
       result = this.viResult({ kind: "continue", screen: this.vi!.screen() });
@@ -1296,7 +1399,41 @@ export class ShellSession {
         2,
       );
     }
-    const [requestedName = ""] = expanded.words;
+    let words = [...expanded.words];
+    let detached = false;
+    let niceValue: number | undefined;
+    for (let wrappers = 0; wrappers < 2; wrappers += 1) {
+      if (this.commands.canonicalCommand(words[0] ?? "") === "nohup") {
+        detached = true;
+        words = words.slice(1);
+        continue;
+      }
+      if (this.commands.canonicalCommand(words[0] ?? "") === "nice") {
+        let value = 10;
+        let consumed = 1;
+        if (words[1] === "-n") {
+          value = Number(words[2]);
+          consumed = 3;
+        }
+        if (
+          !Number.isSafeInteger(value) ||
+          value < -20 ||
+          value > 19 ||
+          (value < 0 && this.credentialContext.current.effectiveUserId !== 0)
+        ) {
+          return commandFailure(
+            "nice",
+            "invalid or unauthorized nice value",
+            1,
+          );
+        }
+        niceValue = value;
+        words = words.slice(consumed);
+        continue;
+      }
+      break;
+    }
+    const [requestedName = ""] = words;
     if (
       this.shellAliases.has(requestedName) ||
       this.shellFunctions.has(requestedName)
@@ -1325,7 +1462,13 @@ export class ShellSession {
     }
     let executed: ShellCommandResult;
     try {
-      executed = this.executeCommand(expanded, "", depth, true, true);
+      executed = this.executeCommand(
+        { redirects: [], words },
+        "",
+        depth,
+        true,
+        true,
+      );
     } catch (error: unknown) {
       return commandFailure(requestedName || "shell", message(error));
     }
@@ -1342,6 +1485,8 @@ export class ShellSession {
           kind: "sleep",
           sleepTicks: executed.sleepTicks,
           umask: this.guestFilesystem.getUmask(),
+          ...(detached ? { detached: true } : {}),
+          ...(niceValue === undefined ? {} : { niceValue }),
         },
       };
     }
@@ -1350,7 +1495,12 @@ export class ShellSession {
         exitCode: 0,
         stderr: executed.stderr,
         stdout: executed.stdout,
-        background: { ...executed.foreground, commandLine },
+        background: {
+          ...executed.foreground,
+          commandLine,
+          ...(detached ? { detached: true } : {}),
+          ...(niceValue === undefined ? {} : { niceValue }),
+        },
       };
     }
     if (executed.foreground?.kind === "cs486") {
@@ -1365,7 +1515,13 @@ export class ShellSession {
         exitCode: 0,
         stderr: executed.stderr,
         stdout: executed.stdout,
-        background: { ...executed.foreground, command: "run", commandLine },
+        background: {
+          ...executed.foreground,
+          command: "run",
+          commandLine,
+          ...(detached ? { detached: true } : {}),
+          ...(niceValue === undefined ? {} : { niceValue }),
+        },
       };
     }
     return commandFailure(
@@ -1468,6 +1624,9 @@ export class ShellSession {
       if (identityCommand !== undefined) return identityCommand;
     }
     const sessionCommand = this.frontend.sessionCommand(name);
+    if (sessionCommand === "linux-initd") {
+      return this.executeInitdScript(name, arguments_, depth);
+    }
     if (
       sessionCommand !== undefined &&
       !this.commands.isBuiltInCommand(requestedName)
@@ -1539,8 +1698,166 @@ export class ShellSession {
         `${this.history.map((value, index) => `${String(index + 1).padStart(5)}  ${value}`).join("\n")}\n`,
       );
     }
+    if (sessionCommand === "linux-make") {
+      if (
+        depth !== 0 ||
+        !interactiveAllowed ||
+        !foregroundAllowed ||
+        command.redirects.length > 0
+      ) {
+        return commandFailure(
+          "make",
+          "cannot run in a pipeline, redirect, script, or command chain",
+          2,
+        );
+      }
+      return this.startLinuxMake(arguments_);
+    }
+    if (sessionCommand === "linux-crontab") {
+      if (arguments_.length === 1 && arguments_[0] === "-l") {
+        return this.commands.execute(command.words, stdin);
+      }
+      if (arguments_.length !== 1 || arguments_[0] !== "-e") {
+        return commandUsage("crontab -l | crontab -e");
+      }
+      if (this.credentialContext.current.effectiveUserId !== 0) {
+        return commandFailure(
+          "crontab",
+          "editing /etc/crontab requires a root login shell (use sudo -i)",
+          1,
+        );
+      }
+      if (this.scopedElevationDepth > 0) {
+        return commandFailure(
+          "sudo",
+          "interactive editors require a nested sudo -i shell",
+          2,
+        );
+      }
+      if (
+        depth !== 0 ||
+        !interactiveAllowed ||
+        !foregroundAllowed ||
+        command.redirects.length > 0
+      ) {
+        return commandFailure(
+          "crontab",
+          "cannot edit in a pipeline, redirect, script, or command chain",
+          2,
+        );
+      }
+      return this.startVi(["/etc/crontab"]);
+    }
+    if (sessionCommand === "linux-watch") {
+      if (
+        depth !== 0 ||
+        !interactiveAllowed ||
+        !foregroundAllowed ||
+        command.redirects.length > 0
+      ) {
+        return commandFailure(
+          "watch",
+          "cannot run in a pipeline, redirect, script, or command chain",
+          2,
+        );
+      }
+      let intervalSeconds = 2;
+      let count = 300;
+      let cursor = 0;
+      while (cursor < arguments_.length) {
+        if (arguments_[cursor] === "--") {
+          cursor += 1;
+          break;
+        }
+        if (arguments_[cursor] === "-n" || arguments_[cursor] === "-c") {
+          const value = Number(arguments_[cursor + 1]);
+          if (!Number.isFinite(value) || value <= 0) {
+            return commandUsage("watch [-n seconds] [-c count] -- command ...");
+          }
+          if (arguments_[cursor] === "-n") intervalSeconds = value;
+          else count = value;
+          cursor += 2;
+          continue;
+        }
+        break;
+      }
+      if (
+        !Number.isSafeInteger(count) ||
+        count < 1 ||
+        count > 3_600 ||
+        intervalSeconds > 3_600 ||
+        cursor >= arguments_.length
+      ) {
+        return commandUsage("watch [-n seconds] [-c count] -- command ...");
+      }
+      const watched = arguments_.slice(cursor).join(" ");
+      if (utf8ByteLength(watched) > maximumBackgroundCommandBytes) {
+        return commandFailure("watch", "command exceeds 512 bytes", 2);
+      }
+      const controller = new WatchCpuProcess(
+        count,
+        Math.max(
+          1,
+          Math.ceil(intervalSeconds * this.commands.ticksPerSecond()),
+        ),
+        watched,
+        () => this.executeWatchCommand(watched),
+      );
+      return {
+        exitCode: 0,
+        foreground: {
+          command: "watch",
+          complete: () => controller.completion(),
+          credentials: this.credentialContext.current,
+          kind: "debugger",
+          start: () => controller,
+          umask: this.guestFilesystem.getUmask(),
+        },
+        stderr: "",
+        stdout: "",
+      };
+    }
+    if (sessionCommand === "linux-nice") {
+      let niceValue = 10;
+      let cursor = 0;
+      if (arguments_[0] === "-n") {
+        niceValue = Number(arguments_[1]);
+        cursor = 2;
+      }
+      if (
+        !Number.isSafeInteger(niceValue) ||
+        niceValue < -20 ||
+        niceValue > 19 ||
+        cursor >= arguments_.length
+      ) {
+        return commandUsage("nice [-n -20..19] command ...");
+      }
+      if (
+        niceValue < 0 &&
+        this.credentialContext.current.effectiveUserId !== 0
+      ) {
+        return commandFailure("nice", "negative adjustment requires root", 1);
+      }
+      const nested = this.executeCommand(
+        { words: arguments_.slice(cursor), redirects: command.redirects },
+        stdin,
+        depth,
+        interactiveAllowed,
+        foregroundAllowed,
+      );
+      return {
+        ...nested,
+        ...(nested.foreground === undefined
+          ? {}
+          : { foreground: { ...nested.foreground, niceValue } }),
+        ...(nested.background === undefined
+          ? {}
+          : { background: { ...nested.background, niceValue } }),
+      };
+    }
     if (sessionCommand === "dos-history") {
       if (arguments_.length === 0) {
+        this.doskeyLoaded = true;
         return commandSuccess("DOSKey installed. Use DOSKEY /HISTORY.\r\n");
       }
       if (
@@ -1576,21 +1893,6 @@ export class ShellSession {
             : `${timed.stderr}real ${elapsed.toFixed(3)}s\n`,
       };
     }
-    if (sessionCommand === "linux-make") {
-      if (
-        depth !== 0 ||
-        !interactiveAllowed ||
-        !foregroundAllowed ||
-        command.redirects.length > 0
-      ) {
-        return commandFailure(
-          "make",
-          "cannot run in a pipeline, redirect, script, or command chain",
-          2,
-        );
-      }
-      return this.startLinuxMake(arguments_);
-    }
     if (sessionCommand === "vi") {
       if (this.scopedElevationDepth > 0) {
         return commandFailure(
@@ -1603,6 +1905,19 @@ export class ShellSession {
         return commandFailure(name, "cannot run in a pipeline or redirect");
       }
       return this.startVi(arguments_);
+    }
+    if (sessionCommand === "less" || sessionCommand === "more") {
+      if (this.scopedElevationDepth > 0) {
+        return commandFailure(
+          "sudo",
+          "interactive editors require a nested sudo -i shell",
+          2,
+        );
+      }
+      if (!interactiveAllowed || command.redirects.length > 0) {
+        return commandFailure(name, "cannot run in a pipeline or redirect");
+      }
+      return this.startPager(sessionCommand, arguments_);
     }
     if (sessionCommand === "dos-editor") {
       if (!interactiveAllowed || command.redirects.length > 0) {
@@ -1636,6 +1951,122 @@ export class ShellSession {
     const result = this.commands.execute(command.words, stdin);
     this.cpuCyclesValue += result.cpuCycles ?? 0;
     return result;
+  }
+
+  /** Advances the service-owned cron queue by at most one command per tick. */
+  advanceSystemServices(tick: number): void {
+    const runtime = this.osRuntime;
+    const accounts = this.accounts;
+    if (runtime === undefined || accounts === undefined) return;
+    const cron = runtime.service("cron");
+    if (cron?.state !== "running" || cron.pid === undefined) {
+      this.cronServicePid = undefined;
+      this.cronEntries = [];
+      this.cronQueue.length = 0;
+      this.cronLastMinute = undefined;
+      return;
+    }
+    if (this.cronServicePid !== cron.pid) {
+      this.cronServicePid = cron.pid;
+      this.cronQueue.length = 0;
+      this.cronLastMinute = undefined;
+      const parsed = this.filesystem.exists("/etc/crontab")
+        ? parseLinuxCrontab(this.filesystem.readFile("/etc/crontab"))
+        : { entries: [], warnings: [] };
+      this.cronEntries = parsed.entries;
+      for (const warning of parsed.warnings) {
+        runtime.appendSystemJournal(tick, `cron: ${warning}`, "warning");
+      }
+    }
+
+    const ticksPerMinute = this.commands.ticksPerSecond() * 60;
+    const minute = Math.floor(tick / ticksPerMinute);
+    if (minute !== this.cronLastMinute) {
+      this.cronLastMinute = minute;
+      const fields = virtualCalendarFields(
+        tick,
+        this.commands.ticksPerSecond(),
+      );
+      for (const entry of this.cronEntries) {
+        if (cronEntryDue(entry, fields) && this.cronQueue.length < 64) {
+          this.cronQueue.push(entry);
+        }
+      }
+    }
+
+    const entry = this.cronQueue.shift();
+    if (entry === undefined) return;
+    const user = accounts.getUser(entry.user);
+    if (user === undefined) {
+      runtime.appendSystemJournal(
+        tick,
+        `cron: line ${String(entry.lineNumber)}: unknown user ${entry.user}`,
+        "error",
+      );
+      return;
+    }
+    const credentials = createLoginCredentials({
+      groupId: user.gid,
+      loginName: user.name,
+      supplementaryGroupIds: accounts
+        .groupsForUser(user.name)
+        .map(({ gid }) => gid)
+        .filter((gid) => gid !== user.gid),
+      userId: user.uid,
+    });
+    const process = runtime.spawnProcess({
+      command: entry.command,
+      gid: user.gid,
+      parentPid: cron.pid,
+      startTick: tick,
+      state: "running",
+      uid: user.uid,
+    });
+    const frame = this.captureIdentityFrame();
+    let exitCode = 1;
+    let output = "";
+    this.commands.beginFilesystemIo();
+    try {
+      this.credentialContext.replace(credentials);
+      this.commands.activateUser(user);
+      const result = this.executeLine(entry.command, 0, false, false);
+      exitCode = result.exitCode;
+      output = `${result.stdout}${result.stderr}`;
+      if (
+        result.foreground !== undefined ||
+        result.background !== undefined ||
+        result.jobControl !== undefined ||
+        result.action !== undefined ||
+        result.terminalScreen !== undefined
+      ) {
+        exitCode = 2;
+        output +=
+          "cron: interactive, process-control, and lifecycle commands are not supported\n";
+      }
+    } catch (error: unknown) {
+      output = `cron: ${message(error)}\n`;
+      exitCode = 1;
+    } finally {
+      try {
+        this.commands.completeFilesystemIo(false);
+      } finally {
+        this.restoreIdentityFrame(frame);
+      }
+    }
+    if (output.length > 0) {
+      runtime.appendSystemJournal(
+        tick,
+        `cron[${String(process.pid)}]: ${output.slice(0, 4096).trimEnd()}`,
+        exitCode === 0 ? "info" : "error",
+      );
+    }
+    runtime.transitionProcess(process.pid, {
+      kind: "exit",
+      status: exitCode,
+      tick,
+    });
+    runtime.reapProcess(process.pid);
+    this.notifyOsRuntimeChanged();
   }
 
   private startLinuxMake(arguments_: readonly string[]): ShellCommandResult {
@@ -1692,6 +2123,8 @@ export class ShellSession {
     let committedStateContents = serializeGuestMakeState(makeState);
     let candidateStateContents: string | undefined;
     let makeStatePath = "";
+    let makefilePath = "";
+    let makefileSource = "";
     const targetBaselines = new Map<string, GuestMakeStateRecord>();
     let phase: "initialize" | "recipe" | "verify" = "initialize";
     let targetIndex = 0;
@@ -1699,6 +2132,24 @@ export class ShellSession {
     let terminalExitCode: number | undefined;
     let waitingFor:
       "commit" | "initialize" | "recipe" | "rollback" | "verify" | undefined;
+
+    const parseCurrentMakefile = (): ReturnType<typeof parseGuestMakefile> =>
+      parseGuestMakefile(makefileSource, options.variables, {
+        include: ({ path }) => {
+          const includePath = this.commands.resolvePath(path);
+          if (
+            !this.guestFilesystem.exists(includePath) ||
+            this.guestFilesystem.isDirectory(includePath)
+          )
+            return undefined;
+          return {
+            identity: includePath,
+            source: this.commands.readFile(includePath),
+            sourceName: includePath,
+          };
+        },
+        sourceName: makefilePath,
+      });
 
     const complete = (exitCode: number): ShellMakeStepResult => {
       const merged = concatGuestToolchainTranscriptsOrFailure(
@@ -1808,9 +2259,8 @@ export class ShellSession {
         if (makefileName === undefined) {
           throw new GuestMakeError("no Makefile or makefile found");
         }
-        const source = this.commands.readFile(
-          this.commands.resolvePath(makefileName),
-        );
+        makefilePath = this.commands.resolvePath(makefileName);
+        makefileSource = this.commands.readFile(makefilePath);
         makeStatePath = this.commands.resolvePath(".cs-make-state");
         if (this.guestFilesystem.exists(makeStatePath)) {
           committedStateContents = this.commands.readFile(makeStatePath);
@@ -1818,11 +2268,11 @@ export class ShellSession {
         } else {
           committedStateContents = serializeGuestMakeState(makeState);
         }
-        const makefile = parseGuestMakefile(source, options.variables);
+        const makefile = parseCurrentMakefile();
         const snapshot = this.createGuestMakeSnapshotReader();
         plan = planGuestMakeBuild(
           makefile,
-          source,
+          makefileSource,
           options.variables,
           {
             exists: (path): boolean =>
@@ -1855,7 +2305,10 @@ export class ShellSession {
         phase = "recipe";
         cpuCycles = Math.min(
           1_000_000,
-          cpuCycles + makefile.rules.size + snapshot.filesRead(),
+          cpuCycles +
+            makefile.rules.size +
+            makefile.patterns.length +
+            snapshot.filesRead(),
         );
       } catch (error: unknown) {
         terminalExitCode = 1;
@@ -1940,8 +2393,28 @@ export class ShellSession {
               "inputs changed while building '" + target.target + "'",
             );
           }
+          const refreshed = this.withGuestMakeProjectDirectory(
+            projectDirectory,
+            () => parseCurrentMakefile(),
+          );
+          const refreshedRule = resolveGuestMakeRule(
+            refreshed,
+            target.target,
+          )?.rule;
+          const committed = this.withGuestMakeProjectDirectory(
+            projectDirectory,
+            () =>
+              this.fingerprintGuestMakeTarget(
+                canonicalTarget,
+                (refreshedRule?.prerequisites ?? target.prerequisites).map(
+                  (path) => this.commands.resolvePath(path),
+                ),
+                target.recipes,
+                this.createGuestMakeSnapshotReader(),
+              ),
+          );
           const updated = new Map(makeState);
-          updated.set(canonicalTarget, current);
+          updated.set(canonicalTarget, committed);
           makeState = new Map(
             [...updated]
               .sort(([left], [right]) => left.localeCompare(right))
@@ -3155,6 +3628,7 @@ export class ShellSession {
     const runtime = this.osRuntime;
     if (runtime === undefined) return undefined;
     const tick = this.commands.currentTick();
+    const wallMilliseconds = this.clock.currentWallTimeMilliseconds();
     const existing = runtime.loginSession(this.loginSessionId);
     if (existing !== undefined) {
       this.closeRuntimeLoginSession("logout");
@@ -3166,6 +3640,7 @@ export class ShellSession {
       tick,
       uid: user.uid,
       username: user.name,
+      ...(isWallMilliseconds(wallMilliseconds) ? { wallMilliseconds } : {}),
     });
     const parentPid =
       runtime
@@ -3189,14 +3664,15 @@ export class ShellSession {
     );
     this.notifyOsRuntimeChanged();
     const previous = opened.previous;
-    if (previous === undefined) return undefined;
-    return `Last login: tick ${String(previous.loginTick)} on ${previous.terminal}${previous.logoutReason === undefined ? "" : ` (${previous.logoutReason})`}`;
+    if (previous?.loginWallMilliseconds === undefined) return undefined;
+    return `Last login: ${formatLastLoginTimestamp(previous.loginWallMilliseconds)} on ${previous.terminal}${previous.logoutReason === undefined || previous.logoutReason === "logout" ? "" : ` (${previous.logoutReason})`}`;
   }
 
   private closeRuntimeLoginSession(reason: "disconnect" | "logout"): void {
     const runtime = this.osRuntime;
     if (runtime === undefined) return;
     const tick = this.commands.currentTick();
+    const wallMilliseconds = this.clock.currentWallTimeMilliseconds();
     const session = runtime.loginSession(this.loginSessionId);
     const shellPid = this.shellProcessId;
     if (shellPid !== undefined) {
@@ -3244,7 +3720,12 @@ export class ShellSession {
         runtime.reapProcess(shellPid);
     }
     if (session !== undefined) {
-      runtime.closeLoginSession(this.loginSessionId, tick, reason);
+      runtime.closeLoginSession(
+        this.loginSessionId,
+        tick,
+        reason,
+        isWallMilliseconds(wallMilliseconds) ? wallMilliseconds : undefined,
+      );
       runtime.appendAuthJournal(
         tick,
         `session ${this.loginSessionId} closed for ${session.username}: ${reason}`,
@@ -3293,8 +3774,7 @@ export class ShellSession {
     this.notifyOsRuntimeChanged();
   }
 
-  private readMotd(): readonly string[] | undefined {
-    const path = "/etc/motd";
+  private readGuestTextLines(path: string): readonly string[] | undefined {
     try {
       if (
         !this.guestFilesystem.exists(path) ||
@@ -3312,6 +3792,14 @@ export class ShellSession {
     } catch {
       return undefined;
     }
+  }
+
+  private readMotd(): readonly string[] | undefined {
+    return this.readGuestTextLines("/etc/motd");
+  }
+
+  private readIssue(): readonly string[] | undefined {
+    return this.readGuestTextLines("/etc/issue");
   }
 
   private notifyOsRuntimeChanged(): void {
@@ -3566,6 +4054,42 @@ export class ShellSession {
     for (const [name, value] of scope) {
       if (value === undefined) this.commands.unsetEnvironmentValue(name);
       else this.commands.setEnvironmentValue(name, value);
+    }
+  }
+
+  private executeInitdScript(
+    path: string,
+    arguments_: readonly string[],
+    depth: number,
+  ): ShellCommandResult {
+    if (depth >= maximumScriptDepth) {
+      return commandFailure(path, "maximum script depth exceeded");
+    }
+    if (
+      !this.guestFilesystem.exists(path) ||
+      this.guestFilesystem.isDirectory(path)
+    ) {
+      return commandFailure(path, "No such file or directory", 127);
+    }
+    if (!this.guestFilesystem.hasAccess(path, filesystemExecute)) {
+      return commandFailure(path, "Permission denied", 126);
+    }
+    let source: string;
+    try {
+      source = this.commands.readFile(path);
+    } catch (error: unknown) {
+      return commandFailure(path, message(error));
+    }
+    const lines = source.replaceAll("\r\n", "\n").split("\n");
+    if (lines.length > maximumScriptLines) {
+      return commandFailure(path, "script line limit exceeded");
+    }
+    if (this.scriptFrames.length === 0) this.scriptLoopIterations = 0;
+    this.scriptFrames.push({ arguments: [...arguments_], name: path });
+    try {
+      return this.executeScriptLines(lines, depth + 1, path).result;
+    } finally {
+      this.scriptFrames.pop();
     }
   }
 
@@ -4262,6 +4786,44 @@ export class ShellSession {
     }
   }
 
+  private startPager(
+    mode: PagerMode,
+    arguments_: readonly string[],
+  ): ShellCommandResult {
+    if (arguments_.length !== 1) return commandUsage(`${mode} <path>`);
+    const path = this.commands.resolvePath(arguments_[0]!);
+    try {
+      if (!this.guestFilesystem.exists(path)) {
+        throw new Error("No such file or directory");
+      }
+      if (this.guestFilesystem.isDirectory(path)) {
+        throw new Error("Is a directory");
+      }
+      const contents = this.commands.readFile(path);
+      this.pager = this.createPagerSession(
+        mode,
+        () =>
+          new PagerSession(
+            mode,
+            path,
+            contents,
+            this.terminalWidth,
+            this.terminalHeight,
+          ),
+      );
+      return {
+        exitCode: 0,
+        stderr: "",
+        stdout: "",
+        terminalScreen: this.pager.screen(),
+      };
+    } catch (error: unknown) {
+      this.releasePagerMemory();
+      this.pager = undefined;
+      return commandFailure(mode, message(error));
+    }
+  }
+
   private createEditorSession(
     owner: Extract<
       GuestRamOwner,
@@ -4310,6 +4872,49 @@ export class ShellSession {
     lease?.release();
   }
 
+  private createPagerSession(
+    mode: PagerMode,
+    create: () => PagerSession,
+  ): PagerSession {
+    if (this.pagerMemoryLease !== undefined) {
+      throw new Error("pager memory lease is already active");
+    }
+    const lease = this.reservePagerMemory(pagerResidentBytes, mode);
+    try {
+      const pager = create();
+      this.pagerMemoryLease = lease;
+      return pager;
+    } catch (error: unknown) {
+      lease.release();
+      throw error;
+    }
+  }
+
+  private releasePagerMemory(): void {
+    const lease = this.pagerMemoryLease;
+    this.pagerMemoryLease = undefined;
+    lease?.release();
+  }
+
+  private reservePagerMemory(
+    bytes: number,
+    mode: PagerMode,
+  ): SessionMemoryReservation {
+    if (this.linuxMemory === undefined) {
+      throw new Error("Linux session memory admission is unavailable");
+    }
+    const reservation = this.linuxMemory.reserveTransient({
+      category: "editor",
+      displayName: mode,
+      moduleId: mode,
+      residentBytes: bytes,
+    });
+    if (this.shellProcessId !== undefined) {
+      reservation.bindProcess(this.shellProcessId);
+    }
+    return reservation;
+  }
+
   private reserveSessionMemory(
     bytes: number,
     owner: Extract<
@@ -4317,9 +4922,6 @@ export class ShellSession {
       "dos-editor" | "dos-qbasic" | "dos-toolchain-ide" | "vi"
     >,
   ): SessionMemoryReservation {
-    if (this.dosMemory === undefined) {
-      return this.guestRamLedger.acquire(bytes, owner);
-    }
     const identity =
       owner === "dos-editor"
         ? {
@@ -4344,7 +4946,20 @@ export class ShellSession {
                 displayName: "vi",
                 moduleId: "vi",
               };
-    return this.dosMemory.reserveTransientResident({ ...identity, bytes });
+    if (this.dosMemory !== undefined) {
+      return this.dosMemory.reserveTransientResident({ ...identity, bytes });
+    }
+    if (this.linuxMemory === undefined) {
+      throw new Error("Linux session memory admission is unavailable");
+    }
+    const reservation = this.linuxMemory.reserveTransient({
+      ...identity,
+      residentBytes: bytes,
+    });
+    if (this.shellProcessId !== undefined) {
+      reservation.bindProcess(this.shellProcessId);
+    }
+    return reservation;
   }
 
   private admitDosProcessMemory(
@@ -4355,25 +4970,49 @@ export class ShellSession {
       throw new Error("DOS process memory admission is unavailable");
     }
     return grantCs486ExecutableMemory(request.executable, {
-      dosMemoryManager: manager,
       identity: {
         displayName: request.displayName,
         moduleId: request.moduleId,
       },
-      ledger: this.guestRamLedger,
+      kind: "dos",
+      manager,
     });
   }
 
-  private admitLedgerProcessMemory(
+  private admitLinuxProcessMemory(
     request: ShellProcessMemoryAdmissionRequest,
   ): ShellProcessMemoryGrant {
+    const manager = this.linuxMemory;
+    if (manager === undefined) {
+      throw new Error("Linux process memory admission is unavailable");
+    }
     return grantCs486ExecutableMemory(request.executable, {
       identity: {
         displayName: request.displayName,
         moduleId: request.moduleId,
       },
-      ledger: this.guestRamLedger,
+      kind: "linux",
+      manager,
     });
+  }
+
+  private admitLinuxUtilityMemory(
+    request: ShellUtilityMemoryAdmissionRequest,
+  ): ShellUtilityMemoryGrant {
+    const manager = this.linuxMemory;
+    if (manager === undefined) {
+      throw new Error("Linux utility memory admission is unavailable");
+    }
+    const reservation = manager.reserveTransient({
+      category: "process",
+      displayName: request.displayName,
+      moduleId: request.moduleId,
+      residentBytes: request.residentBytes,
+    });
+    if (this.shellProcessId !== undefined) {
+      reservation.bindProcess(this.shellProcessId);
+    }
+    return reservation;
   }
 
   private readDosEditorConfiguration(): DosEditorConfiguration {
@@ -4446,6 +5085,26 @@ export class ShellSession {
           "",
           0,
         ),
+        resetTerminal: true,
+      };
+    }
+    return {
+      ...resultFromStreams("", "", 0),
+      terminalScreen: result.screen,
+    };
+  }
+
+  private submitPager(line: string): ShellResult {
+    return this.keys([...line, "Enter"]);
+  }
+
+  private pagerResult(result: PagerResult): ShellResult {
+    if (result.kind === "closed") {
+      this.releasePagerMemory();
+      this.pager = undefined;
+      this.lastExitCode = 0;
+      return {
+        ...resultFromStreams("", "", 0),
         resetTerminal: true,
       };
     }
@@ -4583,6 +5242,38 @@ export class ShellSession {
         request.insertOutput,
       ),
     );
+  }
+
+  private executeWatchCommand(command: string): ShellCommandResult {
+    const frame = this.captureIdentityFrame();
+    const previousExitCode = this.lastExitCode;
+    this.commands.beginFilesystemIo();
+    try {
+      const result = this.executeLine(command, 0, false, false);
+      if (
+        result.foreground !== undefined ||
+        result.background !== undefined ||
+        result.jobControl !== undefined ||
+        result.action !== undefined ||
+        result.terminalScreen !== undefined
+      ) {
+        return commandFailure(
+          "watch",
+          "watched command must be a finite non-interactive command",
+          2,
+        );
+      }
+      return result;
+    } catch (error: unknown) {
+      return commandFailure("watch", message(error), 1);
+    } finally {
+      try {
+        this.commands.completeFilesystemIo(false);
+      } finally {
+        this.restoreIdentityFrame(frame);
+        this.lastExitCode = previousExitCode;
+      }
+    }
   }
 
   private submitEditor(line: string): ShellResult {
@@ -5176,9 +5867,10 @@ function ensureLinuxRuntimePresence(
   runtime: OsRuntimeState,
   tick: number,
   hardware: ComputerHardwareProfile,
+  filesystem: InMemoryFilesystem,
 ): void {
   try {
-    initializeLinuxRuntimePresence(runtime, tick, hardware);
+    initializeLinuxRuntimePresence(runtime, tick, hardware, filesystem);
   } catch (error: unknown) {
     if (runtime.lifecycle.phase === "booting") {
       try {
@@ -5201,6 +5893,7 @@ function initializeLinuxRuntimePresence(
   runtime: OsRuntimeState,
   tick: number,
   hardware: ComputerHardwareProfile,
+  filesystem: InMemoryFilesystem,
 ): void {
   if (runtime.lifecycle.phase === "running") return;
   if (runtime.lifecycle.phase === "faulted") {
@@ -5376,6 +6069,8 @@ function initializeLinuxRuntimePresence(
     });
   }
 
+  startLinuxRcDotDServices(runtime, filesystem, tick);
+
   let loginService = runtime.service("cs-login");
   if (loginService === undefined) {
     loginService = runtime.registerService({
@@ -5420,6 +6115,187 @@ function initializeLinuxRuntimePresence(
   runtime.appendBootJournal(tick, "account database migration verified");
   runtime.transitionLifecycle({ kind: "boot_complete", tick });
   runtime.appendBootJournal(tick, "boot complete");
+}
+
+export interface LinuxRcServiceReport {
+  readonly name: string;
+  readonly started: boolean;
+}
+
+/**
+ * Parses /etc/inittab, resolves the initdefault runlevel's rc.d `S`-prefixed
+ * entries, and starts each named service synchronously - real inittab/rc.d
+ * mechanics, but run inline during the already-synchronous boot presence step
+ * so a standalone `ShellSession` (used directly by ~100 unit tests, with no
+ * external tick driver) still reaches a fully running OS on construction.
+ * A structural inittab fault (malformed file, missing/duplicate initdefault)
+ * throws here and faults the whole boot; one service's own start failure
+ * does not (recorded as `started: false` and journaled instead).
+ */
+function startLinuxRcDotDServices(
+  runtime: OsRuntimeState,
+  filesystem: InMemoryFilesystem,
+  tick: number,
+): readonly LinuxRcServiceReport[] {
+  const inittabText = filesystem.exists("/etc/inittab")
+    ? filesystem.readFile("/etc/inittab")
+    : "";
+  const parsed = parseLinuxInittab(inittabText);
+  for (const warning of parsed.warnings) {
+    runtime.appendSystemJournal(tick, `inittab: ${warning}`, "warning");
+  }
+  const runlevel = parsed.initDefault;
+  const rcDirectory = `/etc/rc${runlevel === "S" ? "1" : runlevel}.d`;
+  const serviceNames =
+    filesystem.exists(rcDirectory) && filesystem.isDirectory(rcDirectory)
+      ? filesystem
+          .list(rcDirectory)
+          .map((entry) => /^S(\d{2})([a-z][a-z0-9_-]*)$/u.exec(entry))
+          .filter((match): match is RegExpExecArray => match !== null)
+          .sort((left, right) => Number(left[1]) - Number(right[1]))
+          .map((match) => match[2]!)
+      : [];
+  return serviceNames.map((name) => ({
+    name,
+    started: startLinuxRcService(runtime, name, tick),
+  }));
+}
+
+function startLinuxRcService(
+  runtime: OsRuntimeState,
+  name: string,
+  tick: number,
+): boolean {
+  try {
+    let service = runtime.service(name);
+    if (service === undefined) {
+      service = runtime.registerService({ enabled: true, name, tick });
+    }
+    if (service.state === "running" || service.state === "starting") {
+      return true;
+    }
+    runtime.transitionService(name, { kind: "start", tick });
+    const daemon = runtime.spawnProcess({
+      command: `/etc/init.d/${name}`,
+      gid: 0,
+      parentPid: 1,
+      startTick: tick,
+      state: "running",
+      uid: 0,
+    });
+    runtime.transitionProcess(daemon.pid, {
+      kind: "sleep",
+      reason: `${name}-daemon`,
+      tick,
+    });
+    runtime.transitionService(name, {
+      kind: "running",
+      pid: daemon.pid,
+      tick,
+    });
+    runtime.appendBootJournal(
+      tick,
+      `${name} service started as process ${String(daemon.pid)}`,
+    );
+    return true;
+  } catch (error: unknown) {
+    runtime.appendSystemJournal(
+      tick,
+      `rc: ${name} failed to start: ${message(error)}`,
+      "error",
+    );
+    return false;
+  }
+}
+
+class WatchCpuProcess implements CpuProcess {
+  readonly hasPendingCpuCycles = false;
+  readonly memoryLimitBytes = 0;
+  readonly memoryUsageBytes = 0;
+  private stateValue: CpuProcessState = { kind: "sleeping", wakeTick: 0 };
+  private remaining: number;
+  private latest: ShellCommandResult | undefined;
+
+  constructor(
+    count: number,
+    private readonly intervalTicks: number,
+    private readonly command: string,
+    private readonly execute: () => ShellCommandResult,
+  ) {
+    this.remaining = count;
+  }
+
+  get state(): CpuProcessState {
+    return this.stateValue;
+  }
+
+  advanceTick(tick: number): CpuProcessState {
+    if (
+      this.stateValue.kind !== "sleeping" ||
+      tick < this.stateValue.wakeTick
+    ) {
+      return this.stateValue;
+    }
+    try {
+      this.latest = this.execute();
+      this.remaining -= 1;
+      this.stateValue =
+        this.latest.exitCode !== 0 || this.remaining === 0
+          ? { kind: "completed", value: null }
+          : { kind: "sleeping", wakeTick: tick + this.intervalTicks };
+    } catch (error: unknown) {
+      this.stateValue = {
+        error: new VmRuntimeError("RuntimeError", message(error)),
+        kind: "crashed",
+      };
+    }
+    return this.stateValue;
+  }
+
+  completion(): ShellCommandResult {
+    const latest = this.latest;
+    if (latest === undefined) {
+      return commandFailure(
+        "watch",
+        "terminated before the first refresh",
+        130,
+      );
+    }
+    return {
+      ...latest,
+      stdout: `Every ${String(this.intervalTicks)} tick(s): ${this.command}\n\n${latest.stdout}`,
+    };
+  }
+
+  deliverEvent(): boolean {
+    return false;
+  }
+
+  fail(error: VmRuntimeError): CpuProcessState {
+    if (
+      this.stateValue.kind !== "completed" &&
+      this.stateValue.kind !== "crashed" &&
+      this.stateValue.kind !== "terminated"
+    ) {
+      this.stateValue = { error, kind: "crashed" };
+    }
+    return this.stateValue;
+  }
+
+  runCpuSlice(): CpuProcessSliceResult {
+    return { cpuCycles: 0, executedInstructions: 0, state: this.stateValue };
+  }
+
+  terminate(reason = "terminated"): CpuProcessState {
+    if (
+      this.stateValue.kind !== "completed" &&
+      this.stateValue.kind !== "crashed" &&
+      this.stateValue.kind !== "terminated"
+    ) {
+      this.stateValue = { kind: "terminated", reason };
+    }
+    return this.stateValue;
+  }
 }
 
 interface IfBranch {
@@ -5689,4 +6565,12 @@ function hasUnixBatchCompoundSyntax(commandLine: string): boolean {
 
 function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function isWallMilliseconds(value: number): boolean {
+  return Number.isSafeInteger(value) && value >= 0;
+}
+
+function profileCursorShape(profile: ComputerOsProfile): "block" | "underline" {
+  return profile === "dos" ? "underline" : "block";
 }

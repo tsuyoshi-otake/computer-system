@@ -66,6 +66,72 @@ describe("ViSession", (): void => {
     });
   });
 
+  it("renders content first with stateful status, command line, and block cursors", (): void => {
+    const editor = new ViSession(undefined, "");
+    let screen = editor.screen();
+    let status = screen.rows[screen.rows.length - 2]!;
+
+    expect(rowText(screen.rows[0]!).trimEnd()).toBe("");
+    expect(rowText(screen.rows[1]!).startsWith("~")).toBe(true);
+    expect(screen.cursor).toEqual({ x: 1, y: 1 });
+    expect(screen.rows[0]![0]).toMatchObject({
+      background: 0,
+      character: " ",
+      foreground: 15,
+    });
+    expect(rowText(status)).toContain("[No Name]");
+    expect(rowText(status)).not.toContain("[+]");
+    expect(rowText(status).endsWith("1,1  All")).toBe(true);
+    expect(
+      status.every(
+        ({ background, foreground }) => background === 0 && foreground === 15,
+      ),
+    ).toBe(true);
+    expect(rowText(screen.rows[screen.rows.length - 1]!).trim()).toBe("");
+    expect(screenRowsText(screen)).not.toContain("VI  ");
+    expect(screenRowsText(screen)).not.toContain("-- NORMAL --");
+    expect(screenRowsText(screen)).not.toContain("Esc normal");
+
+    editor.key("i");
+    editor.key("x");
+    screen = editor.screen();
+    status = screen.rows[screen.rows.length - 2]!;
+    expect(rowText(status)).toContain("[No Name] [+]");
+    expect(rowText(screen.rows[screen.rows.length - 1]!).trim()).toBe(
+      "-- INSERT --",
+    );
+    expect(screen.cursor).toEqual({ x: 2, y: 1 });
+    expect(screen.rows[0]![1]).toMatchObject({
+      background: 0,
+      character: " ",
+      foreground: 15,
+    });
+
+    editor.key("Escape");
+    screen = editor.screen();
+    expect(rowText(screen.rows[screen.rows.length - 1]!).trim()).toBe("");
+    editor.key(":");
+    screen = editor.screen();
+    expect(screen.cursor).toEqual({ x: 2, y: screen.rows.length });
+    expect(rowText(screen.rows[screen.rows.length - 1]!).startsWith(":")).toBe(
+      true,
+    );
+    editor.key("w");
+    screen = editor.screen();
+    expect(screen.cursor).toEqual({ x: 3, y: screen.rows.length });
+    expect(rowText(screen.rows[screen.rows.length - 1]!).startsWith(":w")).toBe(
+      true,
+    );
+    expect(editor.key("Enter")).toMatchObject({
+      closeAfter: false,
+      kind: "save",
+    });
+    screen = editor.completeSave(false, "note.txt").screen;
+    status = screen.rows[screen.rows.length - 2]!;
+    expect(rowText(status)).toContain("note.txt");
+    expect(rowText(status)).not.toContain("[+]");
+  });
+
   it("supports forced write-quit and the normal-mode ZZ shortcut", (): void => {
     const forced = new ViSession("forced.txt", "before");
     forced.key("i");
@@ -102,11 +168,18 @@ describe("ViSession", (): void => {
     const screen = vi.screen();
     expect(screen.rows).toHaveLength(19);
     expect(screen.rows.every((row) => row.length === 51)).toBe(true);
+    expect(
+      rowText(screen.rows[screen.rows.length - 2]!).endsWith("1,1  Top"),
+    ).toBe(true);
     vi.key("ArrowDown");
     expect(vi.screen().rows).toHaveLength(19);
     const expanded = vi.resize(100, 40);
     expect(expanded.rows).toHaveLength(40);
     expect(expanded.rows.every((row) => row.length === 100)).toBe(true);
+    const bottom = vi.key("G").screen;
+    expect(
+      rowText(bottom.rows[bottom.rows.length - 2]!).endsWith("999,1  Bot"),
+    ).toBe(true);
   });
 
   it("integrates save and reopen with the sandbox filesystem", (): void => {
@@ -192,27 +265,33 @@ describe("ViSession", (): void => {
 
   it("keeps display features off by default and toggles each independently", (): void => {
     const editor = new ViSession("demo.py", "    if value == 42:");
-    const plain = editor.screen().rows[1]!;
+    const plain = editor.screen().rows[0]!;
     expect(rowText(plain).startsWith("    if")).toBe(true);
-    expect(plain.every(({ background }) => background === 15)).toBe(true);
-    expect(plain.every(({ foreground }) => foreground === 0)).toBe(true);
+    expect(plain.slice(1).every(({ background }) => background === 15)).toBe(
+      true,
+    );
+    expect(plain.slice(1).every(({ foreground }) => foreground === 0)).toBe(
+      true,
+    );
 
     submitEx(editor, "syntax on");
-    const syntax = editor.screen().rows[1]!;
+    const syntax = editor.screen().rows[0]!;
     expect(
       syntax.slice(4, 6).every(({ foreground }) => foreground === 10),
     ).toBe(true);
-    expect(syntax.every(({ background }) => background === 15)).toBe(true);
+    expect(syntax.slice(1).every(({ background }) => background === 15)).toBe(
+      true,
+    );
 
     submitEx(editor, "set rainbow");
     expect(
       editor
         .screen()
-        .rows[1]!.slice(0, 4)
+        .rows[0]!.slice(1, 4)
         .map(({ background }) => background),
-    ).toEqual([11, 11, 10, 10]);
+    ).toEqual([11, 10, 10]);
     submitEx(editor, "set number");
-    expect(rowText(editor.screen().rows[1]!).startsWith("  1 ")).toBe(true);
+    expect(rowText(editor.screen().rows[0]!).startsWith("  1 ")).toBe(true);
 
     submitEx(editor, "syntax off");
     submitEx(editor, "set norainbow nonumber");
@@ -258,19 +337,19 @@ describe("ViSession", (): void => {
     literalTab.key("v");
     literalTab.key("Escape");
     expect(literalTab.contents).toBe("\tv");
-    expect(rowText(literalTab.screen().rows[1]!).startsWith("→v$")).toBe(true);
+    expect(rowText(literalTab.screen().rows[0]!).startsWith("→v$")).toBe(true);
 
     const wrapped = new ViSession("wrap.txt", "abcdefghijklmnopqrstuv", 20, 6);
-    expect(rowText(wrapped.screen().rows[2]!).startsWith("~")).toBe(true);
+    expect(rowText(wrapped.screen().rows[1]!).startsWith("~")).toBe(true);
     submitEx(wrapped, "set wrap list");
-    expect(rowText(wrapped.screen().rows[2]!).startsWith("uv$")).toBe(true);
+    expect(rowText(wrapped.screen().rows[1]!).startsWith("uv$")).toBe(true);
     submitEx(wrapped, "set number");
-    expect(rowText(wrapped.screen().rows[1]!).startsWith("  1 ")).toBe(true);
-    expect(rowText(wrapped.screen().rows[2]!).startsWith("    qrstuv$")).toBe(
+    expect(rowText(wrapped.screen().rows[0]!).startsWith("  1 ")).toBe(true);
+    expect(rowText(wrapped.screen().rows[1]!).startsWith("    qrstuv$")).toBe(
       true,
     );
     wrapped.key("$");
-    expect(wrapped.screen().cursor).toEqual({ x: 11, y: 3 });
+    expect(wrapped.screen().cursor).toEqual({ x: 11, y: 2 });
   });
 
   it("applies set atomically and reports all options without truncating state", (): void => {
@@ -298,6 +377,17 @@ describe("ViSession", (): void => {
     });
     const shown = editor.completeShellCommand(0, "hello\n", "", false);
     expect(screenRowsText(shown.screen)).toContain("hello");
+    expect(rowText(shown.screen.rows[0]!).trimEnd()).toBe("hello");
+    expect(rowText(shown.screen.rows[shown.screen.rows.length - 2]!)).toContain(
+      "Output",
+    );
+    expect(
+      rowText(shown.screen.rows[shown.screen.rows.length - 1]!).startsWith(
+        "Press any key to return",
+      ),
+    ).toBe(true);
+    expect(shown.screen.cursor.y).toBe(shown.screen.rows.length);
+    expect(screenRowsText(shown.screen)).not.toContain("VI  ");
     editor.key("Enter");
     expect(submitEx(editor, "!!")).toMatchObject({
       command: "echo hello",
@@ -329,12 +419,12 @@ describe("ViSession", (): void => {
     filesystem.writeFile("/home/cs/demo.py", "if True:");
 
     const opened = shell.submit("vi demo.py");
-    expect(rowText(opened.terminalScreen!.rows[1]!).startsWith("  1 ")).toBe(
+    expect(rowText(opened.terminalScreen!.rows[0]!).startsWith("  1 ")).toBe(
       true,
     );
     expect(
       opened
-        .terminalScreen!.rows[1]!.slice(4, 6)
+        .terminalScreen!.rows[0]!.slice(5, 6)
         .every(({ foreground }) => foreground === 10),
     ).toBe(true);
 
@@ -379,12 +469,12 @@ describe("ViSession", (): void => {
     filesystem.writeFile("/drives/c/demo.py", "if True:");
 
     const opened = shell.submit("vi demo.py");
-    expect(rowText(opened.terminalScreen!.rows[1]!).startsWith("  1 ")).toBe(
+    expect(rowText(opened.terminalScreen!.rows[0]!).startsWith("  1 ")).toBe(
       true,
     );
     expect(
       opened
-        .terminalScreen!.rows[1]!.slice(4, 6)
+        .terminalScreen!.rows[0]!.slice(5, 6)
         .every(({ foreground }) => foreground === 10),
     ).toBe(true);
   });
@@ -415,8 +505,8 @@ describe("ViSession", (): void => {
     const editor = new ViSession("demo.py", "def target():\n  pass\ntarget()");
     editor.key("G");
     editor.key("g");
-    expect(editor.key("d").screen.cursor.y).toBe(2);
-    expect(editor.key("Ctrl+O").screen.cursor.y).toBe(4);
+    expect(editor.key("d").screen.cursor.y).toBe(1);
+    expect(editor.key("Ctrl+O").screen.cursor.y).toBe(3);
     expect(screenRowsText(submitEx(editor, "symbols").screen)).toContain(
       "function target",
     );

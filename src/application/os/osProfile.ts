@@ -1,5 +1,10 @@
 import type { InMemoryFilesystem } from "../../domain/filesystem/inMemoryFilesystem.js";
-import { installOsFilesystemImage } from "./osFilesystemImages.js";
+import {
+  commandExecutablePath,
+  installOsFilesystemImage,
+  legacyV7CommandFile,
+  legacyV7CommandNames,
+} from "./osFilesystemImages.js";
 import type { ComputerOsProfile } from "../../domain/computer/computer.js";
 import { formatOsIdentity, getOsIdentity } from "./osIdentity.js";
 import type { OsIdentity } from "./osIdentity.js";
@@ -9,9 +14,16 @@ import {
   initialUserName,
 } from "./linuxCredentials.js";
 import { linuxAccountLimits, linuxAccountPaths } from "./linuxAccounts.js";
+import {
+  commandRegistryFor,
+  isDosInternalCommand,
+  isLinuxBuiltinCommand,
+} from "./commandRegistry.js";
+import type { DosRuntimeState } from "./dosRuntimeState.js";
 
 export interface OsBootContext {
   readonly computerName: string;
+  readonly dosRuntime?: DosRuntimeState;
 }
 
 export interface PathDialect {
@@ -105,6 +117,17 @@ const linuxOsRelease = [
   "",
 ].join("\n");
 
+export const linuxUserDefaultPath =
+  "/usr/local/bin:/usr/bin:/bin:/usr/local/games:/usr/games";
+export const linuxRootDefaultPath =
+  "/usr/local/sbin:/usr/sbin:/sbin:/usr/local/bin:/usr/bin:/bin";
+const linuxEtcProfile =
+  'if [ "$USER" = "root" ]; then\n' +
+  `  export PATH=${linuxRootDefaultPath}\n` +
+  "else\n" +
+  `  export PATH=${linuxUserDefaultPath}\n` +
+  "fi\n";
+
 const linuxProfile: OsProfile = {
   id: "linux",
   identity: getOsIdentity("linux"),
@@ -115,7 +138,7 @@ const linuxProfile: OsProfile = {
   pathDialect: linuxPathDialect,
   environment: new Map([
     ["HOME", "/home/cs"],
-    ["PATH", "/usr/bin:/bin"],
+    ["PATH", linuxUserDefaultPath],
     ["SHELL", "/bin/bash"],
     ["TERM", "computer-system"],
     ["USER", initialUserName],
@@ -124,6 +147,7 @@ const linuxProfile: OsProfile = {
   ]),
   virtualDevices: new Map([["/dev/null", discardDevice("/dev/null")]]),
   boot: (filesystem, context) => {
+    const previousBaseImageId = filesystem.baseImageId;
     const accountDatabasePresentBeforeBoot = Object.values(
       linuxAccountPaths,
     ).some((path) => filesystem.exists(path));
@@ -153,6 +177,23 @@ const linuxProfile: OsProfile = {
       );
     }
     installOsFilesystemImage(filesystem, "linux");
+    if (
+      previousBaseImageId !== undefined &&
+      previousBaseImageId !== "cs-linux-1.0-rootfs-v8" &&
+      previousBaseImageId !== "cs-linux-1.0-rootfs-v9" &&
+      previousBaseImageId !== "cs-linux-1.0-rootfs-v10" &&
+      previousBaseImageId !== "cs-linux-1.0-rootfs-v11" &&
+      previousBaseImageId !== "cs-linux-1.0-rootfs-v12" &&
+      previousBaseImageId !== "cs-linux-1.0-rootfs-v13" &&
+      previousBaseImageId !== "cs-linux-1.0-rootfs-v14" &&
+      previousBaseImageId !== "cs-linux-1.0-rootfs-v15" &&
+      previousBaseImageId !== "cs-linux-1.0-rootfs-v16" &&
+      previousBaseImageId !== "cs-linux-1.0-rootfs-v17" &&
+      previousBaseImageId !== "cs-linux-1.0-rootfs-v18" &&
+      previousBaseImageId !== "cs-linux-1.0-rootfs-v19"
+    ) {
+      migrateLinuxCommandLayout(filesystem);
+    }
     if (initializeInitialHome) migrateLegacyLinuxHome(filesystem);
     else if (!legacyHomePresentBeforeBoot)
       suppressImplicitLegacyBaseHome(filesystem);
@@ -160,14 +201,25 @@ const linuxProfile: OsProfile = {
       "/bin",
       "/dev",
       "/etc",
+      "/etc/init.d",
+      "/etc/rc0.d",
+      "/etc/rc1.d",
+      "/etc/rc2.d",
+      "/etc/rc3.d",
+      "/etc/rc4.d",
+      "/etc/rc5.d",
+      "/etc/rc6.d",
       "/lib/python",
       "/proc",
       "/run",
       "/root",
+      "/sbin",
       "/tmp",
+      "/mnt",
       "/usr/bin",
       "/usr/include",
       "/usr/lib/computer-system/python",
+      "/usr/sbin",
       "/usr/share/man",
       "/var/lib/cs-os",
       "/var/log",
@@ -180,15 +232,11 @@ const linuxProfile: OsProfile = {
       legacyLinuxOsRelease,
     ]);
     ensureFile(filesystem, "/etc/hostname", `${context.computerName}\n`);
-    ensureMigratedDefaultFile(
-      filesystem,
-      "/etc/profile",
-      "export PATH=/usr/bin:/bin\n",
-      [
-        "export PATH=/usr/bin:/bin\nexport HOME=/home/cs\n",
-        "export PATH=/usr/bin:/bin\nexport HOME=/home/computer\n",
-      ],
-    );
+    ensureMigratedDefaultFile(filesystem, "/etc/profile", linuxEtcProfile, [
+      `export PATH=${linuxUserDefaultPath}\n`,
+      "export PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/games:/usr/games\nexport HOME=/home/cs\n",
+      "export PATH=/usr/local/bin:/usr/bin:/bin:/usr/local/games:/usr/games\nexport HOME=/home/computer\n",
+    ]);
     ensureFile(
       filesystem,
       "/etc/bash.bashrc",
@@ -212,6 +260,7 @@ const linuxProfile: OsProfile = {
       "/proc",
       "/run",
       "/root",
+      "/sbin",
       "/usr",
       "/usr/bin",
       "/usr/include",
@@ -220,6 +269,7 @@ const linuxProfile: OsProfile = {
       "/usr/lib/computer-system/python",
       "/usr/share",
       "/usr/share/man",
+      "/usr/sbin",
       "/var",
       "/var/lib",
       "/var/lib/cs-os",
@@ -245,8 +295,54 @@ const linuxProfile: OsProfile = {
     ]) {
       filesystem.setMetadata(path, { gid: 0, mode: 0o644, uid: 0 });
     }
+    ensureLinuxRcSymlinks(filesystem);
   },
 };
+
+/**
+ * Materializes the SysV rc.d symlink farm on every boot. The shared base
+ * image cannot ship symlinks (`FilesystemBaseImageFile` has no symlink
+ * field), so this idempotent, existence-guarded pass provisions fresh and
+ * upgraded Computers alike from `/etc/init.d`. Runlevels 2-5 are deliberately
+ * identical (no fabricated per-runlevel behavior); 0/1/6 stop everything.
+ */
+function ensureLinuxRcSymlinks(filesystem: InMemoryFilesystem): void {
+  const services: ReadonlyArray<{
+    readonly name: string;
+    readonly killOrder: number;
+    readonly startOrder: number;
+  }> = [
+    { killOrder: 90, name: "syslog", startOrder: 10 },
+    { killOrder: 80, name: "cron", startOrder: 20 },
+  ];
+  for (const runlevel of ["0", "1", "6"]) {
+    for (const service of services) {
+      ensureLinuxRcSymlink(
+        filesystem,
+        `/etc/rc${runlevel}.d/K${String(service.killOrder)}${service.name}`,
+        `../init.d/${service.name}`,
+      );
+    }
+  }
+  for (const runlevel of ["2", "3", "4", "5"]) {
+    for (const service of services) {
+      ensureLinuxRcSymlink(
+        filesystem,
+        `/etc/rc${runlevel}.d/S${String(service.startOrder)}${service.name}`,
+        `../init.d/${service.name}`,
+      );
+    }
+  }
+}
+
+function ensureLinuxRcSymlink(
+  filesystem: InMemoryFilesystem,
+  path: string,
+  target: string,
+): void {
+  if (filesystem.exists(path)) return;
+  filesystem.createSymbolicLink(target, path);
+}
 
 const dosProfile: OsProfile = {
   id: "dos",
@@ -257,23 +353,26 @@ const dosProfile: OsProfile = {
   initialDirectory: "/drives/c",
   pathDialect: dosPathDialect,
   environment: new Map([
+    ["COMSPEC", "C:\\COMMAND.COM"],
     ["INCLUDE", "C:\\INCLUDE"],
-    ["PATH", "C:\\DOS;C:\\COMMAND"],
+    ["PATH", "C:\\DOS"],
     ["PROMPT", "$P$G"],
-    ["SHELL", "C:\\COMMAND.COM"],
-    ["TERM", "computer-system"],
-    ["USER", "COMPUTER"],
-    ["LOGNAME", "COMPUTER"],
-    ["OS", "CS-DOS"],
+    ["TEMP", "C:\\TEMP"],
   ]),
   virtualDevices: new Map([
     ["/drives/c/con", discardDevice("/drives/c/con")],
     ["/drives/c/nul", discardDevice("/drives/c/nul")],
   ]),
-  boot: (filesystem) => {
+  boot: (filesystem, context) => {
+    const previousBaseImageId = filesystem.baseImageId;
     installOsFilesystemImage(filesystem, "dos");
+    if (
+      previousBaseImageId !== undefined &&
+      previousBaseImageId !== "cs-dos-1.0-rootfs-v8"
+    ) {
+      migrateDosCommandDirectory(filesystem, context.dosRuntime);
+    }
     ensureDirectories(filesystem, [
-      "/drives/c/command",
       "/drives/c/dos",
       "/drives/c/include",
       "/drives/c/temp",
@@ -282,7 +381,7 @@ const dosProfile: OsProfile = {
     ensureFile(
       filesystem,
       "/drives/c/autoexec.bat",
-      "@ECHO OFF\r\nPATH C:\\DOS;C:\\COMMAND\r\nSET INCLUDE=C:\\INCLUDE\r\n",
+      "@ECHO OFF\r\nPATH C:\\DOS\r\nSET TEMP=C:\\TEMP\r\nSET INCLUDE=C:\\INCLUDE\r\n",
     );
     ensureFile(
       filesystem,
@@ -296,6 +395,13 @@ const dosProfile: OsProfile = {
         "",
       ].join("\r\n"),
     );
+    if (
+      !filesystem.exists("/drives/c/command.com") ||
+      filesystem.isDirectory("/drives/c/command.com") ||
+      filesystem.isSymbolicLink("/drives/c/command.com")
+    ) {
+      throw new Error("Bad or missing Command Interpreter");
+    }
   },
 };
 
@@ -365,6 +471,136 @@ function migrateLegacyLinuxHome(filesystem: InMemoryFilesystem): void {
   throw new Error(
     "CS-Linux account migration: both legacy and current homes exist",
   );
+}
+
+function migrateLinuxCommandLayout(filesystem: InMemoryFilesystem): void {
+  filesystem.transaction(() => {
+    for (const command of legacyV7CommandNames("linux")) {
+      const legacy = legacyV7CommandFile("linux", command);
+      if (isLinuxBuiltinCommand(command)) {
+        if (
+          filesystem.exists(legacy.path) &&
+          !filesystem.isDirectory(legacy.path) &&
+          !filesystem.isSymbolicLink(legacy.path) &&
+          filesystem.readFile(legacy.path) === legacy.contents
+        ) {
+          filesystem.delete(legacy.path);
+        }
+        continue;
+      }
+      const destination = commandExecutablePath("linux", command);
+      if (destination === legacy.path) continue;
+      if (!filesystem.exists(legacy.path)) {
+        if (filesystem.exists(destination)) filesystem.delete(destination);
+        continue;
+      }
+      if (
+        filesystem.isDirectory(legacy.path) ||
+        filesystem.isSymbolicLink(legacy.path)
+      ) {
+        throw new Error(
+          `CS-Linux command migration: ${legacy.path} is not a regular file`,
+        );
+      }
+      if (filesystem.readFile(legacy.path) === legacy.contents) {
+        filesystem.delete(legacy.path);
+        continue;
+      }
+      if (filesystem.exists(destination)) filesystem.delete(destination);
+      filesystem.move(legacy.path, destination);
+    }
+  });
+}
+
+function migrateDosCommandDirectory(
+  filesystem: InMemoryFilesystem,
+  runtime: DosRuntimeState | undefined,
+): void {
+  const legacyDirectory = "/drives/c/command";
+  if (!filesystem.exists(legacyDirectory)) return;
+  if (
+    !filesystem.isDirectory(legacyDirectory) ||
+    filesystem.isSymbolicLink(legacyDirectory)
+  ) {
+    throw new Error("CS-DOS command migration: C:\\COMMAND is not a directory");
+  }
+  const operation = (): void => {
+    const registry = commandRegistryFor("dos");
+    for (const name of legacyV7CommandNames("dos")) {
+      const legacy = legacyV7CommandFile("dos", name);
+      const canonical = registry.canonical(name);
+      const destination = isDosInternalCommand(canonical)
+        ? `/drives/c/dos/${legacy.path.split("/").at(-1)!}`
+        : commandExecutablePath("dos", canonical);
+      if (!filesystem.exists(legacy.path)) {
+        if (
+          !isDosInternalCommand(canonical) &&
+          filesystem.exists(destination)
+        ) {
+          deleteDosPath(filesystem, runtime, destination);
+        }
+        continue;
+      }
+      if (
+        filesystem.isDirectory(legacy.path) ||
+        filesystem.isSymbolicLink(legacy.path)
+      ) {
+        throw new Error(
+          `CS-DOS command migration: ${legacy.path} is not a regular file`,
+        );
+      }
+      if (filesystem.readFile(legacy.path) === legacy.contents) {
+        deleteDosPath(filesystem, runtime, legacy.path);
+        continue;
+      }
+      if (filesystem.exists(destination)) {
+        deleteDosPath(filesystem, runtime, destination);
+      }
+      moveDosPath(filesystem, runtime, legacy.path, destination);
+    }
+    for (const entry of [...filesystem.list(legacyDirectory)]) {
+      const source = `${legacyDirectory}/${entry}`;
+      const destination = `/drives/c/dos/${entry}`;
+      if (filesystem.exists(destination)) {
+        throw new Error(
+          `CS-DOS command migration: destination C:\\DOS\\${entry.toUpperCase()} already exists`,
+        );
+      }
+      moveDosPath(filesystem, runtime, source, destination);
+    }
+    deleteDosPath(filesystem, runtime, legacyDirectory);
+  };
+  if (runtime === undefined) filesystem.transaction(operation);
+  else runtime.transaction(() => filesystem.transaction(operation));
+}
+
+function moveDosPath(
+  filesystem: InMemoryFilesystem,
+  runtime: DosRuntimeState | undefined,
+  source: string,
+  destination: string,
+): void {
+  const generation = runtime?.driveState("C").mediaGeneration;
+  const hasFatMetadata =
+    generation !== undefined &&
+    runtime?.fatMetadata(source, generation) !== undefined;
+  filesystem.move(source, destination);
+  if (hasFatMetadata) {
+    runtime.moveFatMetadata(source, destination, generation, generation);
+  }
+}
+
+function deleteDosPath(
+  filesystem: InMemoryFilesystem,
+  runtime: DosRuntimeState | undefined,
+  path: string,
+): void {
+  const generation = runtime?.driveState("C").mediaGeneration;
+  const hasFatMetadata =
+    generation !== undefined &&
+    runtime?.fatMetadata(path, generation) !== undefined;
+  filesystem.delete(path);
+  if (hasFatMetadata) runtime.deleteFatMetadata(path, generation);
 }
 
 function hasRecognizedLegacyLinuxAccount(

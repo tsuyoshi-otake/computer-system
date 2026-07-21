@@ -10,7 +10,7 @@ import {
 
 const probeComputerId = "c-900117";
 const probePassword = "issue17-auth-probe";
-const maximumProbeTransitionTicks = 64;
+const maximumProbeTransitionTicks = 256;
 
 export interface LinuxAuthenticationProbeResult {
   readonly authenticatedUser: "cs";
@@ -37,8 +37,11 @@ export function runLinuxAuthenticationProbe(): LinuxAuthenticationProbeResult {
   try {
     requireAccepted(runtime.register(record), "register");
     requireAccepted(runtime.powerOn(record.computerId), "power on");
-    runTick(runtime);
-    ticks += 1;
+    ticks += runUntil(
+      runtime,
+      () => runtime.isShellSecretInput(record.computerId),
+      "first-boot setup",
+    );
 
     requireSecretInput(runtime, record.computerId, true, "first-boot setup");
     requireLoginRejected(

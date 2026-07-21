@@ -45,11 +45,13 @@ message = f"value={value} {{ok}}"
     expect(module.body[4]).toMatchObject({
       value: {
         kind: "FormattedStringExpression",
-        parts: [
-          "value=",
-          { kind: "IdentifierExpression", name: "value" },
-          " {ok}",
+        interpolations: [
+          {
+            conversion: null,
+            value: { kind: "IdentifierExpression", name: "value" },
+          },
         ],
+        strings: ["value=", " {ok}"],
       },
     });
   });
@@ -94,6 +96,56 @@ while total < 10:
       ],
       body: [{ kind: "IfStatement", branches: [{}, {}] }],
     });
+  });
+
+  it("parses absolute and explicit-relative from imports", (): void => {
+    const module = parse(`
+import package.tools as tools
+from package import value as answer, helper
+from . import local
+from ..shared.tools import (build as make, run,)
+from package import *
+`);
+
+    expect(module.body).toMatchObject([
+      {
+        imports: [{ alias: "tools", module: "package.tools" }],
+        kind: "ImportStatement",
+      },
+      {
+        imports: [{ alias: "answer", name: "value" }, { name: "helper" }],
+        kind: "FromImportStatement",
+        level: 0,
+        module: "package",
+        wildcard: false,
+      },
+      {
+        imports: [{ name: "local" }],
+        kind: "FromImportStatement",
+        level: 1,
+        wildcard: false,
+      },
+      {
+        imports: [{ alias: "make", name: "build" }, { name: "run" }],
+        kind: "FromImportStatement",
+        level: 2,
+        module: "shared.tools",
+        wildcard: false,
+      },
+      {
+        imports: [],
+        kind: "FromImportStatement",
+        level: 0,
+        module: "package",
+        wildcard: true,
+      },
+    ]);
+    expect(() => parse("from package import value,\n")).toThrow(
+      /Trailing import comma requires parentheses/u,
+    );
+    expect(() => parse("from import value\n")).toThrow(
+      /Expected module name after from/u,
+    );
   });
 
   it("parses try, except, else, finally, and raise", (): void => {

@@ -176,9 +176,16 @@ describe("OS runtime state", (): void => {
       "computer-system / csfs rw,nosuid,nodev 0 0\n",
     );
     expect(state.renderProcDevices()).toContain("  4 ttyS0");
-    expect(state.renderProcStatus(daemon.pid)).toContain(
-      `Pid:\t${String(daemon.pid)}\n`,
-    );
+    const status = state.renderProcStatus(daemon.pid, {
+      residentBytes: 32_768,
+      virtualBytes: 65_536,
+    });
+    expect(status).toContain(`Pid:\t${String(daemon.pid)}\n`);
+    expect(status).toContain("VmSize:\t65536 B\n");
+    expect(status).toContain("VmRSS:\t32768 B\n");
+    expect(
+      state.readProc(`/proc/${String(daemon.pid)}/status`),
+    ).toBeUndefined();
     expect(state.readProc(`/proc/${String(daemon.pid)}/cmdline`)).toBe(
       "/usr/sbin/cs-getty\0tty1\0",
     );
@@ -300,14 +307,19 @@ describe("OS runtime state", (): void => {
     });
     lastLogins.openLoginSession({
       gid: 1000,
+      wallMilliseconds: 1_752_912_550_000,
       sessionId: "first",
       terminal: "tty1",
       tick: 3,
       uid: 1000,
       username: "cs",
     });
-    lastLogins.closeLoginSession("first", 4);
+    lastLogins.closeLoginSession("first", 4, "logout", 1_752_912_555_000);
     const lastLoginSnapshot = lastLogins.snapshot();
+    expect(lastLoginSnapshot.lastLogins[0]).toMatchObject({
+      loginWallMilliseconds: 1_752_912_550_000,
+      logoutWallMilliseconds: 1_752_912_555_000,
+    });
     expect(() =>
       lastLogins.openLoginSession({
         gid: 1001,
@@ -321,6 +333,35 @@ describe("OS runtime state", (): void => {
       expect.objectContaining({ maximum: 1, resource: "last_logins" }),
     );
     expect(lastLogins.snapshot()).toEqual(lastLoginSnapshot);
+
+    const wallValidation = runningState();
+    const beforeInvalidOpen = wallValidation.snapshot();
+    expect(() =>
+      wallValidation.openLoginSession({
+        gid: 1000,
+        sessionId: "invalid-wall",
+        terminal: "tty1",
+        tick: 3,
+        uid: 1000,
+        username: "cs",
+        wallMilliseconds: -1,
+      }),
+    ).toThrow(/login wall time/u);
+    expect(wallValidation.snapshot()).toEqual(beforeInvalidOpen);
+    wallValidation.openLoginSession({
+      gid: 1000,
+      sessionId: "valid-wall",
+      terminal: "tty1",
+      tick: 3,
+      uid: 1000,
+      username: "cs",
+      wallMilliseconds: 1_752_912_550_000,
+    });
+    const beforeInvalidClose = wallValidation.snapshot();
+    expect(() =>
+      wallValidation.closeLoginSession("valid-wall", 4, "logout", Number.NaN),
+    ).toThrow(/logout wall time/u);
+    expect(wallValidation.snapshot()).toEqual(beforeInvalidClose);
 
     const journal = runningState({
       maximumJournalBytes: 16,
@@ -500,6 +541,44 @@ describe("OS runtime state", (): void => {
     expect(() =>
       runningState().transitionLifecycle({ kind: "begin_boot", tick: 4 }),
     ).toThrow(OsRuntimeStateTransitionError);
+  });
+
+  it("tracks an in-memory runlevel that never persists and resets on restart", (): void => {
+    const state = runningState();
+    expect(state.runlevel()).toEqual({});
+
+    expect(state.setRunlevel("3", 3)).toEqual({ current: "3" });
+    expect(state.runlevel()).toEqual({ current: "3" });
+
+    expect(state.setRunlevel("1", 4)).toEqual({
+      current: "1",
+      previous: "3",
+    });
+    expect(state.runlevel()).toEqual({ current: "1", previous: "3" });
+
+    expect(() => state.setRunlevel("9", 5)).toThrow(RangeError);
+    expect(() => state.setRunlevel("s", 5)).toThrow(RangeError);
+    expect(state.setRunlevel("S", 5)).toEqual({
+      current: "S",
+      previous: "1",
+    });
+
+    expect(state.snapshot()).not.toHaveProperty("runlevel");
+    expect(state.persistentSnapshot()).not.toHaveProperty("runlevel");
+
+    state.transitionLifecycle({
+      kind: "begin_shutdown",
+      reason: "shutdown",
+      tick: 6,
+    });
+    state.transitionLifecycle({ kind: "shutdown_complete", tick: 7 });
+    expect(state.runlevel()).toEqual({});
+
+    const restored = OsRuntimeState.restore(
+      "c-runtime",
+      state.persistentSnapshot(),
+    );
+    expect(restored.runlevel()).toEqual({});
   });
 });
 

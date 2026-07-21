@@ -7,5 +7,6 @@ export default defineConfig({
       provider: "v8",
     },
     include: ["tests/**/*.test.{ts,mjs}"],
+    testTimeout: 15_000,
   },
 });

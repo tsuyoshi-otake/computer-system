@@ -2,8 +2,9 @@
 
 GitHub Issue: https://github.com/tsuyoshi-otake/computer-system/issues/48
 
-Status: implemented, verified, and published after focused host tests, the
-complete host gate, isolated MCP/BDS, and real Chrome.
+Status: implemented and verified locally on focused host tests, the complete
+host gate, isolated MCP/BDS, and real Chrome. The GitHub Issue remains open
+until these workspace changes are intentionally committed and published.
 
 ## Implemented boundary
 
@@ -44,7 +45,7 @@ Verify: `npm run validate`.
 Expect: Formatting, lint, TypeScript, all host tests, Bedrock pack build, and
 Pages build pass.
 
-Result on 2026-07-20: 165 test files and 1,130 tests passed; the Bedrock pack
+Result on 2026-07-20: 180 test files and 1,256 tests passed; the Bedrock pack
 and 16-chapter Pages builds completed.
 
 Verify: Run `npm run test:mcp:bds` with isolated BDS workdir, MCP port, and Web

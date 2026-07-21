@@ -19,7 +19,6 @@ import {
 } from "../../domain/redstone/redstoneState.js";
 import { ShellSession } from "../os/shellSession.js";
 import type { ShellResult } from "../os/shellSession.js";
-import type { ShellProcessMemoryAdmission } from "../os/shellCommands.js";
 import type {
   ShellBackgroundRequest,
   ShellForegroundRequest,
@@ -85,9 +84,7 @@ export interface NativeModuleContext {
   readonly reboot?: () => void;
   readonly ticksPerSecond?: number;
   readonly hardware?: ComputerHardwareProfile;
-  readonly memoryUsageBytes?: () => number;
   readonly guestRamLedger?: GuestRamLedger;
-  readonly admitProcessMemory?: ShellProcessMemoryAdmission;
   readonly requireLinuxLogin?: boolean;
   readonly shell?: ShellSession;
   readonly startForegroundProcess?: (
@@ -197,13 +194,9 @@ export function createNativeEnvironment(
       signalProcess: context.signalProcess,
       ticksPerSecond: context.ticksPerSecond,
       hardware: context.hardware,
-      memoryUsageBytes: context.memoryUsageBytes,
       ...(context.guestRamLedger === undefined
         ? {}
         : { guestRamLedger: context.guestRamLedger }),
-      ...(context.admitProcessMemory === undefined
-        ? {}
-        : { admitProcessMemory: context.admitProcessMemory }),
       requireLogin: context.requireLinuxLogin,
       terminalHeight: context.terminal.height,
       terminalWidth: context.terminal.width,
@@ -1054,6 +1047,16 @@ function redstoneSideArgument(value: RuntimeValue | undefined): RedstoneSide {
 }
 
 function numberArgument(value: RuntimeValue | undefined): number {
+  if (typeof value === "bigint") {
+    const converted = Number(value);
+    if (!Number.isSafeInteger(converted)) {
+      throw new VmRuntimeError(
+        "OverflowError",
+        "Integer argument is outside the guest native API range",
+      );
+    }
+    return converted;
+  }
   if (typeof value !== "number" || !Number.isFinite(value)) {
     throw new VmRuntimeError("TypeError", "Expected finite number argument");
   }
@@ -1148,7 +1151,11 @@ function displayValue(value: RuntimeValue): string {
   if (value === null) return "None";
   if (value === true) return "True";
   if (value === false) return "False";
-  if (typeof value === "string" || typeof value === "number")
+  if (
+    typeof value === "bigint" ||
+    typeof value === "string" ||
+    typeof value === "number"
+  )
     return String(value);
   if (value.kind === "list" || value.kind === "tuple") {
     return value.values.map(displayValue).join(", ");

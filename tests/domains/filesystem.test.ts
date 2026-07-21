@@ -336,6 +336,89 @@ describe("in-memory filesystem", (): void => {
     expect(restarted.exists("/replace-dir/sub")).toBe(false);
   });
 
+  it("rebases only unchanged base files while preserving content, metadata, and hard-link overlays", (): void => {
+    const oldImage = {
+      directories: [],
+      files: [
+        { contents: "old-unchanged", path: "/unchanged" },
+        { contents: "old-edited", path: "/edited" },
+        { contents: "old-metadata", path: "/metadata" },
+        { contents: "old-linked", path: "/linked" },
+      ],
+      id: "test-rebase-old-v1",
+    } as const;
+    const newImage = {
+      directories: [],
+      files: [
+        { contents: "new-unchanged", path: "/unchanged" },
+        { contents: "new-edited", path: "/edited" },
+        { contents: "new-metadata", path: "/metadata" },
+        { contents: "new-linked", path: "/linked" },
+      ],
+      id: "test-rebase-new-v1",
+    } as const;
+    const rebaseLimits = {
+      ...limits,
+      capacityBytes: 10_000,
+      maxEntries: 100,
+      maxFileBytes: 100,
+    };
+    const filesystem = new InMemoryFilesystem(rebaseLimits);
+    filesystem.attachBaseImage(oldImage);
+    filesystem.writeFile("/edited", "user-edited");
+    filesystem.setMetadata("/metadata", { gid: 7, mode: 0o600, uid: 8 });
+    filesystem.createHardLink("/linked", "/linked-copy");
+    const restored = new InMemoryFilesystem(rebaseLimits);
+    restored.restore(filesystem.snapshot());
+
+    restored.attachBaseImage(newImage);
+
+    expect(restored.readFile("/unchanged")).toBe("new-unchanged");
+    expect(restored.readFile("/edited")).toBe("user-edited");
+    expect(restored.readFile("/metadata")).toBe("old-metadata");
+    expect(restored.getMetadata("/metadata")).toMatchObject({
+      gid: 7,
+      mode: 0o600,
+      uid: 8,
+    });
+    expect(restored.readFile("/linked")).toBe("old-linked");
+    expect(restored.readFile("/linked-copy")).toBe("old-linked");
+    expect(restored.getLinkCount("/linked")).toBe(2);
+    expect(
+      restored.snapshot().files.some(([path]) => path === "/unchanged"),
+    ).toBe(false);
+  });
+
+  it("rejects a base-file rebase capacity overflow without mutation", (): void => {
+    const filesystem = new InMemoryFilesystem({
+      ...limits,
+      capacityBytes: 16,
+      maxEntries: 10,
+      maxFileBytes: 100,
+    });
+    filesystem.attachBaseImage({
+      directories: [],
+      files: [{ contents: "1234", path: "/file" }],
+      id: "test-rebase-capacity-old-v1",
+    });
+    const before = filesystem.snapshot();
+    const beforeRevision = filesystem.revision;
+    const beforeFree = filesystem.getFreeSpace();
+
+    expect(() =>
+      filesystem.attachBaseImage({
+        directories: [],
+        files: [{ contents: "12345678901234567890", path: "/file" }],
+        id: "test-rebase-capacity-new-v1",
+      }),
+    ).toThrow(/capacity exceeded/u);
+
+    expect(filesystem.snapshot()).toEqual(before);
+    expect(filesystem.revision).toBe(beforeRevision);
+    expect(filesystem.getFreeSpace()).toBe(beforeFree);
+    expect(filesystem.readFile("/file")).toBe("1234");
+  });
+
   it("enforces byte, file, entry, and path limits before committing", (): void => {
     const filesystem = new InMemoryFilesystem({ ...limits, maxEntries: 5 });
     filesystem.makeDirectory("/d");

@@ -14,15 +14,17 @@ export const GUEST_MAKE_LIMITS = Object.freeze({
   expandedRecipeCharacters: 4_096,
   expansionDepth: 8,
   graphDepth: 32,
+  includeDepth: 8,
+  includeFiles: 64,
   pathCharacters: 128,
   recipeLines: 256,
-  fingerprintBytes: 1_048_576,
+  fingerprintBytes: 16 * 1_048_576,
   stateCharacters: 32_768,
   stateRecords: 128,
 });
 
 export const GUEST_MAKE_TOOLCHAIN_ID =
-  "CS Make 1.0|CS ASM 1.0|CS C/C++ 1.0|CS486OBJ3|CS486EXE3";
+  "CS Make 1.0-pattern1|CS ASM 1.0|CS C/C++ 2.1|CS486OBJ4|CS486EXE5|CS486AR2|cs-word32-v1+cs-byte8-v1";
 export const GUEST_MAKE_STATE_MARKER = "CSMAKE2\n";
 const legacyGuestMakeStateMarker = "CSMAKE1\n";
 const pendingGuestMakeStateMarker = "CSMAKE2-PENDING\n";
@@ -59,8 +61,35 @@ export interface GuestMakeRule {
   readonly line: number;
 }
 
+export interface GuestMakePatternRule extends GuestMakeRule {
+  readonly order: number;
+  readonly targetPattern: string;
+}
+
+export interface GuestMakefileIncludeRequest {
+  readonly fromSource: string;
+  readonly optional: boolean;
+  readonly path: string;
+}
+
+export interface GuestMakefileInclude {
+  readonly identity?: string;
+  readonly source: string;
+  readonly sourceName: string;
+}
+
+export interface GuestMakefileParseOptions {
+  readonly include?: (
+    request: GuestMakefileIncludeRequest,
+  ) => GuestMakefileInclude | undefined;
+  readonly sourceName?: string;
+}
+
 export interface GuestMakefile {
   readonly rules: ReadonlyMap<string, GuestMakeRule>;
+  readonly patterns: readonly GuestMakePatternRule[];
+  readonly patternIndex: ReadonlyMap<string, readonly GuestMakePatternRule[]>;
+  readonly variables: ReadonlyMap<string, MakeVariable>;
   readonly defaultTarget?: string;
 }
 
@@ -72,9 +101,16 @@ export interface GuestMakePlannedTarget {
 }
 
 export interface GuestMakePlan {
+  readonly dependencyEdgesTraversed: number;
+  readonly patternCandidatesExamined: number;
   readonly requestedTargets: readonly string[];
   readonly targets: readonly GuestMakePlannedTarget[];
   readonly skippedTargets: readonly string[];
+}
+
+export interface GuestMakeResolvedRule {
+  readonly rule: GuestMakeRule;
+  readonly stem: string;
 }
 
 export interface GuestMakeStateRecord {
@@ -104,10 +140,17 @@ interface MutableRule {
   readonly line: number;
 }
 
-interface MakeVariable {
+export interface MakeVariable {
   readonly flavor: "recursive" | "simple";
   readonly value: string;
   readonly commandLine: boolean;
+}
+
+interface MakeConditionalFrame {
+  active: boolean;
+  branchTaken: boolean;
+  elseSeen: boolean;
+  readonly parentActive: boolean;
 }
 
 const VARIABLE_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/u;
@@ -273,7 +316,7 @@ function expandText(
       index += 1;
       continue;
     }
-    if (next === "@" || next === "<" || next === "^") {
+    if (next === "@" || next === "<" || next === "^" || next === "*") {
       output += automatic.get(next) ?? "";
       index += 1;
       continue;
@@ -305,21 +348,155 @@ function parseWords(value: string, context: string): string[] {
   return words;
 }
 
+function assignMakeVariable(
+  variables: Map<string, MakeVariable>,
+  assignment: RegExpExecArray,
+  sourceName: string,
+  lineNumber: number,
+): void {
+  const [, name = "", operator = "", rawValue = ""] = assignment;
+  assertVariableName(name);
+  const existing = variables.get(name);
+  if (existing?.commandLine === true) return;
+  if (operator === "?=" && existing !== undefined) return;
+  let flavor: MakeVariable["flavor"] =
+    operator === ":=" ? "simple" : "recursive";
+  let value = operator === ":=" ? expandText(rawValue, variables) : rawValue;
+  if (operator === "+=" && existing !== undefined) {
+    flavor = existing.flavor;
+    value =
+      existing.flavor === "simple"
+        ? appendVariableValue(existing.value, expandText(rawValue, variables))
+        : appendVariableValue(existing.value, rawValue);
+  }
+  if (value.length > GUEST_MAKE_LIMITS.variableValueCharacters) {
+    fail(
+      `${sourceName}:${lineNumber}: variable '${name}' exceeds ${GUEST_MAKE_LIMITS.variableValueCharacters} characters`,
+    );
+  }
+  variables.set(name, { flavor, value, commandLine: false });
+  if (variables.size > GUEST_MAKE_LIMITS.variables)
+    fail(`variable count exceeds ${GUEST_MAKE_LIMITS.variables}`);
+}
+
+function makeConditionalActive(
+  conditionals: readonly MakeConditionalFrame[],
+): boolean {
+  return conditionals.at(-1)?.active ?? true;
+}
+
+function processMakeConditional(
+  line: string,
+  variables: ReadonlyMap<string, MakeVariable>,
+  conditionals: MakeConditionalFrame[],
+  sourceName: string,
+  lineNumber: number,
+): boolean {
+  const keyword = /^(ifeq|ifneq|ifdef|ifndef|else|endif)(?:\s|$)/u.exec(
+    line,
+  )?.[1];
+  if (keyword === undefined) return false;
+  const rest = line.slice(keyword.length).trim();
+  if (keyword === "else") {
+    if (rest.length !== 0)
+      fail(`${sourceName}:${lineNumber}: tokens after else`);
+    const frame = conditionals.at(-1);
+    if (frame === undefined)
+      fail(`${sourceName}:${lineNumber}: else without conditional`);
+    if (frame.elseSeen) fail(`${sourceName}:${lineNumber}: duplicate else`);
+    frame.elseSeen = true;
+    frame.active = frame.parentActive && !frame.branchTaken;
+    if (frame.active) frame.branchTaken = true;
+    return true;
+  }
+  if (keyword === "endif") {
+    if (rest.length !== 0)
+      fail(`${sourceName}:${lineNumber}: tokens after endif`);
+    if (conditionals.pop() === undefined)
+      fail(`${sourceName}:${lineNumber}: endif without conditional`);
+    return true;
+  }
+  if (conditionals.length >= GUEST_MAKE_LIMITS.graphDepth)
+    fail(`${sourceName}:${lineNumber}: conditional nesting limit exceeded`);
+  const parentActive = makeConditionalActive(conditionals);
+  let condition = false;
+  if (parentActive) {
+    if (keyword === "ifdef" || keyword === "ifndef") {
+      assertVariableName(rest);
+      const variable = variables.get(rest);
+      condition =
+        variable !== undefined &&
+        expandText(`$(${rest})`, variables).trim().length > 0;
+      if (keyword === "ifndef") condition = !condition;
+    } else {
+      const [left, right] = parseMakeEqualityOperands(
+        expandText(rest, variables),
+        sourceName,
+        lineNumber,
+      );
+      condition = left === right;
+      if (keyword === "ifneq") condition = !condition;
+    }
+  }
+  conditionals.push({
+    active: parentActive && condition,
+    branchTaken: parentActive && condition,
+    elseSeen: false,
+    parentActive,
+  });
+  return true;
+}
+
+function parseMakeEqualityOperands(
+  value: string,
+  sourceName: string,
+  lineNumber: number,
+): readonly [string, string] {
+  const trimmed = value.trim();
+  if (trimmed.startsWith("(") && trimmed.endsWith(")")) {
+    const body = trimmed.slice(1, -1);
+    const separator = body.indexOf(",");
+    if (separator >= 0 && body.indexOf(",", separator + 1) < 0) {
+      return [
+        body.slice(0, separator).trim(),
+        body.slice(separator + 1).trim(),
+      ];
+    }
+  }
+  const quoted = /^(?:"([^"]*)"|'([^']*)')\s+(?:"([^"]*)"|'([^']*)')$/u.exec(
+    trimmed,
+  );
+  if (quoted !== null)
+    return [quoted[1] ?? quoted[2] ?? "", quoted[3] ?? quoted[4] ?? ""];
+  fail(`${sourceName}:${lineNumber}: malformed make conditional`);
+}
+
+function validateMakePaths(
+  paths: readonly string[],
+  sourceName: string,
+  lineNumber: number,
+): void {
+  if (
+    paths.some(
+      (path) =>
+        path.length === 0 || path.length > GUEST_MAKE_LIMITS.pathCharacters,
+    )
+  ) {
+    fail(
+      `${sourceName}:${lineNumber}: target or prerequisite path exceeds ${GUEST_MAKE_LIMITS.pathCharacters} characters`,
+    );
+  }
+}
+
+function countOccurrences(value: string, needle: string): number {
+  return value.split(needle).length - 1;
+}
+
 export function parseGuestMakefile(
   source: string,
   commandLineVariables: ReadonlyMap<string, string> = new Map(),
+  options: GuestMakefileParseOptions = {},
 ): GuestMakefile {
-  if (source.length > GUEST_MAKE_LIMITS.sourceCharacters) {
-    fail(`Makefile exceeds ${GUEST_MAKE_LIMITS.sourceCharacters} characters`);
-  }
-  const lines = source
-    .replaceAll("\r\n", "\n")
-    .replaceAll("\r", "\n")
-    .split("\n");
-  if (lines.length > GUEST_MAKE_LIMITS.lines) {
-    fail(`Makefile exceeds ${GUEST_MAKE_LIMITS.lines} lines`);
-  }
-
   const variables = new Map<string, MakeVariable>();
   for (const [name, value] of Object.entries(BUILTIN_VARIABLES)) {
     variables.set(name, { flavor: "simple", value, commandLine: false });
@@ -338,153 +515,236 @@ export function parseGuestMakefile(
   }
 
   const rules = new Map<string, MutableRule>();
+  const patternRules = new Map<string, MutableRule>();
   const phonyTargets = new Set<string>();
-  const graphNodes = new Set<string>();
-  let activeRule: MutableRule | undefined;
   let defaultTarget: string | undefined;
   let recipeLines = 0;
-  let edgeCount = 0;
+  let aggregateCharacters = 0;
+  let aggregateLines = 0;
+  let includeFiles = 0;
+  const includeStack: string[] = [];
 
-  for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
-    const rawLine = lines[lineIndex] ?? "";
-    const lineNumber = lineIndex + 1;
-    if (rawLine.startsWith("\t")) {
-      if (activeRule === undefined)
-        fail(`line ${lineNumber}: recipe has no target`);
-      let command = rawLine.slice(1);
-      let silent = false;
-      if (command.startsWith("@")) {
-        silent = true;
-        command = command.slice(1);
-      }
-      if (command.startsWith("-") || command.startsWith("+")) {
-        fail(`line ${lineNumber}: recipe prefixes '-' and '+' are unsupported`);
-      }
-      if (command.trim().length === 0) continue;
-      activeRule.recipes.push({ command, silent });
-      recipeLines += 1;
-      if (recipeLines > GUEST_MAKE_LIMITS.recipeLines) {
-        fail(`recipe line count exceeds ${GUEST_MAKE_LIMITS.recipeLines}`);
-      }
-      continue;
-    }
+  const parseSource = (
+    contents: string,
+    sourceName: string,
+    identity: string,
+    depth: number,
+  ): void => {
+    if (depth > GUEST_MAKE_LIMITS.includeDepth)
+      fail(`include depth exceeds ${GUEST_MAKE_LIMITS.includeDepth}`);
+    if (includeStack.includes(identity))
+      fail(`circular Makefile include '${sourceName}'`);
+    const lines = contents
+      .replaceAll("\r\n", "\n")
+      .replaceAll("\r", "\n")
+      .split("\n");
+    aggregateCharacters += contents.length;
+    aggregateLines += lines.length;
+    if (aggregateCharacters > GUEST_MAKE_LIMITS.sourceCharacters)
+      fail(`Makefile exceeds ${GUEST_MAKE_LIMITS.sourceCharacters} characters`);
+    if (aggregateLines > GUEST_MAKE_LIMITS.lines)
+      fail(`Makefile exceeds ${GUEST_MAKE_LIMITS.lines} lines`);
 
-    activeRule = undefined;
-    const line = stripComment(rawLine).trim();
-    if (line.length === 0) continue;
-    const assignment = ASSIGNMENT.exec(line);
-    if (assignment !== null) {
-      const [, name = "", operator = "", rawValue = ""] = assignment;
-      assertVariableName(name);
-      const existing = variables.get(name);
-      if (existing?.commandLine === true) continue;
-      if (operator === "?=" && existing !== undefined) continue;
-      let flavor: MakeVariable["flavor"] =
-        operator === ":=" ? "simple" : "recursive";
-      let value =
-        operator === ":=" ? expandText(rawValue, variables) : rawValue;
-      if (operator === "+=" && existing !== undefined) {
-        flavor = existing.flavor;
-        value =
-          existing.flavor === "simple"
-            ? appendVariableValue(
-                existing.value,
-                expandText(rawValue, variables),
-              )
-            : appendVariableValue(existing.value, rawValue);
-      }
-      if (value.length > GUEST_MAKE_LIMITS.variableValueCharacters) {
-        fail(
-          `line ${lineNumber}: variable '${name}' exceeds ${GUEST_MAKE_LIMITS.variableValueCharacters} characters`,
-        );
-      }
-      variables.set(name, { flavor, value, commandLine: false });
-      if (variables.size > GUEST_MAKE_LIMITS.variables) {
-        fail(`variable count exceeds ${GUEST_MAKE_LIMITS.variables}`);
-      }
-      continue;
-    }
-
-    const colon = line.indexOf(":");
-    if (colon < 0) fail(`line ${lineNumber}: expected assignment or rule`);
-    const targets = parseWords(
-      expandText(line.slice(0, colon), variables),
-      "rule target",
-    );
-    const prerequisites = parseWords(
-      expandText(line.slice(colon + 1), variables),
-      "rule prerequisites",
-    );
-    if (targets.length === 0) fail(`line ${lineNumber}: rule has no target`);
-    if (targets[0] === ".PHONY") {
-      if (targets.length !== 1)
-        fail(`line ${lineNumber}: malformed .PHONY rule`);
-      if (prerequisites.length > GUEST_MAKE_LIMITS.prerequisitesPerRule) {
-        fail(
-          `line ${lineNumber}: prerequisite count exceeds ${GUEST_MAKE_LIMITS.prerequisitesPerRule}`,
-        );
-      }
-      for (const target of prerequisites) {
-        if (target.length > GUEST_MAKE_LIMITS.pathCharacters) {
-          fail(
-            `line ${lineNumber}: target exceeds ${GUEST_MAKE_LIMITS.pathCharacters} characters`,
-          );
+    includeStack.push(identity);
+    const conditionals: MakeConditionalFrame[] = [];
+    let activeRule: MutableRule | undefined;
+    let mayAddRecipes = false;
+    try {
+      for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
+        const rawLine = lines[lineIndex] ?? "";
+        const lineNumber = lineIndex + 1;
+        if (rawLine.startsWith("\t")) {
+          if (!makeConditionalActive(conditionals)) continue;
+          if (activeRule === undefined)
+            fail(`${sourceName}:${lineNumber}: recipe has no target`);
+          if (!mayAddRecipes)
+            fail(
+              `${sourceName}:${lineNumber}: duplicate recipe for '${activeRule.target}'`,
+            );
+          let command = rawLine.slice(1);
+          let silent = false;
+          if (command.startsWith("@")) {
+            silent = true;
+            command = command.slice(1);
+          }
+          if (command.startsWith("-") || command.startsWith("+")) {
+            fail(
+              `${sourceName}:${lineNumber}: recipe prefixes '-' and '+' are unsupported`,
+            );
+          }
+          if (command.trim().length === 0) continue;
+          activeRule.recipes.push({ command, silent });
+          recipeLines += 1;
+          if (recipeLines > GUEST_MAKE_LIMITS.recipeLines)
+            fail(`recipe line count exceeds ${GUEST_MAKE_LIMITS.recipeLines}`);
+          continue;
         }
-        phonyTargets.add(target);
-        graphNodes.add(target);
+
+        activeRule = undefined;
+        mayAddRecipes = false;
+        const line = stripComment(rawLine).trim();
+        if (line.length === 0) continue;
+        if (
+          processMakeConditional(
+            line,
+            variables,
+            conditionals,
+            sourceName,
+            lineNumber,
+          )
+        )
+          continue;
+        if (!makeConditionalActive(conditionals)) continue;
+
+        const include = /^(include|-include|sinclude)\s+(.+)$/u.exec(line);
+        if (include !== null) {
+          const optional = include[1] !== "include";
+          const paths = parseWords(
+            expandText(include[2] ?? "", variables),
+            "include path",
+          );
+          if (paths.length === 0)
+            fail(`${sourceName}:${lineNumber}: empty include`);
+          if (paths.length > GUEST_MAKE_LIMITS.prerequisitesPerRule)
+            fail(`${sourceName}:${lineNumber}: too many included Makefiles`);
+          for (const path of paths) {
+            if (path.length > GUEST_MAKE_LIMITS.pathCharacters)
+              fail(`${sourceName}:${lineNumber}: include path is too long`);
+            const loaded = options.include?.({
+              fromSource: sourceName,
+              optional,
+              path,
+            });
+            if (loaded === undefined) {
+              if (optional) continue;
+              fail(
+                `${sourceName}:${lineNumber}: included Makefile not found: ${path}`,
+              );
+            }
+            includeFiles += 1;
+            if (includeFiles > GUEST_MAKE_LIMITS.includeFiles)
+              fail(
+                `included Makefile count exceeds ${GUEST_MAKE_LIMITS.includeFiles}`,
+              );
+            parseSource(
+              loaded.source,
+              loaded.sourceName,
+              loaded.identity ?? loaded.sourceName,
+              depth + 1,
+            );
+          }
+          continue;
+        }
+
+        const assignment = ASSIGNMENT.exec(line);
+        if (assignment !== null) {
+          assignMakeVariable(variables, assignment, sourceName, lineNumber);
+          continue;
+        }
+
+        const colon = line.indexOf(":");
+        if (colon < 0)
+          fail(`${sourceName}:${lineNumber}: expected assignment or rule`);
+        const targets = parseWords(
+          expandText(line.slice(0, colon), variables),
+          "rule target",
+        );
+        const prerequisites = parseWords(
+          expandText(line.slice(colon + 1), variables),
+          "rule prerequisites",
+        );
+        if (targets.length === 0)
+          fail(`${sourceName}:${lineNumber}: rule has no target`);
+        if (targets[0] === ".PHONY") {
+          if (targets.length !== 1)
+            fail(`${sourceName}:${lineNumber}: malformed .PHONY rule`);
+          if (prerequisites.length > GUEST_MAKE_LIMITS.prerequisitesPerRule)
+            fail(
+              `${sourceName}:${lineNumber}: prerequisite count exceeds ${GUEST_MAKE_LIMITS.prerequisitesPerRule}`,
+            );
+          validateMakePaths(prerequisites, sourceName, lineNumber);
+          for (const target of prerequisites) {
+            if (target.includes("%"))
+              fail(
+                `${sourceName}:${lineNumber}: pattern .PHONY target is unsupported`,
+              );
+            phonyTargets.add(target);
+          }
+          continue;
+        }
+        if (targets.length !== 1)
+          fail(
+            `${sourceName}:${lineNumber}: multiple rule targets are unsupported`,
+          );
+        validateMakePaths(
+          [...targets, ...prerequisites],
+          sourceName,
+          lineNumber,
+        );
+        const target = targets[0]!;
+        if (countOccurrences(target, "%") > 1)
+          fail(
+            `${sourceName}:${lineNumber}: target pattern has multiple '%' markers`,
+          );
+        for (const prerequisite of prerequisites) {
+          if (countOccurrences(prerequisite, "%") > 1)
+            fail(
+              `${sourceName}:${lineNumber}: prerequisite pattern has multiple '%' markers`,
+            );
+        }
+        const targetRules = target.includes("%") ? patternRules : rules;
+        const existing = targetRules.get(target);
+        const rule: MutableRule = existing ?? {
+          target,
+          prerequisites: [],
+          recipes: [],
+          line: lineNumber,
+        };
+        for (const prerequisite of prerequisites) {
+          if (!rule.prerequisites.includes(prerequisite))
+            rule.prerequisites.push(prerequisite);
+        }
+        if (rule.prerequisites.length > GUEST_MAKE_LIMITS.prerequisitesPerRule)
+          fail(
+            `${sourceName}:${lineNumber}: prerequisite count exceeds ${GUEST_MAKE_LIMITS.prerequisitesPerRule}`,
+          );
+        if (existing === undefined) targetRules.set(target, rule);
+        activeRule = rule;
+        mayAddRecipes = rule.recipes.length === 0;
+        if (
+          rules.size + patternRules.size > GUEST_MAKE_LIMITS.rules ||
+          rules.size > GUEST_MAKE_LIMITS.graphNodes
+        )
+          fail(`rule count exceeds ${GUEST_MAKE_LIMITS.rules}`);
+        if (
+          defaultTarget === undefined &&
+          !target.startsWith(".") &&
+          !target.includes("%")
+        )
+          defaultTarget = target;
       }
-      if (graphNodes.size > GUEST_MAKE_LIMITS.graphNodes) {
-        fail(`dependency node count exceeds ${GUEST_MAKE_LIMITS.graphNodes}`);
-      }
-      continue;
+      if (conditionals.length !== 0)
+        fail(`${sourceName}: unterminated Make conditional`);
+    } finally {
+      includeStack.pop();
     }
-    if (targets.length !== 1)
-      fail(`line ${lineNumber}: multiple rule targets are unsupported`);
-    if (prerequisites.length > GUEST_MAKE_LIMITS.prerequisitesPerRule) {
-      fail(
-        `line ${lineNumber}: prerequisite count exceeds ${GUEST_MAKE_LIMITS.prerequisitesPerRule}`,
-      );
-    }
-    const target = targets[0] ?? "";
-    if (
-      target.length > GUEST_MAKE_LIMITS.pathCharacters ||
-      prerequisites.some(
-        (prerequisite) =>
-          prerequisite.length > GUEST_MAKE_LIMITS.pathCharacters,
-      )
-    ) {
-      fail(
-        `line ${lineNumber}: target or prerequisite path exceeds ${GUEST_MAKE_LIMITS.pathCharacters} characters`,
-      );
-    }
-    if (rules.has(target))
-      fail(`line ${lineNumber}: duplicate rule for '${target}'`);
-    const rule: MutableRule = {
-      target,
-      prerequisites,
-      recipes: [],
-      line: lineNumber,
-    };
-    rules.set(target, rule);
-    graphNodes.add(target);
-    for (const prerequisite of prerequisites) graphNodes.add(prerequisite);
-    activeRule = rule;
-    edgeCount += prerequisites.length;
-    if (
-      rules.size > GUEST_MAKE_LIMITS.rules ||
-      rules.size > GUEST_MAKE_LIMITS.graphNodes
-    ) {
-      fail(`rule count exceeds ${GUEST_MAKE_LIMITS.rules}`);
-    }
-    if (edgeCount > GUEST_MAKE_LIMITS.graphEdges) {
-      fail(`dependency edge count exceeds ${GUEST_MAKE_LIMITS.graphEdges}`);
-    }
-    if (graphNodes.size > GUEST_MAKE_LIMITS.graphNodes) {
-      fail(`dependency node count exceeds ${GUEST_MAKE_LIMITS.graphNodes}`);
-    }
-    if (defaultTarget === undefined && !target.startsWith("."))
-      defaultTarget = target;
+  };
+
+  const sourceName = options.sourceName ?? "Makefile";
+  parseSource(source, sourceName, sourceName, 0);
+
+  const graphNodes = new Set<string>();
+  let edgeCount = 0;
+  for (const rule of [...rules.values(), ...patternRules.values()]) {
+    graphNodes.add(rule.target);
+    for (const prerequisite of rule.prerequisites) graphNodes.add(prerequisite);
+    edgeCount += rule.prerequisites.length;
   }
+  for (const target of phonyTargets) graphNodes.add(target);
+  if (edgeCount > GUEST_MAKE_LIMITS.graphEdges)
+    fail(`dependency edge count exceeds ${GUEST_MAKE_LIMITS.graphEdges}`);
+  if (graphNodes.size > GUEST_MAKE_LIMITS.graphNodes)
+    fail(`dependency node count exceeds ${GUEST_MAKE_LIMITS.graphNodes}`);
 
   const frozenRules = new Map<string, GuestMakeRule>();
   for (const [target, rule] of rules) {
@@ -496,8 +756,29 @@ export function parseGuestMakefile(
       line: rule.line,
     });
   }
+  const frozenPatterns = [...patternRules.values()].map((rule, order) => ({
+    order,
+    targetPattern: rule.target,
+    target: rule.target,
+    prerequisites: [...rule.prerequisites],
+    recipes: rule.recipes.map((recipe) => ({ ...recipe })),
+    phony: false,
+    line: rule.line,
+  }));
+  const patternIndex = new Map<string, GuestMakePatternRule[]>();
+  for (const pattern of frozenPatterns) {
+    const suffix = pattern.targetPattern.slice(
+      pattern.targetPattern.indexOf("%") + 1,
+    );
+    const candidates = patternIndex.get(suffix) ?? [];
+    candidates.push(pattern);
+    patternIndex.set(suffix, candidates);
+  }
   return {
+    patternIndex,
     rules: frozenRules,
+    patterns: frozenPatterns,
+    variables: new Map(variables),
     ...(defaultTarget === undefined ? {} : { defaultTarget }),
   };
 }
@@ -507,11 +788,13 @@ function expandRecipe(
   variables: ReadonlyMap<string, MakeVariable>,
   target: string,
   prerequisites: readonly string[],
+  stem = "",
 ): GuestMakeRecipe {
   const automatic = new Map<string, string>([
     ["@", target],
     ["<", prerequisites[0] ?? ""],
     ["^", [...new Set(prerequisites)].join(" ")],
+    ["*", stem],
   ]);
   const command = expandText(recipe.command, variables, automatic);
   if (command.length > GUEST_MAKE_LIMITS.expandedRecipeCharacters) {
@@ -562,6 +845,71 @@ function variablesForPlanning(
   return variables;
 }
 
+export function resolveGuestMakeRule(
+  makefile: GuestMakefile,
+  target: string,
+): GuestMakeResolvedRule | undefined {
+  return resolveGuestMakeRuleWithMetrics(makefile, target).resolved;
+}
+
+function resolveGuestMakeRuleWithMetrics(
+  makefile: GuestMakefile,
+  target: string,
+): {
+  readonly candidatesExamined: number;
+  readonly resolved?: GuestMakeResolvedRule;
+} {
+  const exact = makefile.rules.get(target);
+  if (exact !== undefined && (exact.recipes.length > 0 || exact.phony))
+    return { candidatesExamined: 0, resolved: { rule: exact, stem: "" } };
+  const candidates = new Map<number, GuestMakePatternRule>();
+  for (let index = 0; index <= target.length; index += 1) {
+    for (const pattern of makefile.patternIndex.get(target.slice(index)) ?? [])
+      candidates.set(pattern.order, pattern);
+  }
+  let candidatesExamined = 0;
+  for (const pattern of [...candidates.values()].sort(
+    (left, right) => left.order - right.order,
+  )) {
+    candidatesExamined += 1;
+    const marker = pattern.targetPattern.indexOf("%");
+    if (marker < 0) continue;
+    const prefix = pattern.targetPattern.slice(0, marker);
+    const suffix = pattern.targetPattern.slice(marker + 1);
+    if (
+      !target.startsWith(prefix) ||
+      !target.endsWith(suffix) ||
+      target.length < prefix.length + suffix.length
+    )
+      continue;
+    const stem = target.slice(prefix.length, target.length - suffix.length);
+    return {
+      candidatesExamined,
+      resolved: {
+        rule: {
+          target,
+          prerequisites: [
+            ...new Set([
+              ...pattern.prerequisites.map((prerequisite) =>
+                prerequisite.replace("%", stem),
+              ),
+              ...(exact?.prerequisites ?? []),
+            ]),
+          ],
+          recipes: pattern.recipes,
+          phony: false,
+          line: pattern.line,
+        },
+        stem,
+      },
+    };
+  }
+  return {
+    candidatesExamined,
+    ...(exact === undefined ? {} : { resolved: { rule: exact, stem: "" } }),
+  };
+}
+
 export function planGuestMakeBuild(
   makefile: GuestMakefile,
   source: string,
@@ -588,34 +936,62 @@ export function planGuestMakeBuild(
       `requested target exceeds ${GUEST_MAKE_LIMITS.pathCharacters} characters`,
     );
   }
-  const variables = variablesForPlanning(source, commandLineVariables);
+  const variables = new Map([
+    ...variablesForPlanning(source, commandLineVariables),
+    ...makefile.variables,
+  ]);
   const visiting: string[] = [];
   const visited = new Set<string>();
   const rebuilt = new Set<string>();
   const planned: GuestMakePlannedTarget[] = [];
   const skipped: string[] = [];
+  const instantiatedPatterns = new Map<
+    string,
+    { readonly rule: GuestMakeRule; readonly stem: string }
+  >();
+  let traversedEdges = 0;
+  let patternCandidatesExamined = 0;
+
+  const resolveRule = (
+    target: string,
+  ): { readonly rule: GuestMakeRule; readonly stem: string } | undefined => {
+    const cached = instantiatedPatterns.get(target);
+    if (cached !== undefined) return cached;
+    const lookup = resolveGuestMakeRuleWithMetrics(makefile, target);
+    patternCandidatesExamined += lookup.candidatesExamined;
+    const resolved = lookup.resolved;
+    if (resolved !== undefined) instantiatedPatterns.set(target, resolved);
+    return resolved;
+  };
 
   const visit = (target: string, depth: number): void => {
     if (depth > GUEST_MAKE_LIMITS.graphDepth) {
       fail(`dependency graph exceeds depth ${GUEST_MAKE_LIMITS.graphDepth}`);
     }
     if (visited.has(target)) return;
+    if (visited.size + visiting.length >= GUEST_MAKE_LIMITS.graphNodes)
+      fail(`dependency node count exceeds ${GUEST_MAKE_LIMITS.graphNodes}`);
     const cycleStart = visiting.indexOf(target);
     if (cycleStart >= 0)
       fail(
         `dependency cycle: ${[...visiting.slice(cycleStart), target].join(" -> ")}`,
       );
     visiting.push(target);
-    const rule = makefile.rules.get(target);
-    if (rule === undefined) {
+    const resolved = resolveRule(target);
+    if (resolved === undefined) {
       visiting.pop();
       visited.add(target);
       if (!filesystem.exists(target))
         fail(`no rule to make target '${target}'`);
       return;
     }
+    const { rule, stem } = resolved;
+    traversedEdges += rule.prerequisites.length;
+    if (traversedEdges > GUEST_MAKE_LIMITS.graphEdges)
+      fail(`dependency edge count exceeds ${GUEST_MAKE_LIMITS.graphEdges}`);
     for (const prerequisite of rule.prerequisites) {
-      if (makefile.rules.has(prerequisite)) visit(prerequisite, depth + 1);
+      if (resolveRule(prerequisite) !== undefined)
+        visit(prerequisite, depth + 1);
       else if (!filesystem.exists(prerequisite))
         fail(`no rule to make target '${prerequisite}'`);
     }
@@ -629,7 +1005,7 @@ export function planGuestMakeBuild(
       return modifiedAt !== undefined && modifiedAt > targetModifiedAt;
     });
     const expandedRecipes = rule.recipes.map((recipe) =>
-      expandRecipe(recipe, variables, target, rule.prerequisites),
+      expandRecipe(recipe, variables, target, rule.prerequisites, stem),
     );
     const fingerprintChanged =
       filesystem.fingerprintChanged?.(
@@ -665,7 +1041,13 @@ export function planGuestMakeBuild(
   };
 
   for (const root of roots) visit(root, 1);
-  return { requestedTargets: roots, targets: planned, skippedTargets: skipped };
+  return {
+    dependencyEdgesTraversed: traversedEdges,
+    patternCandidatesExamined,
+    requestedTargets: roots,
+    targets: planned,
+    skippedTargets: skipped,
+  };
 }
 
 export function parseGuestMakeState(

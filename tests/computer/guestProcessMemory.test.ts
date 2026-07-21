@@ -26,6 +26,7 @@ describe("guest process memory admission", (): void => {
         instanceId: "pid-7",
         moduleId: "legacy-demo",
       },
+      kind: "ledger" as const,
       ledger,
     };
 
@@ -76,6 +77,7 @@ describe("guest process memory admission", (): void => {
         displayName: "Declared demo",
         moduleId: "declared-demo",
       },
+      kind: "ledger",
       ledger,
     });
 
@@ -98,6 +100,7 @@ describe("guest process memory admission", (): void => {
         displayName: "Concurrent demo",
         moduleId: "concurrent-demo",
       },
+      kind: "ledger",
       ledger,
     });
     expect(ledger.snapshot()).toMatchObject({

@@ -175,13 +175,24 @@ describe("Computer System Linux shell and editor", (): void => {
   it("completes commands and filesystem paths at the cursor", (): void => {
     const shell = new ShellSession(new InMemoryFilesystem());
     expect(shell.complete("who", 3)).toEqual({
-      candidates: ["who", "whoami"],
+      candidates: [
+        { displayText: "who", insertText: "who ", kind: "command" },
+        { displayText: "whoami", insertText: "whoami ", kind: "command" },
+      ],
       cursor: 3,
+      replaceEnd: 3,
+      replaceStart: 0,
+      truncated: false,
       value: "who",
     });
     expect(shell.complete("cat /et", 7)).toEqual({
-      candidates: ["/etc/"],
+      candidates: [
+        { displayText: "/etc/", insertText: "/etc/", kind: "directory" },
+      ],
       cursor: 9,
+      replaceEnd: 7,
+      replaceStart: 4,
+      truncated: false,
       value: "cat /etc/",
     });
     expect(shell.complete("s", 1).candidates.length).toBeGreaterThan(1);
@@ -276,7 +287,6 @@ describe("Computer System Linux shell and editor", (): void => {
   it("reports sandbox identity, deterministic time, history, and filesystem information", (): void => {
     let tick = 40;
     const filesystem = new InMemoryFilesystem();
-    let memoryReads = 0;
     const shell = new ShellSession(filesystem, {
       clock: {
         currentGameTime: (): {
@@ -293,10 +303,6 @@ describe("Computer System Linux shell and editor", (): void => {
         clockHz: 10_000,
         cpuModel: "cs486dx",
         memoryBytes: 2_097_152,
-      },
-      memoryUsageBytes: (): number => {
-        memoryReads += 1;
-        return 65_536;
       },
       ticksPerSecond: 20,
     });
@@ -331,19 +337,20 @@ describe("Computer System Linux shell and editor", (): void => {
     expect(shell.submit("du -s /etc").lines[0]).toMatch(/^\d+\t\/etc$/u);
     expect(shell.submit("quota").lines).toEqual([
       expect.stringMatching(/^Disk quota: \d+ \/ 41943040 bytes used/u),
-      "Limits: 1048576 bytes/file, 4096 entries",
+      "Limits: 8388608 bytes/file, 4096 entries",
     ]);
     expect(shell.submit("cpuinfo").lines).toContain("clock\t\t: 10 kHz");
     expect(shell.submit("free -h").lines[1]).toContain("2.0 MiB");
-    expect(memoryReads).toBe(1);
     expect(shell.submit("cat /proc/cpuinfo").lines).toContain(
       "model name\t: Computer System 486DX",
     );
     const meminfo = shell.submit("cat /proc/meminfo").lines;
-    expect(meminfo).toContain("MemUsed:  851968 B");
+    expect(meminfo).toContain("MemUsed:  786432 B");
+    expect(meminfo).toContain("MemFree:  1310720 B");
+    expect(meminfo).toContain("MemAvailable: 1376256 B");
     expect(meminfo).toContain("KernelResident: 524288 B");
-    expect(meminfo).toContain("GuestRuntime: 65536 B");
-    expect(memoryReads).toBe(2);
+    expect(meminfo).toContain("Buffers: 65536 B");
+    expect(meminfo).toContain("GuestRuntime: 0 B");
     expect(shell.submit("ls /proc").lines[0]).toContain("cpuinfo");
     expect(shell.submit("CPU").exitCode).toBe(127);
     expect(

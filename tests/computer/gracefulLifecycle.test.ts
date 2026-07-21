@@ -115,11 +115,19 @@ describe("graceful Computer lifecycle", (): void => {
         outcome: "accepted",
         state: intent === "reboot" ? "rebooting" : "stopping",
       });
-      runRuntimeUntil(runtime, () =>
-        intent === "reboot"
-          ? record.lifecycle.state.kind === "running"
-          : record.lifecycle.state.kind === "off",
-      );
+      if (intent === "reboot") {
+        runRuntimeUntil(
+          runtime,
+          () =>
+            record.lifecycle.state.kind === "booting" &&
+            record.display.state.kind === "post",
+        );
+        runRuntimeUntil(runtime, () =>
+          shellAcceptsInput(runtime, record.computerId),
+        );
+      } else {
+        runRuntimeUntil(runtime, () => record.lifecycle.state.kind === "off");
+      }
 
       expect(syncCount).toBe(2);
       expect(persisted).toHaveLength(2);

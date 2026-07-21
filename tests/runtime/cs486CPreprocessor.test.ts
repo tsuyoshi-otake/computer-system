@@ -2,11 +2,15 @@ import { describe, expect, it } from "vitest";
 
 import { Cs486CompileError } from "../../src/application/toolchain/cs486Assembler.js";
 import {
+  cs486CPreprocessorLimits,
   preprocessCs486C,
   type Cs486CPreprocessorInclude,
 } from "../../src/application/toolchain/cs486CPreprocessor.js";
 import { compileCs486Source } from "../../src/application/toolchain/highLevelCompilers.js";
-import { runCs486 } from "../../src/domain/cpu/cs486.js";
+import {
+  cs486ExecutableMemoryRequirements,
+  runCs486,
+} from "../../src/domain/cpu/cs486.js";
 
 function raw(source: string): string {
   return preprocessCs486C(source, { sourceName: "/work/main.c" })
@@ -44,6 +48,57 @@ describe("CS486 C-family preprocessor", (): void => {
     expect(tokens.find((token) => token.kind === "string")?.value).toBe(
       "ready",
     );
+  });
+
+  it("expands variadic macros and dynamic source-location macros", (): void => {
+    const tokens = preprocessCs486C(
+      [
+        "#define VALUES(first, ...) first, __VA_ARGS__",
+        "#define TEXT(...) #__VA_ARGS__",
+        "int values[] = { VALUES(1, 2, 3) };",
+        "const char *before = __FILE__;",
+        '#line 90 "generated.c"',
+        "int line = __LINE__;",
+        "const char *after = __FILE__;",
+        "const char *text = TEXT(a, b);",
+      ].join("\n"),
+      { sourceName: "/work/macros.c" },
+    );
+
+    expect(tokens.map((token) => token.raw).join(" ")).toContain(
+      "{ 1 , 2 , 3 }",
+    );
+    expect(tokens.find((token) => token.value === "/work/macros.c")?.raw).toBe(
+      '"/work/macros.c"',
+    );
+    expect(
+      tokens.find((token) => token.raw === "90")?.span.start,
+    ).toMatchObject({ line: 90, source: "generated.c" });
+    expect(tokens.find((token) => token.value === "generated.c")?.raw).toBe(
+      '"generated.c"',
+    );
+    expect(tokens.find((token) => token.value === "a, b")?.kind).toBe("string");
+  });
+
+  it("honors pragma once by normalized include identity", (): void => {
+    let loads = 0;
+    const tokens = preprocessCs486C(
+      '#include "guarded.h"\n#include "alias.h"\nint x = VALUE;\n',
+      {
+        include: () => {
+          loads += 1;
+          return {
+            identity: "/usr/include/guarded.h",
+            source: "#pragma once\n#define VALUE 42\n",
+            sourceName: "/usr/include/guarded.h",
+          };
+        },
+        sourceName: "/work/main.c",
+      },
+    );
+
+    expect(loads).toBe(2);
+    expect(tokens.map((token) => token.raw).join(" ")).toContain("x = 42");
   });
 
   it("evaluates defined and bounded integer conditional expressions", (): void => {
@@ -179,7 +234,15 @@ describe("CS486 C-family preprocessor", (): void => {
       { sourceName: "/work/main.c" },
     );
 
-    expect(runCs486(executable, { memoryBytes: 65_536 }).output).toBe("42\n");
+    const requirements = cs486ExecutableMemoryRequirements(executable);
+    if (requirements.kind !== "declared") {
+      throw new Error("C compiler produced a legacy executable");
+    }
+    expect(
+      runCs486(executable, {
+        memoryBytes: requirements.linearAddressSpaceBytes,
+      }).output,
+    ).toBe("42\n");
   });
 
   it("rejects missing/circular includes and unsupported directives explicitly", (): void => {
@@ -198,15 +261,21 @@ describe("CS486 C-family preprocessor", (): void => {
         sourceName: "/work/main.c",
       }),
     ).toThrow(/circular include/u);
-    expect(() => raw("#pragma once\n")).toThrow(
-      /unsupported preprocessor directive #pragma/u,
+    expect(() => raw("#pragma pack\n")).toThrow(
+      /unsupported (?:preprocessor directive )?#pragma/u,
     );
-    expect(() => raw("#define BAD(...) 1\n")).toThrow(
-      /macro parameter name expected/u,
+    expect(() => raw("#define BAD(a, ..., b) 1\n")).toThrow(
+      /variadic marker must end/u,
     );
+    expect(() => raw("#line 0\nint x;\n")).toThrow(/positive line number/u);
   });
 
   it("bounds conditional, macro, include, and emitted-token work", (): void => {
+    expect(cs486CPreprocessorLimits).toEqual({
+      aggregateSourceCharacters: 2 * 1_048_576,
+      emittedTokens: 512_000,
+      rootSourceCharacters: 2 * 1_048_576,
+    });
     expect(() => raw(`${"#if 1\n".repeat(65)}int x;\n`)).toThrow(
       /conditional nesting limit/u,
     );
@@ -235,12 +304,12 @@ describe("CS486 C-family preprocessor", (): void => {
     ).toThrow(/macro replacement limit/u);
 
     const doublingMacros = Array.from(
-      { length: 16 },
+      { length: 19 },
       (_unused, index) =>
         `#define D${String(index + 1)} D${String(index)} D${String(index)}`,
     ).join("\n");
     expect(() =>
-      raw(`#define D0 1\n${doublingMacros}\nint x = D16;\n`),
+      raw(`#define D0 1\n${doublingMacros}\nint x = D19;\n`),
     ).toThrow(/macro expansion token limit/u);
   });
 });

@@ -52,6 +52,7 @@ export interface OsProcessRecord {
   readonly exitStatus?: number;
   readonly gid: number;
   readonly lastSignal?: OsProcessSignal;
+  readonly niceValue: number;
   readonly parentPid: number;
   readonly pid: number;
   readonly startTick: number;
@@ -63,10 +64,16 @@ export interface OsProcessRecord {
 export interface OsProcessSpawn {
   readonly command: string;
   readonly gid: number;
+  readonly niceValue?: number;
   readonly parentPid: number;
   readonly startTick: number;
   readonly state?: "ready" | "running";
   readonly uid: number;
+}
+
+export interface OsProcessMemoryObservation {
+  readonly residentBytes: number;
+  readonly virtualBytes: number;
 }
 
 export interface OsInitProcessSpawn {
@@ -145,6 +152,7 @@ export interface OsLoginSessionRecord {
   readonly gid: number;
   readonly lastActivityTick: number;
   readonly loginTick: number;
+  readonly loginWallMilliseconds?: number;
   readonly remote?: string;
   readonly sessionId: string;
   readonly terminal: string;
@@ -160,13 +168,16 @@ export interface OsLoginSessionOpen {
   readonly tick: number;
   readonly uid: number;
   readonly username: string;
+  readonly wallMilliseconds?: number;
 }
 
 export interface OsLastLoginRecord {
   readonly gid: number;
   readonly loginTick: number;
+  readonly loginWallMilliseconds?: number;
   readonly logoutReason?: string;
   readonly logoutTick?: number;
+  readonly logoutWallMilliseconds?: number;
   readonly remote?: string;
   readonly terminal: string;
   readonly uid: number;
@@ -397,6 +408,8 @@ export class OsRuntimeState {
   private readonly deviceRecords = new Map<string, OsDeviceRecord>();
   private readonly journalRecords: OsJournalEntry[] = [];
   private networkStateValue: OsNetworkState;
+  private currentRunlevelValue?: string;
+  private previousRunlevelValue?: string;
   private journalBytesValue = 0;
   private nextPidValue = 2;
   private nextJobIdValue = 1;
@@ -797,6 +810,10 @@ export class OsRuntimeState {
   openLoginSession(input: OsLoginSessionOpen): OsLoginOpenResult {
     this.requireLifecycle("running", "open login session");
     validateLoginSessionInput(input);
+    const loginWallMilliseconds =
+      input.wallMilliseconds === undefined
+        ? undefined
+        : requireWallMilliseconds(input.wallMilliseconds, "login wall time");
     if (this.loginSessionRecords.has(input.sessionId)) {
       throw new OsRuntimeStateTransitionError(
         `login session ${input.sessionId}`,
@@ -823,6 +840,7 @@ export class OsRuntimeState {
       gid: input.gid,
       lastActivityTick: input.tick,
       loginTick: input.tick,
+      ...(loginWallMilliseconds === undefined ? {} : { loginWallMilliseconds }),
       ...(input.remote === undefined ? {} : { remote: input.remote }),
       sessionId: input.sessionId,
       terminal: input.terminal,
@@ -832,6 +850,7 @@ export class OsRuntimeState {
     const lastLogin: OsLastLoginRecord = Object.freeze({
       gid: input.gid,
       loginTick: input.tick,
+      ...(loginWallMilliseconds === undefined ? {} : { loginWallMilliseconds }),
       ...(input.remote === undefined ? {} : { remote: input.remote }),
       terminal: input.terminal,
       uid: input.uid,
@@ -865,6 +884,7 @@ export class OsRuntimeState {
     sessionId: string,
     tick: number,
     reason = "logout",
+    wallMilliseconds?: number,
   ): OsLoginSessionRecord {
     const session = this.requireLoginSession(sessionId);
     requireTick(tick, "logout tick");
@@ -879,12 +899,23 @@ export class OsRuntimeState {
       reason,
       maximumReasonBytes,
     );
+    const logoutWallMilliseconds =
+      wallMilliseconds === undefined
+        ? undefined
+        : requireWallMilliseconds(wallMilliseconds, "logout wall time");
     this.loginSessionRecords.delete(sessionId);
     const lastLogin = this.lastLoginRecords.get(session.username);
     if (lastLogin?.loginTick === session.loginTick) {
       this.lastLoginRecords.set(
         session.username,
-        Object.freeze({ ...lastLogin, logoutReason, logoutTick: tick }),
+        Object.freeze({
+          ...lastLogin,
+          logoutReason,
+          logoutTick: tick,
+          ...(logoutWallMilliseconds === undefined
+            ? {}
+            : { logoutWallMilliseconds }),
+        }),
       );
     }
     this.bumpRevision();
@@ -1036,6 +1067,39 @@ export class OsRuntimeState {
     this.serviceRecords.set(name, updated);
     this.bumpRevision();
     return updated;
+  }
+
+  /**
+   * Runlevel is host-scoped, in-memory presentation state derived from
+   * `/etc/inittab`'s `initdefault` entry on every boot. It never persists,
+   * matching how real sysvinit re-derives it fresh rather than restoring it.
+   */
+  runlevel(): { readonly current?: string; readonly previous?: string } {
+    return Object.freeze({
+      ...(this.currentRunlevelValue === undefined
+        ? {}
+        : { current: this.currentRunlevelValue }),
+      ...(this.previousRunlevelValue === undefined
+        ? {}
+        : { previous: this.previousRunlevelValue }),
+    });
+  }
+
+  setRunlevel(
+    next: string,
+    tick: number,
+  ): { readonly current: string; readonly previous?: string } {
+    this.requirePresencePhase("set runlevel");
+    requireTick(tick, "runlevel tick");
+    validateRunlevelCharacter(next);
+    const previous = this.currentRunlevelValue;
+    this.previousRunlevelValue = previous;
+    this.currentRunlevelValue = next;
+    this.bumpRevision();
+    return Object.freeze({
+      current: next,
+      ...(previous === undefined ? {} : { previous }),
+    });
   }
 
   defineMount(input: OsMountDefinition): OsMountDefinition {
@@ -1374,7 +1438,7 @@ export class OsRuntimeState {
     if (path === "/proc/loadavg") return this.renderProcLoadAverage();
     if (path === "/proc/mounts") return this.renderProcMounts();
     if (path === "/proc/services") return this.renderProcServices();
-    const match = /^\/proc\/([1-9][0-9]*)\/(cmdline|stat|status)$/u.exec(path);
+    const match = /^\/proc\/([1-9][0-9]*)\/(cmdline|stat)$/u.exec(path);
     if (match === null) return undefined;
     const pid = Number(match[1]);
     if (!Number.isSafeInteger(pid) || !this.processRecords.has(pid)) {
@@ -1385,8 +1449,6 @@ export class OsRuntimeState {
         return this.renderProcCmdline(pid);
       case "stat":
         return this.renderProcStat(pid);
-      case "status":
-        return this.renderProcStatus(pid);
       default:
         return undefined;
     }
@@ -1405,7 +1467,7 @@ export class OsRuntimeState {
     return `${String(process.pid)} (${name}) ${state} ${String(process.parentPid)} 0 0 0 0 0 0 0 0 0 ${String(process.cpuCycles)} 0 0 0 0 0 0 ${String(process.startTick)} 0 0\n`;
   }
 
-  renderProcStatus(pid: number): string {
+  renderProcStatus(pid: number, memory: OsProcessMemoryObservation): string {
     const process = this.requireProcess(pid);
     const state = `${procStateCode(process.state)} (${process.state})`;
     const lines = [
@@ -1415,6 +1477,8 @@ export class OsRuntimeState {
       `PPid:\t${String(process.parentPid)}`,
       `Uid:\t${String(process.uid)}\t${String(process.uid)}\t${String(process.uid)}\t${String(process.uid)}`,
       `Gid:\t${String(process.gid)}\t${String(process.gid)}\t${String(process.gid)}\t${String(process.gid)}`,
+      `VmSize:\t${String(memory.virtualBytes)} B`,
+      `VmRSS:\t${String(memory.residentBytes)} B`,
       `CSStartTick:\t${String(process.startTick)}`,
       `CSCycles:\t${String(process.cpuCycles)}`,
     ];
@@ -1986,6 +2050,8 @@ export class OsRuntimeState {
     this.jobRecords.clear();
     this.loginSessionRecords.clear();
     this.mountRecords.clear();
+    this.currentRunlevelValue = undefined;
+    this.previousRunlevelValue = undefined;
     for (const [name, service] of this.serviceRecords) {
       this.serviceRecords.set(
         name,
@@ -2191,6 +2257,7 @@ function createProcessRecord(
     ),
     cpuCycles: 0,
     gid: input.gid,
+    niceValue: input.niceValue ?? 0,
     parentPid: input.parentPid,
     pid,
     startTick: input.startTick,
@@ -2203,6 +2270,16 @@ function validateProcessSpawn(input: OsProcessSpawn): void {
   requirePidOrKernel(input.parentPid);
   requireIdentityId(input.uid, "process UID");
   requireIdentityId(input.gid, "process GID");
+  if (
+    input.niceValue !== undefined &&
+    (!Number.isSafeInteger(input.niceValue) ||
+      input.niceValue < -20 ||
+      input.niceValue > 19)
+  ) {
+    throw new RangeError(
+      "process nice value must be an integer from -20 to 19",
+    );
+  }
   requireTick(input.startTick, "process start tick");
   requireBoundedString("process command", input.command, maximumCommandBytes);
   if (
@@ -2268,6 +2345,15 @@ function validateServiceName(name: string): string {
   const value = requireBoundedString("service name", name, maximumNameBytes);
   if (!/^[A-Za-z0-9][A-Za-z0-9_.-]*$/u.test(value)) {
     throw new RangeError(`invalid service name: ${name}`);
+  }
+  return value;
+}
+
+const runlevelCharacters = new Set(["0", "1", "2", "3", "4", "5", "6", "S"]);
+
+function validateRunlevelCharacter(value: string): string {
+  if (!runlevelCharacters.has(value)) {
+    throw new RangeError(`invalid runlevel: ${value}`);
   }
   return value;
 }
@@ -2458,6 +2544,13 @@ function requireDevicePath(value: string): string {
 }
 
 function requireTick(value: number, label: string): number {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new RangeError(`${label} must be a non-negative safe integer`);
+  }
+  return value;
+}
+
+function requireWallMilliseconds(value: number, label: string): number {
   if (!Number.isSafeInteger(value) || value < 0) {
     throw new RangeError(`${label} must be a non-negative safe integer`);
   }
@@ -2661,6 +2754,7 @@ function parseProcess(value: unknown): OsProcessRecord {
       "exitStatus",
       "cpuCycles",
       "lastSignal",
+      "niceValue",
     ],
     "process",
   );
@@ -2741,6 +2835,12 @@ function parseProcess(value: unknown): OsProcessRecord {
       Number.MAX_SAFE_INTEGER,
       "parent PID",
     ),
+    niceValue: requireIntegerInRange(
+      record.niceValue ?? 0,
+      -20,
+      19,
+      "process nice value",
+    ),
     pid,
     startTick,
     state,
@@ -2812,6 +2912,7 @@ function parseLoginSession(value: unknown): OsLoginSessionRecord {
       "terminal",
       "remote",
       "loginTick",
+      "loginWallMilliseconds",
       "lastActivityTick",
     ],
     "login session",
@@ -2831,6 +2932,14 @@ function parseLoginSession(value: unknown): OsLoginSessionRecord {
     gid: requireIntegerInRange(record.gid, 0, 65_535, "login GID"),
     lastActivityTick,
     loginTick,
+    ...(record.loginWallMilliseconds === undefined
+      ? {}
+      : {
+          loginWallMilliseconds: requireNonNegativeSafeInteger(
+            record.loginWallMilliseconds,
+            "login wall time",
+          ),
+        }),
     ...(record.remote === undefined
       ? {}
       : {
@@ -2870,7 +2979,9 @@ function parseLastLogin(value: unknown): OsLastLoginRecord {
       "terminal",
       "remote",
       "loginTick",
+      "loginWallMilliseconds",
       "logoutTick",
+      "logoutWallMilliseconds",
       "logoutReason",
     ],
     "last login",
@@ -2894,6 +3005,14 @@ function parseLastLogin(value: unknown): OsLastLoginRecord {
   return Object.freeze({
     gid: requireIntegerInRange(record.gid, 0, 65_535, "last login GID"),
     loginTick,
+    ...(record.loginWallMilliseconds === undefined
+      ? {}
+      : {
+          loginWallMilliseconds: requireNonNegativeSafeInteger(
+            record.loginWallMilliseconds,
+            "last login wall time",
+          ),
+        }),
     ...(record.logoutReason === undefined
       ? {}
       : {
@@ -2904,6 +3023,14 @@ function parseLastLogin(value: unknown): OsLastLoginRecord {
           ),
         }),
     ...(logoutTick === undefined ? {} : { logoutTick }),
+    ...(record.logoutWallMilliseconds === undefined
+      ? {}
+      : {
+          logoutWallMilliseconds: requireNonNegativeSafeInteger(
+            record.logoutWallMilliseconds,
+            "logout wall time",
+          ),
+        }),
     ...(record.remote === undefined
       ? {}
       : {

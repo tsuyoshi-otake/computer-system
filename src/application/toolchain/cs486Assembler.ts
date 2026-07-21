@@ -1,16 +1,28 @@
 import {
+  createCs486FunctionSignature,
   createCs486Flat32MemoryMetadata,
   cs486RegisterNames,
+  parseCs486FunctionSignature,
   validateCs486Executable,
-  type Cs486ExecutableV3,
+  type Cs486ExecutableV5,
+  type Cs486FunctionEntry,
   type Cs486FunctionSignature,
   type Cs486Instruction,
   type Cs486Operand,
   type Cs486Register,
 } from "../../domain/cpu/cs486.js";
 import {
+  cs486Word32DataModel,
+  type Cs486DataModel,
+} from "../../domain/cpu/cs486Compatibility.js";
+import {
+  cs486FormatLimits,
+  currentCs486ExecutableFormatVersion,
+  currentCs486ObjectFormatVersion,
+} from "../../domain/cpu/cs486FormatLimits.js";
+import {
   cs486RelocationAcceptsSection,
-  isCs486ObjectV2,
+  isCs486StructuredObject,
   objectSection,
   validateCs486Object,
   type Cs486Object,
@@ -49,6 +61,7 @@ export type { Cs486AssemblerDialect } from "./cs486AsmPreprocessor.js";
 
 export interface Cs486AssemblerOptions {
   readonly dataBytes?: number;
+  readonly dataModel?: Cs486DataModel;
   readonly dialect?: Cs486AssemblerDialect;
   readonly include?: (
     request: string,
@@ -87,14 +100,18 @@ interface AssemblyBuild {
   readonly rodata: readonly number[];
 }
 
-const maximumDataBytes = 16 * 1_048_576;
-const maximumInitializedDataBytes = 256_000;
-const maximumInstructions = 4_096;
+const objectLimits = cs486FormatLimits({
+  format: "object",
+  version: currentCs486ObjectFormatVersion,
+});
+const maximumDataBytes = objectLimits.dataBytes;
+const maximumInitializedDataBytes = objectLimits.initializedDataBytes;
+const maximumInstructions = objectLimits.instructions;
 
 export function assembleCs486(
   source: string,
   options: Omit<Cs486AssemblerOptions, "dataBytes" | "language"> = {},
-): Cs486ExecutableV3 {
+): Cs486ExecutableV5 {
   const object = assembleCs486Object(source, { ...options, language: "asm" });
   return materializeStandaloneObject(object);
 }
@@ -115,15 +132,21 @@ export function assembleCs486Object(
   const build = buildSections(statements, analysis, dialect);
   const sections = createSections(build, analysis, options.dataBytes ?? 0);
   const symbols = createSymbols(analysis);
+  const transcript = renderStatements(statements);
+  const assemblyTruncated = transcript.length > objectLimits.assemblyCharacters;
   const object: Cs486Object = {
-    assembly: renderStatements(statements),
+    assembly: assemblyTruncated
+      ? transcript.slice(0, objectLimits.assemblyCharacters)
+      : transcript,
+    ...(assemblyTruncated ? { assemblyTruncated: true } : {}),
     dataBytes: sectionDataBytes(sections),
+    dataModel: options.dataModel ?? cs486Word32DataModel,
     format: "cs486-object",
     language: options.language ?? "asm",
     relocations: build.relocations,
     sections,
     symbols,
-    version: 2,
+    version: currentCs486ObjectFormatVersion,
   };
   validateCs486Object(object);
   return object;
@@ -227,18 +250,74 @@ function analyze(
       continue;
     }
     if (directive === "signature") {
-      const [nameTokens, returnTypeTokens] = statement.operands;
+      // Admit exactly one capacity-plus-one operand so the authored fixed
+      // parameter overflow receives its precise diagnostic below.
+      if (statement.operands.length < 2 || statement.operands.length > 36)
+        throw compileErrorAt(
+          "function signature requires a name, return type, at most 32 parameter types, and optional trailing varargs",
+          statement.span,
+        );
+      const [nameTokens, returnTypeTokens, ...allParameterTypeOperands] =
+        statement.operands;
       const name = singleIdentifier(nameTokens, statement.span);
       const returnType = singleIdentifier(
         returnTypeTokens,
         statement.span,
       ).value.toLowerCase();
-      if (returnType !== "i32" && returnType !== "void")
+      if (
+        returnType !== "f32" &&
+        returnType !== "f64" &&
+        returnType !== "i32" &&
+        returnType !== "i64" &&
+        returnType !== "void"
+      )
         throw compileErrorAt(
-          "function signature return type must be i32 or void",
+          "function signature return type must be f32, f64, i32, i64, or void",
           returnTypeTokens![0]!.span,
         );
-      const signature: Cs486FunctionSignature = `()->${returnType}`;
+      const finalParameter = allParameterTypeOperands.at(-1);
+      const variadic =
+        finalParameter !== undefined &&
+        singleIdentifier(finalParameter, statement.span).value.toLowerCase() ===
+          "varargs";
+      const parameterTypeOperands = variadic
+        ? allParameterTypeOperands.slice(0, -1)
+        : allParameterTypeOperands;
+      if (parameterTypeOperands.length > 32)
+        throw compileErrorAt(
+          "function signature has more than 32 fixed parameters",
+          statement.span,
+        );
+      const parameterTypes = parameterTypeOperands.map((operand) => {
+        const parameterType = singleIdentifier(operand, statement.span);
+        const value = parameterType.value.toLowerCase();
+        if (
+          value !== "f32" &&
+          value !== "f64" &&
+          value !== "i32" &&
+          value !== "i64"
+        )
+          throw compileErrorAt(
+            "function signature parameter types must be f32, f64, i32, or i64",
+            parameterType.span,
+          );
+        return value;
+      });
+      if (
+        parameterTypes.reduce(
+          (words, type) => words + (type === "i64" || type === "f64" ? 2 : 1),
+          0,
+        ) > 32
+      )
+        throw compileErrorAt(
+          "function signature has more than 32 fixed argument words",
+          statement.span,
+        );
+      const signature: Cs486FunctionSignature = createCs486FunctionSignature(
+        parameterTypes,
+        returnType,
+        variadic,
+      );
       const existing = signatures.get(name.value);
       if (existing !== undefined && existing !== signature)
         throw compileErrorAt(
@@ -464,13 +543,31 @@ function inferredNumericDataBytes(
   let bytes = 0;
   for (const instruction of instructions) {
     if (
-      (instruction.op === "load" || instruction.op === "store") &&
+      "address" in instruction &&
       instruction.address.kind === "immediate" &&
       instruction.address.value >= 0
     )
-      bytes = Math.max(bytes, instruction.address.value + 4);
+      bytes = Math.max(
+        bytes,
+        instruction.address.value + instructionMemoryWidth(instruction.op),
+      );
   }
   return bytes;
+}
+
+function instructionMemoryWidth(op: Cs486Instruction["op"]): number {
+  switch (op) {
+    case "load8s":
+    case "load8u":
+    case "store8":
+      return 1;
+    case "load16s":
+    case "load16u":
+    case "store16":
+      return 2;
+    default:
+      return 4;
+  }
 }
 
 function createSymbols(
@@ -555,6 +652,30 @@ function parseInstruction(
     });
     return { op: op as "jmp", target: 0 };
   }
+  if (op === "calli") {
+    arity(2);
+    const signatureToken = statement.operands[1];
+    if (
+      signatureToken?.length !== 1 ||
+      signatureToken[0]!.kind !== "string" ||
+      parseCs486FunctionSignature(signatureToken[0]!.value) === undefined
+    )
+      throw compileErrorAt(
+        "calli requires a canonical quoted function signature",
+        signatureToken?.[0]?.span ?? statement.span,
+      );
+    return {
+      op: "call_indirect",
+      source: parseOperand(
+        statement.operands[0]!,
+        analysis,
+        instructionOffset,
+        "source",
+        relocations,
+      ),
+      functionSignature: signatureToken[0]!.value,
+    };
+  }
   if (op === "push") {
     arity(1);
     return {
@@ -592,7 +713,13 @@ function parseInstruction(
             ),
     };
   }
-  if (op === "load") {
+  if (
+    op === "load" ||
+    op === "load8s" ||
+    op === "load8u" ||
+    op === "load16s" ||
+    op === "load16u"
+  ) {
     arity(2);
     return {
       op,
@@ -605,7 +732,7 @@ function parseInstruction(
       ),
     };
   }
-  if (op === "store") {
+  if (op === "store" || op === "store8" || op === "store16") {
     arity(2);
     return {
       op,
@@ -639,12 +766,15 @@ function parseInstruction(
       "sub",
       "mul",
       "div",
+      "udiv",
       "mod",
+      "umod",
       "and",
       "or",
       "xor",
       "shl",
       "shr",
+      "ushr",
     ].includes(op)
   ) {
     arity(2);
@@ -683,7 +813,7 @@ function parseOperand(
     offset: instructionOffset,
     section: "text",
     symbol: value.symbol,
-    type: "absolute32",
+    type: addressRelocationType(value.symbol, analysis),
   });
   return { kind: "immediate", value: 0 };
 }
@@ -762,15 +892,15 @@ function emitInitializedData(
         offset: target.length,
         section,
         symbol: value.symbol,
-        type: "absolute32",
+        type: addressRelocationType(value.symbol, analysis),
       });
       target.push(0, 0, 0, 0);
     } else appendInteger(target, value.value, width, operand[0]!.span);
   }
 }
 
-function materializeStandaloneObject(object: Cs486Object): Cs486ExecutableV3 {
-  if (!isCs486ObjectV2(object))
+function materializeStandaloneObject(object: Cs486Object): Cs486ExecutableV5 {
+  if (!isCs486StructuredObject(object))
     throw new Cs486CompileError("internal assembler produced a legacy object");
   const undefinedSymbol = object.symbols.find(
     (symbol) => symbol.binding === "undefined",
@@ -800,9 +930,12 @@ function materializeStandaloneObject(object: Cs486Object): Cs486ExecutableV3 {
           (relocation.addend ?? 0);
     applyRelocation(instructions, initialData, layout.bases, relocation, value);
   }
-  const executable: Cs486ExecutableV3 = {
+  const functionEntries = collectStandaloneFunctionEntries(object.symbols);
+  const executable: Cs486ExecutableV5 = {
     dataBytes: object.dataBytes,
+    dataModel: object.dataModel ?? cs486Word32DataModel,
     format: "cs486-executable",
+    ...(functionEntries.length === 0 ? {} : { functionEntries }),
     initialData:
       initialData.length === 0 ? [] : [{ bytes: initialData, offset: 0 }],
     instructions,
@@ -823,10 +956,35 @@ function materializeStandaloneObject(object: Cs486Object): Cs486ExecutableV3 {
         section: symbol.section,
         type: symbol.type,
       })),
-    version: 3,
+    version: currentCs486ExecutableFormatVersion,
   };
   validateCs486Executable(executable);
   return executable;
+}
+
+function collectStandaloneFunctionEntries(
+  symbols: readonly Cs486ObjectSymbol[],
+): readonly Cs486FunctionEntry[] {
+  const entries = new Map<number, Cs486FunctionSignature>();
+  for (const symbol of symbols) {
+    if (
+      symbol.binding === "undefined" ||
+      symbol.offset === undefined ||
+      symbol.section !== "text" ||
+      symbol.type !== "function" ||
+      symbol.functionSignature === undefined
+    )
+      continue;
+    const existing = entries.get(symbol.offset);
+    if (existing !== undefined && existing !== symbol.functionSignature)
+      throw new Cs486CompileError(
+        `function entry signature mismatch at ${String(symbol.offset)}`,
+      );
+    entries.set(symbol.offset, symbol.functionSignature);
+  }
+  return [...entries]
+    .map(([address, functionSignature]) => ({ address, functionSignature }))
+    .sort((left, right) => left.address - right.address);
 }
 
 function applyRelocation(
@@ -877,7 +1035,7 @@ function patchInstruction(
 
 export function objectDataLayout(
   object: Cs486Object & {
-    readonly version: 2;
+    readonly version: 2 | 3 | 4;
     readonly sections: readonly Cs486ObjectSection[];
   },
 ): {
@@ -1163,6 +1321,17 @@ function requireReference(
       (expectedSection === "data-address" && declaredType === "function"))
   )
     throw compileErrorAt(`${name} has incompatible type ${declaredType}`, span);
+}
+
+function addressRelocationType(
+  name: string,
+  analysis: AssemblyAnalysis,
+): "absolute32" | "data-address" | "function-address" {
+  const type = analysis.types.get(name);
+  const section = analysis.definitions.get(name)?.section;
+  if (type === "function" || section === "text") return "function-address";
+  if (type === "object" || section !== undefined) return "data-address";
+  return "absolute32";
 }
 
 function requireSymbolName(name: string, span: Cs486SourceSpan): void {

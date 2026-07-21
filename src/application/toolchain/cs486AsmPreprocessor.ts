@@ -17,7 +17,18 @@ export interface Cs486AsmPreprocessorOptions {
     request: string,
     fromSource: string,
   ) => Cs486AsmIncludeSource | undefined;
+  readonly limits?: Partial<Cs486AsmPreprocessorLimits>;
   readonly sourceName?: string;
+}
+
+export interface Cs486AsmPreprocessorLimits {
+  readonly expandedTokens: number;
+  readonly includeDepth: number;
+  readonly includeFiles: number;
+  readonly lexicalTokens: number;
+  readonly macroDepth: number;
+  readonly macros: number;
+  readonly sourceCharacters: number;
 }
 
 interface MacroDefinition {
@@ -27,18 +38,41 @@ interface MacroDefinition {
   readonly parameterCount: number;
 }
 
-const maximumExpandedTokens = 100_000;
-const maximumIncludeDepth = 8;
-const maximumIncludeFiles = 64;
-const maximumLexicalTokens = 100_000;
-const maximumMacroDepth = 16;
-const maximumMacros = 256;
-const maximumSourceCharacters = 1_000_000;
+export const cs486AsmPreprocessorLimits: Readonly<Cs486AsmPreprocessorLimits> =
+  Object.freeze({
+    expandedTokens: 2_000_000,
+    includeDepth: 8,
+    includeFiles: 64,
+    lexicalTokens: 2_000_000,
+    macroDepth: 16,
+    macros: 256,
+    sourceCharacters: 8 * 1_048_576,
+  });
+
+function resolvePreprocessorLimits(
+  requested: Partial<Cs486AsmPreprocessorLimits> | undefined,
+): Cs486AsmPreprocessorLimits {
+  const resolved: Cs486AsmPreprocessorLimits = {
+    ...cs486AsmPreprocessorLimits,
+    ...requested,
+  };
+  for (const key of Object.keys(
+    resolved,
+  ) as (keyof Cs486AsmPreprocessorLimits)[])
+    if (
+      !Number.isSafeInteger(resolved[key]) ||
+      resolved[key] < 1 ||
+      resolved[key] > cs486AsmPreprocessorLimits[key]
+    )
+      throw new RangeError(`invalid assembly preprocessor ${key} limit`);
+  return resolved;
+}
 
 export function preprocessCs486Assembly(
   source: string,
   options: Cs486AsmPreprocessorOptions = {},
 ): readonly Cs486AsmToken[] {
+  const limits = resolvePreprocessorLimits(options.limits);
   const definitions = new Map<string, readonly Cs486AsmToken[]>();
   const macros = new Map<string, MacroDefinition>();
   const includeStack: string[] = [];
@@ -49,7 +83,7 @@ export function preprocessCs486Assembly(
   let sourceCharacters = 0;
 
   const reserveExpanded = (count: number, token: Cs486AsmToken): void => {
-    if (count > maximumExpandedTokens - expandedTokens)
+    if (count > limits.expandedTokens - expandedTokens)
       throw compileErrorAt("preprocessor token limit exceeded", token.span);
     expandedTokens += count;
   };
@@ -59,7 +93,7 @@ export function preprocessCs486Assembly(
     sourceName: string,
     depth: number,
   ): Cs486AsmToken[] => {
-    if (depth > maximumIncludeDepth)
+    if (depth > limits.includeDepth)
       throw new Cs486CompileError("assembly include depth exceeded", 1, {
         column: 1,
         source: sourceName,
@@ -70,7 +104,7 @@ export function preprocessCs486Assembly(
         1,
         { column: 1, source: sourceName },
       );
-    if (value.length > maximumSourceCharacters - sourceCharacters)
+    if (value.length > limits.sourceCharacters - sourceCharacters)
       throw new Cs486CompileError(
         "assembly source character limit exceeded",
         1,
@@ -80,7 +114,7 @@ export function preprocessCs486Assembly(
     includeStack.push(sourceName);
     try {
       const tokens = tokenizeCs486Assembly(value, {
-        maximumTokens: maximumLexicalTokens - lexicalTokens,
+        maximumTokens: limits.lexicalTokens - lexicalTokens,
         sourceName,
       });
       lexicalTokens += tokens.length - 1;
@@ -116,7 +150,7 @@ export function preprocessCs486Assembly(
               request.span,
             );
           includeFiles += 1;
-          if (includeFiles > maximumIncludeFiles)
+          if (includeFiles > limits.includeFiles)
             throw compileErrorAt(
               "assembly include file limit exceeded",
               request.span,
@@ -127,7 +161,7 @@ export function preprocessCs486Assembly(
               `include file not found: ${request.value}`,
               request.span,
             );
-          if (depth + 1 > maximumIncludeDepth)
+          if (depth + 1 > limits.includeDepth)
             throw compileErrorAt(
               "assembly include depth exceeded",
               request.span,
@@ -150,7 +184,7 @@ export function preprocessCs486Assembly(
           const name = nasmMacro ? line[1] : line[0];
           if (name?.kind !== "identifier")
             throw compileErrorAt("macro expects a name", line[0]!.span);
-          if (macros.size >= maximumMacros && !macros.has(name.value))
+          if (macros.size >= limits.macros && !macros.has(name.value))
             throw compileErrorAt("macro definition limit exceeded", name.span);
           let parameterCount: number;
           let parameterNames: readonly string[] | undefined;
@@ -214,12 +248,12 @@ export function preprocessCs486Assembly(
     input: readonly Cs486AsmToken[],
     depth: number,
   ): Cs486AsmToken[] => {
-    if (depth > maximumMacroDepth)
+    if (depth > limits.macroDepth)
       throw compileErrorAt("macro expansion depth exceeded", input[0]!.span);
     const expandedDefinitions = expandDefinitions(
       input,
       definitions,
-      maximumExpandedTokens - expandedTokens,
+      limits.expandedTokens - expandedTokens,
     );
     const macro = macros.get(expandedDefinitions[0]?.value ?? "");
     if (macro === undefined) {
@@ -242,7 +276,7 @@ export function preprocessCs486Assembly(
         arguments_,
         macro,
         expansionSequence,
-        maximumExpandedTokens - expandedTokens,
+        limits.expandedTokens - expandedTokens,
       );
       appendTokens(output, expandLine(substituted, depth + 1));
       const newline = newlineAfter(bodyLine.at(-1) ?? expandedDefinitions[0]!);

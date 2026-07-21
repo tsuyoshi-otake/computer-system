@@ -140,7 +140,8 @@ describe("ComputerRuntime OS process ownership", (): void => {
     runUntil(
       rebootRuntime,
       () =>
-        rebootRecord.lifecycle.state.kind === "running" &&
+        rebootRecord.lifecycle.state.kind !== "booting" &&
+        rebootRecord.display.state.kind !== "post" &&
         rebootState.lifecycle.phase === "running",
     );
     expect(rebootState.process(1)).toMatchObject({
@@ -188,6 +189,7 @@ function poweredRuntime(record: ComputerRecord): ComputerRuntime {
     },
   });
   expect(runtime.powerOn(record.computerId).outcome).toBe("accepted");
+  completeBoot(runtime, record);
   return runtime;
 }
 
@@ -246,4 +248,13 @@ function runUntil(runtime: ComputerRuntime, predicate: () => boolean): void {
     runtime.runTick();
   }
   throw new Error("runtime did not reach the expected terminal state");
+}
+
+function completeBoot(runtime: ComputerRuntime, record: ComputerRecord): void {
+  runUntil(
+    runtime,
+    () =>
+      record.lifecycle.state.kind !== "booting" &&
+      record.display.state.kind !== "post",
+  );
 }

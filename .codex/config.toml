@@ -12,6 +12,7 @@ env_vars = ["BDS_HOME", "BDS_MCP_WORKDIR", "BDS_MCP_PORT", "BDS_MCP_WORLD", "WEB
 enabled_tools = [
   "bds_status",
   "bds_start",
+  "bds_provision_acceptance_fixture",
   "bds_stop",
   "bds_run_probe",
   "bds_run_command",

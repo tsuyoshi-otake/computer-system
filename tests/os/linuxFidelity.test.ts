@@ -35,7 +35,7 @@ describe("CS-Linux fidelity", (): void => {
       "Linux version 1.0.0-cs",
     );
     expect(shell.submit("cat /proc/loadavg").stdout).toBe(
-      "0.00 0.00 0.00 2/3 3\n",
+      "0.00 0.00 0.00 2/5 5\n",
     );
     expect(shell.submit("cat /proc/mounts").stdout).toContain(
       "computer-system / csfs rw,nosuid,nodev 0 0\n",

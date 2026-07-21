@@ -50,18 +50,21 @@ export type LinuxAuthenticationAudit =
   | { readonly kind: "password-configured"; readonly username: string };
 
 export interface LinuxAuthenticationOptions {
+  readonly computerName?: string;
   readonly enabled: boolean;
   readonly salt?: () => string;
 }
 
 export class LinuxAuthentication {
   private state: AuthenticationState;
+  private readonly computerName: string;
   private readonly salt: () => string;
 
   constructor(
     private readonly accounts: LinuxAccountDatabase,
     private readonly options: LinuxAuthenticationOptions,
   ) {
+    this.computerName = options.computerName ?? "c-000000";
     this.salt = options.salt ?? randomSalt;
     if (!options.enabled) {
       this.state = this.disabledState();
@@ -95,7 +98,7 @@ export class LinuxAuthentication {
   prompt(): string | undefined {
     switch (this.state.kind) {
       case "login-name":
-        return "login: ";
+        return `${this.computerName} login: `;
       case "login-password":
         return "Password: ";
       case "setup-confirm":
@@ -272,7 +275,7 @@ export class LinuxAuthentication {
         credentials: this.credentialsForUser(username),
         kind: "authenticated",
       };
-      return result(true, "Login successful.\n", "", 0, {
+      return result(true, "", "", 0, {
         kind: "login-success",
         username,
       });
@@ -287,14 +290,14 @@ export class LinuxAuthentication {
         ...result(
           true,
           "",
-          "Login incorrect.\nToo many attempts; retrying in 2 seconds.\n",
+          "Login incorrect\nToo many attempts; retrying in 2 seconds.\n",
           1,
           { kind: "login-failure", username: username || "unknown" },
         ),
         sleepTicks: 40,
       };
     }
-    return result(true, "", "Login incorrect.\n", 1, {
+    return result(true, "", "Login incorrect\n", 1, {
       kind: "login-failure",
       username: username || "unknown",
     });

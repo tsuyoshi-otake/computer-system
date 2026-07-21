@@ -109,8 +109,8 @@ diagnostics all have named ceilings.
 base images, and execute `which basic`, `which basicc`, `QBASIC`, and `EDIT`.
 
 `Expect:` Current CS-Linux has no BASIC command or utility file. Current CS-DOS
-has `C:\COMMAND\QBASIC.EXE`; legacy overlays still attach to their immutable
-base. `EDIT` and `QBASIC /EDITOR` render the same editor engine.
+has `C:\DOS\QBASIC.EXE`; legacy overlays still attach to their immutable base.
+`EDIT` and `QBASIC /EDITOR` render the same editor engine.
 
 ### B. Command-line and editor compatibility
 

@@ -29,6 +29,7 @@ export function compileCs486Object(
     const compiled = compileCs486CFrontend(language, source, options);
     return assembleCs486Object(compiled.assembly, {
       dataBytes: compiled.dataBytes,
+      dataModel: compiled.dataModel,
       language,
     });
   }

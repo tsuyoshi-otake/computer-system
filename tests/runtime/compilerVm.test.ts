@@ -15,6 +15,7 @@ import { PythonCs486Harness, runPythonCs486 } from "./pythonCs486Harness.js";
 const generousLimits: PythonRuntimeLimits = {
   maxCallDepth: 64,
   maxCollectionSize: 4_096,
+  maxIntegerBits: 262_144,
   maxStackSize: 4_096,
   maxStringLength: 65_536,
 };

@@ -15,6 +15,7 @@ import { PythonCs486Harness } from "./pythonCs486Harness.js";
 const base: PythonRuntimeLimits = {
   maxCallDepth: 8,
   maxCollectionSize: 8,
+  maxIntegerBits: 64,
   maxStackSize: 8,
   maxStringLength: 8,
 };
@@ -126,13 +127,29 @@ describe("runtime resource limits", (): void => {
     expect(overflow.state.error.typeName).toBe("MemoryError");
     expect(overflow.state.error.message).toBe("memory limit exceeded");
 
+    const retained = machine(
+      `value = "${"x".repeat(300)}"\nother = "${"y".repeat(300)}"\n`,
+      { ...base, maxMemoryBytes: 650, maxStringLength: 1_000 },
+    );
+    run(retained);
+    expect(retained.state.kind).toBe("crashed");
+    if (retained.state.kind === "crashed") {
+      expect(retained.state.error.typeName).toBe("MemoryError");
+    }
+
     const reclaimed = machine(
       `value = "${"x".repeat(300)}"\nvalue = None\nother = "${"y".repeat(300)}"\n`,
-      { ...base, maxMemoryBytes: 500, maxStringLength: 1_000 },
+      { ...base, maxMemoryBytes: 650, maxStringLength: 1_000 },
     );
     run(reclaimed);
-    expect(reclaimed.state.kind).toBe("completed");
-    expect(reclaimed.memoryUsageBytes).toBeLessThanOrEqual(500);
+    expect(
+      reclaimed.state.kind,
+      JSON.stringify({
+        memoryUsageBytes: reclaimed.memoryUsageBytes,
+        state: reclaimed.state,
+      }),
+    ).toBe("completed");
+    expect(reclaimed.memoryUsageBytes).toBeLessThanOrEqual(650);
   });
 
   it("bounds events without altering the accepted prefix", (): void => {
@@ -184,6 +201,7 @@ function machineWithGlobals(
   limits: PythonRuntimeLimits = {
     maxCallDepth: 64,
     maxCollectionSize: 4_096,
+    maxIntegerBits: 262_144,
     maxStackSize: 4_096,
     maxStringLength: 65_536,
   },

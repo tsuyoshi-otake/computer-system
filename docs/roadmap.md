@@ -3,10 +3,11 @@
 ## Objective
 
 Build a ComputerCraft-inspired Minecraft Bedrock Add-On named **Computer
-System**. User programs use a sandboxed MicroPython-compatible language, while
-device behavior, APIs, terminal semantics, filesystems, events, networking,
-peripherals, portable computers, and turtles remain as close to ComputerCraft as
-Bedrock permits.
+System**. Desktop user programs use bounded Computer System Python, which is
+targeting Python 3.14 syntax and core semantics under the Python 3.14 CS
+Profile. Device behavior, APIs, terminal semantics, filesystems, events,
+networking, peripherals, portable computers, and turtles remain as close to
+ComputerCraft as Bedrock permits.
 
 ## Product decisions
 
@@ -105,28 +106,126 @@ Major components:
 
 ## Language scope
 
-Initial Computer System Python support:
+Current Computer System Python subset (`partial` in the compatibility manifest):
 
 - literals: integers, floats, strings, booleans, and `None`
-- collections: lists, tuples, and dictionaries
+- collections: lists, tuples, dictionaries, and bounded mutable sets
 - arithmetic, comparison, boolean, attribute, and subscript expressions
+- bounded arbitrary-precision integers, base literals, shifts, and bitwise
+  operators
 - assignments
+- single-RHS chained assignments and single-evaluation augmented assignments
+- starred list/tuple displays, dictionary mapping unpacking, and nested
+  destructuring assignment
+- built-in string/list/tuple slicing and bounded list slice assignment
 - `if`, `elif`, and `else`
 - `while` and `for`
 - `break` and `continue`
 - functions and returns
 - positional and keyword arguments
+- positional-only, keyword-only, variadic, and unpacked call arguments
+- condition-first, single-branch conditional expressions and expression-only
+  `lambda` functions
+- identifier-only assignment expressions with bounded lexical stores
+- eager list/set/dictionary comprehensions with implicit non-leaking scopes,
+  left-to-right synchronous clauses, and containing-scope `:=` binding
+- bounded class definitions, isolated class namespaces, atomic publication,
+  instance/class/base lookup, managed method binding, inherited `__init__`, and
+  single inheritance with a 64-class chain ceiling including `object`
+- bounded function/class decorator expressions, top-to-bottom evaluation,
+  bottom-to-top application, and publish-after-success binding
+- bounded built-in `iter`/`next` cursors shared by `for`, unpacking, expansion,
+  slice replacement, and `set`, with stable `StopIteration`
+- two-argument `iter(callable, sentinel)` over managed functions/lambdas, bound
+  methods, classes, native waits, and CS486 extensions, with evaluate-once
+  operands, equality-before-yield, stable exhaustion, and retained heap
+  ownership
+- class-backed and inherited user `__iter__`/`__next__` through bounded managed
+  calls for `iter`, `next`, `for`, comprehensions, generator expressions, and
+  `yield from`, including exact defaults, faults, and `StopIteration.value`
+- lazy generator functions and lambdas with optional-value yield expressions,
+  independent suspended state, `next`/`for`/`send` resumption, first-send
+  validation, `throw`/`close`/`GeneratorExit`, yield throughout
+  `try`/`except`/`finally`, retained finalizer continuations, and explicit
+  fault/return closure
+- bounded `yield from` delegation over built-in iterators and subgenerators,
+  including lazy values, return capture, forwarded `send`/`throw`/`close`, and
+  one reachable nested-generator chain on the existing CS486 process
+- synchronous generator expressions with immediate leftmost iterator
+  acquisition, lazy nested clauses, implicit non-leaking targets,
+  containing-scope `:=`, and the shared generator protocol
+- synchronous class-backed context managers with left-to-right entry,
+  right-to-left exact finalization, protected target assignment, truthy
+  exception suppression, and retained exits across generator suspension
+- always-enabled `assert` statements with lazy failure messages
+- Unicode XID identifiers with NFKC lookup normalization
+- whole-function local binding, `global`, `nonlocal`, and nested closure cells
 - `try`, `except`, `finally`, and `raise`
-- imports from an explicit module allowlist
-- basic formatted strings
+- dotted, absolute, and explicit-relative imports over bounded regular
+  `__init__.py` packages, including aliases, selected names, wildcard exports,
+  parent-before-child initialization, circular namespaces, and retry after
+  failed initialization
+- soft-keyword structural `match`/`case` with evaluate-once subjects, ordered
+  guarded cases, atomic captures, literal/value/capture/wildcard/OR/AS patterns,
+  fixed or starred list/tuple sequences, dictionary/rest mappings, and bounded
+  C3 multiple-inheritance class patterns through inherited `__match_args__`
+- Python 3.14-style deferred variable/parameter/return annotations with
+  executed-only module/class entries, class namespace and closure lookup,
+  successful `__annotations__` caching, fault retry, partial-module non-caching,
+  function-local non-evaluation, and shared CS486/heap/scope limits
+- bounded Python 3.14 generic functions/classes and soft-keyword `type` aliases
+  with TypeVar-/TypeVarTuple-/ParamSpec-shaped reflection, private type scopes,
+  lazy bounds/constraints/defaults/alias values, successful caching, fault
+  retry, and shared CS486/heap/scope limits
+- bounded generic class, type-alias, and `list`/`dict`/`tuple`/`set`
+  subscription with stable cached `__origin__`/`__args__`/`__parameters__`,
+  default and variadic arguments, open/nested substitution, type-erased calls,
+  and explicit cache/heap/nesting ceilings
+- a runtime-owned bounded `typing` core with stable special types, `Union`,
+  `Optional`, `Literal`, `Annotated`, `Callable`, qualifier forms,
+  `TypeVar`/`ParamSpec`/`TypeVarTuple`, `get_origin`/`get_args`, and
+  identity-only `cast`/`assert_type` behavior without runtime type enforcement
+- bounded `async def` coroutines, `await`, class-backed `__await__`,
+  `async for`, and `async with` on the existing CS486 process, with low-level
+  `send(None)`/`throw`/`close`, exact faults, reverse finalization, call-depth,
+  reachable-heap, and instruction-slice ownership
+- bounded async generators with single-use `__anext__`/`asend`/`athrow`/`aclose`
+  awaitables, exact `GeneratorExit` finalization, eager async
+  list/set/dictionary comprehensions, and lazy async generator expressions on
+  that same process
+- bounded `BaseExceptionGroup`/`ExceptionGroup`, recursive `except*` splitting,
+  deterministic unmatched/new-fault merging, managed callable predicates, and
+  retained continuation ownership across generator or coroutine suspension
+- Python 3.14 `t`/`tr` template strings, intrinsic `string.templatelib`,
+  retained `Template`/`Interpolation` metadata, constructors, iteration,
+  concatenation, conversion, pattern matching, and bounded nested format fields
+- inherited data/non-data descriptor precedence, atomic `__set_name__`,
+  `property`, `staticmethod`, `classmethod`, and bound-method reflection on the
+  existing bounded CS486 call, heap, and instruction-slice paths
+- bounded multiple inheritance with deterministic C3 MRO construction,
+  `__base__`/`__bases__`/`__mro__` reflection, and shared descriptor, hook,
+  special-method, pattern, and subclass lookup
+- bounded zero/one/two-argument `super`, hidden `__class__` cells, C3-continuing
+  descriptor binding, read-only proxy reflection, and cooperative
+  `object.__init__`
+- bounded C3-selected `__new__` construction, implicit-static plain methods,
+  strict `object.__new__`, returned-subclass initialization, exact non-instance
+  returns, and after-call ownership on the existing heap and slice paths
+- bounded formatted strings with debug equals, conversions, width/precision,
+  numeric bases, alignment, and nested replacement fields
 
-Initially excluded:
+The Issue #49 end-state expands this surface to the Python 3.14 grammar and
+observable core-language semantics, including the remaining class data model
+(metaclasses and slots), extended context protocols, bounded dynamic code,
+remaining exception and traceback details, remaining pattern data-model
+protocols, annotation introspection formats and advanced typing utilities, the
+complete format mini-language, and scheduler-backed asynchronous libraries.
 
-- classes and decorators
-- generators
-- `async` and `await`
-- native extensions and arbitrary packages
-- `eval` and `exec`
+Deliberate Python 3.14 CS Profile exclusions:
+
+- `pip`, `ensurepip`, `venv`, PyPI, and wheel installation
+- CPython bytecode/`.pyc`, JIT, free-threading/GIL details, and subinterpreters
+- the Python C API and CPython `.so`/`.pyd` extensions
 - direct access to the host JavaScript runtime
 
 ## ComputerCraft-style APIs
@@ -217,13 +316,58 @@ suppressed error may leave a device accidentally marked as running.
 - [OS Presence v1: connect guest runtime, lifecycle, Linux state, and DOS drive/FAT/BAT behavior](https://github.com/tsuyoshi-otake/computer-system/issues/20)
 - [Compile RAM lease finalization](https://github.com/tsuyoshi-otake/computer-system/issues/33)
 - [DOS memory architecture v2](https://github.com/tsuyoshi-otake/computer-system/issues/34)
+- [CS C 2.0 frontend completion](https://github.com/tsuyoshi-otake/computer-system/issues/58)
+- [CS C 2.0 aggregates, pointers, and globals](https://github.com/tsuyoshi-otake/computer-system/issues/61)
+- [CS486 large-program capacity scaling](https://github.com/tsuyoshi-otake/computer-system/issues/62)
+- [CS ABI 1.0 and guest libc foundation](https://github.com/tsuyoshi-otake/computer-system/issues/63)
+- [Hosted C portability](https://github.com/tsuyoshi-otake/computer-system/issues/69)
+- [Hosted libc and bounded curses](https://github.com/tsuyoshi-otake/computer-system/issues/70)
+- [MCP-safe authenticated CS-Linux acceptance fixture](https://github.com/tsuyoshi-otake/computer-system/issues/99)
+- [Static archives, dependency files, and bounded Make rules](https://github.com/tsuyoshi-otake/computer-system/issues/71)
+- [Versioned 8-bit-byte C profile and binary guest I/O](https://github.com/tsuyoshi-otake/computer-system/issues/72)
+- [Deterministic floating-point ABI and guest libm](https://github.com/tsuyoshi-otake/computer-system/issues/73)
+- [Preserved reduced NetHack prototype (frozen; excluded from current implementation)](https://github.com/tsuyoshi-otake/computer-system/issues/64)
+- [Computer System Python 1.0: Python 3.14 CS Profile](https://github.com/tsuyoshi-otake/computer-system/issues/49)
+- [Python 3.14 compatibility contract](https://github.com/tsuyoshi-otake/computer-system/issues/50)
+- [Bounded Python 3.14 frontend and runtime foundations](https://github.com/tsuyoshi-otake/computer-system/issues/51)
+- [Python lexical binding, global/nonlocal declarations, and closure cells](https://github.com/tsuyoshi-otake/computer-system/issues/52)
+- [Python call binding, unpacking, and chained-comparison evaluation order](https://github.com/tsuyoshi-otake/computer-system/issues/53)
+- [Bounded arbitrary-precision integers and Python numeric operators](https://github.com/tsuyoshi-otake/computer-system/issues/54)
+- [Python conditional expressions and lambda closures](https://github.com/tsuyoshi-otake/computer-system/issues/55)
+- [Python chained and augmented assignment semantics](https://github.com/tsuyoshi-otake/computer-system/issues/56)
+- [Python starred displays and destructuring assignment](https://github.com/tsuyoshi-otake/computer-system/issues/57)
+- [Bounded Python slicing and list slice assignment](https://github.com/tsuyoshi-otake/computer-system/issues/59)
+- [Python assignment expressions and lexical binding](https://github.com/tsuyoshi-otake/computer-system/issues/66)
+- [Bounded Python assert statements](https://github.com/tsuyoshi-otake/computer-system/issues/67)
+- [Bounded Python sets and comprehensions](https://github.com/tsuyoshi-otake/computer-system/issues/68)
+- [Bounded Python classes, instances, method binding, and single inheritance](https://github.com/tsuyoshi-otake/computer-system/issues/74)
+- [Bounded Python multiple inheritance and C3 MRO](https://github.com/tsuyoshi-otake/computer-system/issues/100)
+- [Bounded Python super and class cells](https://github.com/tsuyoshi-otake/computer-system/issues/101)
+- [Bounded Python `__new__` construction protocol](https://github.com/tsuyoshi-otake/computer-system/issues/102)
+- [Bounded Python function and class decorators](https://github.com/tsuyoshi-otake/computer-system/issues/75)
+- [Bounded built-in Python iterator protocol](https://github.com/tsuyoshi-otake/computer-system/issues/76)
+- [Lazy bounded Python generator functions](https://github.com/tsuyoshi-otake/computer-system/issues/77)
+- [Bounded Python generator send semantics](https://github.com/tsuyoshi-otake/computer-system/issues/78)
+- [Bounded Python generator throw and close semantics](https://github.com/tsuyoshi-otake/computer-system/issues/79)
+- [Bounded Python yield-from delegation](https://github.com/tsuyoshi-otake/computer-system/issues/80)
+- [Bounded synchronous Python generator expressions](https://github.com/tsuyoshi-otake/computer-system/issues/81)
+- [Bounded synchronous Python context managers](https://github.com/tsuyoshi-otake/computer-system/issues/82)
+- [Bounded Python user-defined iterator protocol](https://github.com/tsuyoshi-otake/computer-system/issues/83)
+- [Bounded generic Python iterable materialization](https://github.com/tsuyoshi-otake/computer-system/issues/85)
+- [Bounded Python `__getitem__` sequence-iteration fallback](https://github.com/tsuyoshi-otake/computer-system/issues/87)
+- [Bounded Python 3.14 deferred annotations](https://github.com/tsuyoshi-otake/computer-system/issues/88)
+- [Bounded Python callable/sentinel iteration](https://github.com/tsuyoshi-otake/computer-system/issues/89)
+- [Bounded Python 3.14 type parameters and lazy type aliases](https://github.com/tsuyoshi-otake/computer-system/issues/90)
+- [Bounded Python generic aliases and runtime subscription](https://github.com/tsuyoshi-otake/computer-system/issues/91)
+- [Bounded Python 3.14 typing runtime core](https://github.com/tsuyoshi-otake/computer-system/issues/92)
+- [Bounded Python 3.14 coroutines and async protocols](https://github.com/tsuyoshi-otake/computer-system/issues/93)
 
 ### M1: Repository and host-side runtime
 
 - [x] TypeScript package, lint, formatting, type-checking, and Vitest setup
 - [x] domain boundaries and Minecraft adapter interfaces
 - [x] Python lexer and parser
-- [x] bytecode compiler and deterministic VM
+- [x] direct Python-to-CS486 compiler and shared deterministic process runtime
 - [x] fair scheduler, events, timers, terminal buffer, and in-memory filesystem
 - [x] initial `os`, `term`, and `fs` modules
 

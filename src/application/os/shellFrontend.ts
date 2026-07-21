@@ -20,12 +20,18 @@ export type SessionCommandKind =
   | "dos-qbasic"
   | "dos-timer"
   | "dos-toolchain-ide"
+  | "less"
   | "linux-builtin"
+  | "linux-crontab"
   | "linux-history"
+  | "linux-initd"
   | "linux-make"
+  | "linux-nice"
   | "linux-python"
   | "linux-script"
   | "linux-timer"
+  | "linux-watch"
+  | "more"
   | "vi";
 
 export interface ShellFrontend {

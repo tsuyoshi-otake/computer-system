@@ -29,16 +29,25 @@ function cs486dxInstructionCycleCost(
 ): number {
   switch (instruction.op) {
     case "load":
+    case "load8s":
+    case "load8u":
+    case "load16s":
+    case "load16u":
     case "store":
+    case "store8":
+    case "store16":
     case "push":
     case "pop":
       return 2;
     case "mul":
       return 9;
     case "div":
+    case "udiv":
     case "mod":
+    case "umod":
       return 40;
     case "call":
+    case "call_indirect":
     case "ret":
       return 3;
     case "jmp":
@@ -66,8 +75,16 @@ function cs386sxInstructionCycleCost(
   switch (instruction.op) {
     case "load":
       return 6;
+    case "load8s":
+    case "load8u":
+    case "load16s":
+    case "load16u":
+      return 4;
     case "store":
       return 4;
+    case "store8":
+    case "store16":
+      return 3;
     case "push":
       return 4;
     case "pop":
@@ -75,10 +92,13 @@ function cs386sxInstructionCycleCost(
     case "mul":
       return cs386EarlyOutMultiplyCycles(context.multiplier ?? 0);
     case "div":
+    case "udiv":
     case "mod":
+    case "umod":
       return 43;
     case "shl":
     case "shr":
+    case "ushr":
       return 3;
     case "jmp":
       return 7;
@@ -90,6 +110,7 @@ function cs386sxInstructionCycleCost(
     case "jge":
       return context.branchTaken === true ? 7 : 3;
     case "call":
+    case "call_indirect":
       return 9;
     case "ret":
       return 12;

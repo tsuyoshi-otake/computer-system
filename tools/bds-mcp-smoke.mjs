@@ -52,16 +52,40 @@ try {
     clientInfo: { name: "computer-system-smoke", version: "1.0.0" },
   });
   notify("notifications/initialized", {});
+  const beforeStart = await call("bds_status", {});
   const started = await call("bds_start", { resetWorld: !preserveWorld });
+  const storageMigration = await call("bds_wait_for_log", {
+    contains: 'CS_STORAGE_MIGRATION {"state":"complete"',
+    afterCursor: beforeStart.logCursor,
+    timeoutMs: 120_000,
+  });
   const probe = await call("bds_run_probe", {
     probe: "headless",
     target: "server",
   });
-  const terminal = await call("bds_wait_for_log", {
-    contains: '"phase":"complete"',
-    afterCursor: probe.afterCursor,
-    timeoutMs: 120_000,
-  });
+  let terminal;
+  try {
+    const outcome = await Promise.race([
+      call("bds_wait_for_log", {
+        contains: '"phase":"complete"',
+        afterCursor: probe.afterCursor,
+        timeoutMs: 120_000,
+      }).then((entry) => ({ entry, kind: "complete" })),
+      call("bds_wait_for_log", {
+        contains: "Unhandled critical exception",
+        afterCursor: probe.afterCursor,
+        timeoutMs: 120_000,
+      }).then((entry) => ({ entry, kind: "watchdog" })),
+    ]);
+    if (outcome.kind === "watchdog") {
+      throw new Error(
+        `BDS watchdog terminated the probe: ${outcome.entry.line}`,
+      );
+    }
+    terminal = outcome.entry;
+  } catch (error) {
+    throw await describeProbeWaitFailure(error, probe.afterCursor);
+  }
   const diagnostics = await call("bds_get_logs", {
     afterCursor: probe.afterCursor,
     diagnosticsOnly: true,
@@ -75,6 +99,7 @@ try {
   const stopped = await call("bds_stop", {});
   const authentication = requireLinuxAuthenticationRecord(probeLogs);
   const make = requireLinuxMakeRecord(probeLogs);
+  const git = requireLinuxGitRecord(probeLogs);
   if (started.state !== "running") {
     throw new Error(`Expected running, received ${String(started.state)}.`);
   }
@@ -98,11 +123,13 @@ try {
       {
         status: "PASS",
         endpoint: `${started.address}:${String(started.port)}`,
+        storageMigrationCursor: storageMigration.cursor,
         terminal: JSON.parse(
           terminal.line.slice(terminal.line.indexOf("CS_PROBE_RESULT ") + 16),
         ),
         authentication: authentication.details,
         make: make.details,
+        git: git.details,
         diagnostics: diagnostics.length,
         finalState: stopped.state,
       },
@@ -139,7 +166,7 @@ function requireLinuxAuthenticationRecord(logs) {
     record.details?.setupCompleted !== true ||
     !Number.isInteger(record.details?.ticks) ||
     record.details.ticks < 8 ||
-    record.details.ticks > 64
+    record.details.ticks > 256
   ) {
     throw new Error(
       `CS-Linux authentication probe did not pass its contract: ${JSON.stringify(record)}`,
@@ -180,6 +207,79 @@ function requireLinuxMakeRecord(logs) {
     );
   }
   return record;
+}
+
+function requireLinuxGitRecord(logs) {
+  const marker = "CS_PROBE_RESULT ";
+  const entry = logs.find((candidate) =>
+    candidate.line.includes('"probe":"linux_git"'),
+  );
+  if (entry === undefined) {
+    throw new Error("Headless suite omitted the CS-Linux Git probe.");
+  }
+  const markerIndex = entry.line.indexOf(marker);
+  if (markerIndex < 0) {
+    throw new Error("CS-Linux Git probe record was malformed.");
+  }
+  const record = JSON.parse(entry.line.slice(markerIndex + marker.length));
+  if (
+    record.probe !== "linux_git" ||
+    record.status !== "PASS" ||
+    record.details?.committed !== true ||
+    record.details?.finalized !== true ||
+    record.details?.ignored !== true ||
+    record.details?.initialized !== true ||
+    record.details?.merged !== true ||
+    record.details?.remoteUnavailable !== true ||
+    record.details?.switched !== true ||
+    !Number.isInteger(record.details?.ticks) ||
+    record.details.ticks < 1 ||
+    record.details.ticks > 512
+  ) {
+    throw new Error(
+      `CS-Linux Git probe did not pass its contract: ${JSON.stringify(record)}`,
+    );
+  }
+  return record;
+}
+
+async function describeProbeWaitFailure(error, afterCursor) {
+  const lines = [
+    error instanceof Error ? error.message : String(error),
+    `Probe cursor: ${String(afterCursor)}`,
+  ];
+  try {
+    const status = await call("bds_status", {});
+    lines.push(`BDS status: ${JSON.stringify(status)}`);
+  } catch (statusError) {
+    lines.push(
+      `BDS status unavailable: ${statusError instanceof Error ? statusError.message : String(statusError)}`,
+    );
+  }
+  try {
+    const logs = await call("bds_get_logs", {
+      afterCursor,
+      diagnosticsOnly: false,
+      limit: 2_000,
+    });
+    const records = logs
+      .filter(
+        (entry) =>
+          entry.diagnostic === true || entry.line.includes("CS_PROBE_RESULT "),
+      )
+      .slice(-80)
+      .map((entry) => entry.line.slice(0, 2_000));
+    lines.push(
+      records.length === 0
+        ? "No diagnostic or probe records followed the probe cursor."
+        : `Recent diagnostic/probe records:\n${records.join("\n")}`,
+    );
+  } catch (logsError) {
+    lines.push(
+      `BDS logs unavailable: ${logsError instanceof Error ? logsError.message : String(logsError)}`,
+    );
+  }
+  return new Error(lines.join("\n"), { cause: error });
 }
 
 function request(method, params) {

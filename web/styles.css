@@ -305,6 +305,10 @@ h1 {
 }
 
 .terminal-shell {
+  --terminal-frame-width: 504px;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+  gap: 8px;
   min-width: 0;
   min-height: 0;
   padding: clamp(10px, 2vw, 24px) clamp(12px, 3vw, 42px);
@@ -312,7 +316,6 @@ h1 {
 }
 
 .terminal-stage {
-  --terminal-frame-width: 504px;
   --terminal-frame-height: 378px;
   --terminal-horizontal-scale: 0.8;
   --terminal-raster-margin: 1em;
@@ -569,7 +572,7 @@ h1 {
   outline: 0 solid transparent;
   background: transparent;
   color: var(--input-color, var(--text));
-  caret-color: var(--input-color, var(--text));
+  caret-color: transparent;
   pointer-events: auto;
   field-sizing: content;
   line-height: 1;
@@ -579,6 +582,56 @@ h1 {
   resize: none;
   text-indent: var(--cursor-left);
   white-space: pre-wrap;
+}
+
+.terminal-cell-cursor {
+  --cursor-cell-left: 0ch;
+  --cursor-cell-top: 0em;
+  --cursor-foreground: var(--text);
+  --cursor-background: var(--terminal-screen-bg);
+  position: absolute;
+  z-index: 3;
+  top: var(--cursor-cell-top);
+  left: var(--cursor-cell-left);
+  display: grid;
+  width: 1ch;
+  height: 1em;
+  pointer-events: none;
+  place-items: center;
+  color: var(--cursor-background);
+  font: inherit;
+  line-height: 1;
+  white-space: pre;
+}
+
+.terminal-cell-cursor--block {
+  background: var(--cursor-foreground);
+}
+
+.terminal-cell-cursor--underline {
+  border-bottom: max(2px, 0.14em) solid var(--cursor-foreground);
+}
+
+.terminal-cell-cursor--blink {
+  animation: terminal-cursor-blink 1.06s steps(1, end) infinite;
+}
+
+@keyframes terminal-cursor-blink {
+  0%,
+  49% {
+    visibility: visible;
+  }
+
+  50%,
+  100% {
+    visibility: hidden;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .terminal-cell-cursor--blink {
+    animation: none;
+  }
 }
 
 .command-line textarea:disabled {
@@ -656,20 +709,100 @@ h1 {
 }
 
 .completion-menu {
-  position: absolute;
-  z-index: 4;
-  left: 50%;
-  bottom: 0;
   width: min(var(--terminal-frame-width), 100%);
   max-width: 100%;
-  padding: 4px 8px;
+  min-width: 0;
+  justify-self: center;
   border: 1px solid var(--line-strong);
-  background: var(--panel);
-  color: var(--muted);
+  background: var(--black);
+  color: var(--text);
   font-size: 11px;
-  line-height: 1.4;
-  translate: -50% 0;
-  overflow-wrap: anywhere;
+  line-height: 1.3;
+  overflow: hidden;
+}
+
+.completion-header {
+  display: flex;
+  min-height: 26px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 8px;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--green);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.completion-count {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.completion-message {
+  display: grid;
+  min-height: 44px;
+  margin: 0;
+  padding: 8px;
+  place-items: center start;
+  color: var(--muted);
+  letter-spacing: 0.04em;
+}
+
+.completion-message[data-tone="error"] {
+  color: var(--amber);
+}
+
+.completion-options {
+  max-height: 192px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-color: var(--line-strong) var(--black);
+}
+
+.completion-option {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  min-height: 32px;
+  align-items: center;
+  gap: 12px;
+  padding: 0 8px;
+  border-bottom: 1px solid var(--line);
+  cursor: default;
+  transition:
+    background-color 150ms ease,
+    color 150ms ease;
+}
+
+.completion-option:last-child {
+  border-bottom: 0;
+}
+
+.completion-option:hover {
+  color: var(--green);
+}
+
+.completion-option[data-selected="true"] {
+  background: var(--green);
+  color: var(--black);
+}
+
+.completion-option-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.completion-option-kind {
+  color: var(--muted);
+  font-size: 9px;
+  letter-spacing: 0.08em;
+}
+
+.completion-option[data-selected="true"] .completion-option-kind {
+  color: color-mix(in srgb, var(--black) 72%, transparent);
 }
 
 .statusbar {
@@ -702,12 +835,28 @@ h1 {
   display: flex;
   min-width: 42px;
   height: 22px;
+  padding: 0;
+  border: 0;
   align-items: center;
   justify-content: center;
   gap: 4px;
+  background: transparent;
   color: var(--muted);
+  cursor: pointer;
+  font-family: inherit;
   font-size: 8px;
   line-height: 1;
+  touch-action: manipulation;
+}
+
+.keyboard-lock-indicator:hover {
+  color: var(--text);
+  background: color-mix(in srgb, var(--green) 8%, transparent);
+}
+
+.keyboard-lock-indicator:focus-visible {
+  outline: 1px solid var(--green);
+  outline-offset: -1px;
 }
 
 .keyboard-lock-light {
@@ -726,10 +875,6 @@ h1 {
 .keyboard-lock-indicator[data-state="on"] .keyboard-lock-light {
   color: var(--green);
   text-shadow: 0 0 6px color-mix(in srgb, var(--green) 65%, transparent);
-}
-
-.keyboard-lock-indicator[data-state="unknown"] .keyboard-lock-light {
-  color: var(--amber);
 }
 
 #access-state {
@@ -1990,6 +2135,14 @@ dialog form {
     padding-inline: 10px;
   }
 
+  .completion-options {
+    max-height: 176px;
+  }
+
+  .completion-option {
+    min-height: 44px;
+  }
+
   button {
     min-width: 44px;
     min-height: 44px;
@@ -2004,6 +2157,11 @@ dialog form {
 
   .terminal-display {
     outline: 1px solid CanvasText;
+  }
+
+  .completion-option[data-selected="true"] {
+    outline: 2px solid Highlight;
+    outline-offset: -2px;
   }
 
   .display-option:has(input:focus-visible) {

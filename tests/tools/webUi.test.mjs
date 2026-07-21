@@ -40,7 +40,7 @@ describe("Web terminal UI", () => {
     expect(script).toContain("terminalInteraction.secretInput");
     expect(script).toContain("!submittedSecret");
     expect(script).toContain(
-      "if (terminalInteraction?.secretInput !== true) moveHistory(-1)",
+      "if (terminalInteraction?.history === true) moveHistory(-1)",
     );
   });
 
@@ -217,11 +217,19 @@ describe("Web terminal UI", () => {
     expect(html).toContain('id="keyboard-help"');
     expect(html).toContain('aria-atomic="true"');
     expect(html).toContain('id="completion-menu"');
+    expect(html).toContain('role="combobox"');
+    expect(html).toContain('aria-controls="completion-options"');
+    expect(html).toContain('role="listbox"');
+    expect(html).toContain('id="completion-status"');
     expect(script).toContain('key === "c"');
     expect(script).toContain('event.key === "ArrowUp"');
     expect(script).toContain('key === "u" || key === "k" || key === "w"');
     expect(script).toContain("void closeSession()");
     expect(script).toContain("historyDraft");
+    expect(script).toContain('event.key === "F3"');
+    expect(script).toContain('cursorShape === "underline"');
+    expect(script).toContain('["a", "d", "e", "k", "u", "w"].includes(key)');
+    expect(script).toContain('sendInput({ kind: "abort-line" })');
     expect(script).toContain("function interactionStateLabel()");
     expect(script).toContain("function renderInteractionHints(interaction)");
     expect(script).toContain("elements.keyboardHelp.replaceChildren(fragment)");
@@ -234,31 +242,45 @@ describe("Web terminal UI", () => {
     expect(css).toMatch(/\[hidden\]\s*\{\s*display:\s*none\s*!important;/u);
     expect(script).toContain('event.key === "Tab"');
     expect(script).toContain('api("/api/complete"');
-    for (const id of [
-      "caps-lock-indicator",
-      "num-lock-indicator",
-      "scroll-lock-indicator",
+    expect(script).toContain("new CompletionShelfController()");
+    expect(script).toContain("acceptSelectedCompletion()");
+    expect(inputHelpers).toContain("class CompletionShelfController");
+    expect(inputHelpers).toContain('outcome: "stale"');
+    expect(css).toContain('.completion-option[data-selected="true"]');
+    expect(css).toContain("grid-template-rows: minmax(0, 1fr) auto");
+    const completionRules =
+      /\.completion-menu\s*\{[\s\S]+?\n\}/u.exec(css)?.[0] ?? "";
+    expect(completionRules).not.toContain("position: absolute");
+    for (const [id, label] of [
+      ["caps-lock-indicator", "Caps Lock"],
+      ["num-lock-indicator", "Num Lock"],
+      ["scroll-lock-indicator", "Scroll Lock"],
     ]) {
-      expect(html).toContain(`id="${id}"`);
+      const button = new RegExp(
+        `<button[\\s\\S]*?id="${id}"[\\s\\S]*?<\\/button>`,
+        "u",
+      ).exec(html)?.[0];
+      expect(button).toBeDefined();
+      expect(button).toContain('type="button"');
+      expect(button).toContain('data-state="off"');
+      expect(button).toContain('aria-pressed="false"');
+      expect(button).toContain(`aria-label="Virtual ${label} off"`);
     }
-    expect(html).toContain('aria-label="Keyboard lock status"');
-    expect(html).toContain('data-state="unknown"');
+    expect(html).toContain('aria-label="Web Terminal virtual keyboard locks"');
+    expect(html).toContain(
+      "They do not change operating-system or terminal input behavior.",
+    );
     expect(css).toContain('.keyboard-lock-indicator[data-state="on"]');
+    expect(css).toContain(".keyboard-lock-indicator:focus-visible");
     expect(script).toContain(
-      'addEventListener("keydown", updateKeyboardLockIndicators)',
+      "function toggleVirtualKeyboardLock(element, label)",
     );
+    expect(script).toContain('element.getAttribute("aria-pressed") !== "true"');
     expect(script).toContain(
-      'addEventListener("keyup", updateKeyboardLockIndicators)',
+      'element.setAttribute("aria-pressed", String(enabled))',
     );
-    expect(script).toContain(
-      'addEventListener("blur", resetKeyboardLockIndicators)',
-    );
-    expect(script).toContain(
-      "if (document.hidden) resetKeyboardLockIndicators()",
-    );
-    expect(script).toContain('off: { glyph: "\\u25cb", label: "off" }');
-    expect(script).toContain('on: { glyph: "\\u25cf", label: "on" }');
-    expect(inputHelpers).toContain("event.getModifierState(modifier)");
+    expect(script).not.toContain("updateKeyboardLockIndicators");
+    expect(inputHelpers).not.toContain("getModifierState");
   });
 
   it("preserves native copy selections and normalizes bounded paste", async () => {
@@ -451,8 +473,11 @@ describe("Web terminal UI", () => {
     expect(css).toContain("font-size: var(--terminal-font-size)");
     expect(css).toMatch(/\.terminal-stage\s*\{[^}]*overflow: hidden;/su);
     expect(css).not.toMatch(/\.terminal-stage\s*\{[^}]*overflow: auto;/su);
-    expect(css).toContain("caret-color: var(--input-color, var(--text))");
+    expect(css).toContain("caret-color: transparent");
     expect(css).not.toContain("caret-color: var(--green)");
+    expect(css).toContain(".terminal-cell-cursor");
+    expect(css).toContain("steps(1, end)");
+    expect(css).toContain("prefers-reduced-motion: reduce");
     expect(script).toContain("function fitTerminal(columns, rows)");
     expect(script).toContain("function terminalContentSize()");
     expect(script).toContain("function ensureHardwareTextMode()");
@@ -461,6 +486,12 @@ describe("Web terminal UI", () => {
     expect(script).toContain("const hardwareTextColumns = 80");
     expect(script).toContain("const hardwareTextRows = 25");
     expect(script).toContain("maximumPixels: 48");
+    expect(script).toContain("calculateIntegerGridPresentation");
+    expect(script).toContain("calculateLineCursorCell");
+    expect(script).toContain("renderTerminalCursor");
+    expect(script).toContain("refreshLocalLineCursor");
+    expect(script).toContain("terminalInteraction.secretInput === true");
+    expect(script).toContain('? "•"');
     expect(layout).toContain("availableWidth / (columns * monospaceRatio)");
     expect(layout).toContain("availableHeight / (rows * lineHeightRatio)");
     expect(layout).toContain("export function calculateRasterPresentation");

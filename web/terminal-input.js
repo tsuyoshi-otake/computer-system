@@ -26,13 +26,17 @@ const namedEditorKeys = new Set([
   "Tab",
 ]);
 const terminalInputModes = new Set(["keys", "line", "none"]);
+const terminalCursorShapes = new Set(["block", "underline"]);
 const terminalPointerModes = new Set(["cell", "none"]);
 const terminalPresentationModes = new Set(["dos-tui", "terminal"]);
 const terminalInteractionContexts = new Set([
   "busy",
+  "cs-abi",
   "csasm",
   "edit",
+  "less",
   "login",
+  "more",
   "pwb",
   "qbasic",
   "secret",
@@ -46,12 +50,6 @@ const terminalInteractionContexts = new Set([
 const maximumInteractionHints = 5;
 const maximumInteractionHintKeyLength = 32;
 const maximumInteractionHintLabelLength = 64;
-const keyboardLockModifiers = {
-  capsLock: "CapsLock",
-  numLock: "NumLock",
-  scrollLock: "ScrollLock",
-};
-
 export class TerminalInteractionProtocolError extends Error {
   constructor(message) {
     super(message);
@@ -75,6 +73,16 @@ export function terminalInteractionFromTerminal(terminal) {
   if (!terminalInputModes.has(interaction.inputMode)) {
     throw new TerminalInteractionProtocolError(
       "The terminal frame has an unsupported input mode.",
+    );
+  }
+  if (!terminalCursorShapes.has(interaction.cursorShape)) {
+    throw new TerminalInteractionProtocolError(
+      "The terminal frame has an unsupported cursor shape.",
+    );
+  }
+  if (typeof interaction.history !== "boolean") {
+    throw new TerminalInteractionProtocolError(
+      "The terminal frame has an invalid history flag.",
     );
   }
   if (!terminalPointerModes.has(interaction.pointer)) {
@@ -125,6 +133,14 @@ export function terminalInteractionFromTerminal(terminal) {
     );
   }
   if (
+    interaction.history &&
+    (interaction.inputMode !== "line" || interaction.secretInput)
+  ) {
+    throw new TerminalInteractionProtocolError(
+      "Terminal history requires non-secret line input.",
+    );
+  }
+  if (
     interaction.pointer === "cell" &&
     (interaction.inputMode !== "keys" || interaction.presentation !== "dos-tui")
   ) {
@@ -149,22 +165,6 @@ export function terminalInteractionFromTerminal(terminal) {
       ),
     ),
   });
-}
-
-export function keyboardLockStatesFromEvent(event) {
-  if (typeof event?.getModifierState !== "function") {
-    return {
-      capsLock: "unknown",
-      numLock: "unknown",
-      scrollLock: "unknown",
-    };
-  }
-  return Object.fromEntries(
-    Object.entries(keyboardLockModifiers).map(([name, modifier]) => [
-      name,
-      event.getModifierState(modifier) ? "on" : "off",
-    ]),
-  );
 }
 
 export function editorKeyFromKeyboardEvent(event) {
@@ -219,6 +219,255 @@ export function insertPastedCommand(
     cursor: prefix.length + inserted.length,
     value: `${prefix}${inserted}${suffix}`,
   };
+}
+
+const maximumCompletionCandidates = 64;
+const maximumCompletionLineLength = 128;
+const completionCandidateKinds = new Set([
+  "command",
+  "device",
+  "directory",
+  "file",
+]);
+
+export class CompletionShelfController {
+  #generation = 0;
+  #state = Object.freeze({ generation: 0, kind: "closed" });
+
+  get state() {
+    return this.#state;
+  }
+
+  begin(value, cursor) {
+    requireCompletionLine(value, cursor);
+    this.#generation += 1;
+    const ticket = Object.freeze({
+      cursor,
+      generation: this.#generation,
+      value,
+    });
+    this.#state = Object.freeze({ ...ticket, kind: "loading" });
+    return ticket;
+  }
+
+  resolve(ticket, result, currentValue, currentCursor) {
+    if (!this.#owns(ticket)) return { outcome: "stale" };
+    if (ticket.value !== currentValue || ticket.cursor !== currentCursor) {
+      this.#state = Object.freeze({
+        generation: this.#generation,
+        kind: "closed",
+      });
+      return { outcome: "stale" };
+    }
+    const completion = normalizedCompletionResult(result, ticket);
+    if (completion === undefined) {
+      this.#state = Object.freeze({
+        generation: this.#generation,
+        kind: "message",
+        message: "COMPLETION PROTOCOL ERROR",
+        tone: "error",
+      });
+      return { outcome: "invalid" };
+    }
+    if (completion.candidates.length === 0) {
+      this.#state = Object.freeze({
+        generation: this.#generation,
+        kind: "message",
+        message: completion.truncated
+          ? "MATCHES EXCEED INPUT LIMIT"
+          : "NO MATCHES",
+        tone: completion.truncated ? "error" : "muted",
+      });
+      return { completion, outcome: "empty" };
+    }
+    if (completion.candidates.length === 1) {
+      this.#state = Object.freeze({
+        generation: this.#generation,
+        kind: "closed",
+      });
+      return { completion, outcome: "applied" };
+    }
+    this.#state = Object.freeze({
+      candidates: completion.candidates,
+      cursor: completion.cursor,
+      generation: this.#generation,
+      kind: "open",
+      replaceEnd: completion.replaceEnd,
+      replaceStart: completion.replaceStart,
+      requestValue: ticket.value,
+      selected: 0,
+      truncated: completion.truncated,
+      value: completion.value,
+    });
+    return { completion, outcome: "applied" };
+  }
+
+  fail(ticket, currentValue, currentCursor) {
+    if (!this.#owns(ticket)) return false;
+    if (ticket.value !== currentValue || ticket.cursor !== currentCursor) {
+      this.#state = Object.freeze({
+        generation: this.#generation,
+        kind: "closed",
+      });
+      return false;
+    }
+    this.#state = Object.freeze({
+      generation: this.#generation,
+      kind: "message",
+      message: "COMPLETION UNAVAILABLE",
+      tone: "error",
+    });
+    return true;
+  }
+
+  move(offset) {
+    if (
+      this.#state.kind !== "open" ||
+      !Number.isSafeInteger(offset) ||
+      offset === 0
+    ) {
+      return false;
+    }
+    const selected =
+      (this.#state.selected + offset + this.#state.candidates.length) %
+      this.#state.candidates.length;
+    this.#state = Object.freeze({ ...this.#state, selected });
+    return true;
+  }
+
+  select(index) {
+    if (
+      this.#state.kind !== "open" ||
+      !Number.isSafeInteger(index) ||
+      index < 0 ||
+      index >= this.#state.candidates.length
+    ) {
+      return false;
+    }
+    this.#state = Object.freeze({ ...this.#state, selected: index });
+    return true;
+  }
+
+  accept(currentValue, currentCursor) {
+    if (
+      this.#state.kind !== "open" ||
+      currentValue !== this.#state.value ||
+      currentCursor !== this.#state.cursor
+    ) {
+      this.dismiss();
+      return undefined;
+    }
+    const candidate = this.#state.candidates[this.#state.selected];
+    const value = `${this.#state.requestValue.slice(
+      0,
+      this.#state.replaceStart,
+    )}${candidate.insertText}${this.#state.requestValue.slice(
+      this.#state.replaceEnd,
+    )}`;
+    const cursor = this.#state.replaceStart + candidate.insertText.length;
+    this.#state = Object.freeze({
+      generation: this.#generation,
+      kind: "closed",
+    });
+    return { cursor, value };
+  }
+
+  dismiss() {
+    this.#generation += 1;
+    this.#state = Object.freeze({
+      generation: this.#generation,
+      kind: "closed",
+    });
+  }
+
+  #owns(ticket) {
+    return (
+      ticket !== null &&
+      typeof ticket === "object" &&
+      ticket.generation === this.#generation &&
+      this.#state.kind === "loading"
+    );
+  }
+}
+
+function normalizedCompletionResult(result, ticket) {
+  if (
+    result === null ||
+    typeof result !== "object" ||
+    Array.isArray(result) ||
+    typeof result.value !== "string" ||
+    result.value.length > maximumCompletionLineLength ||
+    /[\0\r\n]/u.test(result.value) ||
+    !Number.isSafeInteger(result.cursor) ||
+    result.cursor < 0 ||
+    result.cursor > result.value.length ||
+    !Number.isSafeInteger(result.replaceStart) ||
+    !Number.isSafeInteger(result.replaceEnd) ||
+    result.replaceStart < 0 ||
+    result.replaceStart > result.replaceEnd ||
+    result.replaceEnd !== ticket.cursor ||
+    result.replaceEnd > ticket.value.length ||
+    typeof result.truncated !== "boolean" ||
+    !Array.isArray(result.candidates) ||
+    result.candidates.length > maximumCompletionCandidates
+  ) {
+    return undefined;
+  }
+  const candidates = [];
+  for (const candidate of result.candidates) {
+    if (
+      candidate === null ||
+      typeof candidate !== "object" ||
+      Array.isArray(candidate) ||
+      !boundedCompletionText(candidate.displayText) ||
+      !boundedCompletionText(candidate.insertText) ||
+      !completionCandidateKinds.has(candidate.kind)
+    ) {
+      return undefined;
+    }
+    const completedValue = `${ticket.value.slice(
+      0,
+      result.replaceStart,
+    )}${candidate.insertText}${ticket.value.slice(result.replaceEnd)}`;
+    if (completedValue.length > maximumCompletionLineLength) return undefined;
+    candidates.push(
+      Object.freeze({
+        displayText: candidate.displayText,
+        insertText: candidate.insertText,
+        kind: candidate.kind,
+      }),
+    );
+  }
+  return Object.freeze({
+    candidates: Object.freeze(candidates),
+    cursor: result.cursor,
+    replaceEnd: result.replaceEnd,
+    replaceStart: result.replaceStart,
+    truncated: result.truncated,
+    value: result.value,
+  });
+}
+
+function boundedCompletionText(value) {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= maximumCompletionLineLength &&
+    !/[\0\r\n]/u.test(value)
+  );
+}
+
+function requireCompletionLine(value, cursor) {
+  if (
+    typeof value !== "string" ||
+    value.length > maximumCompletionLineLength ||
+    /[\0\r\n]/u.test(value) ||
+    !Number.isSafeInteger(cursor) ||
+    cursor < 0 ||
+    cursor > value.length
+  ) {
+    throw new RangeError("Completion input is out of range");
+  }
 }
 
 export class BoundedEditorKeyQueue {

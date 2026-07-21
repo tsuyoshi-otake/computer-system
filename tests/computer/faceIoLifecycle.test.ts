@@ -15,6 +15,13 @@ describe("face I/O lifecycle", (): void => {
     configureInMemoryPersistence(runtime, record);
     runtime.register(record);
     runtime.powerOn(record.computerId);
+    runUntil(
+      runtime,
+      () =>
+        record.lifecycle.state.kind !== "booting" &&
+        record.display.state.kind !== "post",
+      128,
+    );
     const before = record.faceIo.rs232("front").status.powerEpoch;
     expect(record.faceIo.rs232("front").status.powered).toBe(true);
     record.faceIo.rs232("front").receive(Uint8Array.of(1, 2));
@@ -55,7 +62,7 @@ describe("face I/O lifecycle", (): void => {
 function runUntil(
   runtime: ComputerRuntime,
   predicate: () => boolean,
-  maximumTicks = 64,
+  maximumTicks = 128,
 ): void {
   for (let tick = 0; tick < maximumTicks; tick += 1) {
     if (predicate()) return;

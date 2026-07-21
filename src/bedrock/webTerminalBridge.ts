@@ -2,6 +2,7 @@ import { system, world, type Block, type Player } from "@minecraft/server";
 
 import type { ComputerRecord } from "../domain/computer/computer.js";
 import type { RuntimeCommandResult } from "../application/computer/computerRuntime.js";
+import type { ShellCompletionResult } from "../application/os/shellTypes.js";
 import type { TerminalInteractionDescriptor } from "../application/terminal/terminalInteraction.js";
 import { TerminalSnapshotScheduler } from "../application/terminal/terminalSnapshotScheduler.js";
 import { FloppyAudioEventBroker } from "../application/terminal/floppyAudioEvents.js";
@@ -275,6 +276,9 @@ export function handleWebTerminalScriptEvent(
       return true;
     case "computer_system:web-interrupt":
       handleInterrupt(message);
+      return true;
+    case "computer_system:web-abort-line":
+      handleAbortLine(message);
       return true;
     case "computer_system:web-take-control":
       handleTakeControl(message);
@@ -714,8 +718,8 @@ function handleCompletion(message: string): void {
           session.computerId,
           value,
           cursor,
-        ) ?? { candidates: [], cursor, value })
-      : { candidates: [], cursor, value };
+        ) ?? emptyCompletion(value, cursor))
+      : emptyCompletion(value, cursor);
   console.warn(
     `${completionMarker}${JSON.stringify({
       ...completion,
@@ -723,6 +727,17 @@ function handleCompletion(message: string): void {
       sessionId: session.sessionId,
     })}`,
   );
+}
+
+function emptyCompletion(value: string, cursor: number): ShellCompletionResult {
+  return {
+    candidates: [],
+    cursor,
+    replaceEnd: cursor,
+    replaceStart: cursor,
+    truncated: false,
+    value,
+  };
 }
 
 function handleResize(message: string): void {
@@ -765,6 +780,21 @@ function handleInterrupt(message: string): void {
     computerHost.runtime.terminalInteraction(session.computerId).interrupt
   ) {
     computerHost.runtime.interrupt(session.computerId);
+    snapshotScheduler.requestEager(session.sessionId);
+  }
+}
+
+function handleAbortLine(message: string): void {
+  const match = /^([A-Za-z0-9_-]{12,32})$/u.exec(message);
+  if (match === null) return;
+  const session = requireActiveSession(match[1] ?? "");
+  if (
+    session !== undefined &&
+    terminalAccess.canWrite(session.sessionId) &&
+    computerHost.runtime.terminalInteraction(session.computerId).inputMode ===
+      "line"
+  ) {
+    computerHost.runtime.abortLine(session.computerId);
     snapshotScheduler.requestEager(session.sessionId);
   }
 }

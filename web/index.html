@@ -2,6 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="color-scheme" content="dark" />
     <title>Computer System — Web Terminal</title>
@@ -139,6 +140,11 @@
                     <p class="system-line">Opening secure terminal session…</p>
                   </div>
                 </div>
+                <div
+                  id="terminal-cursor"
+                  class="terminal-cell-cursor"
+                  aria-hidden="true"
+                ></div>
                 <form id="command-form" class="command-line" autocomplete="off">
                   <label for="command-input" class="sr-only"
                     >Terminal command line</label
@@ -151,21 +157,46 @@
                     spellcheck="false"
                     autocapitalize="off"
                     enterkeyhint="send"
-                    aria-describedby="keyboard-help input-state access-state"
+                    role="combobox"
+                    aria-autocomplete="list"
+                    aria-controls="completion-options"
+                    aria-expanded="false"
+                    aria-haspopup="listbox"
+                    aria-busy="false"
+                    aria-describedby="keyboard-help input-state access-state completion-status"
                     disabled
                   ></textarea>
                 </form>
               </div>
             </div>
           </div>
+        </div>
+        <section
+          id="completion-menu"
+          class="completion-menu"
+          aria-label="Command completion"
+          hidden
+        >
+          <header class="completion-header" aria-hidden="true">
+            <span>Completion</span>
+            <span id="completion-count" class="completion-count"></span>
+          </header>
+          <p id="completion-message" class="completion-message" hidden></p>
           <div
-            id="completion-menu"
-            class="completion-menu"
-            role="status"
-            aria-live="polite"
+            id="completion-options"
+            class="completion-options"
+            role="listbox"
+            aria-label="Completion candidates"
             hidden
           ></div>
-        </div>
+        </section>
+        <p
+          id="completion-status"
+          class="sr-only"
+          role="status"
+          aria-live="polite"
+          aria-atomic="true"
+        ></p>
       </section>
 
       <footer class="statusbar">
@@ -177,34 +208,51 @@
         >
           Waiting for terminal interaction details.
         </p>
-        <div class="keyboard-locks" aria-label="Keyboard lock status">
-          <span
+        <div
+          class="keyboard-locks"
+          aria-label="Web Terminal virtual keyboard locks"
+          aria-describedby="keyboard-lock-description"
+        >
+          <span id="keyboard-lock-description" class="sr-only">
+            These switches affect only their indicators in this browser tab.
+            They do not change operating-system or terminal input behavior.
+          </span>
+          <button
             id="caps-lock-indicator"
             class="keyboard-lock-indicator"
-            data-state="unknown"
-            aria-label="Caps Lock status unknown"
+            type="button"
+            data-state="off"
+            aria-label="Virtual Caps Lock off"
+            aria-pressed="false"
+            title="Toggle the virtual Caps Lock indicator for this tab"
           >
-            <span class="keyboard-lock-light" aria-hidden="true">?</span>
+            <span class="keyboard-lock-light" aria-hidden="true">&#x25CB;</span>
             <span aria-hidden="true">Caps</span>
-          </span>
-          <span
+          </button>
+          <button
             id="num-lock-indicator"
             class="keyboard-lock-indicator"
-            data-state="unknown"
-            aria-label="Num Lock status unknown"
+            type="button"
+            data-state="off"
+            aria-label="Virtual Num Lock off"
+            aria-pressed="false"
+            title="Toggle the virtual Num Lock indicator for this tab"
           >
-            <span class="keyboard-lock-light" aria-hidden="true">?</span>
+            <span class="keyboard-lock-light" aria-hidden="true">&#x25CB;</span>
             <span aria-hidden="true">Num</span>
-          </span>
-          <span
+          </button>
+          <button
             id="scroll-lock-indicator"
             class="keyboard-lock-indicator"
-            data-state="unknown"
-            aria-label="Scroll Lock status unknown"
+            type="button"
+            data-state="off"
+            aria-label="Virtual Scroll Lock off"
+            aria-pressed="false"
+            title="Toggle the virtual Scroll Lock indicator for this tab"
           >
-            <span class="keyboard-lock-light" aria-hidden="true">?</span>
+            <span class="keyboard-lock-light" aria-hidden="true">&#x25CB;</span>
             <span aria-hidden="true">Scroll</span>
-          </span>
+          </button>
         </div>
         <div class="status-actions">
           <button

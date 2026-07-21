@@ -9,6 +9,8 @@ import {
   type ShellVariableResolver,
 } from "./shellSyntax.js";
 
+const initdCommandPath = /^\/etc\/init\.d\/[a-z][a-z0-9_-]{0,31}$/u;
+
 export class LinuxShellFrontend implements ShellFrontend {
   readonly id = "linux" as const;
 
@@ -40,12 +42,18 @@ export class LinuxShellFrontend implements ShellFrontend {
     )
       return "linux-builtin";
     if (name === "history") return "linux-history";
+    if (name === "crontab") return "linux-crontab";
     if (name === "make") return "linux-make";
+    if (name === "nice") return "linux-nice";
     if (name === "python" || name === "micropython") return "linux-python";
     if (name === "sh" || name === "bash" || name === "source")
       return "linux-script";
     if (name === "time") return "linux-timer";
+    if (name === "watch") return "linux-watch";
     if (name === "vi") return "vi";
+    if (name === "less") return "less";
+    if (name === "more") return "more";
+    if (initdCommandPath.test(name)) return "linux-initd";
     return undefined;
   }
 

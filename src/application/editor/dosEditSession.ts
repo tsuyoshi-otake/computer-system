@@ -434,6 +434,10 @@ export class DosEditSession {
     return this.modeValue;
   }
 
+  get isInsertMode(): boolean {
+    return this.insertMode;
+  }
+
   get state(): "closed" | "editing" {
     return this.stateValue;
   }

@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   calculateFixedGridFontSize,
+  calculateIntegerGridPresentation,
+  calculateLineCursorCell,
   calculateRasterPresentation,
   calculateTextRasterPresentation,
 } from "../../web/terminal-layout.js";
@@ -85,5 +87,76 @@ describe("fixed Web Terminal layout", () => {
         availableWidth: 300,
       }),
     ).toEqual({ kind: "unmeasurable" });
+  });
+
+  it("uses whole-pixel cells and reports deterministic letterboxing", () => {
+    const result = calculateIntegerGridPresentation({
+      ...fixedGrid,
+      availableHeight: 481,
+      availableWidth: 641,
+    });
+
+    expect(result).toEqual({
+      frameHeight: 429,
+      frameWidth: 634,
+      kind: "fitted",
+      letterboxX: 3,
+      letterboxY: 26,
+      pixels: 13,
+    });
+    expect(Number.isInteger(result.pixels)).toBe(true);
+  });
+
+  it("never drops a visible grid below a one-pixel cell", () => {
+    expect(
+      calculateIntegerGridPresentation({
+        ...fixedGrid,
+        availableHeight: 1,
+        availableWidth: 1,
+      }),
+    ).toMatchObject({
+      frameHeight: 33,
+      frameWidth: 49,
+      kind: "fitted",
+      letterboxX: 0,
+      letterboxY: 0,
+      pixels: 1,
+    });
+  });
+
+  it("moves the local line cursor across rows without changing grid geometry", () => {
+    expect(
+      calculateLineCursorCell({
+        baseX: 78,
+        baseY: 2,
+        columns: 80,
+        rows: 25,
+        selectionStart: 5,
+        value: "hello",
+      }),
+    ).toEqual({ x: 3, y: 3 });
+    expect(
+      calculateLineCursorCell({
+        baseX: 79,
+        baseY: 24,
+        columns: 80,
+        rows: 25,
+        selectionStart: 128,
+        value: "x".repeat(128),
+      }),
+    ).toEqual({ x: 79, y: 24 });
+  });
+
+  it("counts Unicode code points rather than UTF-16 code units", () => {
+    expect(
+      calculateLineCursorCell({
+        baseX: 0,
+        baseY: 0,
+        columns: 80,
+        rows: 25,
+        selectionStart: 2,
+        value: "😀x",
+      }),
+    ).toEqual({ x: 1, y: 0 });
   });
 });

@@ -38,6 +38,22 @@ describe("OS shell responsibility boundaries", (): void => {
     expect(dosFrontend).not.toMatch(/from ["'].*linux/iu);
     expect(linuxFrontend).not.toMatch(/from ["'].*dos/iu);
   });
+
+  it("keeps CS System Git inside guest application boundaries", async (): Promise<void> => {
+    const sources = await Promise.all(
+      ["linuxGit.ts", "linuxGitRepository.ts", "linuxGitRemote.ts"].map(
+        (name) => sourceFile(`src/application/os/${name}`),
+      ),
+    );
+    const combined = sources.join("\n");
+
+    expect(combined).not.toMatch(
+      /node:child_process|node:net|@minecraft\/server/u,
+    );
+    expect(combined).not.toMatch(/powershell|cmd\.exe/iu);
+    expect(combined).toContain("GuestFilesystem");
+    expect(combined).toContain("expectedOldOid");
+  });
 });
 
 async function sourceFile(relative: string): Promise<string> {
