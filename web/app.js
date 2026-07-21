@@ -20,6 +20,7 @@ import {
   terminalPresentationAttributes,
 } from "/terminal-presentation.js";
 import { WebFloppyDriveAudio } from "/floppy-audio.js";
+import { terminalDisplayPowerState } from "/terminal-display-power.js";
 
 const palette = [
   "#a8a8a8",
@@ -91,6 +92,7 @@ const elements = {
   terminalStage: document.querySelector("#terminal-stage"),
   terminalShell: document.querySelector(".terminal-shell"),
   terminalDisplay: document.querySelector("#terminal-display"),
+  terminalOpticalSource: document.querySelector("#terminal-optical-source"),
   terminalOutput: document.querySelector("#terminal-output"),
   terminalScreen: document.querySelector("#terminal-screen"),
   terminalCursor: document.querySelector("#terminal-cursor"),
@@ -1646,6 +1648,17 @@ const hardwareIndicatorStates = new Set([
 function updateMachinePanel(payload) {
   const previousLifecycle = machineLifecycle;
   machineLifecycle = String(payload?.lifecycle ?? "unknown");
+  const displayPowerState = terminalDisplayPowerState(
+    payload?.displayState,
+    machineLifecycle,
+  );
+  const displayPoweredOff = displayPowerState === "off";
+  elements.terminalDisplay.dataset.powerState = displayPowerState;
+  elements.terminalOpticalSource.setAttribute(
+    "aria-hidden",
+    String(displayPoweredOff),
+  );
+  elements.copyButton.disabled = displayPoweredOff;
   const powerState =
     machineLifecycle === "off"
       ? "off"

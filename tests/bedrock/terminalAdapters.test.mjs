@@ -128,6 +128,7 @@ describe("Bedrock terminal adapters", () => {
       "selectComputerTerminal(principal.player.id, record.computerId)",
     );
     expect(bridge).toContain("CS_WEB_TERMINAL");
+    expect(bridge).toContain("const displayState = record.display.state.kind");
     expect(bridge).toContain("maxSnapshotsPerPass = 2");
     expect(bridge).toContain("maxEagerSnapshotsPerPass = 4");
     expect(bridge).toContain("TerminalSnapshotScheduler");

@@ -312,10 +312,11 @@ describe("Web terminal UI", () => {
   });
 
   it("places equal-size Options, Copy, and Manual controls before the hardware controls", async () => {
-    const [html, css, script] = await Promise.all([
+    const [html, css, script, manual] = await Promise.all([
       source("web/index.html"),
       source("web/styles.css"),
       source("web/app.js"),
+      source("web/manual.js"),
     ]);
 
     for (const id of [
@@ -361,6 +362,12 @@ describe("Web terminal UI", () => {
     expect(script).toContain("payload?.storage?.hdd?.state");
     expect(script).toContain("payload?.storage?.fdd?.state");
     expect(script).toContain("machineAcceptsInput(machineLifecycle)");
+    expect(script).toContain("terminalDisplayPowerState(");
+    expect(html).toContain('data-power-state="off"');
+    expect(css).toContain(
+      '.terminal-display[data-power-state="off"] .terminal-optical-source',
+    );
+    expect(manual).toContain("the CRT goes dark and Copy is disabled");
   });
 
   it("uses authoritative interaction descriptors for bounded editor input", async () => {

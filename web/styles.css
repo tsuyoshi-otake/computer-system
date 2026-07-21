@@ -353,6 +353,18 @@ h1 {
   transition: border-radius var(--motion-fast);
 }
 
+.terminal-display[data-power-state="off"] {
+  background: #000;
+}
+
+.terminal-display[data-power-state="off"] .terminal-optical-source {
+  visibility: hidden;
+}
+
+.terminal-display[data-power-state="off"]::after {
+  opacity: 0;
+}
+
 .terminal-filter-definitions {
   position: fixed;
   width: 0;

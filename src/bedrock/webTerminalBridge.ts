@@ -76,6 +76,7 @@ interface SharedSnapshotFrame {
   readonly metadata: string;
   readonly payload: {
     readonly computerId: string;
+    readonly displayState: ComputerRecord["display"]["state"]["kind"];
     readonly label: string;
     readonly lifecycle: string;
     readonly storage: ReturnType<typeof computerHost.storageStatus>;
@@ -1142,6 +1143,7 @@ function emitSnapshot(session: ActiveSession, force: boolean): boolean {
     session.audioCursor,
   );
   const label = record.label ?? record.computerId;
+  const displayState = record.display.state.kind;
   const lifecycle = record.lifecycle.state.kind;
   const storage = computerHost.storageStatus(record.computerId);
   const interaction = computerHost.runtime.terminalInteraction(
@@ -1150,6 +1152,7 @@ function emitSnapshot(session: ActiveSession, force: boolean): boolean {
   if (interaction.pointer !== "cell") releaseMouseButtons(session, true);
   const terminalRevision = record.terminal.revision;
   const frameMetadata = JSON.stringify({
+    displayState,
     interaction,
     label,
     lifecycle,
@@ -1168,6 +1171,7 @@ function emitSnapshot(session: ActiveSession, force: boolean): boolean {
   }
   const frame = getSharedSnapshotFrame(
     record,
+    displayState,
     label,
     lifecycle,
     storage,
@@ -1190,6 +1194,7 @@ function emitSnapshot(session: ActiveSession, force: boolean): boolean {
 
 function getSharedSnapshotFrame(
   record: ComputerRecord,
+  displayState: ComputerRecord["display"]["state"]["kind"],
   label: string,
   lifecycle: string,
   storage: ReturnType<typeof computerHost.storageStatus>,
@@ -1210,6 +1215,7 @@ function getSharedSnapshotFrame(
     metadata,
     payload: {
       computerId: record.computerId,
+      displayState,
       label,
       lifecycle,
       storage,
