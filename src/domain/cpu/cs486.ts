@@ -426,6 +426,9 @@ export class Cs486Process implements CpuProcess {
   private readonly registerValues = new Int32Array(cs486RegisterNames.length);
   private readonly cpuModel: CpuModel;
   private readonly memoryHierarchy: CpuMemoryHierarchy;
+  private readonly instructionBaseCycles: Uint32Array;
+  private readonly instructionBranchCycleDeltas: Uint8Array;
+  private readonly instructionExecutionFlags: Uint8Array;
   private readonly memoryBytes: number;
   private readonly heapBaseBytes: number;
   private readonly functionEntries = new Map<number, Cs486FunctionSignature>();
@@ -452,6 +455,13 @@ export class Cs486Process implements CpuProcess {
     const requirements = cs486ExecutableMemoryRequirements(executable);
     this.cpuModel = options.cpuModel ?? defaultCpuModel;
     this.memoryHierarchy = new CpuMemoryHierarchy(this.cpuModel);
+    const preparedInstructions = prepareCs486Instructions(
+      executable,
+      this.cpuModel,
+    );
+    this.instructionBaseCycles = preparedInstructions.baseCycles;
+    this.instructionBranchCycleDeltas = preparedInstructions.branchCycleDeltas;
+    this.instructionExecutionFlags = preparedInstructions.executionFlags;
     const availableMemoryBytes = Math.min(
       options.memoryBytes,
       maximumCs486LinearAddressSpaceBytes,
@@ -812,18 +822,26 @@ export class Cs486Process implements CpuProcess {
       );
     }
     this.instructionPointer += 1;
-    const branchTaken = this.branchTaken(instruction);
+    const executionFlags = this.instructionExecutionFlags[instructionIndex]!;
+    const branchTaken =
+      (executionFlags & conditionalBranchInstructionFlag) !== 0 &&
+      this.branchTaken(instruction) === true;
+    const baseCycles =
+      (executionFlags & dynamicMultiplyInstructionFlag) === 0
+        ? this.instructionBaseCycles[instructionIndex]!
+        : instructionCycleCost(this.cpuModel, instruction, {
+            multiplier:
+              instruction.op === "mul"
+                ? this.read(instruction.source)
+                : undefined,
+          });
     let cycles =
-      instructionCycleCost(this.cpuModel, instruction, {
-        branchTaken,
-        multiplier:
-          instruction.op === "mul" ? this.read(instruction.source) : undefined,
-      }) + this.memoryHierarchy.fetchInstruction(instructionIndex);
+      baseCycles +
+      (branchTaken ? this.instructionBranchCycleDeltas[instructionIndex]! : 0) +
+      this.memoryHierarchy.fetchInstruction(instructionIndex);
     this.memoryHierarchy.recordControlTransfer(
-      branchTaken === true ||
-        instruction.op === "call" ||
-        instruction.op === "call_indirect" ||
-        instruction.op === "ret",
+      branchTaken ||
+        (executionFlags & unconditionalControlTransferInstructionFlag) !== 0,
     );
     switch (instruction.op) {
       case "mov":
@@ -2058,5 +2076,100 @@ function isCs486Operand(value: unknown): value is Cs486Operand {
 }
 
 function indexOf(register: Cs486Register): number {
-  return cs486RegisterNames.indexOf(register);
+  switch (register) {
+    case "eax":
+      return 0;
+    case "ebx":
+      return 1;
+    case "ecx":
+      return 2;
+    case "edx":
+      return 3;
+    case "esi":
+      return 4;
+    case "edi":
+      return 5;
+    case "esp":
+      return 6;
+    case "ebp":
+      return 7;
+    default:
+      return -1;
+  }
+}
+
+const conditionalBranchInstructionFlag = 1 << 0;
+const unconditionalControlTransferInstructionFlag = 1 << 1;
+const dynamicMultiplyInstructionFlag = 1 << 2;
+
+interface PreparedCs486Instructions {
+  readonly baseCycles: Uint32Array;
+  readonly branchCycleDeltas: Uint8Array;
+  readonly executionFlags: Uint8Array;
+}
+
+const preparedCs486InstructionsByExecutable = new WeakMap<
+  Cs486Executable,
+  Map<CpuModel, PreparedCs486Instructions>
+>();
+
+/**
+ * Predecodes immutable timing/control metadata once per process. This keeps the
+ * modeled guest cycle result identical while removing two opcode classifiers
+ * from the dominant O(instructions) execution loop.
+ */
+function prepareCs486Instructions(
+  executable: Cs486Executable,
+  cpuModel: CpuModel,
+): PreparedCs486Instructions {
+  let byCpuModel = preparedCs486InstructionsByExecutable.get(executable);
+  const cached = byCpuModel?.get(cpuModel);
+  if (cached !== undefined) return cached;
+  byCpuModel ??= new Map<CpuModel, PreparedCs486Instructions>();
+  preparedCs486InstructionsByExecutable.set(executable, byCpuModel);
+  const instructions = executable.instructions;
+  const baseCycles = new Uint32Array(instructions.length);
+  const branchCycleDeltas = new Uint8Array(instructions.length);
+  const executionFlags = new Uint8Array(instructions.length);
+  for (let index = 0; index < instructions.length; index += 1) {
+    const instruction = instructions[index]!;
+    switch (instruction.op) {
+      case "je":
+      case "jne":
+      case "jl":
+      case "jle":
+      case "jg":
+      case "jge": {
+        executionFlags[index] = conditionalBranchInstructionFlag;
+        const notTakenCycles = instructionCycleCost(cpuModel, instruction, {
+          branchTaken: false,
+        });
+        const takenCycles = instructionCycleCost(cpuModel, instruction, {
+          branchTaken: true,
+        });
+        baseCycles[index] = notTakenCycles;
+        branchCycleDeltas[index] = takenCycles - notTakenCycles;
+        break;
+      }
+      case "jmp":
+      case "call":
+      case "call_indirect":
+      case "ret":
+        executionFlags[index] = unconditionalControlTransferInstructionFlag;
+        baseCycles[index] = instructionCycleCost(cpuModel, instruction);
+        break;
+      case "mul":
+        if (cpuModel === "cs386sx") {
+          executionFlags[index] = dynamicMultiplyInstructionFlag;
+          break;
+        }
+        baseCycles[index] = instructionCycleCost(cpuModel, instruction);
+        break;
+      default:
+        baseCycles[index] = instructionCycleCost(cpuModel, instruction);
+    }
+  }
+  const prepared = { baseCycles, branchCycleDeltas, executionFlags };
+  byCpuModel.set(cpuModel, prepared);
+  return prepared;
 }

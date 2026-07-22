@@ -27,8 +27,8 @@ export const defaultSchedulerLimits: SchedulerLimits = {
   timerCapacity: 128,
   cpuCyclesPerComputer: Math.floor(computerNominalClockHz / 20),
   cpuCyclesPerTick: Math.floor(computerNominalClockHz / 20),
-  instructionsPerComputer: 200,
-  instructionsPerTick: 1_000,
+  instructionsPerComputer: 40_000,
+  instructionsPerTick: 200_000,
   computersPerTick: 64,
 };
 

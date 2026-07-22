@@ -100,7 +100,9 @@ export function linkCs486Objects(
     textBases.push(textCursor);
     textCursor += objectSection(object, "text").instructions.length;
     if (textCursor > maximumLinkedInstructions)
-      throw new Cs486LinkError("linked instruction limit exceeded");
+      throw new Cs486LinkError(
+        `linked instruction limit exceeded (${String(textCursor)} > ${String(maximumLinkedInstructions)})`,
+      );
   }
   const dataBases: number[] = [];
   // C reserves the all-zero pointer value. Keep the first word unmapped from

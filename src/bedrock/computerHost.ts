@@ -13,6 +13,7 @@ import type { FloppyDriveActivity } from "../application/os/floppyDrive.js";
 import type { ComputerRecord } from "../domain/computer/computer.js";
 import { FloppyMediaService } from "../application/computer/floppyMediaService.js";
 import { acceptanceFixtureBuild } from "./acceptanceFixture.js";
+import { behaviorPackConfig } from "./behaviorPackConfig.js";
 
 const repository = new DynamicPropertyComputerRepository(world);
 const persistence = new ComputerPersistenceService(repository);
@@ -37,6 +38,7 @@ const workMonitor = new ComputerWorkMonitor({
 export const computerHost = new ComputerHost(
   new ComputerRuntime({
     requireLinuxLogin: !acceptanceFixtureBuild,
+    guestRealtimeDivisor: behaviorPackConfig.guestRealtimeDivisor,
     clock: {
       currentGameTime: (): GameClockSnapshot => ({
         absoluteTicks: world.getAbsoluteTime(),
@@ -44,6 +46,7 @@ export const computerHost = new ComputerHost(
       }),
       currentWallTimeMilliseconds: (): number => Date.now(),
     },
+    hostElapsedMilliseconds: (): number => Date.now(),
   }),
   persistence,
   {

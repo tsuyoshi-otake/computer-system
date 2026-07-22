@@ -4,6 +4,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 
+import { parseBehaviorPackConfig } from "./behavior-pack-config.mjs";
+
 import {
   computerBlockIdentifier,
   computerFamilies,
@@ -44,6 +46,14 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const outputRoot = resolveOutputRoot(process.env.COMPUTER_SYSTEM_PACK_OUTPUT);
 const acceptanceFixtureBuild = parseAcceptanceFixtureBuild(
   process.env.COMPUTER_SYSTEM_ACCEPTANCE_FIXTURE,
+);
+const behaviorPackConfig = parseBehaviorPackConfig(
+  JSON.parse(
+    await readFile(
+      path.join(root, "packs", "behavior", "config", "computer-system.json"),
+      "utf8",
+    ),
+  ),
 );
 const behaviorOutput = path.join(outputRoot, "behavior_pack");
 const resourceOutput = path.join(outputRoot, "resource_pack");
@@ -179,6 +189,9 @@ await build({
   bundle: true,
   define: {
     __CS_ACCEPTANCE_FIXTURE__: JSON.stringify(acceptanceFixtureBuild),
+    __CS_GUEST_REALTIME_DIVISOR__: JSON.stringify(
+      behaviorPackConfig.guestRealtimeDivisor,
+    ),
   },
   entryPoints: [path.join(root, "src", "bedrock", "main.ts")],
   external: ["@minecraft/server", "@minecraft/server-ui"],

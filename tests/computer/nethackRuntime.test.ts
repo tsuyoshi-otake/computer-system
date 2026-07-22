@@ -1,13 +1,54 @@
 import { describe, expect, it } from "vitest";
 
 import { ComputerRuntime } from "../../src/application/computer/computerRuntime.js";
-import {
-  buildGuestNethackExecutable,
-  guestNethackSourceFiles,
-} from "../../src/application/toolchain/guestNethack.js";
+import { buildGuestNethackExecutable } from "../../src/application/toolchain/guestNethackBuilder.js";
+import { guestNethackSourceFiles } from "../../src/application/toolchain/guestNethack.js";
 import { ComputerRecord } from "../../src/domain/computer/computer.js";
 
 describe("NetHack for CS-Linux", (): void => {
+  it("renders the next interactive frame within 500 scheduler ticks", (): void => {
+    const runtime = new ComputerRuntime();
+    const record = new ComputerRecord("c-006406", "standard");
+    runtime.register(record);
+    runtime.powerOn(record.computerId);
+    completeBoot(runtime, record);
+    launchGame(runtime, record);
+    const before = terminalText(record);
+
+    expect(
+      runtime.queueEvent(record.computerId, "terminal_keys", '["l"]'),
+    ).toMatchObject({ outcome: "accepted" });
+    let elapsedTicks = 0;
+    while (elapsedTicks < 500 && terminalText(record) === before) {
+      runtime.runTick();
+      elapsedTicks += 1;
+    }
+
+    expect(terminalText(record)).not.toBe(before);
+    expect(elapsedTicks).toBeLessThanOrEqual(500);
+  });
+
+  it("renders every game cell with the black terminal background", (): void => {
+    const runtime = new ComputerRuntime();
+    const record = new ComputerRecord("c-006407", "standard");
+    runtime.register(record);
+    runtime.powerOn(record.computerId);
+    completeBoot(runtime, record);
+    launchGame(runtime, record);
+    const before = terminalText(record);
+    expect(
+      runtime.queueEvent(record.computerId, "terminal_keys", '["l"]'),
+    ).toMatchObject({ outcome: "accepted" });
+    runUntil(runtime, () => terminalText(record) !== before);
+
+    const background = record.terminal.snapshot().background;
+    for (let y = 0; y < 21; y += 1) {
+      expect(background[y]?.slice(0, 78)).toEqual(
+        Array.from({ length: 78 }, () => 15),
+      );
+    }
+  });
+
   it("ships the deterministic compiler-built executable and runs PATH arguments", (): void => {
     const runtime = new ComputerRuntime();
     const record = new ComputerRecord("c-006401", "standard");
@@ -57,7 +98,7 @@ describe("NetHack for CS-Linux", (): void => {
     });
     const saved = record.filesystem.readFile(savePath);
     expect([...saved.slice(0, 4)]).toEqual(["C", "S", "N", "H"]);
-    expect([...saved]).toHaveLength(36);
+    expect([...saved]).toHaveLength(2191);
 
     launchGame(runtime, record);
     expect(
@@ -88,6 +129,33 @@ describe("NetHack for CS-Linux", (): void => {
     for (let tick = 0; tick < 4; tick += 1) runtime.runTick();
     expect(record.filesystem.readFile(savePath)).toBe(saved);
     expect(record.filesystem.exists(`${savePath}.tmp`)).toBe(false);
+  });
+
+  it("restores the generated map, entities, inventory record, and frame after S", (): void => {
+    const runtime = new ComputerRuntime();
+    const record = new ComputerRecord("c-006408", "standard");
+    runtime.register(record);
+    runtime.powerOn(record.computerId);
+    completeBoot(runtime, record);
+
+    launchGame(runtime, record);
+    const initial = terminalText(record);
+    expect(
+      runtime.queueEvent(record.computerId, "terminal_keys", '["l"]'),
+    ).toMatchObject({ outcome: "accepted" });
+    runUntil(runtime, () => terminalText(record) !== initial);
+    expect(
+      runtime.queueEvent(record.computerId, "terminal_keys", '["S"]'),
+    ).toMatchObject({ outcome: "accepted" });
+    waitForShell(runtime, record);
+
+    launchGame(runtime, record);
+    expect(
+      runtime.queueEvent(record.computerId, "terminal_keys", '["l"]'),
+    ).toMatchObject({ outcome: "accepted" });
+    runUntil(runtime, () => terminalText(record).includes("@"));
+    expect(terminalText(record)).toContain("@");
+    expect(terminalText(record)).toContain(".");
   });
 
   it("fails an invalid HOME save before mutating the canonical file", (): void => {

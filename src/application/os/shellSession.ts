@@ -479,83 +479,100 @@ export class ShellSession {
       profile.id === "linux"
         ? new LinuxGuestMemoryManager(this.guestRamLedger)
         : undefined;
-    if (this.osRuntime !== undefined) {
-      ensureLinuxRuntimePresence(
-        this.osRuntime,
-        currentTick(),
-        this.hardware,
-        filesystem,
+    let initializationComplete = false;
+    try {
+      if (this.osRuntime !== undefined) {
+        ensureLinuxRuntimePresence(
+          this.osRuntime,
+          currentTick(),
+          this.hardware,
+          filesystem,
+        );
+        this.notifyOsRuntimeChanged();
+      }
+      const runtimeOptions: ShellCommandRuntimeOptions = {
+        accounts: this.accounts,
+        clock: this.clock,
+        computerId: options.computerId ?? 0,
+        computerName: options.computerName ?? "c-000000",
+        currentTick,
+        credentials: () => this.credentialContext.current,
+        profile,
+        ticksPerSecond,
+        hardware: this.hardware,
+        ...(this.dosMemory === undefined
+          ? {}
+          : {
+              dosMemorySnapshot: (): DosGuestMemorySnapshot =>
+                this.dosMemory!.snapshot(),
+            }),
+        ...(this.linuxMemory === undefined
+          ? {}
+          : {
+              linuxMemorySnapshot: (): LinuxGuestMemorySnapshot =>
+                this.linuxMemory!.snapshot(),
+            }),
+        admitProcessMemory:
+          this.dosMemory === undefined
+            ? (request): ShellProcessMemoryGrant =>
+                this.admitLinuxProcessMemory(request)
+            : (request): ShellProcessMemoryGrant =>
+                this.admitDosProcessMemory(request),
+        admitUtilityMemory: (request): ShellUtilityMemoryGrant =>
+          this.admitLinuxUtilityMemory(request),
+        virtualDevices: options.virtualDevices,
+        peripherals: options.peripherals,
+        deferGuestExecution: options.deferGuestExecution,
+        requestFilesystemIo: options.requestFilesystemIo,
+        requestFloppyIo: options.requestFloppyIo,
+        floppyDrive: options.floppyDrive,
+        syncFilesystem: options.syncFilesystem,
+        osRuntime: this.osRuntime,
+        sessionId: () =>
+          this.osRuntime?.loginSession(this.loginSessionId) === undefined
+            ? undefined
+            : this.loginSessionId,
+        selfPid: () => this.shellProcessId,
+        signalProcess: options.signalProcess,
+        dosRuntime: options.dosRuntime,
+        onDosRuntimeChanged: options.onDosRuntimeChanged,
+      };
+      this.commands = new ShellCommandRuntime(
+        this.guestFilesystem,
+        runtimeOptions,
       );
-      this.notifyOsRuntimeChanged();
-    }
-    const runtimeOptions: ShellCommandRuntimeOptions = {
-      accounts: this.accounts,
-      clock: this.clock,
-      computerId: options.computerId ?? 0,
-      computerName: options.computerName ?? "c-000000",
-      currentTick,
-      credentials: () => this.credentialContext.current,
-      profile,
-      ticksPerSecond,
-      hardware: this.hardware,
-      ...(this.dosMemory === undefined
-        ? {}
-        : {
-            dosMemorySnapshot: (): DosGuestMemorySnapshot =>
-              this.dosMemory!.snapshot(),
-          }),
-      ...(this.linuxMemory === undefined
-        ? {}
-        : {
-            linuxMemorySnapshot: (): LinuxGuestMemorySnapshot =>
-              this.linuxMemory!.snapshot(),
-          }),
-      admitProcessMemory:
-        this.dosMemory === undefined
-          ? (request): ShellProcessMemoryGrant =>
-              this.admitLinuxProcessMemory(request)
-          : (request): ShellProcessMemoryGrant =>
-              this.admitDosProcessMemory(request),
-      admitUtilityMemory: (request): ShellUtilityMemoryGrant =>
-        this.admitLinuxUtilityMemory(request),
-      virtualDevices: options.virtualDevices,
-      peripherals: options.peripherals,
-      deferGuestExecution: options.deferGuestExecution,
-      requestFilesystemIo: options.requestFilesystemIo,
-      requestFloppyIo: options.requestFloppyIo,
-      floppyDrive: options.floppyDrive,
-      syncFilesystem: options.syncFilesystem,
-      osRuntime: this.osRuntime,
-      sessionId: () =>
-        this.osRuntime?.loginSession(this.loginSessionId) === undefined
-          ? undefined
-          : this.loginSessionId,
-      selfPid: () => this.shellProcessId,
-      signalProcess: options.signalProcess,
-      dosRuntime: options.dosRuntime,
-      onDosRuntimeChanged: options.onDosRuntimeChanged,
-    };
-    this.commands = new ShellCommandRuntime(
-      this.guestFilesystem,
-      runtimeOptions,
-    );
-    if (profile.id === "linux") {
-      if (this.authentication?.isAuthenticated() === true) {
-        this.activateAuthenticatedSession(this.startupLines);
+      if (profile.id === "linux") {
+        if (this.authentication?.isAuthenticated() === true) {
+          this.activateAuthenticatedSession(this.startupLines);
+        } else {
+          const issue = this.readIssue();
+          if (issue !== undefined) this.startupLines.push(...issue);
+        }
       } else {
-        const issue = this.readIssue();
-        if (issue !== undefined) this.startupLines.push(...issue);
+        for (const loaded of [
+          this.configureDosMemory("C:\\CONFIG.SYS"),
+          this.executeDosBatch("C:\\AUTOEXEC.BAT", [], 0),
+        ]) {
+          const text = `${loaded.stderr}${loaded.stdout}`.trimEnd();
+          if (text.length > 0) this.startupLines.push(...text.split(/\r?\n/u));
+        }
       }
-    } else {
-      for (const loaded of [
-        this.configureDosMemory("C:\\CONFIG.SYS"),
-        this.executeDosBatch("C:\\AUTOEXEC.BAT", [], 0),
-      ]) {
-        const text = `${loaded.stderr}${loaded.stdout}`.trimEnd();
-        if (text.length > 0) this.startupLines.push(...text.split(/\r?\n/u));
+      this.startupLines.push(...(this.authentication?.startupLines() ?? []));
+      initializationComplete = true;
+    } finally {
+      if (!initializationComplete) {
+        try {
+          this.dosMemory?.close();
+        } catch {
+          // The caller's primary initialization error remains authoritative.
+        }
+        try {
+          this.linuxMemory?.close();
+        } catch {
+          // ComputerRuntime verifies the shared ledger after rollback.
+        }
       }
     }
-    this.startupLines.push(...(this.authentication?.startupLines() ?? []));
   }
 
   prompt(): string {

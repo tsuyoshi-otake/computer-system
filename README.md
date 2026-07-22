@@ -1027,6 +1027,21 @@ four 512 KiB 30-pin SIMMs and no L2. Cache contents and counters are transient
 per process and never enter persistence. Access, replacement, alignment, and
 timing selection remain O(1).
 
+Production Bedrock admission advances each guest CPU at approximately one
+hundredth of its persisted nominal clock. At 20 TPS this admits 8,000 cycles per
+tick for CS386SX 16 MHz, 16,500 for CS486DX 33 MHz, and 33,000 for CS486DX2 66
+MHz. A 40,000-instruction per-runtime ceiling and 200,000-instruction global
+ceiling remain bounded safety limits; under multi-Computer host contention the
+observable rate may be lower, never higher.
+
+The authored Behavior Pack setting `packs/behavior/config/computer-system.json`
+controls this ratio through `guestRealtimeDivisor` (`1..10000`). `100` means
+approximately 1/100 realtime, `1` requests realtime admission, and larger values
+are slower. The build rejects unknown fields, unsupported versions, fractions,
+and out-of-range values. Rebuild the packs and restart BDS after changing it;
+the setting never mutates the persisted guest clock or rewrites guest timing
+from host elapsed time.
+
 Neither model claims dynamic branch prediction. CS486 control flow uses a
 simplified five-stage refill penalty, while CS386SX preserves its prefetch
 overlap and distinct taken/not-taken costs. `run --stats` reports L1/L2 hits and
@@ -1589,7 +1604,10 @@ For example, `cc -c fastmath.c -o fastmath.o` beside a script enables
 `import fastmath`. Missing, circular, oversized, corrupt, or ABI-incompatible
 imports fail explicitly. `run --stats` reports the active CS486DX, CS486DX2, or
 CS386SX model, instructions, CPU cycles, and virtual microseconds at its
-persisted clock. On CS-DOS, `QBASIC file.bas` opens the CS QBASIC 1.0 IDE and
+persisted clock. Scheduled `run --stats` and `python --stats` also separate host
+wall elapsed time from guest timing and report guest CPU cycles per host second
+plus the modeled-real-time ratio; host delay never changes guest cycle counts.
+On CS-DOS, `QBASIC file.bas` opens the CS QBASIC 1.0 IDE and
 `QBASIC /RUN file.bas` compiles and runs its supported subset. `CSASM`, `CSCC`,
 `CSCPP`, and `PWB` open the CS ASM 1.0 or CS C/C++ 1.0 WorkBench. No frontend
 invokes a host compiler, linker, or native binary. General dynamic/shared

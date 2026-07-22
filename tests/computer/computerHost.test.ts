@@ -347,7 +347,11 @@ describe("ComputerRuntime", (): void => {
   it("runs and measures Python from the normal CS-Linux terminal", (): void => {
     const record = new ComputerRecord("c-000010", "advanced");
     record.configureHardware(advancedComputerHardware);
-    const runtime = runtimeWith(record);
+    let hostElapsedMilliseconds = 0;
+    const runtime = runtimeWith(record, () => {
+      hostElapsedMilliseconds += 625;
+      return hostElapsedMilliseconds;
+    });
     runtime.powerOn(record.computerId);
     record.filesystem.writeFile(
       "/tmp/sum.py",
@@ -371,6 +375,9 @@ describe("ComputerRuntime", (): void => {
     expect(output).toContain("5050");
     expect(output).toMatch(
       /Python\/CS486DX2: \d+ machine instructions, \d+ CPU cycles, \d+\.\d{3} us at 66 M\s*Hz, completed/u,
+    );
+    expect(output.replaceAll("\n", "")).toMatch(
+      /host: 625\.000 ms wall elapsed, \d+\.\d{3} guest CPU cycles\/s, \d+\.\d{6}x modeled real-time/u,
     );
     expect(output).toContain("cs@c-000010:~$ ");
     expect(runtime.vmState(record.computerId)).toMatchObject({
@@ -818,8 +825,14 @@ function computer(
   return record;
 }
 
-function runtimeWith(record: ComputerRecord): ComputerRuntime {
+function runtimeWith(
+  record: ComputerRecord,
+  hostElapsedMilliseconds?: () => number,
+): ComputerRuntime {
   const runtime = new ComputerRuntime({
+    ...(hostElapsedMilliseconds === undefined
+      ? {}
+      : { hostElapsedMilliseconds }),
     schedulerLimits: {
       eventCapacity: 8,
       timerCapacity: 8,

@@ -39,6 +39,18 @@ describe("Computer hardware profiles", (): void => {
     expect(hardwareCpuCyclesPerTick(advanced.hardware.clockHz, 20)).toBe(
       3_300_000,
     );
+    expect(hardwareCpuCyclesPerTick(standard.hardware.clockHz, 20, 100)).toBe(
+      16_500,
+    );
+    expect(hardwareCpuCyclesPerTick(advanced.hardware.clockHz, 20, 100)).toBe(
+      33_000,
+    );
+    expect(
+      hardwareCpuCyclesPerTick(portableComputerHardware.clockHz, 20, 100),
+    ).toBe(8_000);
+    expect(() => hardwareCpuCyclesPerTick(33_000_000, 20, 0)).toThrow(
+      "realtimeDivisor must be a positive integer",
+    );
   });
 
   it("migrates an uncustomized advanced desktop from the former standard profile", (): void => {

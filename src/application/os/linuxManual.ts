@@ -27,7 +27,7 @@ const pages = Object.freeze([
     ["nethack [--help|--version]"],
     [
       "NetHack for CS-Linux is a reduced guest-authored CS C 2.0 game with ten dungeon levels, the Amulet of Yendor, bounded monsters and items, hunger, experience, and explored-tile memory. It is not an unmodified upstream NetHack port.",
-      "Move with h, j, k, l, y, u, b, and n. Use < and > for stairs, S to save and exit, and #quit (or q) to abandon unsaved progress. Only explicit S writes a save.",
+      "Move with h, j, k, l, y, u, b, and n. Use , to pick up, i to inspect the bounded pack, and a to use its first item. Use < and > only on legal stairs, S to save and exit, and #quit (or q) to abandon unsaved progress. Only explicit S writes a save.",
       "The save path is the immutable launch environment's $HOME/.nethack.sav. A successful save writes a mode-0600 sibling temporary file and atomically replaces the canonical record. Missing HOME, malformed saves, DAC denial, capacity failure, interruption, and terminal close fail without silently saving.",
       "The stock root-owned executable is /usr/games/nethack. Sources and an explicit-rule Makefile are under /usr/src/nethack. A writable copy can be rebuilt with guest make, cc, and ld; make install PREFIX=/usr/local installs /usr/local/games/nethack and requires root privileges for that destination.",
     ],

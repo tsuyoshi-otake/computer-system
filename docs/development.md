@@ -730,6 +730,25 @@ first and reject stale output. Production BDS module startup must only load
 these payloads; compiling or compressing the rootfs libraries during module
 evaluation exceeds the native startup watchdog.
 
+The immutable `/usr/games/nethack` executable follows the same boundary. After
+changing its guest C sources, libc inputs, compiler, linker, executable format,
+or serialization, run `npm run generate:guest-nethack` and commit
+`generated/guestNethackExecutableContents.ts`. `npm run build` runs
+`npm run check:guest-nethack` and rejects a stale payload. Production module
+evaluation reads the generated executable string only; it must never compile,
+link, validate, or serialize NetHack while BDS is starting.
+
+`npm run benchmark:cs486 -- --instructions 2000000 --samples 7` profiles the
+host cost of the production TypeScript interpreter with a fixed register- and
+branch-heavy instruction stream. It reports host nanoseconds/CPU time separately
+from deterministic modeled guest cycles and labels itself as host implementation
+throughput; it is not evidence of guest clock speed or multi-user BDS capacity.
+Use the same machine, Node version, sample count, and instruction count for
+before/after comparisons. Verify: run the command twice on the candidate commit.
+Expect: every model completes the requested instruction count with a stable
+register checksum and guest-cycle count while host timing remains an explicitly
+separate field.
+
 C++ deliberately emits the same unmangled CS ABI as C. Individual `extern "C"`
 declarations are accepted as an explanatory spelling; linkage blocks, other
 linkages, member functions, overloads, and C++ name mangling are not

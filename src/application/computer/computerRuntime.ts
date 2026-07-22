@@ -150,7 +150,11 @@ import {
 
 export interface ComputerRuntimeOptions {
   readonly clock?: ShellClockSource;
+  /** Monotonic host wall time used only for explicit performance diagnostics. */
+  readonly hostElapsedMilliseconds?: () => number;
   readonly schedulerLimits?: SchedulerLimits;
+  /** Wall-time slowdown relative to each persisted guest CPU clock. */
+  readonly guestRealtimeDivisor?: number;
   readonly defaultBootSource?: string;
   readonly ticksPerSecond?: number;
   readonly requireLinuxLogin?: boolean;
@@ -205,6 +209,8 @@ export class ComputerRuntime {
   private activeWorkScope: TickWorkScope | undefined;
   private readonly defaultBootSource: string;
   private readonly clock: ShellClockSource | undefined;
+  private readonly hostElapsedMilliseconds: (() => number) | undefined;
+  private readonly guestRealtimeDivisor: number;
   private readonly ticksPerSecond: number;
   private readonly requireLinuxLogin: boolean;
   private filesystemIoRequester:
@@ -239,6 +245,14 @@ export class ComputerRuntime {
     this.defaultBootSource =
       options.defaultBootSource ?? defaultSystemBootSource;
     this.clock = options.clock;
+    this.hostElapsedMilliseconds = options.hostElapsedMilliseconds;
+    this.guestRealtimeDivisor = options.guestRealtimeDivisor ?? 1;
+    if (
+      !Number.isSafeInteger(this.guestRealtimeDivisor) ||
+      this.guestRealtimeDivisor < 1
+    ) {
+      throw new RangeError("guestRealtimeDivisor must be a positive integer");
+    }
     this.ticksPerSecond = options.ticksPerSecond ?? 20;
     this.requireLinuxLogin = options.requireLinuxLogin ?? false;
   }
@@ -1337,6 +1351,9 @@ export class ComputerRuntime {
       cpuCycles: 0,
       executedInstructions: 0,
       osPid,
+      ...(job.stats
+        ? { startedHostMilliseconds: this.readHostElapsedMilliseconds() }
+        : {}),
     };
     try {
       active.memoryGrant?.bindProcess(osPid);
@@ -1346,6 +1363,7 @@ export class ComputerRuntime {
         hardwareCpuCyclesPerTick(
           entry.record.hardware.clockHz,
           this.ticksPerSecond,
+          this.guestRealtimeDivisor,
         ),
       );
       this.runtimeOwners.set(active.runtimeId, entry);
@@ -1522,6 +1540,7 @@ export class ComputerRuntime {
                 job.cpuCycles,
                 "completed",
                 entry.record.hardware,
+                this.elapsedHostMilliseconds(job.startedHostMilliseconds),
               )
             : job.stats
               ? `${cs486Stats(
@@ -1530,6 +1549,7 @@ export class ComputerRuntime {
                   "halted",
                   entry.record.hardware,
                   job.process as Cs486Process,
+                  this.elapsedHostMilliseconds(job.startedHostMilliseconds),
                 ).join("\n")}\n`
               : "",
         cpuCycles: job.cpuCycles,
@@ -1958,6 +1978,7 @@ export class ComputerRuntime {
         hardwareCpuCyclesPerTick(
           entry.record.hardware.clockHz,
           this.ticksPerSecond,
+          this.guestRealtimeDivisor,
         ),
       );
       this.scheduler.setPaused(entry.runtimeId, true);
@@ -2078,6 +2099,11 @@ export class ComputerRuntime {
         ...(csAbi === undefined ? {} : { csAbi }),
         runtimeId,
         stats: request.kind === "debugger" ? false : request.stats,
+        ...(request.kind !== "debugger" && request.stats
+          ? {
+              startedHostMilliseconds: this.readHostElapsedMilliseconds(),
+            }
+          : {}),
       };
       this.scheduler.add(
         runtimeId,
@@ -2086,6 +2112,7 @@ export class ComputerRuntime {
           hardwareCpuCyclesPerTick(
             entry.record.hardware.clockHz,
             this.ticksPerSecond,
+            this.guestRealtimeDivisor,
           ),
           request.niceValue,
         ),
@@ -2211,6 +2238,7 @@ export class ComputerRuntime {
           hardwareCpuCyclesPerTick(
             entry.record.hardware.clockHz,
             this.ticksPerSecond,
+            this.guestRealtimeDivisor,
           ),
           request.niceValue,
         ),
@@ -2233,6 +2261,11 @@ export class ComputerRuntime {
         process,
         runtimeId,
         stats: request.kind === "sleep" ? false : request.stats,
+        ...(request.kind !== "sleep" && request.stats
+          ? {
+              startedHostMilliseconds: this.readHostElapsedMilliseconds(),
+            }
+          : {}),
       });
       entry.osRuntimeState.appendSystemJournal(
         this.scheduler.tickNumber,
@@ -2988,6 +3021,7 @@ export class ComputerRuntime {
         hardwareCpuCyclesPerTick(
           entry.record.hardware.clockHz,
           this.ticksPerSecond,
+          this.guestRealtimeDivisor,
         ),
       );
       this.runtimeOwners.set(runtimeId, entry);
@@ -3339,6 +3373,7 @@ export class ComputerRuntime {
               foreground.cpuCycles,
               stateName,
               entry.record.hardware,
+              this.elapsedHostMilliseconds(foreground.startedHostMilliseconds),
             )
               .trimEnd()
               .split("\n")
@@ -3348,6 +3383,7 @@ export class ComputerRuntime {
               stateName,
               entry.record.hardware,
               foreground.process as Cs486Process,
+              this.elapsedHostMilliseconds(foreground.startedHostMilliseconds),
             )),
       ]);
     }
@@ -3395,6 +3431,28 @@ export class ComputerRuntime {
   ): void {
     foreground.csAbi?.finalize();
     releaseGuestProcessMemory(foreground.memoryGrant);
+  }
+
+  private readHostElapsedMilliseconds(): number | undefined {
+    try {
+      const value = this.hostElapsedMilliseconds?.();
+      return value !== undefined && Number.isFinite(value) && value >= 0
+        ? value
+        : undefined;
+    } catch {
+      // Optional observability must never take ownership of process completion.
+      return undefined;
+    }
+  }
+
+  private elapsedHostMilliseconds(
+    startedHostMilliseconds: number | undefined,
+  ): number | undefined {
+    if (startedHostMilliseconds === undefined) return undefined;
+    const completedHostMilliseconds = this.readHostElapsedMilliseconds();
+    return completedHostMilliseconds === undefined
+      ? undefined
+      : Math.max(0, completedHostMilliseconds - startedHostMilliseconds);
   }
 
   private completeBackgroundProcess(
@@ -3452,6 +3510,7 @@ export class ComputerRuntime {
               background.cpuCycles,
               stateName,
               entry.record.hardware,
+              this.elapsedHostMilliseconds(background.startedHostMilliseconds),
             )
               .trimEnd()
               .split("\n")
@@ -3461,6 +3520,7 @@ export class ComputerRuntime {
               stateName,
               entry.record.hardware,
               background.process as Cs486Process,
+              this.elapsedHostMilliseconds(background.startedHostMilliseconds),
             )),
       ]);
     }
@@ -4331,6 +4391,11 @@ export class ComputerRuntime {
         process: foregroundJob.process,
         runtimeId: foregroundJob.runtimeId,
         stats: foregroundJob.stats,
+        ...(foregroundJob.startedHostMilliseconds === undefined
+          ? {}
+          : {
+              startedHostMilliseconds: foregroundJob.startedHostMilliseconds,
+            }),
         terminationSignal: foregroundJob.terminationSignal,
       });
       entry.shell?.completeForegroundProcess(148);
@@ -4700,6 +4765,7 @@ interface BackgroundGuestProcess {
   readonly osPid: number;
   readonly process: CpuProcess;
   readonly runtimeId: number;
+  readonly startedHostMilliseconds?: number;
   readonly stats: boolean;
   terminationSignal?: OsProcessSignal;
 }
@@ -4761,6 +4827,7 @@ interface DebugGuestJob {
   readonly osPid: number;
   readonly process: CpuProcess;
   readonly runtimeId: number;
+  readonly startedHostMilliseconds?: number;
   readonly shellCompletion?: () => ShellCommandResult;
   readonly stats: boolean;
   readonly terminal?: TerminalBuffer;
@@ -4797,6 +4864,7 @@ interface ForegroundGuestProcess {
   readonly osPid: number;
   readonly process: CpuProcess;
   readonly runtimeId: number;
+  readonly startedHostMilliseconds?: number;
   readonly stats: boolean;
   terminationSignal?: OsProcessSignal;
 }
@@ -4858,10 +4926,16 @@ function pythonStats(
   cpuCycles: number,
   state: string,
   hardware: ComputerHardwareProfile,
+  hostElapsedMilliseconds?: number,
 ): string {
   const microseconds = cpuCyclesToMicroseconds(cpuCycles, hardware.clockHz);
   const runtimeName = cpuModelSpecification(hardware.cpuModel).runtimeName;
-  return `Python/${runtimeName}: ${String(instructions)} machine instructions, ${String(cpuCycles)} CPU cycles, ${microseconds.toFixed(3)} us at ${formatClock(hardware.clockHz)}, ${state}\n`;
+  const hostStats = hostElapsedStats(
+    cpuCycles,
+    hardware.clockHz,
+    hostElapsedMilliseconds,
+  );
+  return `Python/${runtimeName}: ${String(instructions)} machine instructions, ${String(cpuCycles)} CPU cycles, ${microseconds.toFixed(3)} us at ${formatClock(hardware.clockHz)}, ${state}\n${hostStats === undefined ? "" : `${hostStats}\n`}`;
 }
 
 function cs486Stats(
@@ -4870,14 +4944,36 @@ function cs486Stats(
   state: string,
   hardware: ComputerHardwareProfile,
   process: Cs486Process,
+  hostElapsedMilliseconds?: number,
 ): readonly string[] {
   const microseconds = cpuCyclesToMicroseconds(cpuCycles, hardware.clockHz);
   const runtimeName = cpuModelSpecification(hardware.cpuModel).runtimeName;
   const stats = process.microarchitectureStats;
-  return [
+  const lines = [
     `${runtimeName}: ${String(instructions)} instructions, ${String(cpuCycles)} CPU cycles, ${microseconds.toFixed(3)} us at ${formatClock(hardware.clockHz)}, ${state}`,
     `memory: L1 ${String(stats.l1Hits)} hit/${String(stats.l1Misses)} miss, L2 ${String(stats.l2Hits)} hit/${String(stats.l2Misses)} miss, ${String(stats.busTransfers)} bus transfers, ${String(stats.unalignedAccesses)} unaligned, ${String(stats.pipelineFlushes)} pipeline flushes`,
   ];
+  const hostStats = hostElapsedStats(
+    cpuCycles,
+    hardware.clockHz,
+    hostElapsedMilliseconds,
+  );
+  return hostStats === undefined ? lines : [...lines, hostStats];
+}
+
+function hostElapsedStats(
+  cpuCycles: number,
+  clockHz: number,
+  elapsedMilliseconds: number | undefined,
+): string | undefined {
+  if (elapsedMilliseconds === undefined) return undefined;
+  if (elapsedMilliseconds === 0) {
+    return "host: 0.000 ms wall elapsed, guest cycle rate unavailable";
+  }
+  const elapsedSeconds = elapsedMilliseconds / 1_000;
+  const guestCyclesPerSecond = cpuCycles / elapsedSeconds;
+  const modeledRealtimeRatio = guestCyclesPerSecond / clockHz;
+  return `host: ${elapsedMilliseconds.toFixed(3)} ms wall elapsed, ${guestCyclesPerSecond.toFixed(3)} guest CPU cycles/s, ${modeledRealtimeRatio.toFixed(6)}x modeled real-time`;
 }
 
 function cs486RunResultStats(

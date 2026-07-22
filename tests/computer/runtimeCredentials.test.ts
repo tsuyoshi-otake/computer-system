@@ -8,6 +8,7 @@ import { getOsProfile } from "../../src/application/os/osProfile.js";
 import { migrateLinuxAccountDatabase } from "../../src/application/os/linuxAccounts.js";
 import { ShellSession } from "../../src/application/os/shellSession.js";
 import { ComputerRecord } from "../../src/domain/computer/computer.js";
+import { GuestRamLedger } from "../../src/domain/computer/guestRamLedger.js";
 
 describe("ComputerRuntime process credentials", (): void => {
   it("rejects synchronous and queued MCP Python before Linux login", (): void => {
@@ -158,6 +159,53 @@ describe("ComputerRuntime process credentials", (): void => {
     if (result.outcome === "failed") {
       expect(result.error.message).toBe(
         "CS-Linux startup account UID 1000 is missing [boot phase: native shell initialization]",
+      );
+    }
+    expect(record.lifecycle.state.kind).toBe("crashed");
+  });
+
+  it("volatilizes guest RAM when Linux initialization fails after memory admission", (): void => {
+    const record = new ComputerRecord("c-000208", "standard");
+    getOsProfile("linux").boot(record.filesystem, {
+      computerName: record.computerId,
+    });
+    record.filesystem.writeFile(
+      "/etc/inittab",
+      "tty1:2:respawn:/sbin/getty 38400 tty1\n",
+    );
+    const constructionLedger = new GuestRamLedger(record.hardware.memoryBytes);
+    expect(
+      () =>
+        new ShellSession(record.filesystem, {
+          computerName: record.computerId,
+          guestRamLedger: constructionLedger,
+          osProfile: "linux",
+        }),
+    ).toThrow(/initdefault/u);
+    expect(constructionLedger.usedBytes).toBe(0);
+    const runtime = registeredRuntime(record, false);
+
+    const firstBoot = runtime.powerOn(record.computerId);
+
+    expect(firstBoot).toMatchObject({ outcome: "failed" });
+    if (firstBoot.outcome === "failed") {
+      expect(firstBoot.error.message).toContain("initdefault");
+      expect(firstBoot.error.message).toContain(
+        "[boot phase: native shell initialization]",
+      );
+      expect(firstBoot.error.message).not.toContain(
+        "Guest RAM finalization leaked",
+      );
+    }
+    expect(record.lifecycle.state.kind).toBe("crashed");
+
+    const safeBoot = runtime.safeBoot(record.computerId);
+
+    expect(safeBoot).toMatchObject({ outcome: "failed" });
+    if (safeBoot.outcome === "failed") {
+      expect(safeBoot.error.message).toContain("initdefault");
+      expect(safeBoot.error.message).not.toContain(
+        "Guest RAM finalization leaked",
       );
     }
     expect(record.lifecycle.state.kind).toBe("crashed");

@@ -85,6 +85,13 @@ export function restoreComputerHardware(
 export function hardwareCpuCyclesPerTick(
   clockHz: number,
   ticksPerSecond: number,
+  realtimeDivisor = 1,
 ): number {
-  return cpuCyclesPerTick(clockHz, ticksPerSecond);
+  if (!Number.isSafeInteger(realtimeDivisor) || realtimeDivisor < 1) {
+    throw new RangeError("realtimeDivisor must be a positive integer");
+  }
+  return Math.max(
+    1,
+    Math.floor(cpuCyclesPerTick(clockHz, ticksPerSecond) / realtimeDivisor),
+  );
 }

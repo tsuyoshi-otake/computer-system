@@ -464,7 +464,7 @@ the production Desktop and Advanced Desktop now carry their CRT in the same
 placeable block.
 
 `Verify:` Run `npm run build`, install Resource Pack 0.1.17 with Behavior Pack
-0.1.9 in the Windows GDK client, and inspect both placed blocks and inventory
+0.1.10 in the Windows GDK client, and inspect both placed blocks and inventory
 items for Computer, Advanced, Portable, and Floppy Disk.
 
 `Expect:` Computer and Advanced share one cream square all-in-one Deskpro-style
