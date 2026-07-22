@@ -171,6 +171,7 @@ describe("PagerSession", (): void => {
     pager.key("q");
     expect(pager.terminalInteraction()).toMatchObject({
       context: "unavailable",
+      ctrlCAction: "none",
       inputMode: "none",
     });
   });

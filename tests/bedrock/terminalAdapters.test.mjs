@@ -208,7 +208,12 @@ describe("Bedrock terminal adapters", () => {
     );
 
     expect(bridge).toContain('const inputMarker = "CS_WEB_INPUT "');
-    expect(handler).toContain("([A-Za-z0-9_-]{6,20}) (line|keys|mouse)");
+    expect(handler).toContain(
+      "([A-Za-z0-9_-]{6,20}) ([0-9]{1,16}) (abort-line|cancel|interrupt|line|keys|mouse)",
+    );
+    expect(handler).toContain(
+      "interactionGeneration !== interaction.interactionGeneration",
+    );
     expect(handler).toContain('resource: "session"');
     expect(handler).toContain('reason: "read_only"');
     expect(handler).toContain('session.principal.kind === "debug"');
@@ -223,7 +228,7 @@ describe("Bedrock terminal adapters", () => {
     expect(handler.match(/const result = safeInputQueueResult/gu)).toHaveLength(
       3,
     );
-    expect(handler.match(/finalizeInputRequest\(/gu)).toHaveLength(18);
+    expect(handler.match(/finalizeInputRequest\(/gu)).toHaveLength(21);
     expect(handler).not.toContain("snapshotScheduler.requestEager");
 
     expect(mouseFlush).toContain("pending.requestId");

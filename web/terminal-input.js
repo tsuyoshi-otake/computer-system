@@ -29,6 +29,13 @@ const terminalInputModes = new Set(["keys", "line", "none"]);
 const terminalCursorShapes = new Set(["block", "underline"]);
 const terminalPointerModes = new Set(["cell", "none"]);
 const terminalPresentationModes = new Set(["dos-tui", "terminal"]);
+const terminalCtrlCActions = new Set([
+  "abort-line",
+  "cancel",
+  "interrupt",
+  "none",
+  "terminal-key",
+]);
 const terminalInteractionContexts = new Set([
   "busy",
   "cs-abi",
@@ -64,10 +71,10 @@ export function terminalInteractionFromTerminal(terminal) {
     interaction === null ||
     typeof interaction !== "object" ||
     Array.isArray(interaction) ||
-    interaction.schema !== 1
+    interaction.schema !== 2
   ) {
     throw new TerminalInteractionProtocolError(
-      "This terminal frame does not provide interaction schema 1.",
+      "This terminal frame does not provide interaction schema 2.",
     );
   }
   if (!terminalInputModes.has(interaction.inputMode)) {
@@ -102,7 +109,9 @@ export function terminalInteractionFromTerminal(terminal) {
   }
   if (
     typeof interaction.secretInput !== "boolean" ||
-    typeof interaction.interrupt !== "boolean"
+    !terminalCtrlCActions.has(interaction.ctrlCAction) ||
+    !Number.isSafeInteger(interaction.interactionGeneration) ||
+    interaction.interactionGeneration < 0
   ) {
     throw new TerminalInteractionProtocolError(
       "The terminal frame has invalid interaction flags.",
@@ -157,6 +166,31 @@ export function terminalInteractionFromTerminal(terminal) {
       "Secret input requires line input.",
     );
   }
+  if (
+    interaction.ctrlCAction === "abort-line" &&
+    (interaction.inputMode !== "line" || interaction.secretInput)
+  ) {
+    throw new TerminalInteractionProtocolError(
+      "Line abort requires non-secret line input.",
+    );
+  }
+  if (
+    interaction.ctrlCAction === "cancel" &&
+    interaction.inputMode !== "line" &&
+    interaction.inputMode !== "keys"
+  ) {
+    throw new TerminalInteractionProtocolError(
+      "Cancellation requires interactive input.",
+    );
+  }
+  if (
+    interaction.ctrlCAction === "terminal-key" &&
+    interaction.inputMode !== "keys"
+  ) {
+    throw new TerminalInteractionProtocolError(
+      "Terminal-owned Ctrl+C requires key input.",
+    );
+  }
   return Object.freeze({
     ...interaction,
     hints: Object.freeze(
@@ -165,6 +199,27 @@ export function terminalInteractionFromTerminal(terminal) {
       ),
     ),
   });
+}
+
+export function resolveTerminalCtrlCAction(
+  interaction,
+  { hasSelection = false, metaKey = false } = {},
+) {
+  if (interaction?.secretInput === true) {
+    return !metaKey && interaction.ctrlCAction === "cancel" ? "cancel" : "none";
+  }
+  if (metaKey) return "copy";
+  if (
+    hasSelection &&
+    (interaction?.ctrlCAction === "abort-line" ||
+      interaction?.ctrlCAction === "cancel" ||
+      interaction?.ctrlCAction === "none")
+  ) {
+    return "copy";
+  }
+  return terminalCtrlCActions.has(interaction?.ctrlCAction)
+    ? interaction.ctrlCAction
+    : "none";
 }
 
 export function editorKeyFromKeyboardEvent(event) {
@@ -221,21 +276,15 @@ export function insertPastedCommand(
   };
 }
 
-const maximumCompletionCandidates = 64;
 const maximumCompletionLineLength = 128;
-const completionCandidateKinds = new Set([
-  "command",
-  "device",
-  "directory",
-  "file",
-]);
+const completionOutcomes = new Set(["applied", "listed", "none"]);
 
-export class CompletionShelfController {
+export class CompletionRequestController {
   #generation = 0;
-  #state = Object.freeze({ generation: 0, kind: "closed" });
+  #pending;
 
-  get state() {
-    return this.#state;
+  get pending() {
+    return this.#pending !== undefined;
   }
 
   begin(value, cursor) {
@@ -246,138 +295,33 @@ export class CompletionShelfController {
       generation: this.#generation,
       value,
     });
-    this.#state = Object.freeze({ ...ticket, kind: "loading" });
+    this.#pending = ticket;
     return ticket;
   }
 
   resolve(ticket, result, currentValue, currentCursor) {
     if (!this.#owns(ticket)) return { outcome: "stale" };
     if (ticket.value !== currentValue || ticket.cursor !== currentCursor) {
-      this.#state = Object.freeze({
-        generation: this.#generation,
-        kind: "closed",
-      });
+      this.#pending = undefined;
       return { outcome: "stale" };
     }
     const completion = normalizedCompletionResult(result, ticket);
+    this.#pending = undefined;
     if (completion === undefined) {
-      this.#state = Object.freeze({
-        generation: this.#generation,
-        kind: "message",
-        message: "COMPLETION PROTOCOL ERROR",
-        tone: "error",
-      });
       return { outcome: "invalid" };
     }
-    if (completion.candidates.length === 0) {
-      this.#state = Object.freeze({
-        generation: this.#generation,
-        kind: "message",
-        message: completion.truncated
-          ? "MATCHES EXCEED INPUT LIMIT"
-          : "NO MATCHES",
-        tone: completion.truncated ? "error" : "muted",
-      });
-      return { completion, outcome: "empty" };
-    }
-    if (completion.candidates.length === 1) {
-      this.#state = Object.freeze({
-        generation: this.#generation,
-        kind: "closed",
-      });
-      return { completion, outcome: "applied" };
-    }
-    this.#state = Object.freeze({
-      candidates: completion.candidates,
-      cursor: completion.cursor,
-      generation: this.#generation,
-      kind: "open",
-      replaceEnd: completion.replaceEnd,
-      replaceStart: completion.replaceStart,
-      requestValue: ticket.value,
-      selected: 0,
-      truncated: completion.truncated,
-      value: completion.value,
-    });
-    return { completion, outcome: "applied" };
+    return { completion, outcome: "resolved" };
   }
 
   fail(ticket, currentValue, currentCursor) {
     if (!this.#owns(ticket)) return false;
-    if (ticket.value !== currentValue || ticket.cursor !== currentCursor) {
-      this.#state = Object.freeze({
-        generation: this.#generation,
-        kind: "closed",
-      });
-      return false;
-    }
-    this.#state = Object.freeze({
-      generation: this.#generation,
-      kind: "message",
-      message: "COMPLETION UNAVAILABLE",
-      tone: "error",
-    });
-    return true;
+    this.#pending = undefined;
+    return ticket.value === currentValue && ticket.cursor === currentCursor;
   }
 
-  move(offset) {
-    if (
-      this.#state.kind !== "open" ||
-      !Number.isSafeInteger(offset) ||
-      offset === 0
-    ) {
-      return false;
-    }
-    const selected =
-      (this.#state.selected + offset + this.#state.candidates.length) %
-      this.#state.candidates.length;
-    this.#state = Object.freeze({ ...this.#state, selected });
-    return true;
-  }
-
-  select(index) {
-    if (
-      this.#state.kind !== "open" ||
-      !Number.isSafeInteger(index) ||
-      index < 0 ||
-      index >= this.#state.candidates.length
-    ) {
-      return false;
-    }
-    this.#state = Object.freeze({ ...this.#state, selected: index });
-    return true;
-  }
-
-  accept(currentValue, currentCursor) {
-    if (
-      this.#state.kind !== "open" ||
-      currentValue !== this.#state.value ||
-      currentCursor !== this.#state.cursor
-    ) {
-      this.dismiss();
-      return undefined;
-    }
-    const candidate = this.#state.candidates[this.#state.selected];
-    const value = `${this.#state.requestValue.slice(
-      0,
-      this.#state.replaceStart,
-    )}${candidate.insertText}${this.#state.requestValue.slice(
-      this.#state.replaceEnd,
-    )}`;
-    const cursor = this.#state.replaceStart + candidate.insertText.length;
-    this.#state = Object.freeze({
-      generation: this.#generation,
-      kind: "closed",
-    });
-    return { cursor, value };
-  }
-
-  dismiss() {
+  cancel() {
     this.#generation += 1;
-    this.#state = Object.freeze({
-      generation: this.#generation,
-      kind: "closed",
-    });
+    this.#pending = undefined;
   }
 
   #owns(ticket) {
@@ -385,7 +329,7 @@ export class CompletionShelfController {
       ticket !== null &&
       typeof ticket === "object" &&
       ticket.generation === this.#generation &&
-      this.#state.kind === "loading"
+      this.#pending === ticket
     );
   }
 }
@@ -401,60 +345,19 @@ function normalizedCompletionResult(result, ticket) {
     !Number.isSafeInteger(result.cursor) ||
     result.cursor < 0 ||
     result.cursor > result.value.length ||
-    !Number.isSafeInteger(result.replaceStart) ||
-    !Number.isSafeInteger(result.replaceEnd) ||
-    result.replaceStart < 0 ||
-    result.replaceStart > result.replaceEnd ||
-    result.replaceEnd !== ticket.cursor ||
-    result.replaceEnd > ticket.value.length ||
+    !completionOutcomes.has(result.outcome) ||
     typeof result.truncated !== "boolean" ||
-    !Array.isArray(result.candidates) ||
-    result.candidates.length > maximumCompletionCandidates
+    ((result.outcome === "listed" || result.outcome === "none") &&
+      (result.value !== ticket.value || result.cursor !== ticket.cursor))
   ) {
     return undefined;
   }
-  const candidates = [];
-  for (const candidate of result.candidates) {
-    if (
-      candidate === null ||
-      typeof candidate !== "object" ||
-      Array.isArray(candidate) ||
-      !boundedCompletionText(candidate.displayText) ||
-      !boundedCompletionText(candidate.insertText) ||
-      !completionCandidateKinds.has(candidate.kind)
-    ) {
-      return undefined;
-    }
-    const completedValue = `${ticket.value.slice(
-      0,
-      result.replaceStart,
-    )}${candidate.insertText}${ticket.value.slice(result.replaceEnd)}`;
-    if (completedValue.length > maximumCompletionLineLength) return undefined;
-    candidates.push(
-      Object.freeze({
-        displayText: candidate.displayText,
-        insertText: candidate.insertText,
-        kind: candidate.kind,
-      }),
-    );
-  }
   return Object.freeze({
-    candidates: Object.freeze(candidates),
     cursor: result.cursor,
-    replaceEnd: result.replaceEnd,
-    replaceStart: result.replaceStart,
+    outcome: result.outcome,
     truncated: result.truncated,
     value: result.value,
   });
-}
-
-function boundedCompletionText(value) {
-  return (
-    typeof value === "string" &&
-    value.length > 0 &&
-    value.length <= maximumCompletionLineLength &&
-    !/[\0\r\n]/u.test(value)
-  );
 }
 
 function requireCompletionLine(value, cursor) {

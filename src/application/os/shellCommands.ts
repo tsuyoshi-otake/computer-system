@@ -160,6 +160,7 @@ export type {
   ShellBackgroundRequest,
   ShellCommandResult,
   ShellCompletionResult,
+  ShellTerminalCompletion,
   ShellForegroundRequest,
   ShellForegroundPython,
   ShellJobControlRequest,

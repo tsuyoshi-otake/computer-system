@@ -31,14 +31,8 @@ const defaultInputTimeoutMs = 2_000;
 const maximumPendingInputs = 32;
 const completionTimeoutMs = 2_000;
 const maximumPendingCompletions = 32;
-const maximumCompletionCandidates = 64;
 const maximumCompletionTextLength = 128;
-const completionCandidateKinds = new Set([
-  "command",
-  "device",
-  "directory",
-  "file",
-]);
+const completionOutcomes = new Set(["applied", "listed", "none"]);
 const powerTimeoutMs = 5_000;
 const maximumPendingPowerRequests = 32;
 const ejectTimeoutMs = 5_000;
@@ -49,7 +43,7 @@ const maximumTuiWaitMs = 120_000;
 const maximumTuiWidth = 200;
 const maximumTuiHeight = 100;
 const maximumTuiContainsLength = 500;
-const browserInteractionSchema = "1";
+const browserInteractionSchema = "2";
 const browserInteractionSchemaHeader = "x-computer-system-interaction-schema";
 const maximumHandoffFailuresPerWindow = 8;
 const maximumHandoffFailureClients = 256;
@@ -333,7 +327,6 @@ export class WebCompanionServer {
     if (completion !== undefined) {
       const payload = JSON.parse(completion);
       const pending = this.pendingCompletions.get(payload.requestId);
-      const candidates = completionCandidatesFromPayload(payload.candidates);
       if (
         pending !== undefined &&
         pending.sessionId === payload.sessionId &&
@@ -343,22 +336,17 @@ export class WebCompanionServer {
         Number.isSafeInteger(payload.cursor) &&
         payload.cursor >= 0 &&
         payload.cursor <= payload.value.length &&
-        Number.isSafeInteger(payload.replaceStart) &&
-        Number.isSafeInteger(payload.replaceEnd) &&
-        payload.replaceStart >= 0 &&
-        payload.replaceStart <= payload.replaceEnd &&
-        payload.replaceEnd === pending.cursor &&
-        payload.replaceEnd <= pending.value.length &&
+        completionOutcomes.has(payload.outcome) &&
         typeof payload.truncated === "boolean" &&
-        candidates !== undefined
+        (payload.outcome === "applied" ||
+          (payload.value === pending.value &&
+            payload.cursor === pending.cursor))
       ) {
         clearTimeout(pending.timer);
         this.pendingCompletions.delete(payload.requestId);
         pending.resolve({
-          candidates,
           cursor: payload.cursor,
-          replaceEnd: payload.replaceEnd,
-          replaceStart: payload.replaceStart,
+          outcome: payload.outcome,
           truncated: payload.truncated,
           value: payload.value,
         });
@@ -868,6 +856,7 @@ export class WebCompanionServer {
         );
       }
       return this.relayValidatedInput(session, {
+        interactionGeneration: interaction.interactionGeneration,
         kind: options.kind,
         value: options.value,
       });
@@ -1159,19 +1148,19 @@ export class WebCompanionServer {
       );
     }
     const interaction = requireSessionTerminalInteraction(active);
-    if (body?.kind === "interrupt") {
-      requireInteractionInput(interaction, "interrupt");
-      await this.bds.runWebRelay(
-        `scriptevent computer_system:web-interrupt ${active.sessionId}`,
+    requireInteractionGeneration(interaction, body?.interactionGeneration);
+    if (
+      body?.kind === "interrupt" ||
+      body?.kind === "cancel" ||
+      body?.kind === "abort-line"
+    ) {
+      requireInteractionInput(interaction, body.kind);
+      return this.requestInputAdmission(
+        active.sessionId,
+        interaction.interactionGeneration,
+        body.kind,
+        "",
       );
-      return { outcome: "accepted" };
-    }
-    if (body?.kind === "abort-line") {
-      requireInteractionInput(interaction, "abort-line");
-      await this.bds.runWebRelay(
-        `scriptevent computer_system:web-abort-line ${active.sessionId}`,
-      );
-      return { outcome: "accepted" };
     }
     if (body?.kind === "mouse") {
       const value = body.value;
@@ -1209,6 +1198,7 @@ export class WebCompanionServer {
       requireInteractionInput(interaction, "mouse");
       return this.requestInputAdmission(
         active.sessionId,
+        interaction.interactionGeneration,
         "mouse",
         encodedMouse,
       );
@@ -1233,7 +1223,12 @@ export class WebCompanionServer {
         );
       }
       requireInteractionInput(interaction, "keys");
-      return this.requestInputAdmission(active.sessionId, "keys", encodedKeys);
+      return this.requestInputAdmission(
+        active.sessionId,
+        interaction.interactionGeneration,
+        "keys",
+        encodedKeys,
+      );
     }
     if (body?.kind !== "line" || typeof body.value !== "string") {
       throw new WebSessionError("input", "Input must be a terminal line.");
@@ -1256,10 +1251,15 @@ export class WebCompanionServer {
       );
     }
     requireInteractionInput(interaction, "line");
-    return this.requestInputAdmission(active.sessionId, "line", encoded);
+    return this.requestInputAdmission(
+      active.sessionId,
+      interaction.interactionGeneration,
+      "line",
+      encoded,
+    );
   }
 
-  async requestInputAdmission(sessionId, kind, encoded) {
+  async requestInputAdmission(sessionId, interactionGeneration, kind, encoded) {
     if (this.pendingInputs.size >= maximumPendingInputs) {
       throw retryableInputBusy(
         "Too many terminal input admissions are pending.",
@@ -1294,7 +1294,7 @@ export class WebCompanionServer {
     this.pendingInputs.set(requestId, pending);
     try {
       await this.bds.runWebRelay(
-        `scriptevent computer_system:web-input ${sessionId} ${requestId} ${kind} ${encoded}`,
+        `scriptevent computer_system:web-input ${sessionId} ${requestId} ${String(interactionGeneration)} ${kind} ${encoded}`,
       );
     } catch (error) {
       this.finalizePendingInput(requestId, pending, () => {
@@ -1342,6 +1342,7 @@ export class WebCompanionServer {
         );
       }
       const interaction = requireSessionTerminalInteraction(active);
+      requireInteractionGeneration(interaction, body?.interactionGeneration);
       requireInteractionInput(interaction, "line");
       if (interaction?.secretInput === true) {
         throw new WebSessionError(
@@ -1403,7 +1404,7 @@ export class WebCompanionServer {
       });
       try {
         await this.bds.runWebRelay(
-          `scriptevent computer_system:web-complete ${active.sessionId} ${requestId} ${String(body.cursor)} v${encoded}`,
+          `scriptevent computer_system:web-complete ${active.sessionId} ${requestId} ${String(interaction.interactionGeneration)} ${String(body.cursor)} v${encoded}`,
         );
       } catch (error) {
         clearTimeout(timer);
@@ -1959,7 +1960,7 @@ function requirePublishedTerminalInteraction(payload) {
     interaction === null ||
     typeof interaction !== "object" ||
     Array.isArray(interaction) ||
-    interaction.schema !== 1 ||
+    interaction.schema !== 2 ||
     !["keys", "line", "none"].includes(interaction.inputMode) ||
     !["block", "underline"].includes(interaction.cursorShape) ||
     !["cell", "none"].includes(interaction.pointer) ||
@@ -1983,7 +1984,11 @@ function requirePublishedTerminalInteraction(payload) {
       "vi-output",
     ].includes(interaction.context) ||
     typeof interaction.secretInput !== "boolean" ||
-    typeof interaction.interrupt !== "boolean" ||
+    !["abort-line", "cancel", "interrupt", "none", "terminal-key"].includes(
+      interaction.ctrlCAction,
+    ) ||
+    !Number.isSafeInteger(interaction.interactionGeneration) ||
+    interaction.interactionGeneration < 0 ||
     typeof interaction.history !== "boolean" ||
     (interaction.helpTopicId !== undefined &&
       !boundedInteractionText(interaction.helpTopicId, 64)) ||
@@ -2004,7 +2009,14 @@ function requirePublishedTerminalInteraction(payload) {
       (interaction.inputMode !== "line" || interaction.secretInput)) ||
     (interaction.secretInput &&
       interaction.inputMode !== "line" &&
-      interaction.inputMode !== "none")
+      interaction.inputMode !== "none") ||
+    (interaction.ctrlCAction === "abort-line" &&
+      (interaction.inputMode !== "line" || interaction.secretInput)) ||
+    (interaction.ctrlCAction === "cancel" &&
+      interaction.inputMode !== "line" &&
+      interaction.inputMode !== "keys") ||
+    (interaction.ctrlCAction === "terminal-key" &&
+      interaction.inputMode !== "keys")
   ) {
     throw new Error("Invalid terminal interaction schema.");
   }
@@ -2023,18 +2035,34 @@ function boundedInteractionText(value, maximumLength) {
 function requireInteractionInput(interaction, kind) {
   const allowed =
     kind === "interrupt"
-      ? interaction.interrupt
-      : kind === "abort-line"
-        ? interaction.inputMode === "line" && !interaction.secretInput
-        : kind === "mouse"
-          ? interaction.pointer === "cell"
-          : kind === "keys"
-            ? interaction.inputMode === "keys"
-            : interaction.inputMode === "line";
+      ? interaction.ctrlCAction === "interrupt"
+      : kind === "cancel"
+        ? interaction.ctrlCAction === "cancel"
+        : kind === "abort-line"
+          ? interaction.ctrlCAction === "abort-line"
+          : kind === "mouse"
+            ? interaction.pointer === "cell"
+            : kind === "keys"
+              ? interaction.inputMode === "keys"
+              : interaction.inputMode === "line";
   if (allowed) return;
   throw new WebSessionError(
     "input_mode_changed",
     "The terminal input mode changed before this input was admitted.",
+    409,
+  );
+}
+
+function requireInteractionGeneration(interaction, generation) {
+  if (
+    Number.isSafeInteger(generation) &&
+    generation === interaction.interactionGeneration
+  ) {
+    return;
+  }
+  throw new WebSessionError(
+    "input_mode_changed",
+    "The terminal interaction changed before this input was admitted.",
     409,
   );
 }
@@ -2169,7 +2197,7 @@ function serializeTuiScreen(session, includeColors) {
     terminal.foreground.length !== terminal.height ||
     !Array.isArray(terminal.background) ||
     terminal.background.length !== terminal.height ||
-    requirePublishedTerminalInteraction(payload).schema !== 1
+    requirePublishedTerminalInteraction(payload).schema !== 2
   ) {
     throw new Error("The Web Terminal published an invalid text surface.");
   }
@@ -2259,38 +2287,6 @@ function matchesTuiWait(screen, pending) {
 function markerPayload(line, marker) {
   const index = line.indexOf(marker);
   return index === -1 ? undefined : line.slice(index + marker.length).trim();
-}
-
-function completionCandidatesFromPayload(value) {
-  if (
-    !Array.isArray(value) ||
-    value.length > maximumCompletionCandidates ||
-    value.some(
-      (candidate) =>
-        candidate === null ||
-        typeof candidate !== "object" ||
-        Array.isArray(candidate) ||
-        !boundedCompletionText(candidate.displayText) ||
-        !boundedCompletionText(candidate.insertText) ||
-        !completionCandidateKinds.has(candidate.kind),
-    )
-  ) {
-    return undefined;
-  }
-  return value.map((candidate) => ({
-    displayText: candidate.displayText,
-    insertText: candidate.insertText,
-    kind: candidate.kind,
-  }));
-}
-
-function boundedCompletionText(value) {
-  return (
-    typeof value === "string" &&
-    value.length > 0 &&
-    value.length <= maximumCompletionTextLength &&
-    !/[\0\r\n]/u.test(value)
-  );
 }
 
 function bearerToken(request) {

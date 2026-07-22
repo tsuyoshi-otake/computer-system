@@ -83,6 +83,38 @@ describe("default Computer System Linux boot", (): void => {
     });
   });
 
+  it("renders ambiguous shell completion inside the authoritative terminal", (): void => {
+    const record = new ComputerRecord("computer-34", "standard");
+    const runtime = new ComputerRuntime();
+    runtime.register(record);
+    runtime.powerOn(record.computerId);
+    completeBoot(runtime, record);
+
+    expect(runtime.completeShellInput(record.computerId, "who", 3)).toEqual({
+      cursor: 3,
+      outcome: "listed",
+      truncated: false,
+      value: "who",
+    });
+    const listed = record.terminal
+      .snapshot()
+      .rows.map((row) => row.trimEnd())
+      .join("\n");
+    expect(listed).toContain("who     whoami");
+    expect(listed).toMatch(/\$ who\nwho {5}whoami\n.*\$\s*$/mu);
+
+    const beforeUnique = record.terminal.snapshot();
+    expect(runtime.completeShellInput(record.computerId, "cat /et", 7)).toEqual(
+      {
+        cursor: 9,
+        outcome: "applied",
+        truncated: false,
+        value: "cat /etc/",
+      },
+    );
+    expect(record.terminal.snapshot()).toEqual(beforeUnique);
+  });
+
   it("runs QBASIC asynchronously on CS386SX and returns to its IDE output window", (): void => {
     const record = new ComputerRecord("computer-133", "standard", {
       displayProfileId: "portable-vga-256k",

@@ -45,11 +45,11 @@ import { VmRuntimeError } from "../../domain/runtime/errors.js";
 import { TerminalBuffer } from "../../domain/terminal/terminalBuffer.js";
 import { defaultSystemBootSource } from "../os/systemPrograms.js";
 import type { ShellClockSource } from "../os/clock.js";
-import type { ShellCompletionResult } from "../os/shellCommands.js";
 import type { ShellSession } from "../os/shellSession.js";
 import {
   createTerminalInteractionDescriptor,
   unavailableTerminalInteraction,
+  withTerminalInteractionGeneration,
   type TerminalInteractionDescriptor,
 } from "../terminal/terminalInteraction.js";
 import type {
@@ -57,6 +57,7 @@ import type {
   ShellBackgroundRequest,
   ShellForegroundRequest,
   ShellJobControlRequest,
+  ShellTerminalCompletionResponse,
 } from "../os/shellTypes.js";
 import {
   hardwareCpuCyclesPerTick,
@@ -488,7 +489,7 @@ export class ComputerRuntime {
       entry.debugJob.process.terminate("interrupted");
       return { outcome: "accepted", state: "debug_interrupted" };
     }
-    return this.requestStop(computerId, "shutdown", "terminated");
+    return { outcome: "ignored", reason: "not_running" };
   }
 
   abortLine(computerId: string): RuntimeCommandResult {
@@ -774,37 +775,51 @@ export class ComputerRuntime {
     computerId: string,
     line: string,
     cursor: number,
-  ): ShellCompletionResult | undefined {
+  ): ShellTerminalCompletionResponse | undefined {
     const entry = this.entries.get(computerId);
     if (entry?.csBiosSequence !== undefined) return undefined;
-    return entry?.shell?.complete(line, cursor);
+    if (entry?.shell === undefined) return undefined;
+    const completion = entry.shell.completeTerminal(line, cursor);
+    if (completion.response.outcome === "listed") {
+      writeTerminalLines(entry.record.terminal, [line, ...completion.lines]);
+      entry.record.terminal.write(entry.shell.prompt());
+    }
+    return completion.response;
   }
 
   terminalInteraction(computerId: string): TerminalInteractionDescriptor {
     const entry = this.entries.get(computerId);
+    const own = (
+      interaction: TerminalInteractionDescriptor,
+    ): TerminalInteractionDescriptor =>
+      entry === undefined
+        ? interaction
+        : this.ownTerminalInteraction(entry, interaction);
     if (entry?.csBiosSequence !== undefined) {
-      return unavailableTerminalInteraction();
+      return own(unavailableTerminalInteraction());
     }
     const interaction =
       entry?.shell?.terminalInteraction() ?? unavailableTerminalInteraction();
     if (entry === undefined || interaction.context === "unavailable") {
-      return interaction;
+      return own(interaction);
     }
     if (
       entry.foreground?.csAbi !== undefined &&
       entry.stopIntent === undefined
     ) {
-      return createTerminalInteractionDescriptor({
-        context: "cs-abi",
-        cursorShape: "block",
-        hints: [{ key: "Ctrl+C", label: "Interrupt" }],
-        history: false,
-        inputMode: "keys",
-        interrupt: true,
-        pointer: "none",
-        presentation: "terminal",
-        secretInput: false,
-      });
+      return own(
+        createTerminalInteractionDescriptor({
+          context: "cs-abi",
+          ctrlCAction: "interrupt",
+          cursorShape: "block",
+          hints: [{ key: "Ctrl+C", label: "Interrupt" }],
+          history: false,
+          inputMode: "keys",
+          pointer: "none",
+          presentation: "terminal",
+          secretInput: false,
+        }),
+      );
     }
     const vmState = entry.vm?.state;
     const acceptsTerminalInput =
@@ -815,27 +830,71 @@ export class ComputerRuntime {
       entry.jobWait === undefined &&
       vmState?.kind === "waiting_event" &&
       vmState.filter === undefined;
-    if (acceptsTerminalInput) return interaction;
+    if (acceptsTerminalInput) return own(interaction);
 
     const interrupt =
       entry.stopIntent === undefined &&
       (entry.foreground !== undefined ||
         entry.compileJob !== undefined ||
         entry.debugJob !== undefined);
-    return createTerminalInteractionDescriptor({
-      context: "busy",
-      cursorShape: interaction.cursorShape,
-      ...(interaction.helpTopicId === undefined
-        ? {}
-        : { helpTopicId: interaction.helpTopicId }),
-      hints: interrupt ? [{ key: "Ctrl+C", label: "Interrupt" }] : [],
-      history: false,
-      inputMode: "none",
-      interrupt,
-      pointer: "none",
-      presentation: interaction.presentation,
-      secretInput: interaction.secretInput,
-    });
+    return own(
+      createTerminalInteractionDescriptor({
+        context: "busy",
+        ctrlCAction: interrupt ? "interrupt" : "none",
+        cursorShape: interaction.cursorShape,
+        ...(interaction.helpTopicId === undefined
+          ? {}
+          : { helpTopicId: interaction.helpTopicId }),
+        hints: interrupt ? [{ key: "Ctrl+C", label: "Interrupt" }] : [],
+        history: false,
+        inputMode: "none",
+        pointer: "none",
+        presentation: interaction.presentation,
+        secretInput: interaction.secretInput,
+      }),
+    );
+  }
+
+  cancelTerminalInteraction(computerId: string): RuntimeCommandResult {
+    const entry = this.entries.get(computerId);
+    if (entry === undefined) return { outcome: "missing", computerId };
+    if (
+      this.terminalInteraction(computerId).ctrlCAction !== "cancel" ||
+      entry.shell?.cancelTerminalInteraction() !== true
+    ) {
+      return { outcome: "ignored", reason: "not_running" };
+    }
+    writeTerminalLines(entry.record.terminal, ["^C"]);
+    entry.record.terminal.write(entry.shell.prompt());
+    return { outcome: "accepted", state: "interaction_cancelled" };
+  }
+
+  private ownTerminalInteraction(
+    entry: RuntimeEntry,
+    interaction: TerminalInteractionDescriptor,
+  ): TerminalInteractionDescriptor {
+    const signature = [
+      interaction.context,
+      interaction.ctrlCAction,
+      interaction.cursorShape,
+      interaction.history ? "history" : "no-history",
+      interaction.inputMode,
+      interaction.pointer,
+      interaction.presentation,
+      interaction.secretInput ? "secret" : "plain",
+    ].join("\0");
+    if (entry.terminalInteractionSignature !== signature) {
+      entry.terminalInteractionSignature = signature;
+      entry.terminalInteractionGeneration =
+        entry.terminalInteractionGeneration === undefined ||
+        entry.terminalInteractionGeneration === Number.MAX_SAFE_INTEGER
+          ? 1
+          : entry.terminalInteractionGeneration + 1;
+    }
+    return withTerminalInteractionGeneration(
+      interaction,
+      entry.terminalInteractionGeneration ?? 1,
+    );
   }
 
   isShellSecretInput(computerId: string): boolean {
@@ -4598,6 +4657,8 @@ interface RuntimeEntry {
   debugJob?: DebugGuestJob;
   compileJob?: CompileJob;
   jobWait?: BackgroundJobWait;
+  terminalInteractionGeneration?: number;
+  terminalInteractionSignature?: string;
 }
 
 type RuntimeStopPhase =

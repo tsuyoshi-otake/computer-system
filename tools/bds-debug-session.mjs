@@ -262,7 +262,7 @@ export function isAllowedWebRelayCommand(command) {
     return true;
   }
   return (
-    /^scriptevent computer_system:web-(?:interrupt|abort-line|close|take-control) [A-Za-z0-9_-]{12,32}$/u.test(
+    /^scriptevent computer_system:web-(?:close|take-control) [A-Za-z0-9_-]{12,32}$/u.test(
       command,
     ) ||
     /^scriptevent computer_system:web-power [A-Za-z0-9_-]{12,32} [A-Za-z0-9_-]{6,20} (?:power_on|safe_boot|shutdown)$/u.test(
@@ -271,10 +271,10 @@ export function isAllowedWebRelayCommand(command) {
     /^scriptevent computer_system:web-floppy-eject [A-Za-z0-9_-]{12,32} [A-Za-z0-9_-]{6,20}$/u.test(
       command,
     ) ||
-    /^scriptevent computer_system:web-input [A-Za-z0-9_-]{12,32} [A-Za-z0-9_-]{6,20} (?:line|keys|mouse) [^\s]{0,180}$/u.test(
+    /^scriptevent computer_system:web-input [A-Za-z0-9_-]{12,32} [A-Za-z0-9_-]{6,20} [0-9]{1,16} (?:abort-line|cancel|interrupt|line|keys|mouse) [^\s]{0,180}$/u.test(
       command,
     ) ||
-    /^scriptevent computer_system:web-complete [A-Za-z0-9_-]{12,32} [A-Za-z0-9_-]{6,20} [0-9]{1,3} v[^\s]{0,128}$/u.test(
+    /^scriptevent computer_system:web-complete [A-Za-z0-9_-]{12,32} [A-Za-z0-9_-]{6,20} [0-9]{1,16} [0-9]{1,3} v[^\s]{0,128}$/u.test(
       command,
     ) ||
     /^scriptevent computer_system:web-resize [A-Za-z0-9_-]{12,32} [0-9]{2,3} [0-9]{2,3}$/u.test(

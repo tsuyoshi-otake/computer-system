@@ -39,7 +39,7 @@ describe("ComputerRuntime CS ABI ownership", (): void => {
     expect(runtime.terminalInteraction(record.computerId)).toMatchObject({
       context: "cs-abi",
       inputMode: "keys",
-      interrupt: true,
+      ctrlCAction: "interrupt",
     });
     expect(
       runtime.guestMemoryStatus(record.computerId)?.usedBytes,

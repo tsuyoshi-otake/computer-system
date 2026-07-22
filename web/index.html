@@ -158,13 +158,8 @@
                     spellcheck="false"
                     autocapitalize="off"
                     enterkeyhint="send"
-                    role="combobox"
-                    aria-autocomplete="list"
-                    aria-controls="completion-options"
-                    aria-expanded="false"
-                    aria-haspopup="listbox"
                     aria-busy="false"
-                    aria-describedby="keyboard-help input-state access-state completion-status"
+                    aria-describedby="keyboard-help input-state access-state"
                     disabled
                   ></textarea>
                 </form>
@@ -172,32 +167,6 @@
             </div>
           </div>
         </div>
-        <section
-          id="completion-menu"
-          class="completion-menu"
-          aria-label="Command completion"
-          hidden
-        >
-          <header class="completion-header" aria-hidden="true">
-            <span>Completion</span>
-            <span id="completion-count" class="completion-count"></span>
-          </header>
-          <p id="completion-message" class="completion-message" hidden></p>
-          <div
-            id="completion-options"
-            class="completion-options"
-            role="listbox"
-            aria-label="Completion candidates"
-            hidden
-          ></div>
-        </section>
-        <p
-          id="completion-status"
-          class="sr-only"
-          role="status"
-          aria-live="polite"
-          aria-atomic="true"
-        ></p>
       </section>
 
       <footer class="statusbar">

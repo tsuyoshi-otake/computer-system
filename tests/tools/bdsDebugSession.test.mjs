@@ -175,17 +175,17 @@ describe("BDS debug session", () => {
     ).toBe(false);
     expect(
       isAllowedWebRelayCommand(
-        "scriptevent computer_system:web-input abcdefghijkl request1 line hello%20world",
+        "scriptevent computer_system:web-input abcdefghijkl request1 7 line hello%20world",
       ),
     ).toBe(true);
     expect(
       isAllowedWebRelayCommand(
-        "scriptevent computer_system:web-input abcdefghijkl request2 keys %5B%22i%22%5D",
+        "scriptevent computer_system:web-input abcdefghijkl request2 7 keys %5B%22i%22%5D",
       ),
     ).toBe(true);
     expect(
       isAllowedWebRelayCommand(
-        "scriptevent computer_system:web-input abcdefghijkl request3 mouse %7B%22action%22%3A%22move%22%2C%22button%22%3A0%2C%22sequence%22%3A1%2C%22x%22%3A12%2C%22y%22%3A4%7D",
+        "scriptevent computer_system:web-input abcdefghijkl request3 7 mouse %7B%22action%22%3A%22move%22%2C%22button%22%3A0%2C%22sequence%22%3A1%2C%22x%22%3A12%2C%22y%22%3A4%7D",
       ),
     ).toBe(true);
     expect(
@@ -200,7 +200,7 @@ describe("BDS debug session", () => {
     ).toBe(false);
     expect(
       isAllowedWebRelayCommand(
-        "scriptevent computer_system:web-interrupt abcdefghijkl",
+        "scriptevent computer_system:web-input abcdefghijkl request4 7 interrupt ",
       ),
     ).toBe(true);
     expect(
@@ -210,7 +210,7 @@ describe("BDS debug session", () => {
     ).toBe(true);
     expect(
       isAllowedWebRelayCommand(
-        "scriptevent computer_system:web-abort-line abcdefghijkl",
+        "scriptevent computer_system:web-input abcdefghijkl request5 7 abort-line ",
       ),
     ).toBe(true);
     expect(
@@ -245,7 +245,7 @@ describe("BDS debug session", () => {
     ).toBe(false);
     expect(
       isAllowedWebRelayCommand(
-        "scriptevent computer_system:web-complete abcdefghijkl request1 3 vhel",
+        "scriptevent computer_system:web-complete abcdefghijkl request1 7 3 vhel",
       ),
     ).toBe(true);
     expect(

@@ -1,9 +1,10 @@
 import {
   BoundedEditorKeyQueue,
-  CompletionShelfController,
+  CompletionRequestController,
   editorKeyFromKeyboardEvent,
   hasCopySelection,
   insertPastedCommand,
+  resolveTerminalCtrlCAction,
   terminalInteractionFromTerminal,
 } from "/terminal-input.js";
 import { manualChapters, manualParts, searchManual } from "/manual.js";
@@ -77,13 +78,6 @@ const screenShapeLabels = {
   curved: "Curved Glass screen",
   flat: "Flat screen",
 };
-const completionKindLabels = {
-  command: "CMD",
-  device: "DEV",
-  directory: "DIR",
-  file: "FILE",
-};
-
 const elements = {
   computerName: document.querySelector("#computer-name"),
   computerId: document.querySelector("#computer-id"),
@@ -99,11 +93,6 @@ const elements = {
   terminalSize: document.querySelector("#terminal-size"),
   commandForm: document.querySelector("#command-form"),
   commandInput: document.querySelector("#command-input"),
-  completionMenu: document.querySelector("#completion-menu"),
-  completionCount: document.querySelector("#completion-count"),
-  completionMessage: document.querySelector("#completion-message"),
-  completionOptions: document.querySelector("#completion-options"),
-  completionStatus: document.querySelector("#completion-status"),
   takeControlButton: document.querySelector("#take-control-button"),
   reconnectButton: document.querySelector("#reconnect-button"),
   lifecycleState: document.querySelector("#lifecycle-state"),
@@ -170,8 +159,8 @@ let reconnectGeneration = 0;
 let sessionClosed = false;
 let interactionProtocolReload = false;
 let commandPending = false;
-const completionShelf = new CompletionShelfController();
-let completionMessageTimer = 0;
+const completionRequest = new CompletionRequestController();
+let completionPending = false;
 let copyResetTimer = 0;
 let ejectPending = false;
 let floppyDriveState = "absent";
@@ -240,14 +229,28 @@ elements.commandForm.addEventListener("submit", (event) => {
   void sendLine();
 });
 elements.commandInput.addEventListener("keydown", (event) => {
-  if (terminalInteraction?.inputMode === "keys") {
-    if (
-      event.ctrlKey &&
-      event.key.toLowerCase() === "c" &&
-      hasCopySelection(elements.commandInput, window.getSelection())
-    ) {
-      return;
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "c") {
+    const action = resolveTerminalCtrlCAction(terminalInteraction, {
+      hasSelection: hasCopySelection(
+        elements.commandInput,
+        window.getSelection(),
+      ),
+      metaKey: event.metaKey,
+    });
+    if (action === "copy") return;
+    if (action !== "none") event.preventDefault();
+    if (action === "terminal-key") queueEditorKeys(["Ctrl+c"]);
+    if (action === "interrupt" || action === "cancel") {
+      void sendInput({ kind: action });
     }
+    if (action === "abort-line") {
+      elements.commandInput.value = "";
+      refreshLocalLineCursor();
+      void sendInput({ kind: "abort-line" });
+    }
+    return;
+  }
+  if (terminalInteraction?.inputMode === "keys") {
     event.preventDefault();
     if (event.key === "Alt") {
       if (!event.repeat) queueEditorKeys(["F10"]);
@@ -256,54 +259,6 @@ elements.commandInput.addEventListener("keydown", (event) => {
     const key = editorKeyFromKeyboardEvent(event);
     if (key !== undefined) queueEditorKeys([key]);
     return;
-  }
-  const completionState = completionShelf.state;
-  if (
-    event.key === "Escape" &&
-    !event.isComposing &&
-    completionState.kind !== "closed"
-  ) {
-    event.preventDefault();
-    hideCompletions();
-    return;
-  }
-  if (completionState.kind === "open" && !event.isComposing) {
-    if (event.key === "Enter") {
-      event.preventDefault();
-      acceptSelectedCompletion();
-      return;
-    }
-    if (
-      event.key === "Tab" ||
-      event.key === "ArrowDown" ||
-      event.key === "ArrowUp"
-    ) {
-      event.preventDefault();
-      const offset =
-        event.key === "ArrowUp" || (event.key === "Tab" && event.shiftKey)
-          ? -1
-          : 1;
-      if (completionShelf.move(offset)) renderCompletionShelf();
-      return;
-    }
-    if (["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
-      hideCompletions();
-    }
-  }
-  if (
-    completionState.kind === "loading" &&
-    event.key === "Tab" &&
-    !event.isComposing
-  ) {
-    event.preventDefault();
-    return;
-  }
-  if (
-    completionState.kind === "message" &&
-    event.key === "Tab" &&
-    !event.isComposing
-  ) {
-    hideCompletions();
   }
   if (event.key === "Enter" && !event.isComposing) {
     event.preventDefault();
@@ -317,23 +272,6 @@ elements.commandInput.addEventListener("keydown", (event) => {
   }
   if (event.ctrlKey) {
     const key = event.key.toLowerCase();
-    if (key === "c") {
-      if (hasCopySelection(elements.commandInput, window.getSelection()))
-        return;
-      if (terminalInteraction?.interrupt === true) {
-        event.preventDefault();
-        void sendInput({ kind: "interrupt" });
-      } else if (
-        terminalInteraction?.inputMode === "line" &&
-        terminalInteraction.secretInput !== true
-      ) {
-        event.preventDefault();
-        elements.commandInput.value = "";
-        refreshLocalLineCursor();
-        void sendInput({ kind: "abort-line" });
-      }
-      return;
-    }
     if (
       terminalInteraction?.cursorShape === "underline" &&
       ["a", "d", "e", "k", "u", "w"].includes(key)
@@ -383,7 +321,7 @@ elements.commandInput.addEventListener("keydown", (event) => {
   }
 });
 elements.commandInput.addEventListener("input", () => {
-  hideCompletions();
+  completionRequest.cancel();
   if (
     terminalInteraction?.secretInput !== true &&
     historyCursor === commandHistory.length
@@ -851,7 +789,7 @@ async function consumeEvents(response, generation) {
 }
 
 async function sendLine() {
-  hideCompletions();
+  completionRequest.cancel();
   if (terminalInteraction?.inputMode !== "line") return;
   const line = elements.commandInput.value;
   const submittedSecret = terminalInteraction.secretInput;
@@ -875,14 +813,16 @@ async function completeCommandLine() {
     sessionClosed ||
     terminalInteraction?.inputMode !== "line" ||
     elements.commandInput.disabled ||
-    completionShelf.state.kind === "loading" ||
-    completionShelf.state.kind === "open"
+    completionRequest.pending
   )
     return;
   const original = elements.commandInput.value;
   const cursor = elements.commandInput.selectionStart;
-  const ticket = completionShelf.begin(original, cursor);
-  renderCompletionShelf();
+  const ticket = completionRequest.begin(original, cursor);
+  completionPending = true;
+  elements.commandInput.setAttribute("aria-busy", "true");
+  setInputAvailable(connectionState === "online", "WAIT");
+  let unavailableState;
   try {
     const response = await api("/api/complete", {
       method: "POST",
@@ -890,17 +830,21 @@ async function completeCommandLine() {
         ...authorizationHeaders(),
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ value: original, cursor }),
+      body: JSON.stringify({
+        cursor,
+        interactionGeneration: terminalInteraction.interactionGeneration,
+        value: original,
+      }),
     });
     const completion = await response.json();
-    const result = completionShelf.resolve(
+    const result = completionRequest.resolve(
       ticket,
       completion,
       elements.commandInput.value,
       elements.commandInput.selectionStart,
     );
     if (result.outcome === "stale") return;
-    if (result.completion !== undefined && result.outcome === "applied") {
+    if (result.completion !== undefined && result.outcome === "resolved") {
       elements.commandInput.value = result.completion.value;
       elements.commandInput.setSelectionRange(
         result.completion.cursor,
@@ -908,144 +852,30 @@ async function completeCommandLine() {
       );
       refreshLocalLineCursor();
     }
-    renderCompletionShelf();
-    if (completionShelf.state.kind === "message")
-      scheduleCompletionMessageClose();
+    if (result.outcome === "invalid")
+      elements.commandInput.setAttribute("aria-invalid", "true");
   } catch (error) {
-    if (error?.code === "read_only") setInputAvailable(false, "VIEW ONLY");
+    if (error?.code === "read_only") unavailableState = "VIEW ONLY";
     if (error?.code === "out_of_range") {
       setConnection("offline", "OUT OF RANGE");
-      setInputAvailable(false, "MOVE WITHIN 3 BLOCKS");
+      unavailableState = "MOVE WITHIN 3 BLOCKS";
     }
     if (
-      completionShelf.fail(
+      completionRequest.fail(
         ticket,
         elements.commandInput.value,
         elements.commandInput.selectionStart,
       )
-    ) {
-      renderCompletionShelf();
-      scheduleCompletionMessageClose();
-    }
-  }
-}
-
-function acceptSelectedCompletion() {
-  const completion = completionShelf.accept(
-    elements.commandInput.value,
-    elements.commandInput.selectionStart,
-  );
-  if (completion !== undefined) {
-    elements.commandInput.value = completion.value;
-    elements.commandInput.setSelectionRange(
-      completion.cursor,
-      completion.cursor,
+    )
+      elements.commandInput.setAttribute("aria-invalid", "true");
+  } finally {
+    completionPending = false;
+    elements.commandInput.setAttribute("aria-busy", "false");
+    setInputAvailable(
+      unavailableState === undefined && connectionState === "online",
+      unavailableState ?? interactionStateLabel(),
     );
-    refreshLocalLineCursor();
   }
-  renderCompletionShelf();
-}
-
-function renderCompletionShelf() {
-  const state = completionShelf.state;
-  const open = state.kind !== "closed";
-  elements.completionMenu.hidden = !open;
-  elements.terminalShell.dataset.completionState = state.kind;
-  elements.commandInput.setAttribute(
-    "aria-expanded",
-    String(state.kind === "open"),
-  );
-  elements.commandInput.setAttribute(
-    "aria-busy",
-    String(state.kind === "loading"),
-  );
-  elements.completionOptions.replaceChildren();
-  elements.completionCount.textContent = "";
-  elements.completionMessage.textContent = "";
-  elements.completionMessage.hidden = true;
-  elements.completionMessage.removeAttribute("data-tone");
-  elements.completionOptions.hidden = state.kind !== "open";
-  elements.commandInput.removeAttribute("aria-activedescendant");
-
-  if (state.kind === "closed") {
-    elements.completionStatus.textContent = "";
-    if (terminalInteraction !== undefined)
-      renderInteractionHints(terminalInteraction);
-    return;
-  }
-  if (state.kind === "loading") {
-    elements.completionMessage.hidden = false;
-    elements.completionMessage.textContent = "COMPLETING\u2026";
-    elements.completionStatus.textContent = "Finding completion candidates.";
-    renderKeyboardHints([{ key: "Esc", label: "Cancel completion" }]);
-    return;
-  }
-  if (state.kind === "message") {
-    elements.completionMessage.hidden = false;
-    elements.completionMessage.dataset.tone = state.tone;
-    elements.completionMessage.textContent = state.message;
-    elements.completionStatus.textContent = state.message;
-    renderKeyboardHints([{ key: "Esc", label: "Close completion" }]);
-    return;
-  }
-
-  elements.completionCount.textContent = `${String(state.selected + 1)} / ${String(
-    state.candidates.length,
-  )}${state.truncated ? " +" : ""}`;
-  const fragment = document.createDocumentFragment();
-  state.candidates.forEach((candidate, index) => {
-    const option = document.createElement("div");
-    option.id = `completion-option-${String(state.generation)}-${String(index)}`;
-    option.className = "completion-option";
-    option.setAttribute("role", "option");
-    option.setAttribute("aria-selected", String(index === state.selected));
-    option.dataset.selected = String(index === state.selected);
-    option.addEventListener("pointerdown", (event) => {
-      event.preventDefault();
-      if (!completionShelf.select(index)) return;
-      acceptSelectedCompletion();
-      elements.commandInput.focus();
-    });
-
-    const label = document.createElement("span");
-    label.className = "completion-option-label";
-    label.textContent = candidate.displayText;
-    const kind = document.createElement("span");
-    kind.className = "completion-option-kind";
-    kind.textContent = completionKindLabels[candidate.kind] ?? candidate.kind;
-    option.append(label, kind);
-    fragment.append(option);
-  });
-  elements.completionOptions.append(fragment);
-  const selectedId = `completion-option-${String(state.generation)}-${String(
-    state.selected,
-  )}`;
-  elements.commandInput.setAttribute("aria-activedescendant", selectedId);
-  elements.completionStatus.textContent = `${String(
-    state.candidates.length,
-  )} completion candidates. ${state.candidates[state.selected].displayText} selected.`;
-  const selected = document.getElementById(selectedId);
-  requestAnimationFrame(() => selected?.scrollIntoView({ block: "nearest" }));
-  renderKeyboardHints([
-    { key: "Tab", label: "Next" },
-    { key: "Shift+Tab", label: "Previous" },
-    { key: "Enter", label: "Accept" },
-    { key: "Esc", label: "Close" },
-  ]);
-}
-
-function scheduleCompletionMessageClose() {
-  window.clearTimeout(completionMessageTimer);
-  completionMessageTimer = window.setTimeout(() => {
-    if (completionShelf.state.kind === "message") hideCompletions();
-  }, 1_800);
-}
-
-function hideCompletions() {
-  window.clearTimeout(completionMessageTimer);
-  completionMessageTimer = 0;
-  completionShelf.dismiss();
-  renderCompletionShelf();
 }
 
 async function sendInput(payload) {
@@ -1061,7 +891,10 @@ async function sendInput(payload) {
         ...authorizationHeaders(),
         "Content-Type": "application/json",
       },
-      body: JSON.stringify(payload),
+      body: JSON.stringify({
+        ...payload,
+        interactionGeneration: terminalInteraction?.interactionGeneration,
+      }),
     });
     accepted = true;
     return true;
@@ -1145,6 +978,7 @@ async function drainTerminalMouse() {
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
+        interactionGeneration: terminalInteraction.interactionGeneration,
         kind: "mouse",
         value: { ...event, sequence: mouseSequence },
       }),
@@ -1207,8 +1041,9 @@ function renderTerminalNow(payload) {
     scheduleTerminalFit();
   }
   if (
-    terminalInteraction?.inputMode === "keys" &&
-    nextInteraction.inputMode !== "keys"
+    terminalInteraction !== undefined &&
+    terminalInteraction.interactionGeneration !==
+      nextInteraction.interactionGeneration
   ) {
     discardEditorKeys();
   }
@@ -1572,7 +1407,11 @@ async function drainEditorKeys() {
             ...authorizationHeaders(),
             "Content-Type": "application/json",
           },
-          body: JSON.stringify({ kind: "keys", value: keys }),
+          body: JSON.stringify({
+            interactionGeneration: terminalInteraction.interactionGeneration,
+            kind: "keys",
+            value: keys,
+          }),
         });
       } catch (error) {
         if (generation !== editorInputGeneration) return;
@@ -1955,7 +1794,7 @@ async function api(path, options = {}) {
 function authorizationHeaders() {
   return {
     Authorization: `Bearer ${token}`,
-    "X-Computer-System-Interaction-Schema": "1",
+    "X-Computer-System-Interaction-Schema": "2",
   };
 }
 
@@ -1975,13 +1814,15 @@ function setConnection(state, label) {
 function setInputAvailable(available, state) {
   const interactionAvailable =
     terminalInteraction?.inputMode !== undefined &&
-    (terminalInteraction.inputMode !== "none" || terminalInteraction.interrupt);
+    (terminalInteraction.inputMode !== "none" ||
+      terminalInteraction.ctrlCAction === "interrupt");
   const writable =
     available &&
     interactionAvailable &&
     accessMode === "writer" &&
     machineAcceptsInput(machineLifecycle) &&
     !commandPending &&
+    !completionPending &&
     !takeoverPending &&
     !sessionClosed;
   elements.commandInput.disabled = !writable;
@@ -2002,7 +1843,6 @@ function setInputAvailable(available, state) {
       : writable
         ? interactionStateLabel()
         : state;
-  if (!writable && completionShelf.state.kind !== "closed") hideCompletions();
   updatePowerButton();
   updateEjectButton();
   if (writable) elements.commandInput.focus();
@@ -2014,11 +1854,10 @@ function interactionStateLabel() {
   if (terminalInteraction.secretInput) return "SECRET";
   if (terminalInteraction.context === "login") return "LOGIN";
   if (terminalInteraction.inputMode === "line") return "COMMAND";
-  return terminalInteraction.interrupt ? "INTERRUPT" : "WAIT";
+  return terminalInteraction.ctrlCAction === "interrupt" ? "INTERRUPT" : "WAIT";
 }
 
 function renderInteractionHints(interaction) {
-  if (completionShelf.state.kind !== "closed") return;
   renderKeyboardHints(
     interaction.hints.length === 0
       ? [{ key: "", label: "Input unavailable" }]

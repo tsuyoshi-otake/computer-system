@@ -140,7 +140,7 @@ describe("CS-Linux authentication", (): void => {
 
     expect(shell.submit("discarded-candidate").exitCode).toBe(0);
     expect(shell.prompt()).toBe("Retype new password: ");
-    shell.disconnect();
+    expect(shell.cancelTerminalInteraction()).toBe(true);
 
     expect(shell.prompt()).toBe("New password: ");
     expect(filesystem.readFile("/etc/shadow")).toContain("cs:!!");

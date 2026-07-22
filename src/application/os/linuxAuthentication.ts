@@ -150,6 +150,24 @@ export class LinuxAuthentication {
       : this.disabledState();
   }
 
+  cancel(): boolean {
+    switch (this.state.kind) {
+      case "login-name":
+        return true;
+      case "login-password":
+        this.state = { failures: this.state.failures, kind: "login-name" };
+        return true;
+      case "setup-confirm":
+      case "setup-new":
+        this.state = { kind: "setup-new", username: this.state.username };
+        return true;
+      case "authenticated":
+      case "disabled":
+      case "unavailable":
+        return false;
+    }
+  }
+
   verifyUserPassword(username: string, password: string): boolean {
     const shadow = this.accounts.getShadowRecord(username);
     if (shadow?.state !== "hash") return false;

@@ -175,28 +175,32 @@ from authoritative guest state. It selects `terminal_line`, bounded
 `terminal_keys`, or disabled input and separately declares pointer admission,
 secret masking, interrupt availability, presentation, help, and contextual key
 hints. The browser and companion must never infer those semantics from rendered
-rows. Writer-only `web-complete` provides command/path completion. Input before
-the first descriptor fails with `409 terminal_not_ready`; a missing or
-unsupported schema fails with `426 interaction_protocol_mismatch`, exposes
-`RELOAD REQUIRED`, and requires the behavior pack, companion, and cached Web
-client to be updated together before reload. There is no heuristic compatibility
-fallback. The compatibility `web-resize` boundary accepts only 80x25 and
-normalizes that fixed hardware text mode once per writer session; later browser
-resizes change CSS scale, never guest cell geometry. CS-Linux 1.0 parses a
-bounded Computer System Bash language with pipelines, redirects, control
-operators, quoting, variables, positional parameters, conditionals, loops, and
-functions. Production first boot sets the initial `cs` password twice; later
-boots ask for a username and that account's password. The salted record is
-stored in root-readable `/etc/shadow`, while secret Web input is masked and
-excluded from history and completion. `cs` owns UID/GID 1000 and `/home/cs`,
-belongs to `sudo`, and may add bounded users and groups through authenticated
-elevation. UID/GID 0 root starts password-locked. UID 1000 is the protected
-boot-service account: its name and home may change only while it is inactive,
-but it cannot be deleted. Desktop boot creates the existing-file boundary
-`/startup.py` as mode 0644 and owned by that account, without making the root
-directory writable. A blank file runs the built-in shell program; non-empty
-saved source runs on later boots with the account database's current UID 1000
-groups.
+rows. Writer-only `web-complete` carries the current draft and cursor to the
+guest shell. `ShellSession` owns command/path discovery and bounded column
+formatting; ambiguous candidates are written through the authoritative
+`TerminalBuffer` before the prompt and unsubmitted draft are redrawn. The
+companion returns only the resulting draft/cursor outcome, never a browser-owned
+candidate list. Input before the first descriptor fails with
+`409 terminal_not_ready`; a missing or unsupported schema fails with
+`426 interaction_protocol_mismatch`, exposes `RELOAD REQUIRED`, and requires the
+behavior pack, companion, and cached Web client to be updated together before
+reload. There is no heuristic compatibility fallback. The compatibility
+`web-resize` boundary accepts only 80x25 and normalizes that fixed hardware text
+mode once per writer session; later browser resizes change CSS scale, never
+guest cell geometry. CS-Linux 1.0 parses a bounded Computer System Bash language
+with pipelines, redirects, control operators, quoting, variables, positional
+parameters, conditionals, loops, and functions. Production first boot sets the
+initial `cs` password twice; later boots ask for a username and that account's
+password. The salted record is stored in root-readable `/etc/shadow`, while
+secret Web input is masked and excluded from history and completion. `cs` owns
+UID/GID 1000 and `/home/cs`, belongs to `sudo`, and may add bounded users and
+groups through authenticated elevation. UID/GID 0 root starts password-locked.
+UID 1000 is the protected boot-service account: its name and home may change
+only while it is inactive, but it cannot be deleted. Desktop boot creates the
+existing-file boundary `/startup.py` as mode 0644 and owned by that account,
+without making the root directory writable. A blank file runs the built-in shell
+program; non-empty saved source runs on later boots with the account database's
+current UID 1000 groups.
 
 The legacy `computer` name is permanently reserved in both user and group
 namespaces; current account creation and rename paths may never recreate it.

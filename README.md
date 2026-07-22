@@ -77,7 +77,7 @@ adapters, portable computer identity, integrated desktop displays, and bounded
 Bedrock probes are covered by host and Bedrock Dedicated Server verification.
 
 The latest public build is
-[v0.1.0-alpha.5](https://github.com/tsuyoshi-otake/computer-system/releases/tag/v0.1.0-alpha.5).
+[v0.1.0-alpha.6](https://github.com/tsuyoshi-otake/computer-system/releases/tag/v0.1.0-alpha.6).
 It is an alpha preview of the implemented Phase 2 slice, not the later Phase 6
 release-hardening milestone. Back up an existing world before testing it.
 
@@ -181,7 +181,7 @@ The current package baseline uses `@minecraft/server` 2.8.0,
 ## Install the alpha preview
 
 1. Download
-   [`computer-system-0.1.0-alpha.5.mcaddon`](https://github.com/tsuyoshi-otake/computer-system/releases/download/v0.1.0-alpha.5/computer-system-0.1.0-alpha.5.mcaddon).
+   [`computer-system-0.1.0-alpha.6.mcaddon`](https://github.com/tsuyoshi-otake/computer-system/releases/download/v0.1.0-alpha.6/computer-system-0.1.0-alpha.6.mcaddon).
 2. Open the downloaded file with Minecraft for Windows to import both packs.
 3. In the target world's settings, activate the Computer System Behavior Pack.
    Its declared dependency activates the matching Resource Pack.
@@ -847,13 +847,16 @@ the SVG displacement and inverse TUI pointer mapping. These tab-only
 presentation settings do not change cells, palettes, copied text, or the bounded
 row-diff render path. The browser coalesces up to 16 keys per relay, while the
 BDS boundary rejects batches above 32 keys. Tab performs bounded command/path
-completion through the same writer-authorized relay. A unique match is inserted
-immediately without submitting; multiple matches open a shelf below the fixed
-80x25 display. Tab/Down and Shift+Tab/Up move through at most 64 candidates,
-Enter accepts, and Escape closes. CS-DOS uses case-insensitive matching,
-uppercase display names, drive prefixes, and backslashes while CS-Linux retains
-case-sensitive paths. Input changes, control loss, and stale relay responses
-close the shelf instead of applying obsolete text.
+completion through the same writer-authorized relay. The guest shell owns both
+candidate discovery and presentation: a unique match or shared prefix is
+inserted without submitting, while unresolved matches are printed in bounded
+columns inside the fixed 80x25 terminal before the prompt and unsubmitted draft
+are redrawn. At most 64 candidates are considered and an in-terminal `...` marks
+truncation; candidate lists never become browser DOM state. CS-DOS uses
+case-insensitive matching, uppercase display names, drive prefixes, and
+backslashes while CS-Linux retains case-sensitive paths. Input is briefly locked
+while a request is pending, and control loss or a stale relay response cannot
+apply obsolete text.
 
 Each terminal snapshot carries one versioned interaction descriptor derived from
 authoritative guest state. It selects line, bounded key-batch, or disabled

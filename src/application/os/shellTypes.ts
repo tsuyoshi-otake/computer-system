@@ -206,3 +206,17 @@ export interface ShellCompletionResult {
   readonly truncated: boolean;
   readonly value: string;
 }
+
+export type ShellTerminalCompletionOutcome = "applied" | "listed" | "none";
+
+export interface ShellTerminalCompletionResponse {
+  readonly cursor: number;
+  readonly outcome: ShellTerminalCompletionOutcome;
+  readonly truncated: boolean;
+  readonly value: string;
+}
+
+export interface ShellTerminalCompletion {
+  readonly lines: readonly string[];
+  readonly response: ShellTerminalCompletionResponse;
+}

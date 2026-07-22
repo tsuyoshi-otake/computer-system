@@ -20,7 +20,7 @@ describe("Floppy Disk item generator", () => {
     expect(item.components["minecraft:icon"]).toBe(floppyTextureKey);
   });
 
-  it("ships the authored transparent 256px RGBA icon", async () => {
+  it("ships the authored centered 75%-scale transparent 256px RGBA icon", async () => {
     const icon = await readFile("tools/assets/floppy-disk.png");
     expect([...icon.subarray(0, 8)]).toEqual([137, 80, 78, 71, 13, 10, 26, 10]);
     expect(icon.readUInt32BE(16)).toBe(256);
@@ -32,6 +32,13 @@ describe("Floppy Disk item generator", () => {
     expect(alphaAt(pixels, 256, 0, 0)).toBe(0);
     expect(alphaAt(pixels, 256, 255, 255)).toBe(0);
     expect(alphaAt(pixels, 256, 128, 128)).toBe(255);
+    const bounds = alphaBounds(pixels, 256, 256);
+    expect(bounds.width).toBeGreaterThanOrEqual(179);
+    expect(bounds.width).toBeLessThanOrEqual(182);
+    expect(bounds.height).toBeGreaterThanOrEqual(173);
+    expect(bounds.height).toBeLessThanOrEqual(176);
+    expect(Math.abs(bounds.minX - (255 - bounds.maxX))).toBeLessThanOrEqual(1);
+    expect(Math.abs(bounds.minY - (255 - bounds.maxY))).toBeLessThanOrEqual(1);
   });
 });
 
@@ -73,6 +80,30 @@ function decodeRgbaPng(texture, width, height) {
 
 function alphaAt(pixels, width, x, y) {
   return pixels[(y * width + x) * 4 + 3];
+}
+
+function alphaBounds(pixels, width, height) {
+  let minX = width;
+  let minY = height;
+  let maxX = -1;
+  let maxY = -1;
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      if (alphaAt(pixels, width, x, y) === 0) continue;
+      minX = Math.min(minX, x);
+      minY = Math.min(minY, y);
+      maxX = Math.max(maxX, x);
+      maxY = Math.max(maxY, y);
+    }
+  }
+  return {
+    minX,
+    minY,
+    maxX,
+    maxY,
+    width: maxX - minX + 1,
+    height: maxY - minY + 1,
+  };
 }
 
 function paeth(left, up, upLeft) {

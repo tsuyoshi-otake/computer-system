@@ -22,11 +22,11 @@ describe("TerminalInteractionDescriptor", (): void => {
   it("constructs an immutable descriptor and rejects a sixth hint", (): void => {
     const interaction = createTerminalInteractionDescriptor({
       context: "shell",
+      ctrlCAction: "abort-line",
       cursorShape: "block",
       hints: [{ key: "Enter", label: "Run command" }],
       history: true,
       inputMode: "line",
-      interrupt: false,
       pointer: "none",
       presentation: "terminal",
       secretInput: false,
@@ -35,7 +35,9 @@ describe("TerminalInteractionDescriptor", (): void => {
     expect(interaction).toMatchObject({
       context: "shell",
       inputMode: "line",
-      schema: 1,
+      ctrlCAction: "abort-line",
+      interactionGeneration: 0,
+      schema: 2,
     });
     expect(Object.isFrozen(interaction)).toBe(true);
     expect(Object.isFrozen(interaction.hints)).toBe(true);
@@ -43,6 +45,7 @@ describe("TerminalInteractionDescriptor", (): void => {
     expect(() =>
       createTerminalInteractionDescriptor({
         context: "shell",
+        ctrlCAction: "abort-line",
         cursorShape: "block",
         hints: Array.from(
           { length: maximumTerminalInteractionHints + 1 },
@@ -50,7 +53,6 @@ describe("TerminalInteractionDescriptor", (): void => {
         ),
         inputMode: "line",
         history: true,
-        interrupt: false,
         pointer: "none",
         presentation: "terminal",
         secretInput: false,
@@ -61,10 +63,10 @@ describe("TerminalInteractionDescriptor", (): void => {
   it("rejects unbounded text and inconsistent interaction capabilities", (): void => {
     const base = {
       context: "shell" as const,
+      ctrlCAction: "abort-line" as const,
       cursorShape: "block" as const,
       history: false,
       inputMode: "line" as const,
-      interrupt: false,
       pointer: "none" as const,
       presentation: "terminal" as const,
       secretInput: false,
@@ -266,26 +268,34 @@ describe("TerminalInteractionDescriptor", (): void => {
     ).entries;
     entries.set(computerId, entry);
 
-    expect(runtime.terminalInteraction(computerId)).toMatchObject({
+    const shellInteraction = runtime.terminalInteraction(computerId);
+    expect(shellInteraction).toMatchObject({
       context: "shell",
       inputMode: "line",
-      interrupt: false,
+      ctrlCAction: "abort-line",
       presentation: "terminal",
     });
+    expect(runtime.terminalInteraction(computerId).interactionGeneration).toBe(
+      shellInteraction.interactionGeneration,
+    );
     entry.vm.state = {
       filter: "__cs_foreground_complete:1",
       kind: "waiting_event",
     };
     entry.foreground = {};
-    expect(runtime.terminalInteraction(computerId)).toMatchObject({
+    const busyInteraction = runtime.terminalInteraction(computerId);
+    expect(busyInteraction).toMatchObject({
       context: "busy",
       hints: [{ key: "Ctrl+C", label: "Interrupt" }],
       inputMode: "none",
-      interrupt: true,
+      ctrlCAction: "interrupt",
       pointer: "none",
       presentation: "terminal",
       secretInput: false,
     });
+    expect(busyInteraction.interactionGeneration).toBeGreaterThan(
+      shellInteraction.interactionGeneration,
+    );
 
     const edit = new DosIdeSession("C:\\NONAME.TXT", "", 51, 19, "UNTITLED", {
       editorMode: true,
@@ -297,7 +307,7 @@ describe("TerminalInteractionDescriptor", (): void => {
       context: "busy",
       helpTopicId: "edit",
       inputMode: "none",
-      interrupt: true,
+      ctrlCAction: "interrupt",
       presentation: "dos-tui",
       secretInput: false,
     });
@@ -325,6 +335,10 @@ describe("TerminalInteractionDescriptor", (): void => {
     expect(runtime.abortLine(computerId)).toEqual({
       outcome: "accepted",
       state: "line_aborted",
+    });
+    expect(runtime.interrupt(computerId)).toEqual({
+      outcome: "ignored",
+      reason: "not_running",
     });
     expect(terminal.snapshot().rows.join("\n")).toContain("^C");
     expect(terminal.snapshot().rows.join("\n")).toContain(shell.prompt());

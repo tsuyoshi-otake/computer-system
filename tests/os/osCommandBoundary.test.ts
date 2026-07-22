@@ -53,6 +53,14 @@ describe("OS command boundary", (): void => {
       insertText: "C:\\DOS\\",
       kind: "directory",
     });
+    const listed = shell.completeTerminal("C", 1);
+    expect(listed.response).toMatchObject({
+      cursor: 1,
+      outcome: "listed",
+      value: "C",
+    });
+    expect(listed.lines.join("\n")).toContain("COPY");
+    expect(listed.lines.join("\n")).not.toContain("cat");
 
     expect(shell.submit("CLS")).toMatchObject({
       action: "clear",

@@ -720,103 +720,6 @@ h1 {
     0 1px currentcolor;
 }
 
-.completion-menu {
-  width: min(var(--terminal-frame-width), 100%);
-  max-width: 100%;
-  min-width: 0;
-  justify-self: center;
-  border: 1px solid var(--line-strong);
-  background: var(--black);
-  color: var(--text);
-  font-size: 11px;
-  line-height: 1.3;
-  overflow: hidden;
-}
-
-.completion-header {
-  display: flex;
-  min-height: 26px;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 0 8px;
-  border-bottom: 1px solid var(--line);
-  background: var(--panel);
-  color: var(--green);
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-
-.completion-count {
-  color: var(--muted);
-  font-variant-numeric: tabular-nums;
-}
-
-.completion-message {
-  display: grid;
-  min-height: 44px;
-  margin: 0;
-  padding: 8px;
-  place-items: center start;
-  color: var(--muted);
-  letter-spacing: 0.04em;
-}
-
-.completion-message[data-tone="error"] {
-  color: var(--amber);
-}
-
-.completion-options {
-  max-height: 192px;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  scrollbar-color: var(--line-strong) var(--black);
-}
-
-.completion-option {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  min-height: 32px;
-  align-items: center;
-  gap: 12px;
-  padding: 0 8px;
-  border-bottom: 1px solid var(--line);
-  cursor: default;
-  transition:
-    background-color 150ms ease,
-    color 150ms ease;
-}
-
-.completion-option:last-child {
-  border-bottom: 0;
-}
-
-.completion-option:hover {
-  color: var(--green);
-}
-
-.completion-option[data-selected="true"] {
-  background: var(--green);
-  color: var(--black);
-}
-
-.completion-option-label {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.completion-option-kind {
-  color: var(--muted);
-  font-size: 9px;
-  letter-spacing: 0.08em;
-}
-
-.completion-option[data-selected="true"] .completion-option-kind {
-  color: color-mix(in srgb, var(--black) 72%, transparent);
-}
-
 .statusbar {
   min-height: 34px;
   padding: 6px clamp(12px, 2vw, 28px);
@@ -2147,14 +2050,6 @@ dialog form {
     padding-inline: 10px;
   }
 
-  .completion-options {
-    max-height: 176px;
-  }
-
-  .completion-option {
-    min-height: 44px;
-  }
-
   button {
     min-width: 44px;
     min-height: 44px;
@@ -2169,11 +2064,6 @@ dialog form {
 
   .terminal-display {
     outline: 1px solid CanvasText;
-  }
-
-  .completion-option[data-selected="true"] {
-    outline: 2px solid Highlight;
-    outline-offset: -2px;
   }
 
   .display-option:has(input:focus-visible) {

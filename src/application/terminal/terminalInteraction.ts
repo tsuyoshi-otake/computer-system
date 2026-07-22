@@ -1,4 +1,4 @@
-export const terminalInteractionSchema = 1 as const;
+export const terminalInteractionSchema = 2 as const;
 export const maximumTerminalInteractionHints = 5;
 export const maximumTerminalInteractionHelpTopicLength = 64;
 export const maximumTerminalInteractionHintKeyLength = 32;
@@ -8,6 +8,8 @@ export type TerminalInteractionInputMode = "keys" | "line" | "none";
 export type TerminalInteractionCursorShape = "block" | "underline";
 export type TerminalInteractionPointer = "cell" | "none";
 export type TerminalInteractionPresentation = "dos-tui" | "terminal";
+export type TerminalCtrlCAction =
+  "abort-line" | "cancel" | "interrupt" | "none" | "terminal-key";
 export type TerminalInteractionContext =
   | "busy"
   | "cs-abi"
@@ -33,12 +35,13 @@ export interface TerminalInteractionHint {
 
 export interface TerminalInteractionDescriptor {
   readonly context: TerminalInteractionContext;
+  readonly ctrlCAction: TerminalCtrlCAction;
   readonly cursorShape: TerminalInteractionCursorShape;
   readonly helpTopicId?: string;
   readonly hints: readonly TerminalInteractionHint[];
   readonly history: boolean;
   readonly inputMode: TerminalInteractionInputMode;
-  readonly interrupt: boolean;
+  readonly interactionGeneration: number;
   readonly pointer: TerminalInteractionPointer;
   readonly presentation: TerminalInteractionPresentation;
   readonly schema: typeof terminalInteractionSchema;
@@ -47,9 +50,10 @@ export interface TerminalInteractionDescriptor {
 
 export type TerminalInteractionDescriptorInput = Omit<
   TerminalInteractionDescriptor,
-  "hints" | "schema"
+  "hints" | "interactionGeneration" | "schema"
 > & {
   readonly hints?: readonly TerminalInteractionHint[];
+  readonly interactionGeneration?: number;
 };
 
 /**
@@ -67,6 +71,21 @@ export function createTerminalInteractionDescriptor(
   }
   if (input.cursorShape !== "block" && input.cursorShape !== "underline") {
     throw new RangeError("terminal cursor shape is invalid");
+  }
+  if (
+    !Number.isSafeInteger(input.interactionGeneration ?? 0) ||
+    (input.interactionGeneration ?? 0) < 0
+  ) {
+    throw new RangeError("terminal interaction generation is invalid");
+  }
+  if (
+    input.ctrlCAction !== "abort-line" &&
+    input.ctrlCAction !== "cancel" &&
+    input.ctrlCAction !== "interrupt" &&
+    input.ctrlCAction !== "none" &&
+    input.ctrlCAction !== "terminal-key"
+  ) {
+    throw new RangeError("terminal Ctrl+C action is invalid");
   }
   if (typeof input.history !== "boolean") {
     throw new RangeError("terminal history flag is invalid");
@@ -98,6 +117,22 @@ export function createTerminalInteractionDescriptor(
   ) {
     throw new RangeError("terminal secret input requires line or no input");
   }
+  if (
+    input.ctrlCAction === "abort-line" &&
+    (input.inputMode !== "line" || input.secretInput)
+  ) {
+    throw new RangeError("terminal line abort requires non-secret line input");
+  }
+  if (
+    input.ctrlCAction === "cancel" &&
+    input.inputMode !== "line" &&
+    input.inputMode !== "keys"
+  ) {
+    throw new RangeError("terminal cancellation requires interactive input");
+  }
+  if (input.ctrlCAction === "terminal-key" && input.inputMode !== "keys") {
+    throw new RangeError("terminal-owned Ctrl+C requires keys input");
+  }
   const hints = Object.freeze(
     sourceHints.map((hint) => {
       if (
@@ -117,6 +152,7 @@ export function createTerminalInteractionDescriptor(
   );
   return Object.freeze({
     context: input.context,
+    ctrlCAction: input.ctrlCAction,
     cursorShape: input.cursorShape,
     ...(input.helpTopicId === undefined
       ? {}
@@ -124,7 +160,7 @@ export function createTerminalInteractionDescriptor(
     hints,
     history: input.history,
     inputMode: input.inputMode,
-    interrupt: input.interrupt,
+    interactionGeneration: input.interactionGeneration ?? 0,
     pointer: input.pointer,
     presentation: input.presentation,
     schema: terminalInteractionSchema,
@@ -145,14 +181,24 @@ function isBoundedInteractionText(
 
 const unavailableInteraction = createTerminalInteractionDescriptor({
   context: "unavailable",
+  ctrlCAction: "none",
   cursorShape: "underline",
   history: false,
   inputMode: "none",
-  interrupt: false,
   pointer: "none",
   presentation: "terminal",
   secretInput: false,
 });
+
+export function withTerminalInteractionGeneration(
+  interaction: TerminalInteractionDescriptor,
+  interactionGeneration: number,
+): TerminalInteractionDescriptor {
+  return createTerminalInteractionDescriptor({
+    ...interaction,
+    interactionGeneration,
+  });
+}
 
 export function unavailableTerminalInteraction(): TerminalInteractionDescriptor {
   return unavailableInteraction;

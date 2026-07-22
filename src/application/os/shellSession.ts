@@ -21,6 +21,7 @@ import {
   type ShellBackgroundRequest,
   type ShellCommandResult,
   type ShellCompletionResult,
+  type ShellTerminalCompletion,
   type ShellForegroundRequest,
   type ShellJobControlRequest,
   type ShellProcessMemoryAdmissionRequest,
@@ -575,10 +576,10 @@ export class ShellSession {
     if (this.disconnected) {
       return createTerminalInteractionDescriptor({
         context: "unavailable",
+        ctrlCAction: "none",
         cursorShape: "underline",
         history: false,
         inputMode: "none",
-        interrupt: false,
         pointer: "none",
         presentation: "terminal",
         secretInput: false,
@@ -595,6 +596,7 @@ export class ShellSession {
       this.authentication?.isAuthenticated() === false;
     return createTerminalInteractionDescriptor({
       context: secretInput ? "secret" : login ? "login" : "shell",
+      ctrlCAction: secretInput || login ? "cancel" : "abort-line",
       cursorShape: profileCursorShape(this.frontend.id),
       helpTopicId: login ? "login" : "shell",
       hints: login
@@ -607,7 +609,6 @@ export class ShellSession {
       inputMode: "line",
       history:
         !secretInput && (this.frontend.id === "linux" || this.doskeyLoaded),
-      interrupt: false,
       pointer: "none",
       presentation: "terminal",
       secretInput,
@@ -620,6 +621,20 @@ export class ShellSession {
 
   isAuthenticated(): boolean {
     return this.authentication?.isAuthenticated() ?? true;
+  }
+
+  cancelTerminalInteraction(): boolean {
+    if (this.disconnected) return false;
+    if (this.linuxConversation !== undefined) {
+      this.linuxConversation = undefined;
+      this.lastExitCode = 130;
+      return true;
+    }
+    if (this.authentication?.cancel() === true) {
+      this.lastExitCode = 130;
+      return true;
+    }
+    return false;
   }
 
   executionContext(): {
@@ -1059,6 +1074,31 @@ export class ShellSession {
       };
     }
     return this.commands.complete(line, cursor);
+  }
+
+  completeTerminal(line: string, cursor: number): ShellTerminalCompletion {
+    const completion = this.complete(line, cursor);
+    const listed =
+      completion.candidates.length > 1 && completion.value === line;
+    return {
+      lines: listed
+        ? formatTerminalCompletionCandidates(
+            completion.candidates.map(({ displayText }) => displayText),
+            this.terminalWidth,
+            completion.truncated,
+          )
+        : [],
+      response: {
+        cursor: completion.cursor,
+        outcome: listed
+          ? "listed"
+          : completion.candidates.length === 0
+            ? "none"
+            : "applied",
+        truncated: completion.truncated,
+        value: completion.value,
+      },
+    };
   }
 
   resize(width: number, height: number): EditorScreen | undefined {
@@ -6573,4 +6613,45 @@ function isWallMilliseconds(value: number): boolean {
 
 function profileCursorShape(profile: ComputerOsProfile): "block" | "underline" {
   return profile === "dos" ? "underline" : "block";
+}
+
+function formatTerminalCompletionCandidates(
+  candidates: readonly string[],
+  width: number,
+  truncated: boolean,
+): readonly string[] {
+  if (candidates.length === 0) return truncated ? ["..."] : [];
+  const labels = candidates.map((candidate) =>
+    fitTerminalCompletionLabel(candidate, width),
+  );
+  const columnWidth = Math.min(
+    width,
+    Math.max(...labels.map((label) => [...label].length)) + 2,
+  );
+  const columnCount = Math.max(1, Math.floor(width / columnWidth));
+  const rowCount = Math.ceil(labels.length / columnCount);
+  const lines: string[] = [];
+  for (let row = 0; row < rowCount; row += 1) {
+    let line = "";
+    for (let column = 0; column < columnCount; column += 1) {
+      const index = column * rowCount + row;
+      const label = labels[index];
+      if (label === undefined) continue;
+      const finalColumn =
+        column === columnCount - 1 || index + rowCount >= labels.length;
+      line += finalColumn
+        ? label
+        : `${label}${" ".repeat(Math.max(0, columnWidth - [...label].length))}`;
+    }
+    lines.push(line.trimEnd());
+  }
+  if (truncated) lines.push("...");
+  return lines;
+}
+
+function fitTerminalCompletionLabel(value: string, width: number): string {
+  const characters = [...value];
+  if (characters.length <= width) return value;
+  if (width <= 3) return ".".repeat(width);
+  return `${characters.slice(0, width - 3).join("")}...`;
 }

@@ -15,7 +15,7 @@ import {
 
 const servers = [];
 const browserInteractionHeaders = {
-  "X-Computer-System-Interaction-Schema": "1",
+  "X-Computer-System-Interaction-Schema": "2",
 };
 
 function newTestWebCompanionServer(options = {}) {
@@ -602,7 +602,7 @@ describe("Web companion HTTP server", () => {
       }),
     ).resolves.toEqual({ outcome: "accepted" });
     expect(bds.commands.at(-1)).toMatch(
-      /^scriptevent computer_system:web-input [A-Za-z0-9_-]+ [A-Za-z0-9_-]{6,20} keys /u,
+      /^scriptevent computer_system:web-input [A-Za-z0-9_-]+ [A-Za-z0-9_-]{6,20} 1 keys /u,
     );
 
     const waiting = server.waitForTuiScreen({
@@ -1111,6 +1111,26 @@ describe("Web companion HTTP server", () => {
     );
 
     const commandCountBeforeModeRejection = bds.commands.length;
+    const staleGeneration = await fetch(`${status.origin}/api/input`, {
+      method: "POST",
+      headers: {
+        ...browserInteractionHeaders,
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+        Origin: status.origin,
+      },
+      body: JSON.stringify({
+        interactionGeneration: 0,
+        kind: "line",
+        value: "stale",
+      }),
+    });
+    expect(staleGeneration.status).toBe(409);
+    expect(await staleGeneration.json()).toMatchObject({
+      code: "input_mode_changed",
+    });
+    expect(bds.commands).toHaveLength(commandCountBeforeModeRejection);
+
     const wrongMode = await fetch(`${status.origin}/api/input`, {
       method: "POST",
       headers: {
@@ -1119,7 +1139,11 @@ describe("Web companion HTTP server", () => {
         "Content-Type": "application/json",
         Origin: status.origin,
       },
-      body: JSON.stringify({ kind: "keys", value: ["F1"] }),
+      body: JSON.stringify({
+        interactionGeneration: 1,
+        kind: "keys",
+        value: ["F1"],
+      }),
     });
     expect(wrongMode.status).toBe(409);
     expect(await wrongMode.json()).toMatchObject({
@@ -1135,7 +1159,7 @@ describe("Web companion HTTP server", () => {
         "Content-Type": "application/json",
         Origin: status.origin,
       },
-      body: JSON.stringify({ kind: "interrupt" }),
+      body: JSON.stringify({ interactionGeneration: 1, kind: "interrupt" }),
     });
     expect(idleInterrupt.status).toBe(409);
     expect(await idleInterrupt.json()).toMatchObject({
@@ -1151,11 +1175,14 @@ describe("Web companion HTTP server", () => {
         "Content-Type": "application/json",
         Origin: status.origin,
       },
-      body: JSON.stringify({ kind: "abort-line" }),
+      body: JSON.stringify({ interactionGeneration: 1, kind: "abort-line" }),
     });
     expect(abortLine.status).toBe(202);
-    expect(bds.commands.at(-1)).toBe(
-      `scriptevent computer_system:web-abort-line ${sessionId}`,
+    expect(bds.commands.at(-1)).toMatch(
+      new RegExp(
+        `^scriptevent computer_system:web-input ${sessionId} [A-Za-z0-9_-]{6,20} 1 abort-line $`,
+        "u",
+      ),
     );
 
     const input = await fetch(`${status.origin}/api/input`, {
@@ -1166,11 +1193,15 @@ describe("Web companion HTTP server", () => {
         "Content-Type": "application/json",
         Origin: status.origin,
       },
-      body: JSON.stringify({ kind: "line", value: "hello world" }),
+      body: JSON.stringify({
+        interactionGeneration: 1,
+        kind: "line",
+        value: "hello world",
+      }),
     });
     expect(input.status).toBe(202);
     expect(bds.commands.at(-1)).toMatch(
-      /^scriptevent computer_system:web-input [A-Za-z0-9_-]+ [A-Za-z0-9_-]{6,20} line hello%20world$/u,
+      /^scriptevent computer_system:web-input [A-Za-z0-9_-]+ [A-Za-z0-9_-]{6,20} 1 line hello%20world$/u,
     );
 
     bds.log(`CS_WEB_TERMINAL ${JSON.stringify(tuiSnapshot(sessionId))}`);
@@ -1183,11 +1214,15 @@ describe("Web companion HTTP server", () => {
         "Content-Type": "application/json",
         Origin: status.origin,
       },
-      body: JSON.stringify({ kind: "keys", value: ["i", "x", "Escape"] }),
+      body: JSON.stringify({
+        interactionGeneration: 1,
+        kind: "keys",
+        value: ["i", "x", "Escape"],
+      }),
     });
     expect(keys.status).toBe(202);
     expect(bds.commands.at(-1)).toMatch(
-      /^scriptevent computer_system:web-input [A-Za-z0-9_-]+ [A-Za-z0-9_-]{6,20} keys %5B%22i%22%2C%22x%22%2C%22Escape%22%5D$/u,
+      /^scriptevent computer_system:web-input [A-Za-z0-9_-]+ [A-Za-z0-9_-]{6,20} 1 keys %5B%22i%22%2C%22x%22%2C%22Escape%22%5D$/u,
     );
 
     const commandAfterKeys = bds.commands.at(-1);
@@ -1199,7 +1234,7 @@ describe("Web companion HTTP server", () => {
         "Content-Type": "application/json",
         Origin: status.origin,
       },
-      body: JSON.stringify({ kind: "abort-line" }),
+      body: JSON.stringify({ interactionGeneration: 1, kind: "abort-line" }),
     });
     expect(editorAbort.status).toBe(409);
     expect(await editorAbort.json()).toMatchObject({
@@ -1216,13 +1251,14 @@ describe("Web companion HTTP server", () => {
         Origin: status.origin,
       },
       body: JSON.stringify({
+        interactionGeneration: 1,
         kind: "mouse",
         value: { action: "down", button: 0, sequence: 1, x: 12, y: 4 },
       }),
     });
     expect(mouse.status).toBe(202);
     expect(bds.commands.at(-1)).toMatch(
-      /^scriptevent computer_system:web-input [A-Za-z0-9_-]+ [A-Za-z0-9_-]{6,20} mouse /u,
+      /^scriptevent computer_system:web-input [A-Za-z0-9_-]+ [A-Za-z0-9_-]{6,20} 1 mouse /u,
     );
 
     const invalidMouse = await fetch(`${status.origin}/api/input`, {
@@ -1234,6 +1270,7 @@ describe("Web companion HTTP server", () => {
         Origin: status.origin,
       },
       body: JSON.stringify({
+        interactionGeneration: 1,
         kind: "mouse",
         value: { action: "move", button: 0, sequence: 2, x: 81, y: 4 },
       }),
@@ -1281,22 +1318,18 @@ describe("Web companion HTTP server", () => {
         "Content-Type": "application/json",
         Origin: status.origin,
       },
-      body: JSON.stringify({ value: "who", cursor: 3 }),
+      body: JSON.stringify({
+        cursor: 3,
+        interactionGeneration: 1,
+        value: "who",
+      }),
     });
     await until(() => bds.commands.at(-1)?.includes("web-complete"));
     const completionCommand = bds.commands.at(-1).split(" ");
     bds.log(
       `CS_WEB_COMPLETION ${JSON.stringify({
-        candidates: [
-          {
-            displayText: "whoami",
-            insertText: "whoami ",
-            kind: "command",
-          },
-        ],
         cursor: 7,
-        replaceEnd: 3,
-        replaceStart: 0,
+        outcome: "applied",
         requestId: completionCommand[3],
         sessionId: completionCommand[2],
         truncated: false,
@@ -1306,16 +1339,8 @@ describe("Web companion HTTP server", () => {
     const completion = await completionRequest;
     expect(completion.status).toBe(200);
     expect(await completion.json()).toEqual({
-      candidates: [
-        {
-          displayText: "whoami",
-          insertText: "whoami ",
-          kind: "command",
-        },
-      ],
       cursor: 7,
-      replaceEnd: 3,
-      replaceStart: 0,
+      outcome: "applied",
       truncated: false,
       value: "whoami ",
     });
@@ -1328,7 +1353,11 @@ describe("Web companion HTTP server", () => {
         "Content-Type": "application/json",
         Origin: status.origin,
       },
-      body: JSON.stringify({ kind: "keys", value: Array(33).fill("x") }),
+      body: JSON.stringify({
+        interactionGeneration: 1,
+        kind: "keys",
+        value: Array(33).fill("x"),
+      }),
     });
     expect(invalidKeys.status).toBe(400);
   });
@@ -2031,7 +2060,7 @@ class FakeBds {
       });
     }
     const input =
-      /^scriptevent computer_system:web-input ([A-Za-z0-9_-]+) ([A-Za-z0-9_-]{6,20}) (?:line|keys|mouse) /u.exec(
+      /^scriptevent computer_system:web-input ([A-Za-z0-9_-]+) ([A-Za-z0-9_-]{6,20}) [0-9]{1,16} (?:abort-line|cancel|interrupt|line|keys|mouse) /u.exec(
         command,
       );
     if (input !== null && this.autoInputAck) {
@@ -2121,28 +2150,30 @@ function tuiSnapshot(sessionId, options = {}) {
     options.interaction ??
     (secretInput
       ? {
-          schema: 1,
+          schema: 2,
           inputMode: "line",
           cursorShape: "block",
           pointer: "none",
           presentation: "terminal",
           secretInput: true,
           context: "secret",
-          interrupt: false,
+          ctrlCAction: "cancel",
           history: false,
           hints: [{ key: "Enter", label: "Continue" }],
+          interactionGeneration: 1,
         }
       : {
-          schema: 1,
+          schema: 2,
           inputMode: "keys",
           cursorShape: "block",
           pointer: "cell",
           presentation: "dos-tui",
           secretInput: false,
           context: "edit",
-          interrupt: false,
+          ctrlCAction: "terminal-key",
           history: false,
           hints: [{ key: "F10", label: "Menu" }],
+          interactionGeneration: 1,
         });
   return {
     sessionId,
@@ -2168,34 +2199,36 @@ function tuiSnapshot(sessionId, options = {}) {
 
 function shellInteraction() {
   return {
-    schema: 1,
+    schema: 2,
     inputMode: "line",
     cursorShape: "block",
     pointer: "none",
     presentation: "terminal",
     secretInput: false,
     context: "shell",
-    interrupt: false,
+    ctrlCAction: "abort-line",
     history: true,
     hints: [
       { key: "Enter", label: "Run" },
       { key: "Tab", label: "Complete" },
     ],
+    interactionGeneration: 1,
   };
 }
 
 function csAbiInteraction() {
   return {
-    schema: 1,
+    schema: 2,
     inputMode: "keys",
     cursorShape: "block",
     pointer: "none",
     presentation: "terminal",
     secretInput: false,
     context: "cs-abi",
-    interrupt: true,
+    ctrlCAction: "interrupt",
     history: false,
     hints: [{ key: "Ctrl+C", label: "Interrupt" }],
+    interactionGeneration: 1,
   };
 }
 
@@ -2223,6 +2256,11 @@ async function exchangeHandoffUrl(url) {
 }
 
 function post(origin, pathname, token, body) {
+  const requestBody =
+    (pathname === "/api/input" || pathname === "/api/complete") &&
+    body.interactionGeneration === undefined
+      ? { ...body, interactionGeneration: 1 }
+      : body;
   return fetch(`${origin}${pathname}`, {
     method: "POST",
     headers: {
@@ -2231,6 +2269,6 @@ function post(origin, pathname, token, body) {
       "Content-Type": "application/json",
       Origin: origin,
     },
-    body: JSON.stringify(body),
+    body: JSON.stringify(requestBody),
   });
 }

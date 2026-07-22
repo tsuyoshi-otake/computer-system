@@ -216,12 +216,11 @@ describe("Web terminal UI", () => {
     expect(html).toContain("Waiting for terminal interaction details.");
     expect(html).toContain('id="keyboard-help"');
     expect(html).toContain('aria-atomic="true"');
-    expect(html).toContain('id="completion-menu"');
-    expect(html).toContain('role="combobox"');
-    expect(html).toContain('aria-controls="completion-options"');
-    expect(html).toContain('role="listbox"');
-    expect(html).toContain('id="completion-status"');
-    expect(script).toContain('key === "c"');
+    expect(html).not.toContain('id="completion-menu"');
+    expect(html).not.toContain('role="combobox"');
+    expect(html).not.toContain('aria-controls="completion-options"');
+    expect(html).not.toContain('role="listbox"');
+    expect(script).toContain("resolveTerminalCtrlCAction(terminalInteraction");
     expect(script).toContain('event.key === "ArrowUp"');
     expect(script).toContain('key === "u" || key === "k" || key === "w"');
     expect(script).toContain("void closeSession()");
@@ -242,15 +241,12 @@ describe("Web terminal UI", () => {
     expect(css).toMatch(/\[hidden\]\s*\{\s*display:\s*none\s*!important;/u);
     expect(script).toContain('event.key === "Tab"');
     expect(script).toContain('api("/api/complete"');
-    expect(script).toContain("new CompletionShelfController()");
-    expect(script).toContain("acceptSelectedCompletion()");
-    expect(inputHelpers).toContain("class CompletionShelfController");
+    expect(script).toContain("new CompletionRequestController()");
+    expect(script).not.toContain("acceptSelectedCompletion()");
+    expect(inputHelpers).toContain("class CompletionRequestController");
     expect(inputHelpers).toContain('outcome: "stale"');
-    expect(css).toContain('.completion-option[data-selected="true"]');
-    expect(css).toContain("grid-template-rows: minmax(0, 1fr) auto");
-    const completionRules =
-      /\.completion-menu\s*\{[\s\S]+?\n\}/u.exec(css)?.[0] ?? "";
-    expect(completionRules).not.toContain("position: absolute");
+    expect(css).not.toContain(".completion-option");
+    expect(script).not.toContain("completionShelf");
     for (const [id, label] of [
       ["caps-lock-indicator", "Caps Lock"],
       ["num-lock-indicator", "Num Lock"],
@@ -297,9 +293,7 @@ describe("Web terminal UI", () => {
       html.indexOf('id="manual-button"'),
     );
     expect(css).toContain(".terminal-output ::selection");
-    expect(script).toContain(
-      "hasCopySelection(elements.commandInput, window.getSelection())",
-    );
+    expect(script).toContain("hasSelection: hasCopySelection(");
     expect(script).toContain(
       "if (window.getSelection()?.isCollapsed === false) return",
     );
@@ -380,7 +374,7 @@ describe("Web terminal UI", () => {
     expect(inputHelpers).not.toContain("isEditorTerminalScreen");
     expect(inputHelpers).not.toContain("-- INSERT --");
     expect(script).toContain('nextInteraction.presentation === "dos-tui"');
-    expect(script).toContain('terminalInteraction?.inputMode === "keys"');
+    expect(script).toContain("terminalInteraction.interactionGeneration !==");
     expect(script).toContain('terminalInteraction?.pointer === "cell"');
     expect(script).toContain("queueEditorKeys([key])");
     expect(script).toContain("new BoundedEditorKeyQueue()");
@@ -401,7 +395,7 @@ describe("Web terminal UI", () => {
     expect(script).toContain("editorKeyFromKeyboardEvent(event)");
     expect(script).toContain('event.key === "Alt"');
     expect(script).toContain('queueEditorKeys(["F10"])');
-    expect(script).toContain('"X-Computer-System-Interaction-Schema": "1"');
+    expect(script).toContain('"X-Computer-System-Interaction-Schema": "2"');
     expect(script).toContain('setConnection("offline", "RELOAD REQUIRED")');
   });
 

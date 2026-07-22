@@ -2,10 +2,11 @@ import { describe, expect, it } from "vitest";
 
 import {
   BoundedEditorKeyQueue,
-  CompletionShelfController,
+  CompletionRequestController,
   editorKeyFromKeyboardEvent,
   hasCopySelection,
   insertPastedCommand,
+  resolveTerminalCtrlCAction,
   terminalInteractionFromTerminal,
 } from "../../web/terminal-input.js";
 
@@ -85,16 +86,17 @@ describe("Web terminal input helpers", () => {
 
   it("uses the authoritative interaction descriptor instead of screen text", () => {
     const interaction = {
-      schema: 1,
+      schema: 2,
       inputMode: "line",
       cursorShape: "block",
       pointer: "none",
       presentation: "terminal",
       secretInput: false,
       context: "shell",
-      interrupt: false,
+      ctrlCAction: "abort-line",
       history: true,
       hints: [{ key: "Enter", label: "Run" }],
+      interactionGeneration: 4,
     };
 
     for (const rows of [
@@ -115,37 +117,21 @@ describe("Web terminal input helpers", () => {
           context: "cs-abi",
           history: false,
           inputMode: "keys",
-          interrupt: true,
+          ctrlCAction: "interrupt",
         },
       }),
     ).toMatchObject({
       context: "cs-abi",
       inputMode: "keys",
-      interrupt: true,
+      ctrlCAction: "interrupt",
       presentation: "terminal",
     });
   });
 
   it("fails closed for missing, unknown, or unbounded interaction schemas", () => {
     expect(() => terminalInteractionFromTerminal({ rows: [] })).toThrow(
-      /interaction schema 1/u,
+      /interaction schema 2/u,
     );
-    expect(() =>
-      terminalInteractionFromTerminal({
-        interaction: {
-          schema: 2,
-          inputMode: "keys",
-          cursorShape: "block",
-          pointer: "cell",
-          presentation: "dos-tui",
-          secretInput: false,
-          context: "edit",
-          interrupt: false,
-          history: false,
-          hints: [],
-        },
-      }),
-    ).toThrow(/interaction schema 1/u);
     expect(() =>
       terminalInteractionFromTerminal({
         interaction: {
@@ -156,12 +142,30 @@ describe("Web terminal input helpers", () => {
           presentation: "dos-tui",
           secretInput: false,
           context: "edit",
-          interrupt: false,
+          ctrlCAction: "terminal-key",
+          history: false,
+          hints: [],
+          interactionGeneration: 1,
+        },
+      }),
+    ).toThrow(/interaction schema 2/u);
+    expect(() =>
+      terminalInteractionFromTerminal({
+        interaction: {
+          schema: 2,
+          inputMode: "keys",
+          cursorShape: "block",
+          pointer: "cell",
+          presentation: "dos-tui",
+          secretInput: false,
+          context: "edit",
+          ctrlCAction: "terminal-key",
           history: false,
           hints: Array.from({ length: 6 }, (_, index) => ({
             key: `F${String(index + 1)}`,
             label: "Action",
           })),
+          interactionGeneration: 1,
         },
       }),
     ).toThrow(/contextual hints/u);
@@ -184,77 +188,107 @@ describe("Web terminal input helpers", () => {
     ).toThrow(/history requires/u);
   });
 
-  it("owns a bounded completion shelf through selection and acceptance", () => {
-    const shelf = new CompletionShelfController();
-    const ticket = shelf.begin("wh", 2);
-    expect(shelf.state.kind).toBe("loading");
-
+  it("resolves Ctrl+C ownership before selection-based copy", () => {
+    const interaction = interactionForValidation();
     expect(
-      shelf.resolve(
+      resolveTerminalCtrlCAction(
+        { ...interaction, ctrlCAction: "interrupt", inputMode: "none" },
+        { hasSelection: true },
+      ),
+    ).toBe("interrupt");
+    expect(
+      resolveTerminalCtrlCAction(interaction, { hasSelection: true }),
+    ).toBe("copy");
+    expect(
+      resolveTerminalCtrlCAction(
+        {
+          ...interaction,
+          ctrlCAction: "terminal-key",
+          history: false,
+          inputMode: "keys",
+        },
+        { hasSelection: true },
+      ),
+    ).toBe("terminal-key");
+    expect(
+      resolveTerminalCtrlCAction(
+        { ...interaction, ctrlCAction: "cancel", secretInput: true },
+        { hasSelection: true },
+      ),
+    ).toBe("cancel");
+  });
+
+  it("accepts only the bounded OS-owned completion response", () => {
+    const request = new CompletionRequestController();
+    const ticket = request.begin("wh", 2);
+    expect(request.pending).toBe(true);
+    expect(
+      request.resolve(
         ticket,
         {
-          candidates: [
-            { displayText: "who", insertText: "who ", kind: "command" },
-            {
-              displayText: "whoami",
-              insertText: "whoami ",
-              kind: "command",
-            },
-          ],
           cursor: 2,
-          replaceEnd: 2,
-          replaceStart: 0,
+          outcome: "listed",
           truncated: false,
           value: "wh",
         },
         "wh",
         2,
       ),
-    ).toMatchObject({ outcome: "applied" });
-    expect(shelf.state).toMatchObject({
-      kind: "open",
-      selected: 0,
-      truncated: false,
+    ).toEqual({
+      completion: {
+        cursor: 2,
+        outcome: "listed",
+        truncated: false,
+        value: "wh",
+      },
+      outcome: "resolved",
     });
-    expect(shelf.move(1)).toBe(true);
-    expect(shelf.accept("wh", 2)).toEqual({
-      cursor: 7,
-      value: "whoami ",
-    });
-    expect(shelf.state.kind).toBe("closed");
-  });
+    expect(request.pending).toBe(false);
 
-  it("discards late completion responses and reports invalid payloads", () => {
-    const shelf = new CompletionShelfController();
-    const dismissed = shelf.begin("ca", 2);
-    shelf.dismiss();
-    expect(shelf.resolve(dismissed, completionResponse(), "ca", 2)).toEqual({
-      outcome: "stale",
-    });
-
-    const moved = shelf.begin("ca", 2);
-    expect(shelf.resolve(moved, completionResponse(), "cat", 3)).toEqual({
-      outcome: "stale",
-    });
-    expect(shelf.state.kind).toBe("closed");
-
-    const invalid = shelf.begin("ca", 2);
+    const mutatedNone = request.begin("ca", 2);
     expect(
-      shelf.resolve(
-        invalid,
+      request.resolve(
+        mutatedNone,
         {
           ...completionResponse(),
-          candidates: [{ displayText: "cat", insertText: "", kind: "command" }],
+          outcome: "none",
+          value: "cat",
         },
         "ca",
         2,
       ),
     ).toEqual({ outcome: "invalid" });
-    expect(shelf.state).toMatchObject({
-      kind: "message",
-      message: "COMPLETION PROTOCOL ERROR",
-      tone: "error",
+    expect(request.pending).toBe(false);
+  });
+
+  it("discards late completion responses and reports invalid payloads", () => {
+    const request = new CompletionRequestController();
+    const dismissed = request.begin("ca", 2);
+    request.cancel();
+    expect(request.resolve(dismissed, completionResponse(), "ca", 2)).toEqual({
+      outcome: "stale",
     });
+
+    const moved = request.begin("ca", 2);
+    expect(request.resolve(moved, completionResponse(), "cat", 3)).toEqual({
+      outcome: "stale",
+    });
+    expect(request.pending).toBe(false);
+
+    const invalid = request.begin("ca", 2);
+    expect(
+      request.resolve(
+        invalid,
+        {
+          ...completionResponse(),
+          outcome: "listed",
+          value: "cat",
+        },
+        "ca",
+        2,
+      ),
+    ).toEqual({ outcome: "invalid" });
+    expect(request.pending).toBe(false);
   });
 
   it("admits editor keys atomically and removes them only after ordered acknowledgement", () => {
@@ -298,13 +332,8 @@ describe("Web terminal input helpers", () => {
 
 function completionResponse() {
   return {
-    candidates: [
-      { displayText: "cat", insertText: "cat ", kind: "command" },
-      { displayText: "case", insertText: "case ", kind: "command" },
-    ],
     cursor: 2,
-    replaceEnd: 2,
-    replaceStart: 0,
+    outcome: "listed",
     truncated: false,
     value: "ca",
   };
@@ -312,15 +341,16 @@ function completionResponse() {
 
 function interactionForValidation() {
   return {
-    schema: 1,
+    schema: 2,
     inputMode: "line",
     cursorShape: "block",
     pointer: "none",
     presentation: "terminal",
     secretInput: false,
     context: "shell",
-    interrupt: false,
+    ctrlCAction: "abort-line",
     history: true,
     hints: [],
+    interactionGeneration: 1,
   };
 }

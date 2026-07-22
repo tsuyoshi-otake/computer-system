@@ -196,6 +196,36 @@ describe("Computer System Linux shell and editor", (): void => {
       value: "cat /etc/",
     });
     expect(shell.complete("s", 1).candidates.length).toBeGreaterThan(1);
+
+    expect(shell.completeTerminal("who", 3)).toEqual({
+      lines: ["who     whoami"],
+      response: {
+        cursor: 3,
+        outcome: "listed",
+        truncated: false,
+        value: "who",
+      },
+    });
+    expect(shell.completeTerminal("cat /et", 7)).toEqual({
+      lines: [],
+      response: {
+        cursor: 9,
+        outcome: "applied",
+        truncated: false,
+        value: "cat /etc/",
+      },
+    });
+
+    const bounded = shell.completeTerminal("", 0);
+    expect(bounded.response).toMatchObject({
+      cursor: 0,
+      outcome: "listed",
+      truncated: true,
+      value: "",
+    });
+    expect(bounded.lines.at(-1)).toBe("...");
+    expect(bounded.lines.length).toBeLessThanOrEqual(65);
+    expect(bounded.lines.every((line) => [...line].length <= 80)).toBe(true);
   });
 
   it("loads system and user bashrc files without replacing user content", (): void => {

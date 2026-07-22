@@ -463,9 +463,9 @@ The earlier standalone Monitor feasibility probe is historical evidence only;
 the production Desktop and Advanced Desktop now carry their CRT in the same
 placeable block.
 
-`Verify:` Run `npm run build`, install Resource Pack 0.1.16 with Behavior Pack
-0.1.6 in the Windows GDK client, and inspect both placed blocks and inventory
-items for Computer, Advanced, and Portable.
+`Verify:` Run `npm run build`, install Resource Pack 0.1.17 with Behavior Pack
+0.1.9 in the Windows GDK client, and inspect both placed blocks and inventory
+items for Computer, Advanced, Portable, and Floppy Disk.
 
 `Expect:` Computer and Advanced share one cream square all-in-one Deskpro-style
 chassis. The upper CRT housing is a strict rectangular cuboid: one uninterrupted
@@ -478,7 +478,9 @@ silhouette, darker keyboard deck, trackball, and 4:3 black screen. No 5.25-inch
 drive appears. The desktop screen sits nearly flush against the CRT housing
 without a visible thick slab along its side or lower edge. Item silhouettes
 remain legible at inventory scale, block faces resolve without missing-material
-purple, and all four cardinal placements face the player consistently.
+purple, and all four cardinal placements face the player consistently. The
+Floppy Disk artwork occupies 75% of its 256 px item-texture canvas, remains
+centered, and reads at a similar visual scale to the neighboring machine items.
 
 `Verify:` Inspect the generated Behavior/Resource Packs, place each desktop, and
 interact with it directly within three blocks.
@@ -574,27 +576,30 @@ does not migrate the previous sequential `computer-N` registry.
     the identity is the sandbox user `cs`, the hostname is the compact Computer
     ID, Linux profile directories are present, and `null` is listed but is not
     an ordinary persisted file.
-14. At a CS-Linux prompt, type `who` and press Tab. Confirm the shared prefix
-    remains in the line and a completion shelf opens below, rather than over,
-    the 80x25 display with `who` and `whoami` labeled as commands. Use Tab/Down
-    and Shift+Tab/Up to wrap selection, Enter to accept `whoami `, and Escape to
-    close without submitting. Type `cat /et` and press Tab; confirm the unique
-    match becomes `cat /etc/` immediately. On CS-DOS, type `DI` and confirm
-    case-insensitive command candidates use uppercase display names; type
-    `DIR C:\\DO` and confirm `C:\\DOS\\` is offered as a directory. While a
-    shelf request is pending, type or move the caret and confirm its late
-    response is ignored. Lose writer control and confirm the shelf closes.
-    Resize the browser and confirm the reported cell size remains 80x25, the
-    shelf stays outside the guest raster, glyphs scale to fit both axes without
-    a scrollbar, and no duplicate resize relay or command is produced.
+14. At a CS-Linux prompt, type `who` and press Tab. Confirm the current prompt
+    and draft become terminal output, `who` and `whoami` appear in bounded
+    columns inside the 80x25 guest terminal, and a new prompt redraws the same
+    unsubmitted `who` draft without executing it or adding it to history. Type
+    `cat /et` and press Tab; confirm the unique match becomes `cat /etc/`
+    immediately without printing a candidate grid or submitting the line. On
+    CS-DOS, type an ambiguous command or path and confirm case-insensitive
+    matches are printed inside the terminal with uppercase display names; type
+    `DIR C:\\DO` and confirm the unique result becomes `DIR C:\\DOS\\` without
+    submission. While a request is pending, confirm editing is temporarily
+    locked. Switch sessions or lose writer control before the response and
+    confirm the late response cannot replace the newer draft. Resize the browser
+    and confirm the reported cell size remains 80x25, glyphs scale to fit both
+    axes without a scrollbar, no completion shelf or listbox exists outside the
+    guest raster, and no duplicate resize relay or command is produced.
 
-    `Verify:` Repeat the unique, multiple, dismissed, caret-moved, writer-loss,
-    CS-Linux path, and CS-DOS drive-path cases in Chrome with the network
-    response delayed once.
+    `Verify:` Repeat the unique, ambiguous, delayed, session-changed,
+    writer-loss, CS-Linux path, and CS-DOS drive-path cases in Chrome with the
+    network response delayed once.
 
-    `Expect:` No completion submits a command. At most 64 typed candidates are
-    shown; a truncated set has a trailing plus. Only the current request may
-    change the line, and the fixed guest display remains an exact 80x25 grid.
+    `Expect:` No completion submits a command or appears during secret input. At
+    most 64 candidates are shown inside the guest terminal; a truncated set ends
+    with `...`, no browser candidate DOM is created, only the current request
+    may change the line, and the fixed display remains an exact 80x25 grid.
 
 15. Run `date`, `date --game`, `date --virtual`, `du -s /home`, and `quota`.
     Confirm wall UTC, Minecraft time, deterministic VM time, subtree bytes, and

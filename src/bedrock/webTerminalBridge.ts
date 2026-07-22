@@ -2,7 +2,7 @@ import { system, world, type Block, type Player } from "@minecraft/server";
 
 import type { ComputerRecord } from "../domain/computer/computer.js";
 import type { RuntimeCommandResult } from "../application/computer/computerRuntime.js";
-import type { ShellCompletionResult } from "../application/os/shellTypes.js";
+import type { ShellTerminalCompletionResponse } from "../application/os/shellTypes.js";
 import type { TerminalInteractionDescriptor } from "../application/terminal/terminalInteraction.js";
 import { TerminalSnapshotScheduler } from "../application/terminal/terminalSnapshotScheduler.js";
 import { FloppyAudioEventBroker } from "../application/terminal/floppyAudioEvents.js";
@@ -275,12 +275,6 @@ export function handleWebTerminalScriptEvent(
     case "computer_system:web-resize":
       handleResize(message);
       return true;
-    case "computer_system:web-interrupt":
-      handleInterrupt(message);
-      return true;
-    case "computer_system:web-abort-line":
-      handleAbortLine(message);
-      return true;
     case "computer_system:web-take-control":
       handleTakeControl(message);
       return true;
@@ -476,7 +470,7 @@ function handleInput(message: string): void {
   const sessionId = correlation[1] ?? "";
   const requestId = correlation[2] ?? "";
   const match =
-    /^([A-Za-z0-9_-]{12,32}) ([A-Za-z0-9_-]{6,20}) (line|keys|mouse) ([^\s]{0,180})$/u.exec(
+    /^([A-Za-z0-9_-]{12,32}) ([A-Za-z0-9_-]{6,20}) ([0-9]{1,16}) (abort-line|cancel|interrupt|line|keys|mouse) ([^\s]{0,180})$/u.exec(
       message,
     );
   if (match === null) {
@@ -505,6 +499,17 @@ function handleInput(message: string): void {
   const interaction = computerHost.runtime.terminalInteraction(
     session.computerId,
   );
+  const interactionGeneration = Number(match[3]);
+  if (
+    !Number.isSafeInteger(interactionGeneration) ||
+    interactionGeneration !== interaction.interactionGeneration
+  ) {
+    finalizeInputRequest(sessionId, requestId, {
+      outcome: "ignored",
+      reason: "input_mode_changed",
+    });
+    return;
+  }
   if (session.principal.kind === "debug" && interaction.secretInput) {
     finalizeInputRequest(sessionId, requestId, {
       outcome: "ignored",
@@ -514,7 +519,7 @@ function handleInput(message: string): void {
   }
   let value: string;
   try {
-    value = decodeURIComponent(match[4] ?? "");
+    value = decodeURIComponent(match[5] ?? "");
   } catch {
     finalizeInputRequest(
       sessionId,
@@ -523,7 +528,25 @@ function handleInput(message: string): void {
     );
     return;
   }
-  if (match[3] === "mouse") {
+  const kind = match[4];
+  if (kind === "abort-line" || kind === "cancel" || kind === "interrupt") {
+    if (interaction.ctrlCAction !== kind) {
+      finalizeInputRequest(sessionId, requestId, {
+        outcome: "ignored",
+        reason: "input_mode_changed",
+      });
+      return;
+    }
+    const result =
+      kind === "interrupt"
+        ? computerHost.runtime.interrupt(session.computerId)
+        : kind === "cancel"
+          ? computerHost.runtime.cancelTerminalInteraction(session.computerId)
+          : computerHost.runtime.abortLine(session.computerId);
+    finalizeInputRequest(sessionId, requestId, safeInputQueueResult(result));
+    return;
+  }
+  if (kind === "mouse") {
     const event = parseTerminalMouseEvent(value);
     if (event === undefined) {
       finalizeInputRequest(
@@ -596,7 +619,7 @@ function handleInput(message: string): void {
           : session.mouseButtons & ~mask;
     }
     finalizeInputRequest(sessionId, requestId, result);
-  } else if (match[3] === "keys") {
+  } else if (kind === "keys") {
     if (!isTerminalKeyBatch(value)) {
       finalizeInputRequest(
         sessionId,
@@ -686,7 +709,7 @@ function parseTerminalMouseEvent(value: string):
 
 function handleCompletion(message: string): void {
   const match =
-    /^([A-Za-z0-9_-]{12,32}) ([A-Za-z0-9_-]{6,20}) ([0-9]{1,3}) v([^\s]{0,128})$/u.exec(
+    /^([A-Za-z0-9_-]{12,32}) ([A-Za-z0-9_-]{6,20}) ([0-9]{1,16}) ([0-9]{1,3}) v([^\s]{0,128})$/u.exec(
       message,
     );
   if (match === null) return;
@@ -695,11 +718,12 @@ function handleCompletion(message: string): void {
     return;
   let value: string;
   try {
-    value = decodeURIComponent(match[4] ?? "");
+    value = decodeURIComponent(match[5] ?? "");
   } catch {
     return;
   }
-  const cursor = Number(match[3]);
+  const interactionGeneration = Number(match[3]);
+  const cursor = Number(match[4]);
   if (
     value.includes("\0") ||
     /[\r\n]/u.test(value) ||
@@ -713,6 +737,19 @@ function handleCompletion(message: string): void {
   const interaction = computerHost.runtime.terminalInteraction(
     session.computerId,
   );
+  if (
+    !Number.isSafeInteger(interactionGeneration) ||
+    interactionGeneration !== interaction.interactionGeneration
+  ) {
+    console.warn(
+      `${completionMarker}${JSON.stringify({
+        ...emptyCompletion(value, cursor),
+        requestId: match[2],
+        sessionId: session.sessionId,
+      })}`,
+    );
+    return;
+  }
   const completion =
     interaction.inputMode === "line" && !interaction.secretInput
       ? (computerHost.runtime.completeShellInput(
@@ -721,6 +758,13 @@ function handleCompletion(message: string): void {
           cursor,
         ) ?? emptyCompletion(value, cursor))
       : emptyCompletion(value, cursor);
+  if (completion.outcome === "listed") {
+    for (const attachedSessionId of sessionsByComputer.get(
+      session.computerId,
+    ) ?? []) {
+      snapshotScheduler.requestEager(attachedSessionId);
+    }
+  }
   console.warn(
     `${completionMarker}${JSON.stringify({
       ...completion,
@@ -730,12 +774,13 @@ function handleCompletion(message: string): void {
   );
 }
 
-function emptyCompletion(value: string, cursor: number): ShellCompletionResult {
+function emptyCompletion(
+  value: string,
+  cursor: number,
+): ShellTerminalCompletionResponse {
   return {
-    candidates: [],
     cursor,
-    replaceEnd: cursor,
-    replaceStart: cursor,
+    outcome: "none",
     truncated: false,
     value,
   };
@@ -768,35 +813,6 @@ function isTerminalKeyBatch(value: string): boolean {
     );
   } catch {
     return false;
-  }
-}
-
-function handleInterrupt(message: string): void {
-  const match = /^([A-Za-z0-9_-]{12,32})$/u.exec(message);
-  if (match === null) return;
-  const session = requireActiveSession(match[1] ?? "");
-  if (
-    session !== undefined &&
-    terminalAccess.canWrite(session.sessionId) &&
-    computerHost.runtime.terminalInteraction(session.computerId).interrupt
-  ) {
-    computerHost.runtime.interrupt(session.computerId);
-    snapshotScheduler.requestEager(session.sessionId);
-  }
-}
-
-function handleAbortLine(message: string): void {
-  const match = /^([A-Za-z0-9_-]{12,32})$/u.exec(message);
-  if (match === null) return;
-  const session = requireActiveSession(match[1] ?? "");
-  if (
-    session !== undefined &&
-    terminalAccess.canWrite(session.sessionId) &&
-    computerHost.runtime.terminalInteraction(session.computerId).inputMode ===
-      "line"
-  ) {
-    computerHost.runtime.abortLine(session.computerId);
-    snapshotScheduler.requestEager(session.sessionId);
   }
 }
 
