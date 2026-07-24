@@ -39,18 +39,27 @@ const distDirectory = path.join(repositoryRoot, "wasm", "dist");
 const rustArtifactName = "cs486-batch-executor.rust.wasm";
 const asArtifactName = "cs486-batch-executor.as.wasm";
 const checksumFileName = "SHA256SUMS.txt";
-
-// cargo/rustup/npx resolve through .cmd shims on Windows, so commands need a
-// shell there; arguments below are fixed strings, never user input.
-const useShell = process.platform === "win32";
+// Invoked directly with the current Node binary instead of through the `npx`/
+// `asc` .cmd shims, so no command ever needs shell:true (Node's execFileSync
+// otherwise concatenates argv into the shell command line unescaped).
+const ascBinPath = path.join(
+  repositoryRoot,
+  "node_modules",
+  "assemblyscript",
+  "bin",
+  "asc.js",
+);
 
 function run(command, args, options = {}) {
   return execFileSync(command, args, {
     encoding: "utf8",
-    shell: useShell,
     stdio: ["ignore", "pipe", "pipe"],
     ...options,
   });
+}
+
+function runAsc(args, options = {}) {
+  return run(process.execPath, [ascBinPath, ...args], options);
 }
 
 function preflight() {
@@ -67,9 +76,7 @@ function preflight() {
       'missing Rust target wasm32-unknown-unknown; run "rustup target add wasm32-unknown-unknown"',
     );
   try {
-    run("npx", ["--no-install", "asc", "--version"], {
-      cwd: repositoryRoot,
-    });
+    runAsc(["--version"], { cwd: repositoryRoot });
   } catch (error) {
     throw new Error(
       `the assemblyscript compiler is required; run "npm install" so the devDependency is available (${describeError(error)})`,
@@ -92,18 +99,8 @@ function buildRust(targetDirectory) {
 }
 
 function buildAssemblyScript(outFile) {
-  run(
-    "npx",
-    [
-      "--no-install",
-      "asc",
-      "--config",
-      "asconfig.json",
-      "--target",
-      "release",
-      "--outFile",
-      outFile,
-    ],
+  runAsc(
+    ["--config", "asconfig.json", "--target", "release", "--outFile", outFile],
     {
       cwd: asProjectDirectory,
       stdio: ["ignore", "inherit", "inherit"],
