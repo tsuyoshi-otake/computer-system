@@ -175,7 +175,9 @@ Player-experience checks are intentionally isolated in the
 
 - Node.js 24 or later
 - Minecraft Bedrock Edition 1.26.30 or later in the 1.26 release line
-- The official Bedrock Dedicated Server distribution for BDS verification
+- The
+  [official Bedrock Dedicated Server distribution](https://www.minecraft.net/en-us/download/server/bedrock)
+  for BDS verification (see [Bedrock MCP debugging](#bedrock-mcp-debugging))
 
 The normal release-pack baseline uses `@minecraft/server` 2.8.0,
 `@minecraft/server-ui` 2.1.0, and `@minecraft/vanilla-data` 1.26.33 without Beta
@@ -257,10 +259,18 @@ Instead, the project-scoped [`.codex/config.toml`](.codex/config.toml) registers
 the `computer_system_bds` stdio companion implemented by
 [`tools/bds-mcp-server.mjs`](tools/bds-mcp-server.mjs).
 
-Set `BDS_HOME` to an extracted official BDS distribution. The tooling treats
-that directory as a read-only source and copies it into a managed runtime under
-`%USERPROFILE%\tmp\computer-system-bds`; it never recursively deletes
-`BDS_HOME`.
+Download the
+[official Bedrock Dedicated Server distribution](https://www.minecraft.net/en-us/download/server/bedrock)
+(Windows or Ubuntu Linux) and extract the archive to any local directory.
+Downloading it constitutes acceptance of the Minecraft EULA and Privacy Policy,
+so the repository does not download it automatically. Set `BDS_HOME` to that
+extracted directory. The tooling treats that directory as a read-only source and
+copies it into a managed runtime under `%USERPROFILE%\tmp\computer-system-bds`;
+it never recursively deletes `BDS_HOME`. Every `npm run test:bds`,
+`test:bds:disconnect`, `test:mcp:bds`, and `dev:bds:web` command then imports
+the built Behavior and Resource Pack into its managed world and starts the
+server itself — no manual pack copy or world setup is required beyond pointing
+`BDS_HOME` at the extracted distribution.
 
 ```powershell
 $env:BDS_HOME = "C:\path\to\bedrock-server"
