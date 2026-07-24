@@ -743,11 +743,39 @@ host cost of the production TypeScript interpreter with a fixed register- and
 branch-heavy instruction stream. It reports host nanoseconds/CPU time separately
 from deterministic modeled guest cycles and labels itself as host implementation
 throughput; it is not evidence of guest clock speed or multi-user BDS capacity.
-Use the same machine, Node version, sample count, and instruction count for
-before/after comparisons. Verify: run the command twice on the candidate commit.
-Expect: every model completes the requested instruction count with a stable
-register checksum and guest-cycle count while host timing remains an explicitly
-separate field.
+Add `--mode cpu-slice` to exercise the production cycle-budget/debt path instead
+of the instruction-budget-only path. `--instrumentation enabled|disabled`
+selects whether host microarchitecture counters are collected; enabled is the
+compatibility default, while disabled reports `microarchitecture: null` rather
+than fabricated zero counters. Performance evidence for Issue #106 uses at least
+20 warm samples with before/after order rotated in one Node process. Within one
+instrumentation mode, the harness rejects any sample set whose instruction
+count, guest cycles, all eight registers, instruction pointer, process state,
+output, full guest-RAM SHA-256, pending-cycle state, or available
+microarchitecture counter changes. Cross-mode A/B evidence requires every
+authoritative guest field to match exactly and permits only host timing and
+statistics availability to differ. Use the same machine, Node/V8 version, sample
+count, instruction count, workload, and execution mode for comparisons. Verify:
+run both execution and instrumentation modes on the candidate. Expect: every
+model completes the requested instruction count with identical authoritative
+guest evidence while host median and p95 timing remain explicitly separate
+fields.
+
+The Issue #106 Phase 4 wasm batch-executor prototype is optional tooling; it is
+not part of the production execution path and `npm run validate` never requires
+it. Building the artifacts needs Rust with the `wasm32-unknown-unknown` target
+(`rustup target add wasm32-unknown-unknown`) plus the pinned `assemblyscript`
+devDependency. `npm run build:cs486-wasm` compiles both variants into untracked
+`wasm/dist/cs486-batch-executor.{rust,as}.wasm` files with a `SHA256SUMS.txt`,
+and `npm run build:cs486-wasm:check` rebuilds into a temporary path and fails on
+any digest drift. `npm run verify:cs486-wasm-equivalence` differentially
+executes seeded fuzz programs plus forced edge cases across all three CPU
+profiles and exits non-zero on the first divergence or missing artifact; the
+matching vitest wrapper skips when artifacts are absent so the host gate stays
+cargo-free. `npm run benchmark:cs486:wasm-ab` runs the full engine/corpus/
+profile/instrumentation matrix with rotated warm samples and aborts on any
+cross-engine guest-evidence mismatch. Adoption-gate evidence lives in
+`docs/issues/issue-106-wasm-batch-executor.md`.
 
 C++ deliberately emits the same unmangled CS ABI as C. Individual `extern "C"`
 declarations are accepted as an explanatory spelling; linkage blocks, other

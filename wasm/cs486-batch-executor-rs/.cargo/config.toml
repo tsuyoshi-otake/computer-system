@@ -1,0 +1,5 @@
+# The executor is non-recursive with tiny frames; a 64 KiB shadow stack keeps
+# the module's initial linear memory small so the host-owned region (params,
+# SoA tables, cache state, guest RAM) starts near the bottom of memory.
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "link-arg=-zstack-size=65536"]

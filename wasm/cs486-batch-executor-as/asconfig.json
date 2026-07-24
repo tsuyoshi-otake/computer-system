@@ -1,0 +1,18 @@
+{
+  "entries": ["assembly/index.ts"],
+  "targets": {
+    "release": {
+      "outFile": "build/cs486-batch-executor.as.wasm",
+      "optimizeLevel": 3,
+      "shrinkLevel": 0,
+      "converge": true,
+      "noAssert": true
+    }
+  },
+  "options": {
+    "runtime": "stub",
+    "exportStart": false,
+    "use": ["abort="],
+    "initialMemory": 1
+  }
+}

@@ -165,8 +165,10 @@ scope and executable acceptance criteria.
 
 Development setup and Phase 0 evidence are documented in
 [the development guide](docs/development.md) and
-[the feasibility matrix](docs/feasibility-matrix.md). Player-experience checks
-are intentionally isolated in the
+[the feasibility matrix](docs/feasibility-matrix.md). The optional Issue #106
+wasm batch-executor prototype and its adoption-gate evidence are recorded in
+[the Issue #106 evidence document](docs/issues/issue-106-wasm-batch-executor.md).
+Player-experience checks are intentionally isolated in the
 [manual verification checklist](docs/manual-verification.md).
 
 ## Requirements

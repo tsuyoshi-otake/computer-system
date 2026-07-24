@@ -47,6 +47,9 @@ const outputRoot = resolveOutputRoot(process.env.COMPUTER_SYSTEM_PACK_OUTPUT);
 const acceptanceFixtureBuild = parseAcceptanceFixtureBuild(
   process.env.COMPUTER_SYSTEM_ACCEPTANCE_FIXTURE,
 );
+const wasmProbeBuild = parseWasmProbeBuild(
+  process.env.COMPUTER_SYSTEM_WASM_PROBE,
+);
 const behaviorPackConfig = parseBehaviorPackConfig(
   JSON.parse(
     await readFile(
@@ -192,6 +195,7 @@ await build({
     __CS_GUEST_REALTIME_DIVISOR__: JSON.stringify(
       behaviorPackConfig.guestRealtimeDivisor,
     ),
+    __CS_WASM_PROBE__: JSON.stringify(wasmProbeBuild),
   },
   entryPoints: [path.join(root, "src", "bedrock", "main.ts")],
   external: ["@minecraft/server", "@minecraft/server-ui"],
@@ -201,6 +205,29 @@ await build({
   logLevel: "info",
   outfile: path.join(behaviorOutput, "scripts", "main.js"),
   platform: "neutral",
+  // Probe-free builds swap the wasm probe module for an inert stub so no
+  // probe code or diagnostic string ships; esbuild keeps `if (false)`
+  // branches without minification, so a define alone cannot guarantee that.
+  plugins: wasmProbeBuild
+    ? []
+    : [
+        {
+          name: "cs-wasm-probe-stub",
+          setup(pluginBuild) {
+            pluginBuild.onResolve(
+              { filter: /probes[\\/]wasmProbe\.js$/ },
+              () => ({ namespace: "cs-wasm-probe-stub", path: "stub" }),
+            );
+            pluginBuild.onLoad(
+              { filter: /^stub$/, namespace: "cs-wasm-probe-stub" },
+              () => ({
+                contents: "export function startWasmProbe() {}",
+                loader: "js",
+              }),
+            );
+          },
+        },
+      ],
   sourcemap: true,
   target: "es2022",
 });

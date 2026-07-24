@@ -38,6 +38,7 @@ weaken a repository-wide safety rule.
 | [`docs/`](docs/CLAUDE.md)                                                 | Maintainer/operator documentation, verification records, and issue evidence     |
 | [`.github/`](.github/CLAUDE.md)                                           | GitHub automation and its workflow-specific rules                               |
 | [`vendor/bedrock-core-ui-0.9.2/`](vendor/bedrock-core-ui-0.9.2/CLAUDE.md) | Pinned upstream UI source, compiled mirror, and RP protocol assets              |
+| [`wasm/`](wasm/CLAUDE.md)                                                 | Gated Issue #106 Phase 4 Rust/AssemblyScript wasm batch-executor prototype      |
 
 Keep a scoped rule in the narrowest directory that owns it. Do not copy the same
 rule into several files. If a change crosses scopes, read each applicable
@@ -187,9 +188,8 @@ Issue. Issue #4 remains relevant while Phase 2 work is in scope.
 The public Pages site is live at
 `https://tsuyoshi-otake.github.io/computer-system/` through the official
 workflow. Keep publication on `main` or manual dispatch, require successful
-build/deploy jobs, and verify the deployed URL before claiming a later update.
-Exact Actions evidence and recovery steps belong to
-`.github/workflows/CLAUDE.md`.
+build/deploy jobs, and verify the deployed URL before claiming an update.
+Actions evidence and recovery steps belong to `.github/workflows/CLAUDE.md`.
 
 ## Working references
 
