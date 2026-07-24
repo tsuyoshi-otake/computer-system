@@ -406,10 +406,11 @@ idempotence, and fresh-world no-op behavior all pass.
 
 ## Headless Bedrock verification
 
-Download and extract the official Bedrock Dedicated Server distribution, then
-point `BDS_HOME` at the extracted directory. Downloading the server constitutes
-acceptance of the Minecraft EULA and Privacy Policy, so the repository tooling
-does not download it automatically.
+Download and extract the
+[official Bedrock Dedicated Server distribution](https://www.minecraft.net/en-us/download/server/bedrock),
+then point `BDS_HOME` at the extracted directory. Downloading the server
+constitutes acceptance of the Minecraft EULA and Privacy Policy, so the
+repository tooling does not download it automatically.
 
 ```text
 $env:BDS_HOME="C:\path\to\bedrock-server"
