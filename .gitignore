@@ -31,3 +31,7 @@ pnpm-debug.log*
 
 # Goal-loop artifacts
 .codex/goal-loop/
+.claude/
+
+# Playwright CLI scratch output (console logs, page snapshots)
+.playwright-cli/

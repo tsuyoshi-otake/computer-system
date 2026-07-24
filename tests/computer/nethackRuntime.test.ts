@@ -4,6 +4,7 @@ import { ComputerRuntime } from "../../src/application/computer/computerRuntime.
 import { buildGuestNethackExecutable } from "../../src/application/toolchain/guestNethackBuilder.js";
 import { guestNethackSourceFiles } from "../../src/application/toolchain/guestNethack.js";
 import { ComputerRecord } from "../../src/domain/computer/computer.js";
+import type { TerminalBufferSnapshot } from "../../src/domain/terminal/terminalBuffer.js";
 
 describe("NetHack for CS-Linux", (): void => {
   it("renders the next interactive frame within 500 scheduler ticks", (): void => {
@@ -150,10 +151,11 @@ describe("NetHack for CS-Linux", (): void => {
     waitForShell(runtime, record);
 
     launchGame(runtime, record);
+    const beforeReload = terminalText(record);
     expect(
       runtime.queueEvent(record.computerId, "terminal_keys", '["l"]'),
     ).toMatchObject({ outcome: "accepted" });
-    runUntil(runtime, () => terminalText(record).includes("@"));
+    runUntil(runtime, () => terminalText(record) !== beforeReload);
     expect(terminalText(record)).toContain("@");
     expect(terminalText(record)).toContain(".");
   });
@@ -258,6 +260,69 @@ describe("NetHack for CS-Linux", (): void => {
       ),
     });
   });
+
+  it("renders the player glyph with a visible foreground color", (): void => {
+    const runtime = new ComputerRuntime();
+    const record = new ComputerRecord("c-006409", "standard");
+    runtime.register(record);
+    runtime.powerOn(record.computerId);
+    completeBoot(runtime, record);
+    launchGame(runtime, record);
+    const before = terminalText(record);
+    expect(
+      runtime.queueEvent(record.computerId, "terminal_keys", '["l"]'),
+    ).toMatchObject({ outcome: "accepted" });
+    runUntil(runtime, () => terminalText(record) !== before);
+
+    const snapshot = record.terminal.snapshot();
+    const playerPosition = findPlayerGlyph(snapshot);
+    expect(playerPosition).not.toBeNull();
+    const { row: playerRow, column: playerColumn } = playerPosition!;
+    expect(snapshot.foreground[playerRow]?.[playerColumn]).toBe(0);
+    expect(snapshot.background[playerRow]?.[playerColumn]).toBe(15);
+  });
+
+  it("resets the terminal after NetHack exits through Ctrl+C", (): void => {
+    const runtime = new ComputerRuntime();
+    const record = new ComputerRecord("c-006410", "standard");
+    runtime.register(record);
+    runtime.powerOn(record.computerId);
+    completeBoot(runtime, record);
+    launchGame(runtime, record);
+    const before = terminalText(record);
+    expect(
+      runtime.queueEvent(record.computerId, "terminal_keys", '["l"]'),
+    ).toMatchObject({ outcome: "accepted" });
+    runUntil(runtime, () => terminalText(record) !== before);
+    const duringSnapshot = record.terminal.snapshot();
+    const playerPosition = findPlayerGlyph(duringSnapshot);
+    expect(playerPosition).not.toBeNull();
+    const duringForeground = duringSnapshot.foreground;
+    expect(
+      duringForeground.some((row) =>
+        row.slice(0, 78).some((value) => value === 7 || value === 8),
+      ),
+    ).toBe(true);
+
+    expect(runtime.interrupt(record.computerId)).toMatchObject({
+      outcome: "accepted",
+    });
+    for (let tick = 0; tick < 4; tick += 1) runtime.runTick();
+
+    expect(runtime.terminalInteraction(record.computerId).context).not.toBe(
+      "cs-abi",
+    );
+    const { row: playerRow, column: playerColumn } = playerPosition!;
+    const after = record.terminal.snapshot();
+    expect(after.rows[playerRow]?.[playerColumn]).not.toBe("@");
+    expect(terminalText(record)).toContain(`cs@${record.computerId}:~$`);
+    expect(after.background[10]?.slice(0, 78)).toEqual(
+      Array.from({ length: 78 }, () => 15),
+    );
+    expect(after.foreground[10]?.slice(0, 78)).toEqual(
+      Array.from({ length: 78 }, () => 0),
+    );
+  });
 });
 
 function launchGame(runtime: ComputerRuntime, record: ComputerRecord): void {
@@ -325,6 +390,17 @@ function completeBoot(runtime: ComputerRuntime, record: ComputerRecord): void {
 
 function terminalText(record: ComputerRecord): string {
   return record.terminal.snapshot().rows.join("\n");
+}
+
+function findPlayerGlyph(
+  snapshot: TerminalBufferSnapshot,
+): { row: number; column: number } | null {
+  for (let row = 0; row < snapshot.rows.length; row += 1) {
+    const column = snapshot.rows[row]!.indexOf("@");
+    if (column !== -1 && snapshot.background[row]?.[column] === 15)
+      return { row, column };
+  }
+  return null;
 }
 
 function runUntil(runtime: ComputerRuntime, predicate: () => boolean): void {

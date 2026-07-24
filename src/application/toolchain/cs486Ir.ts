@@ -270,6 +270,9 @@ export interface Cs486IrLimits {
   readonly maxExternals: number;
   readonly maxFunctions: number;
   readonly maxIdentifierLength: number;
+  readonly maxInlineCalleeBlocks: number;
+  readonly maxInlineCalleeInstructions: number;
+  readonly maxInlinedInstructionsPerFunction: number;
   readonly maxInstructionsPerFunction: number;
   readonly maxLocalsPerFunction: number;
   readonly maxOptimizationPasses: number;
@@ -286,6 +289,9 @@ export const DEFAULT_CS486_IR_LIMITS: Readonly<Cs486IrLimits> = Object.freeze({
   maxExternals: 2_048,
   maxFunctions: 1_024,
   maxIdentifierLength: 128,
+  maxInlineCalleeBlocks: 16,
+  maxInlineCalleeInstructions: 24,
+  maxInlinedInstructionsPerFunction: 192,
   maxInstructionsPerFunction: 8_192,
   maxLocalsPerFunction: 1_024,
   maxOptimizationPasses: 8,
@@ -1680,17 +1686,20 @@ export function optimizeCs486Ir(
   return optimizeCs486IrWithReport(program, overrides).program;
 }
 
-/** Runs constant folding, copy propagation, pure DCE, and CFG cleanup. */
+/**
+ * Runs bounded leaf inlining, algebraic simplification, constant folding, copy
+ * propagation, block-local CSE, pure DCE, and CFG cleanup.
+ */
 export function optimizeCs486IrWithReport(
   program: Cs486IrProgram,
   overrides: Partial<Cs486IrLimits> = {},
 ): Cs486IrOptimizationResult {
   const limits = resolveLimits(overrides);
   assertValidCs486Ir(program, limits);
-  let current: Cs486IrProgram = {
-    ...program,
-    functions: [...program.functions],
-  };
+  let current: Cs486IrProgram = inlineLeafFunctionCallsWithLimits(
+    program,
+    limits,
+  ).program;
   let converged = false;
   let passes = 0;
   for (let pass = 0; pass < limits.maxOptimizationPasses; pass += 1) {
@@ -1699,9 +1708,13 @@ export function optimizeCs486IrWithReport(
     const functions = current.functions.map((function_) => {
       let result = removeUnreachableBlocks(function_);
       changed ||= result.changed;
+      result = simplifyValues(result.function, limits);
+      changed ||= result.changed;
       result = foldConstants(result.function, limits);
       changed ||= result.changed;
       result = propagateCopies(result.function);
+      changed ||= result.changed;
+      result = eliminateCommonSubexpressions(result.function);
       changed ||= result.changed;
       result = eliminateDeadPureValues(result.function);
       changed ||= result.changed;
@@ -2014,6 +2027,232 @@ function evaluateBinary(
   }
 }
 
+function powerOfTwoShiftAmount(value: number): number | undefined {
+  if (value === -2_147_483_648) return 31;
+  if (value < 2 || (value & (value - 1)) !== 0) return undefined;
+  return 31 - Math.clz32(value);
+}
+
+function simplifyValues(
+  function_: Cs486IrFunction,
+  limits: Cs486IrLimits,
+): Cs486IrFunctionPassResult {
+  const constants = new Map<Cs486IrValueId, number>();
+  let nextValueId = 0;
+  let valueCount = function_.parameters.length;
+  let instructionCount = 0;
+  for (const parameter of function_.parameters)
+    nextValueId = Math.max(nextValueId, parameter.id + 1);
+  for (const block of function_.blocks) {
+    valueCount += block.phis.length;
+    for (const phi of block.phis)
+      nextValueId = Math.max(nextValueId, phi.result + 1);
+    for (const instruction of block.instructions) {
+      instructionCount += 1;
+      const result = instructionResult(instruction);
+      if (result !== undefined) {
+        valueCount += 1;
+        nextValueId = Math.max(nextValueId, result.id + 1);
+      }
+      if (instruction.kind === "constant")
+        constants.set(instruction.result, instruction.value);
+    }
+  }
+
+  const allocateConstant = (
+    value: number,
+  ): Cs486IrConstantInstruction | undefined => {
+    if (
+      valueCount + 1 > limits.maxValuesPerFunction ||
+      instructionCount + 1 > limits.maxInstructionsPerFunction
+    )
+      return undefined;
+    valueCount += 1;
+    instructionCount += 1;
+    const constant: Cs486IrConstantInstruction = {
+      kind: "constant",
+      result: nextValueId,
+      type: "i32",
+      value,
+    };
+    nextValueId += 1;
+    return constant;
+  };
+
+  let changed = false;
+  const blocks = function_.blocks.map((block) => {
+    let blockChanged = false;
+    const instructions: Cs486IrInstruction[] = [];
+    for (const instruction of block.instructions) {
+      const replacement =
+        instruction.kind === "binary"
+          ? simplifyBinaryInstruction(instruction, constants, allocateConstant)
+          : undefined;
+      if (replacement === undefined) {
+        instructions.push(instruction);
+        continue;
+      }
+      blockChanged = true;
+      instructions.push(...replacement);
+    }
+    if (!blockChanged) return block;
+    changed = true;
+    return { ...block, instructions };
+  });
+  return { changed, function: changed ? { ...function_, blocks } : function_ };
+}
+
+/**
+ * Returns a cheaper equivalent instruction sequence or undefined. Signed
+ * div/mod stay untouched: shifting mismatches truncating division rounding.
+ */
+function simplifyBinaryInstruction(
+  instruction: Cs486IrBinaryInstruction,
+  constants: ReadonlyMap<Cs486IrValueId, number>,
+  allocateConstant: (value: number) => Cs486IrConstantInstruction | undefined,
+): readonly Cs486IrInstruction[] | undefined {
+  const { left, right } = instruction;
+  const leftConstant = constants.get(left);
+  const rightConstant = constants.get(right);
+  // Fully constant operands stay owned by foldConstants.
+  if (leftConstant !== undefined && rightConstant !== undefined)
+    return undefined;
+  const copyOf = (value: Cs486IrValueId): readonly Cs486IrInstruction[] => [
+    {
+      kind: "copy",
+      result: instruction.result,
+      span: instruction.span,
+      type: instruction.type,
+      value,
+    },
+  ];
+  const constantOf = (value: number): readonly Cs486IrInstruction[] => [
+    {
+      kind: "constant",
+      result: instruction.result,
+      span: instruction.span,
+      type: instruction.type,
+      value,
+    },
+  ];
+  const withConstant = (
+    operator: Extract<Cs486IrBinaryOperator, "and" | "shl" | "ushr">,
+    operand: Cs486IrValueId,
+    value: number,
+  ): readonly Cs486IrInstruction[] | undefined => {
+    const constant = allocateConstant(value);
+    if (constant === undefined) return undefined;
+    return [
+      constant,
+      {
+        kind: "binary",
+        left: operand,
+        operator,
+        result: instruction.result,
+        right: constant.result,
+        span: instruction.span,
+        type: instruction.type,
+      },
+    ];
+  };
+  switch (instruction.operator) {
+    case "add":
+      if (rightConstant === 0) return copyOf(left);
+      if (leftConstant === 0) return copyOf(right);
+      return undefined;
+    case "sub":
+      if (left === right) return constantOf(0);
+      if (rightConstant === 0) return copyOf(left);
+      return undefined;
+    case "mul": {
+      if (leftConstant === 0 || rightConstant === 0) return constantOf(0);
+      if (rightConstant === 1) return copyOf(left);
+      if (leftConstant === 1) return copyOf(right);
+      const rightShift =
+        rightConstant === undefined
+          ? undefined
+          : powerOfTwoShiftAmount(rightConstant);
+      if (rightShift !== undefined)
+        return withConstant("shl", left, rightShift);
+      const leftShift =
+        leftConstant === undefined
+          ? undefined
+          : powerOfTwoShiftAmount(leftConstant);
+      if (leftShift !== undefined) return withConstant("shl", right, leftShift);
+      return undefined;
+    }
+    case "and":
+      if (left === right) return copyOf(left);
+      if (leftConstant === 0 || rightConstant === 0) return constantOf(0);
+      if (rightConstant === -1) return copyOf(left);
+      if (leftConstant === -1) return copyOf(right);
+      return undefined;
+    case "or":
+      if (left === right) return copyOf(left);
+      if (rightConstant === 0) return copyOf(left);
+      if (leftConstant === 0) return copyOf(right);
+      if (leftConstant === -1 || rightConstant === -1) return constantOf(-1);
+      return undefined;
+    case "xor":
+      if (left === right) return constantOf(0);
+      if (rightConstant === 0) return copyOf(left);
+      if (leftConstant === 0) return copyOf(right);
+      return undefined;
+    case "shl":
+    case "shr":
+    case "ushr":
+      if (rightConstant === 0) return copyOf(left);
+      return undefined;
+    case "udiv": {
+      if (rightConstant === 1) return copyOf(left);
+      const shift =
+        rightConstant === undefined
+          ? undefined
+          : powerOfTwoShiftAmount(rightConstant);
+      if (shift !== undefined) return withConstant("ushr", left, shift);
+      return undefined;
+    }
+    case "umod": {
+      if (rightConstant === 1) return constantOf(0);
+      const shift =
+        rightConstant === undefined
+          ? undefined
+          : powerOfTwoShiftAmount(rightConstant);
+      if (shift === undefined) return undefined;
+      const mask =
+        rightConstant === -2_147_483_648 ? 2_147_483_647 : rightConstant! - 1;
+      return withConstant("and", left, mask);
+    }
+    case "div":
+    case "mod":
+      return undefined;
+    case "eq":
+    case "le":
+    case "ge":
+    case "ule":
+    case "uge":
+      return left === right ? constantOf(1) : undefined;
+    case "ne":
+    case "lt":
+    case "gt":
+    case "ult":
+    case "ugt":
+      return left === right ? constantOf(0) : undefined;
+    case "logical-and":
+      if (left === right) return copyOf(left);
+      if (leftConstant === 0 || rightConstant === 0) return constantOf(0);
+      if (leftConstant === 1) return copyOf(right);
+      if (rightConstant === 1) return copyOf(left);
+      return undefined;
+    case "logical-or":
+      if (left === right) return copyOf(left);
+      if (leftConstant === 1 || rightConstant === 1) return constantOf(1);
+      if (leftConstant === 0) return copyOf(right);
+      if (rightConstant === 0) return copyOf(left);
+      return undefined;
+  }
+}
+
 function propagateCopies(
   function_: Cs486IrFunction,
 ): Cs486IrFunctionPassResult {
@@ -2188,6 +2427,152 @@ function rewriteTerminator(
   }
 }
 
+const commutativeBinaryOperators: ReadonlySet<Cs486IrBinaryOperator> = new Set([
+  "add",
+  "and",
+  "eq",
+  "logical-and",
+  "logical-or",
+  "mul",
+  "ne",
+  "or",
+  "xor",
+]);
+
+/**
+ * Block-local available-expression CSE. Duplicate pure computations and
+ * repeated loads become copies of the first occurrence; conservative kill
+ * rules invalidate cached loads across stores, calls, and volatile accesses.
+ */
+function eliminateCommonSubexpressions(
+  function_: Cs486IrFunction,
+): Cs486IrFunctionPassResult {
+  const constants = new Map<Cs486IrValueId, number>();
+  for (const block of function_.blocks)
+    for (const instruction of block.instructions)
+      if (instruction.kind === "constant")
+        constants.set(instruction.result, instruction.value);
+
+  let changed = false;
+  const blocks = function_.blocks.map((block) => {
+    const available = new Map<string, Cs486IrValueId>();
+    const rename = new Map<Cs486IrValueId, Cs486IrValueId>();
+    const resolve = (id: Cs486IrValueId): Cs486IrValueId =>
+      rename.get(id) ?? id;
+    const token = (id: Cs486IrValueId): string => {
+      const resolved = resolve(id);
+      const constant = constants.get(resolved);
+      return constant === undefined
+        ? `v${String(resolved)}`
+        : `c${String(constant)}`;
+    };
+    const dropKeys = (prefix: string): void => {
+      for (const key of [...available.keys()])
+        if (key.startsWith(prefix)) available.delete(key);
+    };
+
+    let blockChanged = false;
+    const instructions = block.instructions.map((original) => {
+      let operandChanged = false;
+      const rewritten = rewriteInstruction(original, (id) => {
+        const resolved = resolve(id);
+        if (resolved !== id) operandChanged = true;
+        return resolved;
+      });
+      const instruction = operandChanged ? rewritten : original;
+      if (operandChanged) blockChanged = true;
+
+      let key: string | undefined;
+      switch (instruction.kind) {
+        case "constant":
+        case "copy":
+          return instruction;
+        case "unary":
+          key = `u|${instruction.operator}|${instruction.type}|${token(instruction.operand)}`;
+          break;
+        case "binary": {
+          const leftToken = token(instruction.left);
+          const rightToken = token(instruction.right);
+          const ordered =
+            commutativeBinaryOperators.has(instruction.operator) &&
+            rightToken < leftToken
+              ? `${rightToken}|${leftToken}`
+              : `${leftToken}|${rightToken}`;
+          key = `b|${instruction.operator}|${instruction.type}|${ordered}`;
+          break;
+        }
+        case "address-local":
+          key = `al|${instruction.local}`;
+          break;
+        case "address-symbol":
+          key = `as|${instruction.symbol}`;
+          break;
+        case "load-local":
+          if (instruction.volatile === true) {
+            dropKeys("ll|");
+            return instruction;
+          }
+          key = `ll|${instruction.local}|${instruction.type}`;
+          break;
+        case "load-memory":
+          if (instruction.volatile === true) {
+            dropKeys("lm|");
+            return instruction;
+          }
+          key = `lm|${token(instruction.address)}|${String(instruction.width ?? 4)}|${instruction.signed === true ? "s" : "u"}`;
+          break;
+        case "store-local":
+          dropKeys(`ll|${instruction.local}|`);
+          dropKeys("lm|");
+          return instruction;
+        case "store-memory":
+          dropKeys("ll|");
+          dropKeys("lm|");
+          return instruction;
+        case "call":
+        case "indirect-call":
+          dropKeys("ll|");
+          dropKeys("lm|");
+          return instruction;
+      }
+      const result = instructionResult(instruction);
+      if (result === undefined) return instruction;
+      const existing = available.get(key);
+      if (existing === undefined) {
+        available.set(key, result.id);
+        return instruction;
+      }
+      rename.set(result.id, existing);
+      blockChanged = true;
+      return {
+        kind: "copy",
+        result: result.id,
+        span: instruction.span,
+        type: result.type,
+        value: existing,
+      } satisfies Cs486IrCopyInstruction;
+    });
+
+    let terminator = block.terminator;
+    if (terminator !== undefined && rename.size > 0) {
+      let terminatorChanged = false;
+      const rewrittenTerminator = rewriteTerminator(terminator, (id) => {
+        const resolved = resolve(id);
+        if (resolved !== id) terminatorChanged = true;
+        return resolved;
+      });
+      if (terminatorChanged) {
+        terminator = rewrittenTerminator;
+        blockChanged = true;
+      }
+    }
+    if (!blockChanged) return block;
+    changed = true;
+    return { ...block, instructions, terminator };
+  });
+  return { changed, function: changed ? { ...function_, blocks } : function_ };
+}
+
 interface Cs486IrDeadValueNode {
   readonly operands: readonly Cs486IrValueId[];
   readonly removable: boolean;
@@ -2266,10 +2651,444 @@ function isDeadCodeRemovable(instruction: Cs486IrInstruction): boolean {
     instruction.kind === "store-memory"
   )
     return false;
+  // All four division operators fault on zero divisors, so none may vanish.
   return !(
     instruction.kind === "binary" &&
-    (instruction.operator === "div" || instruction.operator === "mod")
+    (instruction.operator === "div" ||
+      instruction.operator === "mod" ||
+      instruction.operator === "udiv" ||
+      instruction.operator === "umod")
   );
+}
+
+export interface Cs486IrInliningResult {
+  readonly inlinedCallSites: number;
+  readonly program: Cs486IrProgram;
+}
+
+interface Cs486IrInlineCandidate {
+  readonly function: Cs486IrFunction;
+  readonly instructionCount: number;
+  readonly resultCount: number;
+  readonly returnCount: number;
+}
+
+/**
+ * One-shot bounded inlining of small leaf functions. Runs before the iterated
+ * optimization loop so convergence semantics stay unchanged. Return values
+ * merge through synthetic locals because this backend rejects phi destruction.
+ * Every overflow or namespace conflict skips the call site instead of failing.
+ */
+export function inlineLeafFunctionCalls(
+  program: Cs486IrProgram,
+  overrides: Partial<Cs486IrLimits> = {},
+): Cs486IrInliningResult {
+  return inlineLeafFunctionCallsWithLimits(program, resolveLimits(overrides));
+}
+
+function inlineLeafFunctionCallsWithLimits(
+  program: Cs486IrProgram,
+  limits: Cs486IrLimits,
+): Cs486IrInliningResult {
+  const candidates = new Map<string, Cs486IrInlineCandidate>();
+  for (const function_ of program.functions) {
+    const candidate = inlineCandidate(function_, limits);
+    if (candidate !== undefined) candidates.set(function_.name, candidate);
+  }
+  if (candidates.size === 0) return { inlinedCallSites: 0, program };
+
+  let inlinedCallSites = 0;
+  const functions = program.functions.map((caller) => {
+    const result = inlineIntoFunction(caller, candidates, limits);
+    inlinedCallSites += result.inlinedCallSites;
+    return result.function;
+  });
+  return {
+    inlinedCallSites,
+    program: inlinedCallSites === 0 ? program : { ...program, functions },
+  };
+}
+
+function inlineCandidate(
+  function_: Cs486IrFunction,
+  limits: Cs486IrLimits,
+): Cs486IrInlineCandidate | undefined {
+  if (function_.variadic === true || function_.wideReturn === true)
+    return undefined;
+  if (function_.name.startsWith(".cs.inline.")) return undefined;
+  if (function_.blocks.length > limits.maxInlineCalleeBlocks) return undefined;
+  if (!function_.blocks.some((block) => block.id === function_.entry))
+    return undefined;
+  const defined = new Set<Cs486IrValueId>(
+    function_.parameters.map((parameter) => parameter.id),
+  );
+  let instructionCount = 0;
+  let resultCount = 0;
+  let returnCount = 0;
+  for (const block of function_.blocks) {
+    if (block.phis.length > 0 || block.terminator === undefined)
+      return undefined;
+    for (const instruction of block.instructions) {
+      if (instruction.kind === "call" || instruction.kind === "indirect-call")
+        return undefined;
+      instructionCount += 1;
+      const result = instructionResult(instruction);
+      if (result !== undefined) {
+        resultCount += 1;
+        defined.add(result.id);
+      }
+    }
+    if (block.terminator.kind === "return") {
+      if (block.terminator.valueHigh !== undefined) return undefined;
+      if (
+        function_.returnType !== "void" &&
+        block.terminator.value === undefined
+      )
+        return undefined;
+      returnCount += 1;
+    }
+  }
+  if (instructionCount > limits.maxInlineCalleeInstructions) return undefined;
+  if (returnCount === 0) return undefined;
+  for (const block of function_.blocks) {
+    for (const instruction of block.instructions)
+      for (const operand of instructionOperands(instruction))
+        if (!defined.has(operand)) return undefined;
+    for (const operand of terminatorOperands(block.terminator!))
+      if (!defined.has(operand)) return undefined;
+  }
+  return { function: function_, instructionCount, resultCount, returnCount };
+}
+
+function inlineIntoFunction(
+  caller: Cs486IrFunction,
+  candidates: ReadonlyMap<string, Cs486IrInlineCandidate>,
+  limits: Cs486IrLimits,
+): { readonly function: Cs486IrFunction; readonly inlinedCallSites: number } {
+  // Hand-authored IR may already use the reserved namespace; skip the caller
+  // deterministically instead of risking a block or local identifier clash.
+  if (
+    caller.blocks.some((block) => block.id.startsWith(".inline")) ||
+    caller.locals.some((local) => local.name.startsWith(".inline"))
+  )
+    return { function: caller, inlinedCallSites: 0 };
+
+  let nextValueId = 0;
+  let valueCount = caller.parameters.length;
+  let instructionCount = 0;
+  for (const parameter of caller.parameters)
+    nextValueId = Math.max(nextValueId, parameter.id + 1);
+  for (const block of caller.blocks) {
+    valueCount += block.phis.length;
+    for (const phi of block.phis)
+      nextValueId = Math.max(nextValueId, phi.result + 1);
+    for (const instruction of block.instructions) {
+      instructionCount += 1;
+      const result = instructionResult(instruction);
+      if (result !== undefined) {
+        valueCount += 1;
+        nextValueId = Math.max(nextValueId, result.id + 1);
+      }
+    }
+  }
+
+  const maxValues = Math.min(
+    limits.maxValuesPerFunction,
+    limits.maxRegisterAllocationValues,
+  );
+  const blocks = [...caller.blocks];
+  const locals = [...caller.locals];
+  let budget = limits.maxInlinedInstructionsPerFunction;
+  let inlinedCallSites = 0;
+  let blockIndex = 0;
+  let instructionIndex = 0;
+  while (blockIndex < blocks.length) {
+    const block = blocks[blockIndex]!;
+    if (
+      instructionIndex >= block.instructions.length ||
+      block.terminator === undefined
+    ) {
+      blockIndex += 1;
+      instructionIndex = 0;
+      continue;
+    }
+    const call = block.instructions[instructionIndex]!;
+    if (call.kind !== "call" || call.wideResultLocal !== undefined) {
+      instructionIndex += 1;
+      continue;
+    }
+    const candidate = candidates.get(call.callee);
+    if (
+      candidate === undefined ||
+      candidate.function.name === caller.name ||
+      call.arguments.length !== candidate.function.parameters.length
+    ) {
+      instructionIndex += 1;
+      continue;
+    }
+    const returnType = candidate.function.returnType;
+    if (
+      (returnType === "void") !== (call.result === undefined) ||
+      (call.result !== undefined && call.type !== returnType)
+    ) {
+      instructionIndex += 1;
+      continue;
+    }
+
+    const namespace = `.inline${String(inlinedCallSites)}`;
+    const mergeNeeded = call.result !== undefined && candidate.returnCount > 1;
+    const singleReturnCopy =
+      call.result !== undefined && candidate.returnCount === 1;
+    const addedInstructions =
+      candidate.instructionCount +
+      (mergeNeeded ? candidate.returnCount + 1 : 0) +
+      (singleReturnCopy ? 1 : 0);
+    const addedLocals =
+      candidate.function.locals.length + (mergeNeeded ? 1 : 0);
+    const identifierBudget =
+      limits.maxIdentifierLength - namespace.length - ".local.".length;
+    const identifiersFit =
+      candidate.function.blocks.every(
+        (calleeBlock) => calleeBlock.id.length <= identifierBudget,
+      ) &&
+      candidate.function.locals.every(
+        (local) => local.name.length <= identifierBudget,
+      );
+    if (
+      !identifiersFit ||
+      addedInstructions > budget ||
+      instructionCount - 1 + addedInstructions >
+        limits.maxInstructionsPerFunction ||
+      blocks.length + candidate.function.blocks.length + 1 >
+        limits.maxBlocksPerFunction ||
+      valueCount + candidate.resultCount > maxValues ||
+      locals.length + addedLocals > limits.maxLocalsPerFunction
+    ) {
+      instructionIndex += 1;
+      continue;
+    }
+
+    const joinId = `${namespace}.join`;
+    const mergeLocalName = `${namespace}.ret`;
+    const blockRename = new Map<Cs486IrBlockId, Cs486IrBlockId>(
+      candidate.function.blocks.map((calleeBlock) => [
+        calleeBlock.id,
+        `${namespace}.body.${calleeBlock.id}`,
+      ]),
+    );
+    const localRename = new Map<string, string>(
+      candidate.function.locals.map((local) => [
+        local.name,
+        `${namespace}.local.${local.name}`,
+      ]),
+    );
+    const valueMap = new Map<Cs486IrValueId, Cs486IrValueId>();
+    candidate.function.parameters.forEach((parameter, index) => {
+      valueMap.set(parameter.id, call.arguments[index]!);
+    });
+    for (const calleeBlock of candidate.function.blocks)
+      for (const instruction of calleeBlock.instructions) {
+        const result = instructionResult(instruction);
+        if (result !== undefined) {
+          valueMap.set(result.id, nextValueId);
+          nextValueId += 1;
+        }
+      }
+
+    let singleReturnValue: Cs486IrValueId | undefined;
+    const clonedBlocks = candidate.function.blocks.map((calleeBlock) => {
+      const instructions = calleeBlock.instructions.map((instruction) =>
+        cloneInlinedInstruction(instruction, valueMap, localRename),
+      );
+      const terminator = calleeBlock.terminator!;
+      let clonedTerminator: Cs486IrTerminator;
+      if (terminator.kind === "jump") {
+        clonedTerminator = {
+          kind: "jump",
+          span: terminator.span,
+          target: blockRename.get(terminator.target) ?? terminator.target,
+        };
+      } else if (terminator.kind === "branch") {
+        clonedTerminator = {
+          condition: valueMap.get(terminator.condition)!,
+          falseTarget:
+            blockRename.get(terminator.falseTarget) ?? terminator.falseTarget,
+          kind: "branch",
+          span: terminator.span,
+          trueTarget:
+            blockRename.get(terminator.trueTarget) ?? terminator.trueTarget,
+        };
+      } else {
+        if (call.result !== undefined && terminator.value !== undefined) {
+          const mapped = valueMap.get(terminator.value)!;
+          if (mergeNeeded)
+            instructions.push({
+              kind: "store-local",
+              local: mergeLocalName,
+              span: terminator.span,
+              value: mapped,
+            });
+          else singleReturnValue = mapped;
+        }
+        clonedTerminator = {
+          kind: "jump",
+          span: terminator.span,
+          target: joinId,
+        };
+      }
+      return {
+        id: blockRename.get(calleeBlock.id)!,
+        instructions,
+        phis: [],
+        span: calleeBlock.span,
+        terminator: clonedTerminator,
+      } satisfies Cs486IrBasicBlock;
+    });
+
+    const joinPrefix: Cs486IrInstruction[] = [];
+    if (call.result !== undefined && call.type !== undefined) {
+      if (mergeNeeded)
+        joinPrefix.push({
+          kind: "load-local",
+          local: mergeLocalName,
+          result: call.result,
+          span: call.span,
+          type: call.type,
+        });
+      else if (singleReturnValue !== undefined)
+        joinPrefix.push({
+          kind: "copy",
+          result: call.result,
+          span: call.span,
+          type: call.type,
+          value: singleReturnValue,
+        });
+    }
+    const headBlock: Cs486IrBasicBlock = {
+      ...block,
+      instructions: block.instructions.slice(0, instructionIndex),
+      terminator: {
+        kind: "jump",
+        span: call.span,
+        target: blockRename.get(candidate.function.entry)!,
+      },
+    };
+    const joinBlock: Cs486IrBasicBlock = {
+      id: joinId,
+      instructions: [
+        ...joinPrefix,
+        ...block.instructions.slice(instructionIndex + 1),
+      ],
+      phis: [],
+      span: block.span,
+      terminator: block.terminator,
+    };
+    blocks.splice(blockIndex, 1, headBlock, ...clonedBlocks, joinBlock);
+    // The split block's original successors now flow from the join block.
+    for (let index = 0; index < blocks.length; index += 1) {
+      const successor = blocks[index]!;
+      if (successor.phis.length === 0) continue;
+      let blockPhisChanged = false;
+      const phis = successor.phis.map((phi) => {
+        let phiChanged = false;
+        const incoming = phi.incoming.map((entry) => {
+          if (entry.block !== block.id) return entry;
+          phiChanged = true;
+          return { ...entry, block: joinId };
+        });
+        if (!phiChanged) return phi;
+        blockPhisChanged = true;
+        return { ...phi, incoming };
+      });
+      if (blockPhisChanged) blocks[index] = { ...successor, phis };
+    }
+    for (const local of candidate.function.locals)
+      locals.push({ ...local, name: localRename.get(local.name)! });
+    if (mergeNeeded)
+      locals.push({
+        name: mergeLocalName,
+        type: returnType as Cs486IrValueType,
+      });
+
+    instructionCount += addedInstructions - 1;
+    valueCount += candidate.resultCount;
+    budget -= addedInstructions;
+    inlinedCallSites += 1;
+    blockIndex += 1 + clonedBlocks.length;
+    instructionIndex = 0;
+  }
+  if (inlinedCallSites === 0) return { function: caller, inlinedCallSites: 0 };
+  return {
+    function: { ...caller, blocks, locals },
+    inlinedCallSites,
+  };
+}
+
+/** Clones a leaf-callee instruction; call kinds are excluded by candidacy. */
+function cloneInlinedInstruction(
+  instruction: Cs486IrInstruction,
+  valueMap: ReadonlyMap<Cs486IrValueId, Cs486IrValueId>,
+  localRename: ReadonlyMap<string, string>,
+): Cs486IrInstruction {
+  const map = (id: Cs486IrValueId): Cs486IrValueId => valueMap.get(id) ?? id;
+  switch (instruction.kind) {
+    case "constant":
+      return { ...instruction, result: map(instruction.result) };
+    case "copy":
+      return {
+        ...instruction,
+        result: map(instruction.result),
+        value: map(instruction.value),
+      };
+    case "unary":
+      return {
+        ...instruction,
+        operand: map(instruction.operand),
+        result: map(instruction.result),
+      };
+    case "binary":
+      return {
+        ...instruction,
+        left: map(instruction.left),
+        result: map(instruction.result),
+        right: map(instruction.right),
+      };
+    case "load-local":
+      return {
+        ...instruction,
+        local: localRename.get(instruction.local) ?? instruction.local,
+        result: map(instruction.result),
+      };
+    case "store-local":
+      return {
+        ...instruction,
+        local: localRename.get(instruction.local) ?? instruction.local,
+        value: map(instruction.value),
+      };
+    case "address-local":
+      return {
+        ...instruction,
+        local: localRename.get(instruction.local) ?? instruction.local,
+        result: map(instruction.result),
+      };
+    case "address-symbol":
+      return { ...instruction, result: map(instruction.result) };
+    case "load-memory":
+      return {
+        ...instruction,
+        address: map(instruction.address),
+        result: map(instruction.result),
+      };
+    case "store-memory":
+      return {
+        ...instruction,
+        address: map(instruction.address),
+        value: map(instruction.value),
+      };
+    case "call":
+    case "indirect-call":
+      throw new Error("leaf inline candidates cannot contain calls");
+  }
 }
 
 export type Cs486IrAllocatableRegister = Extract<
@@ -2522,6 +3341,79 @@ export function allocateCs486IrRegistersLinearScan(
     if (block.terminator !== undefined)
       for (const operand of terminatorOperands(block.terminator))
         recordUse(operand, terminatorPositions.get(block.id)!);
+  }
+
+  // Linear min/max positions alone under-approximate loop liveness: a value
+  // used in a loop header is live across the whole loop body via the backedge
+  // even though the body's linear positions follow its last linear use. A
+  // bounded backward block-liveness fixpoint extends every interval to the
+  // terminator of each block it must survive.
+  const blockDefs = new Map<Cs486IrBlockId, Set<Cs486IrValueId>>();
+  const blockUses = new Map<Cs486IrBlockId, Set<Cs486IrValueId>>();
+  for (const block of orderedBlocks) {
+    const defs = new Set<Cs486IrValueId>();
+    const uses = new Set<Cs486IrValueId>();
+    const use = (value: Cs486IrValueId): void => {
+      if (!defs.has(value)) uses.add(value);
+    };
+    for (const phi of block.phis) defs.add(phi.result);
+    for (const instruction of block.instructions) {
+      for (const operand of instructionOperands(instruction)) use(operand);
+      const result = instructionResult(instruction);
+      if (result !== undefined) defs.add(result.id);
+    }
+    if (block.terminator !== undefined)
+      for (const operand of terminatorOperands(block.terminator)) use(operand);
+    blockDefs.set(block.id, defs);
+    blockUses.set(block.id, uses);
+  }
+  for (const block of orderedBlocks)
+    for (const phi of block.phis)
+      for (const incoming of phi.incoming) {
+        const predecessorUses = blockUses.get(incoming.block);
+        if (
+          predecessorUses !== undefined &&
+          !blockDefs.get(incoming.block)!.has(incoming.value)
+        )
+          predecessorUses.add(incoming.value);
+      }
+  const liveIn = new Map<Cs486IrBlockId, Set<Cs486IrValueId>>(
+    orderedBlocks.map((block) => [block.id, new Set(blockUses.get(block.id))]),
+  );
+  const successors = new Map<Cs486IrBlockId, readonly Cs486IrBlockId[]>(
+    orderedBlocks.map((block) => [
+      block.id,
+      block.terminator === undefined
+        ? []
+        : terminatorTargets(block.terminator).filter((target) =>
+            blockMap.has(target),
+          ),
+    ]),
+  );
+  const maxLivenessRounds = orderedBlocks.length + 1;
+  for (let round = 0; round < maxLivenessRounds; round += 1) {
+    let livenessChanged = false;
+    for (let index = orderedBlocks.length - 1; index >= 0; index -= 1) {
+      const block = orderedBlocks[index]!;
+      const defs = blockDefs.get(block.id)!;
+      const into = liveIn.get(block.id)!;
+      for (const successor of successors.get(block.id)!)
+        for (const value of liveIn.get(successor)!)
+          if (!defs.has(value) && !into.has(value)) {
+            into.add(value);
+            livenessChanged = true;
+          }
+    }
+    if (!livenessChanged) break;
+  }
+  for (const block of orderedBlocks) {
+    const terminatorPosition = terminatorPositions.get(block.id)!;
+    for (const successor of successors.get(block.id)!)
+      for (const value of liveIn.get(successor)!) {
+        const interval = intervals.get(value);
+        if (interval !== undefined && interval.end < terminatorPosition)
+          interval.end = terminatorPosition;
+      }
   }
 
   const ordered: Cs486IrLiveInterval[] = [...intervals.values()]

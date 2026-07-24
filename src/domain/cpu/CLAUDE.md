@@ -13,12 +13,18 @@
   DOS EXE. Validate versions, sections, symbols, relocations, instructions,
   addresses, stack bounds, and RAM layout before execution. Executables begin at
   instruction zero; the current format has no separate entry-point field.
-- Executables allow at most 4,096 instructions, 2,048 symbols, 256 initialized
-  segments, and 256,000 initialized bytes within 16 MiB of data. Output is
-  capped at 64,000 JavaScript UTF-16 code units and inspection at 4,096 bytes.
-- Objects allow 256,000 assembly-string UTF-16 code units, 16 MiB of data,
-  256,000 initialized bytes, 2,048 symbols, and 4,096 relocations. Process RAM
-  is at least 64 KiB and never exceeds 16 MiB.
+- Legacy executables allow at most 4,096 instructions, 2,048 symbols, 256
+  initialized segments, and 256,000 initialized bytes. Executable v4/v5 raises
+  those ceilings to 65,536 instructions, 16,384 symbols, and 2 MiB initialized
+  bytes while retaining 256 segments and 16 MiB of data. Executable v6 (the
+  current writer output) further raises only the instruction ceiling to 524,288
+  while keeping every other v4/v5 bound; v4/v5 ceilings themselves stay
+  immutable. Output is capped at 64,000 JavaScript UTF-16 code units and
+  inspection at 4,096 bytes.
+- Objects allow 256,000 assembly-string UTF-16 code units and 16 MiB of data.
+  Legacy objects allow 256,000 initialized bytes, 2,048 symbols, and 4,096
+  relocations; object v3/v4 raises those ceilings to 2 MiB, 16,384, and 65,536.
+  Process RAM is at least 64 KiB and never exceeds 16 MiB.
 - `syscall cs.print.character` is the bounded word-character output primitive:
   EAX must contain one Unicode scalar value. Decimal `PRINT` remains unchanged,
   and total output still obeys the 64,000-code-unit process limit.

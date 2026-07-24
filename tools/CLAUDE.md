@@ -147,6 +147,17 @@ the isolated server. Never point it at the interactive world.
   429s by proving whether startup, refresh, retry, or multiple tabs generate
   hidden repeated work before changing limits.
 
+## Managed runtime workers
+
+- The managed launcher owns one fixed pool (validated default 2, range 1-16) and
+  starts it plus the compute listener before Web/BDS. Any startup failure,
+  signal, BDS exit, or close rejects pending work and finalizes sockets and
+  threads exactly once; the BDS session owns its restricted admin files.
+- Keep compute WebSockets authenticated, bounded, versioned, and loopback-only.
+  Never publish credentials or secrets; validate correlation and ownership
+  before dispatch, and reject malformed, over-capacity, failed, or closing work
+  without blocking unrelated workers.
+
 ## Pages and asset builders
 
 - `build-pages.mjs` consumes only canonical `web/manual.js` plus explicit

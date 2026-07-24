@@ -4,7 +4,7 @@ import {
   cs486RegisterNames,
   parseCs486FunctionSignature,
   validateCs486Executable,
-  type Cs486ExecutableV5,
+  type Cs486ExecutableV6,
   type Cs486FunctionEntry,
   type Cs486FunctionSignature,
   type Cs486Instruction,
@@ -111,7 +111,7 @@ const maximumInstructions = objectLimits.instructions;
 export function assembleCs486(
   source: string,
   options: Omit<Cs486AssemblerOptions, "dataBytes" | "language"> = {},
-): Cs486ExecutableV5 {
+): Cs486ExecutableV6 {
   const object = assembleCs486Object(source, { ...options, language: "asm" });
   return materializeStandaloneObject(object);
 }
@@ -899,7 +899,7 @@ function emitInitializedData(
   }
 }
 
-function materializeStandaloneObject(object: Cs486Object): Cs486ExecutableV5 {
+function materializeStandaloneObject(object: Cs486Object): Cs486ExecutableV6 {
   if (!isCs486StructuredObject(object))
     throw new Cs486CompileError("internal assembler produced a legacy object");
   const undefinedSymbol = object.symbols.find(
@@ -931,7 +931,7 @@ function materializeStandaloneObject(object: Cs486Object): Cs486ExecutableV5 {
     applyRelocation(instructions, initialData, layout.bases, relocation, value);
   }
   const functionEntries = collectStandaloneFunctionEntries(object.symbols);
-  const executable: Cs486ExecutableV5 = {
+  const executable: Cs486ExecutableV6 = {
     dataBytes: object.dataBytes,
     dataModel: object.dataModel ?? cs486Word32DataModel,
     format: "cs486-executable",

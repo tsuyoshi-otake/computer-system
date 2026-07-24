@@ -20,24 +20,38 @@ describe("machine block visual assets", () => {
     for (const geometry of geometries) {
       expect(geometry.bones).toHaveLength(1);
       expect(geometry.bones[0].cubes.length).toBeGreaterThan(1);
-      expect(geometry.bones[0].cubes.length).toBeLessThanOrEqual(4);
+      expect(geometry.bones[0].cubes.length).toBeLessThanOrEqual(8);
     }
-    const desktop = geometries.find(
-      ({ description }) =>
-        description.identifier === machineBlockGeometryIds.computer,
-    );
-    expect(desktop.bones[0].cubes[0]).toMatchObject({
-      origin: [-7.75, 0, -7.25],
-      size: [15.5, 6, 14.5],
-    });
-    expect(desktop.bones[0].cubes[2]).toMatchObject({
-      origin: [-7, 5, -6.5],
-      size: [14, 11, 13],
-    });
-    expect(desktop.bones[0].cubes[3]).toMatchObject({
-      origin: [-6, 6.25, -6.5625],
-      size: [12, 9, 0.0625],
-    });
+    for (const identifier of [
+      machineBlockGeometryIds.computer,
+      machineBlockGeometryIds.advanced_computer,
+    ]) {
+      const desktop = geometries.find(
+        ({ description }) => description.identifier === identifier,
+      );
+      expect(desktop.bones[0].cubes[0]).toMatchObject({
+        origin: [-7.75, 0, -7.25],
+        size: [15.5, 6, 14.5],
+      });
+      const screen = desktop.bones[0].cubes[7];
+      expect(desktop.bones[0].cubes.slice(2, 7)).toMatchObject([
+        { origin: [-7, 5, -6.5], size: [1, 11, 13] },
+        { origin: [6, 5, -6.5], size: [1, 11, 13] },
+        { origin: [-6, 5, -6.5], size: [12, 1.25, 13] },
+        { origin: [-6, 15.25, -6.5], size: [12, 0.75, 13] },
+        { origin: [-6, 6.25, -5.75], size: [12, 9, 12.25] },
+      ]);
+      expect(screen).toMatchObject({
+        origin: [-6, 6.25, -6.75],
+        size: [12, 9, 0.5],
+      });
+      const bezelFront = desktop.bones[0].cubes[2].origin[2];
+      const backingFront = desktop.bones[0].cubes[6].origin[2];
+      const screenFront = screen.origin[2];
+      const screenBack = screenFront + screen.size[2];
+      expect(bezelFront - screenFront).toBeGreaterThanOrEqual(0.25);
+      expect(backingFront - screenBack).toBeGreaterThanOrEqual(0.5);
+    }
     expect(Object.values(machineBlockGeometryIds)).not.toContain(
       "geometry.computer_system.monitor",
     );
@@ -61,6 +75,11 @@ describe("machine block visual assets", () => {
       expect(texture.readUInt32BE(20)).toBe(16);
       expect(texture[24]).toBe(8);
       expect(texture[25]).toBe(6);
+      for (let y = 0; y < 16; y += 1) {
+        for (let x = 0; x < 16; x += 1) {
+          expect(pixelAt(texture, x, y)[3]).toBe(255);
+        }
+      }
     }
   });
 

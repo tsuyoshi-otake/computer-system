@@ -317,6 +317,8 @@ describe("Web terminal UI", () => {
       "power-indicator",
       "hdd-indicator",
       "fdd-indicator",
+      "runtime-worker-indicator",
+      "runtime-worker-state",
       "eject-button",
       "eject-feedback",
       "power-button",
@@ -355,6 +357,13 @@ describe("Web terminal UI", () => {
     expect(script).toContain("/startup.py was not changed");
     expect(script).toContain("payload?.storage?.hdd?.state");
     expect(script).toContain("payload?.storage?.fdd?.state");
+    expect(script).toContain(
+      "updateRuntimeWorkerIndicator(payload?.execution)",
+    );
+    expect(script).toContain("W${String(workerIndex)}/${String(workerCount)}");
+    expect(script).toContain("dataset.backend = backend");
+    expect(css).toContain('.runtime-worker-indicator[data-backend="worker"]');
+    expect(css).toContain('.runtime-worker-indicator[data-backend="mixed"]');
     expect(script).toContain("machineAcceptsInput(machineLifecycle)");
     expect(script).toContain("terminalDisplayPowerState(");
     expect(html).toContain('data-power-state="off"');
@@ -381,7 +390,10 @@ describe("Web terminal UI", () => {
     expect(script).toContain("editorKeyQueue.peekBatch()");
     expect(script).toContain("editorKeyQueue.acknowledge(keys)");
     expect(script).toContain('admission.outcome === "rejected"');
-    expect(script).toContain("error?.status === 429");
+    expect(script).toContain("isRetryableEditorInputError(error)");
+    expect(inputHelpers).toContain("status >= 500 && status <= 599");
+    expect(script).toContain("retryEditorInputOnDismiss");
+    expect(script).toContain('"Retry input"');
     expect(script).toContain("generation !== editorInputGeneration");
     expect(script).toContain("discardEditorKeys()");
     expect(script).toContain("unacknowledged editor key(s) were discarded");

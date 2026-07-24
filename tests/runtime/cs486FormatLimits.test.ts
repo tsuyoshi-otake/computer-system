@@ -43,8 +43,13 @@ describe("versioned CS486 format capacity", (): void => {
       }),
     ).toMatchObject({
       initializedDataBytes: 2 * 1_048_576,
-      instructions: 65_536,
+      instructions: 524_288,
       symbols: 16_384,
+    });
+    expect(
+      cs486FormatLimits({ format: "executable", version: 5 }),
+    ).toMatchObject({
+      instructions: 65_536,
     });
     expect(
       Object.isFrozen(cs486FormatLimits({ format: "executable", version: 4 })),
@@ -134,7 +139,7 @@ describe("versioned CS486 format capacity", (): void => {
     expect(object.sections?.find(({ name }) => name === "text")?.name).toBe(
       "text",
     );
-    expect(linked).toMatchObject({ dataModel: "cs-word32-v1", version: 5 });
+    expect(linked).toMatchObject({ dataModel: "cs-word32-v1", version: 6 });
     expect(linked.instructions).toHaveLength(24_003);
   });
 });

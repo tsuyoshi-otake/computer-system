@@ -4,9 +4,17 @@ import path from "node:path";
 
 import { normalizePublicOrigin } from "./web-companion-server.mjs";
 
-const configurationVersion = 1;
+const configurationVersion = 2;
+const legacyConfigurationVersion = 1;
+export const defaultRuntimeWorkerCount = 2;
+export const maximumRuntimeWorkerCount = 16;
 const maximumConfigurationBytes = 16 * 1_024;
-const allowedKeys = new Set(["version", "port", "publicOrigin"]);
+const allowedKeys = new Set([
+  "version",
+  "port",
+  "publicOrigin",
+  "runtimeWorkerCount",
+]);
 
 export function defaultWebCompanionConfigPath(options = {}) {
   const platform = options.platform ?? process.platform;
@@ -70,9 +78,20 @@ export function validateWebCompanionAdminConfig(value) {
       throw new Error(`Unknown Web companion configuration field: ${key}`);
     }
   }
-  if (value.version !== configurationVersion) {
+  if (
+    value.version !== legacyConfigurationVersion &&
+    value.version !== configurationVersion
+  ) {
     throw new Error(
-      `Web companion configuration version must be ${String(configurationVersion)}.`,
+      `Web companion configuration version must be ${String(legacyConfigurationVersion)} or ${String(configurationVersion)}.`,
+    );
+  }
+  if (
+    value.version === legacyConfigurationVersion &&
+    value.runtimeWorkerCount !== undefined
+  ) {
+    throw new Error(
+      "Web companion configuration version 1 cannot declare runtimeWorkerCount.",
     );
   }
   const validated = { version: configurationVersion };
@@ -80,6 +99,12 @@ export function validateWebCompanionAdminConfig(value) {
     validated.port = validatePersistentPort(value.port);
   if (value.publicOrigin !== undefined) {
     validated.publicOrigin = normalizePublicOrigin(value.publicOrigin);
+  }
+  if (value.runtimeWorkerCount !== undefined) {
+    validated.runtimeWorkerCount = validateRuntimeWorkerCount(
+      value.runtimeWorkerCount,
+      "Persistent runtime worker count",
+    );
   }
   return validated;
 }
@@ -130,6 +155,12 @@ export function resolveWebCompanionAdminOptions(environment, persisted) {
     port: environment.WEB_COMPANION_PORT ?? persisted.port ?? "80",
     publicOrigin:
       environment.WEB_COMPANION_PUBLIC_ORIGIN ?? persisted.publicOrigin,
+    runtimeWorkerCount: validateRuntimeWorkerCount(
+      environment.WEB_COMPANION_RUNTIME_WORKERS ??
+        persisted.runtimeWorkerCount ??
+        defaultRuntimeWorkerCount,
+      "Runtime worker count",
+    ),
   };
 }
 
@@ -145,6 +176,26 @@ function validatePersistentPort(value) {
     );
   }
   return port;
+}
+
+function validateRuntimeWorkerCount(value, label) {
+  const text = String(value);
+  if (!/^\d+$/u.test(text)) {
+    throw new RangeError(
+      `${label} must be an integer between 1 and ${String(maximumRuntimeWorkerCount)}.`,
+    );
+  }
+  const workerCount = Number.parseInt(text, 10);
+  if (
+    !Number.isSafeInteger(workerCount) ||
+    workerCount < 1 ||
+    workerCount > maximumRuntimeWorkerCount
+  ) {
+    throw new RangeError(
+      `${label} must be between 1 and ${String(maximumRuntimeWorkerCount)}.`,
+    );
+  }
+  return workerCount;
 }
 
 function message(error) {

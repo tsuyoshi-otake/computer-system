@@ -36,7 +36,7 @@ try {
     print({ path: configPath ?? null, removed, restartRequired: removed });
   } else {
     fail(
-      "Usage: npm run web:config -- <show|set|reset> [--port PORT] [--url ORIGIN] [--clear-port] [--clear-url] [--config-file PATH]",
+      "Usage: npm run web:config -- <show|set|reset> [--port PORT] [--url ORIGIN] [--runtime-workers COUNT(1..16, default 2)] [--clear-port] [--clear-url] [--clear-runtime-workers (restore 2)] [--config-file PATH]",
     );
   }
 } catch (error) {
@@ -51,19 +51,27 @@ function parseSetArguments(arguments_, current) {
   let changed = false;
   while (arguments_.length > 0) {
     const option = arguments_.shift();
-    if (option === "--port" || option === "--url") {
+    if (
+      option === "--port" ||
+      option === "--url" ||
+      option === "--runtime-workers"
+    ) {
       const value = arguments_.shift();
       if (value === undefined || value.startsWith("--")) {
         fail(`${option} requires a value.`);
       }
       if (option === "--port") next.port = value;
-      else next.publicOrigin = value;
+      else if (option === "--url") next.publicOrigin = value;
+      else next.runtimeWorkerCount = value;
       changed = true;
     } else if (option === "--clear-port") {
       delete next.port;
       changed = true;
     } else if (option === "--clear-url") {
       delete next.publicOrigin;
+      changed = true;
+    } else if (option === "--clear-runtime-workers") {
+      delete next.runtimeWorkerCount;
       changed = true;
     } else {
       fail(`Unknown option: ${String(option)}`);

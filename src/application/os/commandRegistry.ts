@@ -284,6 +284,7 @@ const dosCommands: readonly CommandRegistration[] = [
   "mem",
   ["mkdir", "md"],
   "move",
+  "more",
   "path",
   "prompt",
   "pwb",

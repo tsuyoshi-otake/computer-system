@@ -16,7 +16,7 @@ import {
 } from "../../src/domain/cpu/cs486.js";
 
 describe("CS486 structured executable flat-memory metadata", (): void => {
-  it("writes v4 objects and v5 executable data-model metadata", (): void => {
+  it("writes v4 objects and v6 executable data-model metadata", (): void => {
     const standalone = assembleCs486("halt");
     const object = assembleCs486Object("global main\nmain:\nhalt");
     const linked = linkCs486Objects([object]);
@@ -33,9 +33,9 @@ describe("CS486 structured executable flat-memory metadata", (): void => {
         stackBytes: defaultCs486StackBytes,
       },
       dataModel: "cs-word32-v1",
-      version: 5,
+      version: 6,
     });
-    expect(linked).toMatchObject({ dataModel: "cs-word32-v1", version: 5 });
+    expect(linked).toMatchObject({ dataModel: "cs-word32-v1", version: 6 });
     expect(Object.isFrozen(standalone.memory)).toBe(true);
     expect(cs486ExecutableMemoryRequirements(standalone)).toEqual({
       alignedDataBytes: 0,
@@ -46,7 +46,7 @@ describe("CS486 structured executable flat-memory metadata", (): void => {
       model: "cs-flat32-v1",
       physicalReservationBytes: 65_536,
       stackBytes: 65_536,
-      version: 5,
+      version: 6,
     });
   });
 

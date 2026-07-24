@@ -16,6 +16,7 @@ describe("BusyBox shell syntax", (): void => {
       chains: [
         {
           pipeline: {
+            operators: ["pipe-stdout"],
             commands: [
               {
                 words: ["printf", "%s\\n", "hello world"],
@@ -23,7 +24,9 @@ describe("BusyBox shell syntax", (): void => {
               },
               {
                 words: ["grep", "hello"],
-                redirects: [{ mode: "write", path: "out" }],
+                redirects: [
+                  { descriptor: 1, kind: "open", mode: "write", path: "out" },
+                ],
               },
             ],
           },
@@ -31,10 +34,13 @@ describe("BusyBox shell syntax", (): void => {
         {
           operator: "&&",
           pipeline: {
+            operators: [],
             commands: [
               {
                 words: ["cat"],
-                redirects: [{ mode: "read", path: "out" }],
+                redirects: [
+                  { descriptor: 0, kind: "open", mode: "read", path: "out" },
+                ],
               },
             ],
           },
@@ -63,6 +69,7 @@ describe("BusyBox shell syntax", (): void => {
         {
           pipeline: {
             background: true,
+            operators: [],
             commands: [
               {
                 redirects: [],
@@ -79,5 +86,75 @@ describe("BusyBox shell syntax", (): void => {
     expect(() =>
       parseShellProgram("sleep 1 &", () => undefined, dosShellSyntaxFeatures),
     ).toThrow(/background jobs/u);
+  });
+
+  it("preserves Linux descriptor redirect order and pipe kind", (): void => {
+    expect(
+      parseShellProgram("probe >all 2>&1 |& next 2>>err 2>last <input >output"),
+    ).toEqual({
+      chains: [
+        {
+          pipeline: {
+            commands: [
+              {
+                redirects: [
+                  {
+                    descriptor: 1,
+                    kind: "open",
+                    mode: "write",
+                    path: "all",
+                  },
+                  { descriptor: 2, kind: "duplicate", target: 1 },
+                ],
+                words: ["probe"],
+              },
+              {
+                redirects: [
+                  {
+                    descriptor: 2,
+                    kind: "open",
+                    mode: "append",
+                    path: "err",
+                  },
+                  {
+                    descriptor: 2,
+                    kind: "open",
+                    mode: "write",
+                    path: "last",
+                  },
+                  {
+                    descriptor: 0,
+                    kind: "open",
+                    mode: "read",
+                    path: "input",
+                  },
+                  {
+                    descriptor: 1,
+                    kind: "open",
+                    mode: "write",
+                    path: "output",
+                  },
+                ],
+                words: ["next"],
+              },
+            ],
+            operators: ["pipe-stdout-and-stderr"],
+          },
+        },
+      ],
+    });
+  });
+
+  it("rejects Linux-only descriptor syntax in DOS before execution", (): void => {
+    for (const source of [
+      "echo ok 2>err",
+      "echo ok 2>>err",
+      "echo ok 2>&1",
+      "echo ok |& more",
+    ]) {
+      expect(() =>
+        parseShellProgram(source, () => undefined, dosShellSyntaxFeatures),
+      ).toThrow(/not supported/u);
+    }
   });
 });

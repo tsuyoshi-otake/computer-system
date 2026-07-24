@@ -57,6 +57,27 @@
 - Never place bearer tokens, one-use URLs, or passwords in Script API details or
   BDS logs.
 
+## Managed runtime-worker adapter
+
+- Keep `@minecraft/server-admin` and `@minecraft/server-net` confined to the
+  managed-BDS entry and adapter. The ordinary release-pack entry remains
+  Beta-free. Managed bootstrap must install the remote process factory before
+  the normal Bedrock entry evaluates `computerHost`; invalid or missing worker
+  configuration fails startup explicitly.
+- Accept only the exact versioned `ws://127.0.0.1:PORT/internal/cs486/v1`
+  endpoint, a server-admin bearer secret, and an integer worker count from 1
+  through 16. Never accept a LAN/public compute endpoint, place the secret in
+  variables or logs, or expose the internal socket through the Web Terminal.
+- Adapt the Beta WebSocket client to the application text-socket port without
+  adding scheduling or guest-time policy. Preserve correlation and Computer
+  identity, use bounded tick timeouts, and settle pending commands on close.
+  Once a worker command may have been sent, adapter failure must not replay it
+  locally or on another worker.
+- The normal Beta-free build may use its declared local execution path because
+  no managed factory was installed. A managed connection failure is different:
+  surface it explicitly and preserve the affected process's terminal state
+  instead of silently switching execution backends.
+
 ## Known production constraints
 
 - The native CustomForm width/scroll behavior is a client constraint; do not

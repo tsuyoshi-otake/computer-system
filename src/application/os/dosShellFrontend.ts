@@ -68,6 +68,7 @@ export class DosShellFrontend implements ShellFrontend {
       return "dos-toolchain-ide";
     }
     if (name === "vi") return "vi";
+    if (name === "more") return "more";
     return undefined;
   }
 

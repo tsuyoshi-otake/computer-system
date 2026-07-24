@@ -1,6 +1,7 @@
 import type { HighlightedCell } from "./syntaxHighlight.js";
 import type { EditorScreen } from "./editorScreen.js";
 import { maximumEditorDocumentLines } from "./editorDocumentLimits.js";
+import { utf8ByteLength } from "../../domain/text/utf8.js";
 import {
   createTerminalInteractionDescriptor,
   type TerminalInteractionContext,
@@ -25,21 +26,25 @@ const forwardLineKeys = new Set(["Enter", "ArrowDown", "j"]);
 const backwardScreenKeys = new Set(["PageUp", "b", "Ctrl+B"]);
 const backwardLineKeys = new Set(["ArrowUp", "k"]);
 const quitKeys = new Set(["q", "Q", "Escape"]);
+const maximumLivePagerBytes = 64 * 1_024;
 
 /**
- * Bounded, read-only text pager backing `more`/`less`. Unlike real Unix
- * pagers it is document-resident (like `ViSession`) and requires a real file
- * path rather than accepting stdin - `more`/`less` are rejected in pipelines
- * and redirects for the same reason `vi` is.
+ * Bounded, read-only text pager backing `more`/`less`. A session may be opened
+ * from a guest file or from shell stdin; callers remain responsible for the
+ * pipe endpoint and for releasing its separately accounted live-input state.
  *
  * `more` is deliberately forward-only (POSIX behavior); `less` adds backward
  * scrolling and top/bottom jumps. No horizontal scroll or search is modeled;
  * long lines truncate at the terminal width.
  */
 export class PagerSession {
-  private readonly lines: readonly string[];
+  private readonly lines: string[];
   private viewTop = 0;
   private stateValue: PagerState = "viewing";
+  private inputCompleteValue: boolean;
+  private contentBytes: number;
+  private pendingCarriageReturn = false;
+  private revisionValue = 0;
 
   constructor(
     readonly mode: PagerMode,
@@ -47,11 +52,18 @@ export class PagerSession {
     contents: string,
     private widthValue = 80,
     private heightValue = 25,
+    liveInput = false,
   ) {
     if (widthValue < 20 || heightValue < 6) {
       throw new RangeError("pager terminal is too small");
     }
     this.lines = normalizePagerContents(contents);
+    this.contentBytes = utf8ByteLength(contents);
+    this.inputCompleteValue = !liveInput;
+  }
+
+  get inputComplete(): boolean {
+    return this.inputCompleteValue;
   }
 
   get fileName(): string {
@@ -70,12 +82,62 @@ export class PagerSession {
     return this.stateValue;
   }
 
+  get revision(): number {
+    return this.revisionValue;
+  }
+
+  append(contents: string): EditorScreen {
+    if (this.stateValue === "closed") {
+      throw new Error("pager session is already closed");
+    }
+    if (this.inputCompleteValue)
+      throw new Error("pager input is already complete");
+    const bytes = utf8ByteLength(contents);
+    if (this.contentBytes + bytes > maximumLivePagerBytes) {
+      throw new Error("pager live input byte limit exceeded");
+    }
+    this.contentBytes += bytes;
+    let normalized = contents;
+    if (this.pendingCarriageReturn) {
+      normalized = `\r${normalized}`;
+      this.pendingCarriageReturn = false;
+    }
+    if (normalized.endsWith("\r")) {
+      normalized = normalized.slice(0, -1);
+      this.pendingCarriageReturn = true;
+    }
+    const parts = normalized.replaceAll("\r\n", "\n").split("\n");
+    this.lines[this.lines.length - 1] =
+      (this.lines.at(-1) ?? "") + (parts.shift() ?? "");
+    this.lines.push(...parts);
+    if (this.lines.length > maximumEditorDocumentLines) {
+      throw new Error("pager document line limit exceeded");
+    }
+    this.clampViewTop();
+    if (contents.length > 0) this.revisionValue += 1;
+    return this.screen();
+  }
+
+  finishInput(): EditorScreen {
+    if (this.pendingCarriageReturn) {
+      this.lines[this.lines.length - 1] = `${this.lines.at(-1) ?? ""}\r`;
+      this.pendingCarriageReturn = false;
+    }
+    if (!this.inputCompleteValue) this.revisionValue += 1;
+    this.inputCompleteValue = true;
+    this.clampViewTop();
+    return this.screen();
+  }
+
   resize(width: number, height: number): EditorScreen {
     if (width < 20 || height < 6) {
       throw new RangeError("pager terminal is too small");
     }
-    this.widthValue = width;
-    this.heightValue = height;
+    if (this.widthValue !== width || this.heightValue !== height) {
+      this.revisionValue += 1;
+      this.widthValue = width;
+      this.heightValue = height;
+    }
     this.clampViewTop();
     return this.screen();
   }
@@ -86,8 +148,10 @@ export class PagerSession {
     }
     if (quitKeys.has(key)) {
       this.stateValue = "closed";
+      this.revisionValue += 1;
       return { kind: "closed", screen: this.screen() };
     }
+    const previousTop = this.viewTop;
     if (forwardScreenKeys.has(key)) {
       this.viewTop += this.contentRows;
     } else if (forwardLineKeys.has(key)) {
@@ -99,6 +163,7 @@ export class PagerSession {
       else if (key === "G") this.viewTop = this.maxViewTop;
     }
     this.clampViewTop();
+    if (this.viewTop !== previousTop) this.revisionValue += 1;
     return { kind: "continue", screen: this.screen() };
   }
 
@@ -179,6 +244,11 @@ export class PagerSession {
 
   private statusText(): string {
     const atBottom = this.viewTop >= this.maxViewTop;
+    if (!this.inputCompleteValue && atBottom) {
+      return this.mode === "more"
+        ? "--More--(LIVE)"
+        : `${this.fileNameValue} (Live)`;
+    }
     if (this.mode === "more") {
       return atBottom
         ? "--More--(END)"
@@ -244,7 +314,7 @@ export class PagerSession {
   }
 }
 
-function normalizePagerContents(contents: string): readonly string[] {
+function normalizePagerContents(contents: string): string[] {
   const lines = contents.replaceAll("\r\n", "\n").split("\n");
   if (lines.length > maximumEditorDocumentLines) {
     throw new Error("pager document line limit exceeded");

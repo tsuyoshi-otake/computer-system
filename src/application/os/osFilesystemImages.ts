@@ -51,7 +51,8 @@ const formerDosImageId = "cs-dos-1.0-rootfs-v4";
 const priorDosImageId = "cs-dos-1.0-rootfs-v5";
 const dosImageId = "cs-dos-1.0-rootfs-v6";
 const dosV7ImageId = "cs-dos-1.0-rootfs-v7";
-const currentDosImageId = "cs-dos-1.0-rootfs-v8";
+const dosV8ImageId = "cs-dos-1.0-rootfs-v8";
+const currentDosImageId = "cs-dos-1.0-rootfs-v9";
 export const installBaseImageTimestampMilliseconds = Date.UTC(2026, 6, 19);
 
 const previousLinuxImageDirectories = Object.freeze([
@@ -547,6 +548,7 @@ const dosCommandSizes: Readonly<Record<string, number>> = Object.freeze({
   label: 9_390,
   mem: 32_502,
   move: 17_575,
+  more: 10_240,
   qbasic: 194_309,
   tree: 6_945,
 });
@@ -1008,6 +1010,22 @@ export const dosFilesystemImage: FilesystemBaseImage = Object.freeze({
   ),
 });
 
+const currentV8DosFilesystemImage: FilesystemBaseImage = Object.freeze({
+  id: dosV8ImageId,
+  directories: dosV8ImageDirectories,
+  files: Object.freeze(
+    withInstallTimestamp([
+      ...commandFiles("dos", currentV7DosCommands, true),
+      imageFile("/drives/c/command.com", "command", 55_968),
+      dataFile("/drives/c/io.sys", "CS-DOS I/O system", 40_774),
+      dataFile("/drives/c/msdos.sys", "CS-DOS kernel", 38_138),
+      dataFile("/drives/c/dos/himem.sys", "CS-DOS XMS manager", 14_592),
+      dataFile("/drives/c/dos/emm386.exe", "CS-DOS UMB manager", 22_528),
+      ...cFamilyHeaders("dos"),
+    ]),
+  ),
+});
+
 const currentV7DosFilesystemImage: FilesystemBaseImage = Object.freeze({
   id: dosV7ImageId,
   directories: currentDosImageDirectories,
@@ -1129,6 +1147,7 @@ export function registerOsFilesystemImages(): void {
   registerFilesystemBaseImage(priorDosFilesystemImage);
   registerFilesystemBaseImage(preprocessorPriorDosFilesystemImage);
   registerFilesystemBaseImage(currentV7DosFilesystemImage);
+  registerFilesystemBaseImage(currentV8DosFilesystemImage);
   registerFilesystemBaseImage(dosFilesystemImage);
 }
 

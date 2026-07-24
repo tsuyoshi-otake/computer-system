@@ -1654,7 +1654,11 @@ describe("Web companion HTTP server", () => {
       kind: "line",
       value: "relay-failure",
     });
-    expect(response.status).toBe(500);
+    expect(response.status).toBe(503);
+    expect(await response.json()).toMatchObject({
+      code: "companion_unavailable",
+      error: "The terminal input relay is temporarily unavailable.",
+    });
     expect(server.pendingInputs.size).toBe(0);
   });
 

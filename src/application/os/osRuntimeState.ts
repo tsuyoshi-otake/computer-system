@@ -55,6 +55,8 @@ export interface OsProcessRecord {
   readonly niceValue: number;
   readonly parentPid: number;
   readonly pid: number;
+  /** Foreground job-control group; defaults to the process PID for old snapshots. */
+  readonly processGroupId: number;
   readonly startTick: number;
   readonly state: OsProcessState;
   readonly uid: number;
@@ -66,6 +68,7 @@ export interface OsProcessSpawn {
   readonly gid: number;
   readonly niceValue?: number;
   readonly parentPid: number;
+  readonly processGroupId?: number;
   readonly startTick: number;
   readonly state?: "ready" | "running";
   readonly uid: number;
@@ -2260,6 +2263,7 @@ function createProcessRecord(
     niceValue: input.niceValue ?? 0,
     parentPid: input.parentPid,
     pid,
+    processGroupId: input.processGroupId ?? pid,
     startTick: input.startTick,
     state,
     uid: input.uid,
@@ -2268,6 +2272,9 @@ function createProcessRecord(
 
 function validateProcessSpawn(input: OsProcessSpawn): void {
   requirePidOrKernel(input.parentPid);
+  if (input.processGroupId !== undefined) {
+    requirePid(input.processGroupId, Number.MAX_SAFE_INTEGER);
+  }
   requireIdentityId(input.uid, "process UID");
   requireIdentityId(input.gid, "process GID");
   if (
@@ -2744,6 +2751,7 @@ function parseProcess(value: unknown): OsProcessRecord {
     [
       "pid",
       "parentPid",
+      "processGroupId",
       "uid",
       "gid",
       "command",
@@ -2842,6 +2850,15 @@ function parseProcess(value: unknown): OsProcessRecord {
       "process nice value",
     ),
     pid,
+    processGroupId:
+      record.processGroupId === undefined
+        ? pid
+        : requireIntegerInRange(
+            record.processGroupId,
+            1,
+            Number.MAX_SAFE_INTEGER,
+            "process group ID",
+          ),
     startTick,
     state,
     uid: requireIntegerInRange(record.uid, 0, 65_535, "process UID"),

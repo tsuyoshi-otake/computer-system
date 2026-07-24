@@ -1,13 +1,16 @@
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 
 import { permanentComputerCode } from "./web-session-store.mjs";
 import {
   access,
+  chmod,
   cp,
   mkdir,
   readFile,
   readdir,
+  rename,
   rm,
   stat,
   writeFile,
@@ -52,6 +55,33 @@ const allowedPlayerProbes = new Set([
 ]);
 const allowedServerProbes = new Set(["headless"]);
 const workMonitorLogPrefix = "CS_WORK_MONITOR ";
+export const managedBdsScriptModuleId = "c0de9c03-90ec-452b-be20-773a58b38b54";
+export const managedRuntimeWorkerPermissionLimits = Object.freeze({
+  maxBodyBytes: 1024 * 1024,
+  maxConcurrentRequests: 1,
+  maxMessageSize: 1024 * 1024,
+  maxWebSocketConnections: 1,
+});
+const managedRuntimeWorkerPath = "/internal/cs486/v1";
+const managedRuntimeWorkerReadyMarker = "CS_RUNTIME_WORKER_READY ";
+const maximumManagedRuntimeWorkers = 16;
+const supportedLevelDatVersion = 10;
+const maximumNbtDepth = 64;
+const nbtTag = Object.freeze({
+  end: 0,
+  byte: 1,
+  short: 2,
+  int: 3,
+  long: 4,
+  float: 5,
+  double: 6,
+  byteArray: 7,
+  string: 8,
+  list: 9,
+  compound: 10,
+  intArray: 11,
+  longArray: 12,
+});
 const workMonitorLanes = [
   "control",
   "event_delivery",
@@ -81,8 +111,281 @@ export function parseBdsPort(value) {
   return port;
 }
 
+export function normalizeManagedRuntimeWorkers(value) {
+  if (value === undefined) return undefined;
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new TypeError("runtimeWorkers must be an object.");
+  }
+  const allowedKeys = new Set(["count", "endpoint", "token"]);
+  for (const key of Object.keys(value)) {
+    if (!allowedKeys.has(key)) {
+      throw new Error(`Unknown runtimeWorkers field: ${key}`);
+    }
+  }
+  if (
+    !Number.isSafeInteger(value.count) ||
+    value.count < 1 ||
+    value.count > maximumManagedRuntimeWorkers
+  ) {
+    throw new RangeError(
+      `runtimeWorkers.count must be between 1 and ${String(maximumManagedRuntimeWorkers)}.`,
+    );
+  }
+  if (typeof value.endpoint !== "string") {
+    throw new TypeError("runtimeWorkers.endpoint must be a string.");
+  }
+  let endpoint;
+  try {
+    endpoint = new URL(value.endpoint);
+  } catch {
+    throw new Error(
+      "runtimeWorkers.endpoint must be a valid loopback WebSocket URL.",
+    );
+  }
+  if (
+    endpoint.protocol !== "ws:" ||
+    endpoint.hostname !== "127.0.0.1" ||
+    endpoint.port === "" ||
+    endpoint.pathname !== managedRuntimeWorkerPath ||
+    endpoint.username !== "" ||
+    endpoint.password !== "" ||
+    endpoint.search !== "" ||
+    endpoint.hash !== ""
+  ) {
+    throw new Error(
+      `runtimeWorkers.endpoint must be ws://127.0.0.1:<port>${managedRuntimeWorkerPath}.`,
+    );
+  }
+  const port = Number.parseInt(endpoint.port, 10);
+  if (!Number.isSafeInteger(port) || port < 1 || port > 65_535) {
+    throw new Error(
+      "runtimeWorkers.endpoint port must be between 1 and 65535.",
+    );
+  }
+  if (
+    typeof value.token !== "string" ||
+    !/^[A-Za-z0-9_-]{43}$/u.test(value.token) ||
+    Buffer.from(value.token, "base64url").byteLength !== 32 ||
+    Buffer.from(value.token, "base64url").toString("base64url") !== value.token
+  ) {
+    throw new Error("runtimeWorkers.token must be a 256-bit base64url token.");
+  }
+  return Object.freeze({
+    count: value.count,
+    endpoint: endpoint.href,
+    token: value.token,
+  });
+}
+
+export function createManagedRuntimeWorkerConfigFiles(value) {
+  const runtimeWorkers = normalizeManagedRuntimeWorkers(value);
+  if (runtimeWorkers === undefined) {
+    throw new TypeError("runtimeWorkers configuration is required.");
+  }
+  return {
+    "permissions.json": {
+      allowed_modules: [
+        "@minecraft/server",
+        "@minecraft/server-ui",
+        "@minecraft/server-admin",
+        "@minecraft/server-net",
+      ],
+      module_permissions: {
+        "@minecraft/server-net": {
+          allowed_uris: [runtimeWorkers.endpoint],
+          force_tls: false,
+          max_body_bytes: managedRuntimeWorkerPermissionLimits.maxBodyBytes,
+          max_concurrent_requests:
+            managedRuntimeWorkerPermissionLimits.maxConcurrentRequests,
+          max_message_size: managedRuntimeWorkerPermissionLimits.maxMessageSize,
+          max_websocket_connections:
+            managedRuntimeWorkerPermissionLimits.maxWebSocketConnections,
+        },
+      },
+    },
+    "variables.json": {
+      cs486ComputeEndpoint: runtimeWorkers.endpoint,
+      cs486RuntimeWorkerCount: runtimeWorkers.count,
+    },
+    "secrets.json": {
+      cs486ComputeToken: `Bearer ${runtimeWorkers.token}`,
+    },
+  };
+}
+
+export async function writeManagedRuntimeWorkerConfig(workRoot, value) {
+  if (typeof workRoot !== "string" || !path.isAbsolute(workRoot)) {
+    throw new TypeError("Managed BDS work root must be an absolute path.");
+  }
+  const files = createManagedRuntimeWorkerConfigFiles(value);
+  const configRoot = path.join(
+    path.resolve(workRoot),
+    "config",
+    managedBdsScriptModuleId,
+  );
+  await mkdir(configRoot, { recursive: true, mode: 0o700 });
+  await chmod(configRoot, 0o700).catch(() => undefined);
+  const staged = [];
+  try {
+    for (const [filename, contents] of Object.entries(files)) {
+      const targetPath = path.join(configRoot, filename);
+      const temporaryPath = path.join(
+        configRoot,
+        `.${filename}.${String(process.pid)}.${randomUUID()}.tmp`,
+      );
+      await writeFile(temporaryPath, `${JSON.stringify(contents, null, 2)}\n`, {
+        encoding: "utf8",
+        flag: "wx",
+        mode: 0o600,
+      });
+      staged.push({ targetPath, temporaryPath });
+    }
+    for (const { targetPath, temporaryPath } of staged) {
+      await rename(temporaryPath, targetPath);
+      await chmod(targetPath, 0o600).catch(() => undefined);
+    }
+  } catch (error) {
+    await Promise.all(
+      staged.map(({ temporaryPath }) =>
+        rm(temporaryPath, { force: true }).catch(() => undefined),
+      ),
+    );
+    throw new Error(
+      "Unable to write managed BDS runtime worker configuration.",
+      {
+        cause: error,
+      },
+    );
+  }
+  return configRoot;
+}
+
+export function patchDisposableBetaApisLevelDat(source) {
+  if (!Buffer.isBuffer(source) || source.byteLength < 10) {
+    throw new Error("Disposable acceptance level.dat is truncated.");
+  }
+  if (source.readUInt32LE(0) !== supportedLevelDatVersion) {
+    throw new Error(
+      `Disposable acceptance level.dat version must be ${String(supportedLevelDatVersion)}.`,
+    );
+  }
+  const payloadBytes = source.readUInt32LE(4);
+  if (payloadBytes !== source.byteLength - 8) {
+    throw new Error(
+      "Disposable acceptance level.dat has an invalid payload length.",
+    );
+  }
+  const payload = Buffer.from(source.subarray(8));
+  if (payload[0] !== nbtTag.compound) {
+    throw new Error("Disposable acceptance level.dat root must be a compound.");
+  }
+  const rootName = readNbtName(payload, 1);
+  const root = scanNbtCompound(payload, rootName.endOffset, 0);
+  if (root.endOffset !== payload.byteLength) {
+    throw new Error(
+      "Disposable acceptance level.dat contains trailing NBT data.",
+    );
+  }
+  const experiments = root.entries.find(
+    (entry) => entry.name === "experiments",
+  );
+  if (experiments === undefined || experiments.type !== nbtTag.compound) {
+    throw new Error(
+      "Disposable acceptance level.dat has no experiments compound.",
+    );
+  }
+  const experimentEntries = scanNbtCompound(
+    payload,
+    experiments.payloadOffset,
+    1,
+  );
+  const updated = Buffer.from(payload);
+  const requiredTags = [
+    "gametest",
+    "experiments_ever_used",
+    "saved_with_toggled_experiments",
+  ];
+  const additions = [];
+  let changed = false;
+  for (const name of requiredTags) {
+    const entry = experimentEntries.entries.find(
+      (candidate) => candidate.name === name,
+    );
+    if (entry === undefined) {
+      additions.push(encodeNbtByteTag(name, 1));
+      changed = true;
+      continue;
+    }
+    if (entry.type !== nbtTag.byte) {
+      throw new Error(
+        `Disposable acceptance level.dat experiment ${name} must be a byte.`,
+      );
+    }
+    if (updated[entry.payloadOffset] !== 1) {
+      updated[entry.payloadOffset] = 1;
+      changed = true;
+    }
+  }
+  if (!changed) return source;
+
+  const inserted =
+    additions.length === 0
+      ? updated
+      : Buffer.concat([
+          updated.subarray(0, experimentEntries.endTagOffset),
+          ...additions,
+          updated.subarray(experimentEntries.endTagOffset),
+        ]);
+  const result = Buffer.allocUnsafe(inserted.byteLength + 8);
+  result.writeUInt32LE(source.readUInt32LE(0), 0);
+  result.writeUInt32LE(inserted.byteLength, 4);
+  inserted.copy(result, 8);
+  validatePatchedBetaApisLevelDat(result);
+  return result;
+}
+
+export async function enableDisposableAcceptanceBetaApis(worldRoot) {
+  const resolvedWorldRoot = path.resolve(worldRoot);
+  const temporaryRoot = path.resolve(os.homedir(), "tmp");
+  if (
+    path.basename(resolvedWorldRoot) !== acceptanceFixtureWorldName ||
+    !isWithin(resolvedWorldRoot, temporaryRoot)
+  ) {
+    throw new Error(
+      "Beta APIs may be enabled automatically only for the disposable acceptance world under the user tmp directory.",
+    );
+  }
+  const levelDatPath = path.join(resolvedWorldRoot, "level.dat");
+  const source = await readFile(levelDatPath);
+  const patched = patchDisposableBetaApisLevelDat(source);
+  if (patched === source) return false;
+
+  const temporaryPath = path.join(
+    resolvedWorldRoot,
+    `.level.dat.${String(process.pid)}.${randomUUID()}.tmp`,
+  );
+  try {
+    await writeFile(temporaryPath, patched, { flag: "wx", mode: 0o600 });
+    await rename(temporaryPath, levelDatPath);
+  } catch (error) {
+    await rm(temporaryPath, { force: true }).catch(() => undefined);
+    throw new Error(
+      "Unable to enable Beta APIs for the disposable acceptance world.",
+      { cause: error },
+    );
+  }
+  return true;
+}
+
 export function isDiagnosticLine(line) {
   if (line.includes(workMonitorLogPrefix)) return false;
+  if (
+    /requesting dependency on beta APIs .*Beta APIs experiment is not enabled/iu.test(
+      line,
+    )
+  ) {
+    return true;
+  }
   for (const marker of [
     "CS_DEBUG_ACCEPTANCE_FIXTURE ",
     "CS_DEBUG_COMMAND ",
@@ -317,6 +620,9 @@ export class BdsDebugSession {
     );
     this.managedWorkRoot = this.environment.BDS_MCP_WORKDIR === undefined;
     this.packOutputRoot = path.join(this.projectRoot, "dist");
+    this.runtimeWorkers = normalizeManagedRuntimeWorkers(
+      options.runtimeWorkers,
+    );
   }
 
   getStatus() {
@@ -335,6 +641,13 @@ export class BdsDebugSession {
       diagnostics: this.logLines.filter((entry) => entry.diagnostic).length,
       lastError: this.lastError ?? null,
       workMonitor: this.workMonitor ?? null,
+      runtimeWorkers:
+        this.runtimeWorkers === undefined
+          ? null
+          : {
+              count: this.runtimeWorkers.count,
+              endpoint: this.runtimeWorkers.endpoint,
+            },
     };
   }
 
@@ -759,6 +1072,12 @@ export class BdsDebugSession {
         runtimeCreated = await this.#prepareRuntime(resetWorld);
       }
       await this.#configureServer();
+      if (this.runtimeWorkers !== undefined) {
+        await writeManagedRuntimeWorkerConfig(
+          this.workRoot,
+          this.runtimeWorkers,
+        );
+      }
 
       if (runtimeCreated || !(await exists(this.#worldRoot()))) {
         const generator = this.#spawnServer("generation");
@@ -788,6 +1107,9 @@ export class BdsDebugSession {
         }
       }
 
+      if (acceptanceFixture && this.runtimeWorkers !== undefined) {
+        await enableDisposableAcceptanceBetaApis(this.#worldRoot());
+      }
       await this.#installWorldPacks();
       const handle = this.#spawnServer("debug");
       this.handle = handle;
@@ -801,6 +1123,7 @@ export class BdsDebugSession {
           "BDS exited during the Script API startup grace period.",
         );
       }
+      await this.#verifyManagedRuntimeWorkerBootstrap();
       this.#setState("running");
       this.acceptanceFixture = acceptanceFixture;
       return this.getStatus();
@@ -873,6 +1196,41 @@ export class BdsDebugSession {
     await access(path.join(this.sourceRoot, executableName));
   }
 
+  async #verifyManagedRuntimeWorkerBootstrap() {
+    if (this.runtimeWorkers === undefined) return;
+    const readyMarker = `${managedRuntimeWorkerReadyMarker}${JSON.stringify({
+      workerCount: this.runtimeWorkers.count,
+    })}`;
+    const betaApiFailure = () =>
+      this.logLines.find((entry) =>
+        /requesting dependency on beta APIs .*Beta APIs experiment is not enabled/iu.test(
+          entry.line,
+        ),
+      );
+    if (betaApiFailure() !== undefined) {
+      throw new Error(
+        "Managed runtime workers require the irreversible Beta APIs experiment; it is not enabled for this world.",
+      );
+    }
+    try {
+      await this.waitForLog({
+        contains: readyMarker,
+        afterCursor: 0,
+        timeoutMs: 10_000,
+      });
+    } catch (error) {
+      if (betaApiFailure() !== undefined) {
+        throw new Error(
+          "Managed runtime workers require the irreversible Beta APIs experiment; it is not enabled for this world.",
+        );
+      }
+      throw new Error(
+        "Managed runtime worker bootstrap did not reach an observable ready state.",
+        { cause: error },
+      );
+    }
+  }
+
   async #runBuild(acceptanceFixture) {
     const handle = this.#spawnChild(
       process.execPath,
@@ -882,6 +1240,12 @@ export class BdsDebugSession {
       {
         ...this.environment,
         COMPUTER_SYSTEM_ACCEPTANCE_FIXTURE: acceptanceFixture ? "1" : "0",
+        COMPUTER_SYSTEM_MANAGED_BDS:
+          this.runtimeWorkers === undefined ? "0" : "1",
+        COMPUTER_SYSTEM_RUNTIME_WORKERS:
+          this.runtimeWorkers === undefined
+            ? undefined
+            : String(this.runtimeWorkers.count),
         ...(acceptanceFixture
           ? { COMPUTER_SYSTEM_PACK_OUTPUT: this.packOutputRoot }
           : { COMPUTER_SYSTEM_PACK_OUTPUT: undefined }),
@@ -1160,6 +1524,216 @@ function isComputerListEntry(value) {
     value.physicalKey.length > 0 &&
     value.physicalKey.length <= 256
   );
+}
+
+function readNbtName(buffer, offset) {
+  ensureNbtBytes(buffer, offset, 2);
+  const byteLength = buffer.readUInt16LE(offset);
+  const valueOffset = offset + 2;
+  ensureNbtBytes(buffer, valueOffset, byteLength);
+  return {
+    endOffset: valueOffset + byteLength,
+    value: buffer.toString("utf8", valueOffset, valueOffset + byteLength),
+  };
+}
+
+function scanNbtCompound(buffer, startOffset, depth) {
+  ensureNbtDepth(depth);
+  const entries = [];
+  let offset = startOffset;
+  while (true) {
+    ensureNbtBytes(buffer, offset, 1);
+    const type = buffer[offset];
+    if (type === nbtTag.end) {
+      return {
+        endOffset: offset + 1,
+        endTagOffset: offset,
+        entries,
+      };
+    }
+    ensureKnownNbtTag(type);
+    const name = readNbtName(buffer, offset + 1);
+    const payloadOffset = name.endOffset;
+    const endOffset = skipNbtPayload(buffer, type, payloadOffset, depth);
+    entries.push({
+      endOffset,
+      name: name.value,
+      payloadOffset,
+      type,
+    });
+    offset = endOffset;
+  }
+}
+
+function skipNbtPayload(buffer, type, offset, depth) {
+  switch (type) {
+    case nbtTag.byte:
+      return checkedNbtEnd(buffer, offset, 1);
+    case nbtTag.short:
+      return checkedNbtEnd(buffer, offset, 2);
+    case nbtTag.int:
+    case nbtTag.float:
+      return checkedNbtEnd(buffer, offset, 4);
+    case nbtTag.long:
+    case nbtTag.double:
+      return checkedNbtEnd(buffer, offset, 8);
+    case nbtTag.byteArray:
+      return skipNbtArray(buffer, offset, 1);
+    case nbtTag.string: {
+      const name = readNbtName(buffer, offset);
+      return name.endOffset;
+    }
+    case nbtTag.list:
+      return skipNbtList(buffer, offset, depth);
+    case nbtTag.compound:
+      return scanNbtCompound(buffer, offset, depth + 1).endOffset;
+    case nbtTag.intArray:
+      return skipNbtArray(buffer, offset, 4);
+    case nbtTag.longArray:
+      return skipNbtArray(buffer, offset, 8);
+    default:
+      throw new Error(`Unsupported NBT tag type: ${String(type)}.`);
+  }
+}
+
+function skipNbtArray(buffer, offset, elementBytes) {
+  ensureNbtBytes(buffer, offset, 4);
+  const count = buffer.readInt32LE(offset);
+  if (count < 0) {
+    throw new Error(
+      "Disposable acceptance level.dat has a negative NBT array.",
+    );
+  }
+  const remainingBytes = buffer.byteLength - (offset + 4);
+  if (count > Math.floor(remainingBytes / elementBytes)) {
+    throw new Error(
+      "Disposable acceptance level.dat has an oversized NBT array.",
+    );
+  }
+  return checkedNbtEnd(buffer, offset + 4, count * elementBytes);
+}
+
+function skipNbtList(buffer, offset, depth) {
+  ensureNbtDepth(depth + 1);
+  ensureNbtBytes(buffer, offset, 5);
+  const elementType = buffer[offset];
+  const count = buffer.readInt32LE(offset + 1);
+  if (count < 0) {
+    throw new Error("Disposable acceptance level.dat has a negative NBT list.");
+  }
+  if (elementType === nbtTag.end && count !== 0) {
+    throw new Error(
+      "Disposable acceptance level.dat has a non-empty end-tag list.",
+    );
+  }
+  if (elementType !== nbtTag.end) ensureKnownNbtTag(elementType);
+  const remainingBytes = buffer.byteLength - (offset + 5);
+  if (count > remainingBytes) {
+    throw new Error(
+      "Disposable acceptance level.dat has an oversized NBT list.",
+    );
+  }
+  let itemOffset = offset + 5;
+  for (let index = 0; index < count; index += 1) {
+    itemOffset = skipNbtPayload(buffer, elementType, itemOffset, depth + 1);
+  }
+  return itemOffset;
+}
+
+function ensureKnownNbtTag(type) {
+  if (
+    !Number.isInteger(type) ||
+    type < nbtTag.byte ||
+    type > nbtTag.longArray
+  ) {
+    throw new Error(`Unsupported NBT tag type: ${String(type)}.`);
+  }
+}
+
+function ensureNbtDepth(depth) {
+  if (!Number.isSafeInteger(depth) || depth < 0 || depth > maximumNbtDepth) {
+    throw new Error(
+      "Disposable acceptance level.dat exceeds the NBT depth limit.",
+    );
+  }
+}
+
+function ensureNbtBytes(buffer, offset, byteLength) {
+  if (
+    !Number.isSafeInteger(offset) ||
+    !Number.isSafeInteger(byteLength) ||
+    offset < 0 ||
+    byteLength < 0 ||
+    offset > buffer.byteLength ||
+    byteLength > buffer.byteLength - offset
+  ) {
+    throw new Error("Disposable acceptance level.dat is truncated.");
+  }
+}
+
+function checkedNbtEnd(buffer, offset, byteLength) {
+  ensureNbtBytes(buffer, offset, byteLength);
+  return offset + byteLength;
+}
+
+function encodeNbtByteTag(name, value) {
+  const encodedName = Buffer.from(name, "utf8");
+  if (encodedName.byteLength > 0xffff) {
+    throw new Error("Disposable acceptance NBT tag name is too long.");
+  }
+  const result = Buffer.allocUnsafe(encodedName.byteLength + 4);
+  result[0] = nbtTag.byte;
+  result.writeUInt16LE(encodedName.byteLength, 1);
+  encodedName.copy(result, 3);
+  result[result.byteLength - 1] = value;
+  return result;
+}
+
+function validatePatchedBetaApisLevelDat(source) {
+  if (
+    source.readUInt32LE(0) !== supportedLevelDatVersion ||
+    source.readUInt32LE(4) !== source.byteLength - 8
+  ) {
+    throw new Error("Patched disposable acceptance level.dat is invalid.");
+  }
+  const payload = source.subarray(8);
+  if (payload[0] !== nbtTag.compound) {
+    throw new Error("Patched disposable acceptance level.dat root is invalid.");
+  }
+  const rootName = readNbtName(payload, 1);
+  const root = scanNbtCompound(payload, rootName.endOffset, 0);
+  if (root.endOffset !== payload.byteLength) {
+    throw new Error(
+      "Patched disposable acceptance level.dat contains trailing NBT data.",
+    );
+  }
+  const experimentCompounds = root.entries.filter(
+    (entry) => entry.name === "experiments" && entry.type === nbtTag.compound,
+  );
+  if (experimentCompounds.length !== 1) {
+    throw new Error(
+      "Patched disposable acceptance level.dat must contain one experiments compound.",
+    );
+  }
+  const experiments = scanNbtCompound(
+    payload,
+    experimentCompounds[0].payloadOffset,
+    1,
+  );
+  for (const name of [
+    "gametest",
+    "experiments_ever_used",
+    "saved_with_toggled_experiments",
+  ]) {
+    const matches = experiments.entries.filter(
+      (entry) => entry.name === name && entry.type === nbtTag.byte,
+    );
+    if (matches.length !== 1 || payload[matches[0].payloadOffset] !== 1) {
+      throw new Error(
+        `Patched disposable acceptance level.dat has an invalid ${name} experiment flag.`,
+      );
+    }
+  }
 }
 
 function isWithin(candidate, parent) {

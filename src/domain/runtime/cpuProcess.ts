@@ -17,13 +17,36 @@ export type CpuProcessState =
   | { readonly kind: "waiting_event"; readonly filter?: string };
 
 export interface CpuProcessSliceResult {
+  /**
+   * Host admission reserved for this dispatch. Local processes omit these
+   * fields because their completed work is also their admission. An
+   * asynchronous executor reports completed work in `cpuCycles` and
+   * `executedInstructions`, while reserving a newly dispatched slice here.
+   */
+  readonly admittedCpuCycles?: number;
+  readonly admittedInstructions?: number;
   readonly cpuCycles: number;
   readonly executedInstructions: number;
   readonly state: CpuProcessState;
 }
 
+export type CpuProcessExecutionLocation =
+  | { readonly backend: "bedrock" }
+  | {
+      readonly backend: "worker";
+      readonly workerCount: number;
+      readonly workerIndex: number;
+    };
+
 /** Stable scheduler boundary for Python and CS486 machine-code processes. */
 export interface CpuProcess {
+  /**
+   * Processes sharing this identifier consume one aggregate scheduler budget.
+   * Omitted identifiers use the Bedrock main-thread resource.
+   */
+  readonly schedulerResourceId?: string;
+  /** Host execution placement exposed only for truthful operator telemetry. */
+  readonly executionLocation?: CpuProcessExecutionLocation;
   readonly hasPendingCpuCycles: boolean;
   readonly memoryLimitBytes: number;
   readonly memoryUsageBytes: number;
@@ -31,6 +54,8 @@ export interface CpuProcess {
 
   advanceTick(tick: number): CpuProcessState;
   deliverEvent(name: string, ...arguments_: readonly RuntimeValue[]): boolean;
+  /** Releases an optional external execution actor. Must be idempotent. */
+  dispose?(): void;
   fail(error: VmRuntimeError): CpuProcessState;
   runCpuSlice(
     cpuCycleBudget: number,

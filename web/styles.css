@@ -248,6 +248,37 @@ h1 {
   box-shadow: 0 0 6px color-mix(in srgb, var(--red) 65%, transparent);
 }
 
+.runtime-worker-indicator {
+  display: grid;
+  min-width: 62px;
+  place-content: center;
+  gap: 3px;
+  border-right: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 8px;
+  line-height: 1;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.runtime-worker-label {
+  color: #697375;
+  font-size: 7px;
+  letter-spacing: 0.08em;
+}
+
+.runtime-worker-indicator[data-backend="worker"] {
+  color: var(--green);
+}
+
+.runtime-worker-indicator[data-backend="mixed"] {
+  color: var(--amber);
+}
+
+.runtime-worker-indicator[data-backend="bedrock"] {
+  color: #9ba5a6;
+}
+
 .power-button {
   display: flex;
   width: 68px;
@@ -1772,6 +1803,10 @@ dialog form {
 
   .hardware-indicator {
     min-width: 28px;
+  }
+
+  .runtime-worker-indicator {
+    min-width: 52px;
   }
 
   .power-button {

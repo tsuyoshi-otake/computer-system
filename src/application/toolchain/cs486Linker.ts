@@ -1,7 +1,7 @@
 import {
   createCs486Flat32MemoryMetadata,
   validateCs486Executable,
-  type Cs486ExecutableV5,
+  type Cs486ExecutableV6,
   type Cs486FunctionEntry,
   type Cs486FunctionSignature,
   type Cs486Instruction,
@@ -67,7 +67,7 @@ export const cs486NullGuardBytes = 4;
 export function linkCs486Objects(
   objects: readonly Cs486Object[],
   options: Cs486LinkOptions = {},
-): Cs486ExecutableV5 {
+): Cs486ExecutableV6 {
   if (objects.length === 0) throw new Cs486LinkError("no input objects");
   if (objects.length > maximumObjects)
     throw new Cs486LinkError("object limit exceeded");
@@ -210,7 +210,7 @@ export function linkCs486Objects(
         left.address - right.address || left.name.localeCompare(right.name),
     );
   const functionEntries = collectFunctionEntries(canonical, textBases);
-  const linked: Cs486ExecutableV5 = {
+  const linked: Cs486ExecutableV6 = {
     dataBytes,
     dataModel,
     format: "cs486-executable",

@@ -177,8 +177,11 @@ Player-experience checks are intentionally isolated in the
 - Minecraft Bedrock Edition 1.26.30 or later in the 1.26 release line
 - The official Bedrock Dedicated Server distribution for BDS verification
 
-The current package baseline uses `@minecraft/server` 2.8.0,
-`@minecraft/server-ui` 2.1.0, and `@minecraft/vanilla-data` 1.26.33.
+The normal release-pack baseline uses `@minecraft/server` 2.8.0,
+`@minecraft/server-ui` 2.1.0, and `@minecraft/vanilla-data` 1.26.33 without Beta
+APIs. The separate managed-BDS build adds the Beta `server-admin` and
+`server-net` modules only for its authenticated loopback runtime-worker
+transport.
 
 ## Install the alpha preview
 
@@ -327,6 +330,13 @@ $env:BDS_HOME = "C:\path\to\bedrock-server"
 npm run dev:bds:web
 ```
 
+This managed worker path (two workers by default) requires the world's
+irreversible **Beta APIs** experiment. The launcher refuses a preserved world
+where it is disabled; stop BDS, make a full world-directory backup, and obtain
+explicit operator consent before enabling it. Only a newly generated disposable
+`ComputerSystemAcceptance` world under the current user's temporary directory is
+enabled automatically.
+
 Browser auto-open defaults to enabled, and the companion automatically opens
 each eligible one-use handoff only when the effective published host—detected
 automatically or overridden by `WEB_COMPANION_PUBLIC_HOST`—is a literal IP
@@ -400,7 +410,7 @@ HTTP(S) origin without editing repository files or recreating environment
 variables on every boot:
 
 ```powershell
-npm run web:config -- set --port 80 --url http://10.255.10.90
+npm run web:config -- set --port 80 --url http://10.255.10.90 --runtime-workers 2
 npm run web:config -- show
 npm run dev:bds:web
 ```
@@ -409,16 +419,32 @@ On Windows the default system-wide file is
 `%ProgramData%\Computer System\web-companion.json`; on Linux it is
 `/etc/computer-system/web-companion.json`. Run the configuration command with
 the permissions required to write that location. `--clear-port` and
-`--clear-url` restore the corresponding default, while `reset` removes the
-complete persisted configuration. A restart is required after any change.
-`WEB_COMPANION_PORT` and `WEB_COMPANION_PUBLIC_ORIGIN` remain temporary
-per-process overrides and take precedence over persisted values. Use
+`--clear-url` restore the corresponding default. `--clear-runtime-workers`
+restores the two-worker default, while `reset` removes the complete persisted
+configuration. A restart is required after any change. `WEB_COMPANION_PORT`,
+`WEB_COMPANION_PUBLIC_ORIGIN`, and `WEB_COMPANION_RUNTIME_WORKERS` remain
+temporary per-process overrides and take precedence over persisted values.
+Worker count is a strict integer from 1 through 16. Use
 `WEB_COMPANION_CONFIG_FILE` to select a different configuration file; an empty
 value disables persisted configuration for an isolated test process. Displayed
 origins omit standard ports: HTTP 80 is shown as `http://host` and an explicit
 HTTPS origin on 443 is shown as `https://host`. The companion itself is plain
 HTTP; an HTTPS origin requires a real TLS reverse proxy rather than merely
 binding the companion to TCP 443.
+
+The managed companion starts that fixed-size pool before BDS and assigns every
+Computer ID to one stable worker. CS386SX, CS486DX, and CS486DX2 keep their
+persisted CPU model, clock, cycle debt, and per-tick guest admission; the worker
+setting changes host concurrency only. A small Web Terminal CPU badge reports
+the stable assignment (`W1/2`, for example) and whether active execution is on a
+worker, Bedrock, or both. The internal worker transport is authenticated,
+loopback-only, bounded, and unavailable to browsers. Managed BDS uses the
+server-admin/server-net Beta modules for this private connection. Enabling the
+required Beta APIs experiment is irreversible. The launcher never changes a
+preserved world silently; it fails explicitly until an operator has stopped and
+backed up that world and deliberately enabled the experiment. Automatic
+enablement is limited to a fresh disposable `ComputerSystemAcceptance` world
+under the current user's temporary directory.
 
 Minecraft/BDS and the Web Terminal use different transports: the managed BDS
 defaults to UDP 19142, while the browser companion defaults to TCP 80. For
@@ -652,17 +678,18 @@ DOS-facing commands use CRLF and DOS-specific status/error text rather than
 leaking Linux applet output. The implemented compatibility surface includes
 `DIR`, `TYPE`, `COPY`, `DEL`/ `ERASE`, `MD`, `RD`, `MOVE`, `REN`/`RENAME`,
 `TREE`, `VOL`, `VER`, `TIME`, `TIMER`, `DOSKEY /HISTORY`, `MEM /F`, `ATTRIB`,
-`LABEL`, and read-only `CHKDSK`. Computer System DOS 1.0 (`CS-DOS 1.0`) reads a
-bounded `CONFIG.SYS` and runs `AUTOEXEC.BAT`; `SET`, `PATH`, `PROMPT`, `REM`,
-`@ECHO OFF`, `%0`…`%9`, `%VAR%`, and `%ERRORLEVEL%` are supported. Unsupported
-boot directives are parsed and resolved as one atomic plan. Any invalid line or
-driver rejects the whole plan, emits bounded diagnostics, and boots the explicit
-64 KiB degraded-low profile before AUTOEXEC continues; no earlier line is
-partially retained. `DEVICE`/`DEVICEHIGH` enables the modeled HIMEM or EMM386
-state only after the referenced installed guest file begins with the expected
-versioned CS-DOS driver capsule. A missing, deleted, or corrupt file fails
-before changing memory state. `DEVICEHIGH` tries one contiguous UMB block and
-reports when it falls back to conventional memory.
+`LABEL`, read-only `CHKDSK`, and the external `C:\DOS\MORE.COM`. Computer System
+DOS 1.0 (`CS-DOS 1.0`) reads a bounded `CONFIG.SYS` and runs `AUTOEXEC.BAT`;
+`SET`, `PATH`, `PROMPT`, `REM`, `@ECHO OFF`, `%0`…`%9`, `%VAR%`, and
+`%ERRORLEVEL%` are supported. Unsupported boot directives are parsed and
+resolved as one atomic plan. Any invalid line or driver rejects the whole plan,
+emits bounded diagnostics, and boots the explicit 64 KiB degraded-low profile
+before AUTOEXEC continues; no earlier line is partially retained.
+`DEVICE`/`DEVICEHIGH` enables the modeled HIMEM or EMM386 state only after the
+referenced installed guest file begins with the expected versioned CS-DOS driver
+capsule. A missing, deleted, or corrupt file fails before changing memory state.
+`DEVICEHIGH` tries one contiguous UMB block and reports when it falls back to
+conventional memory.
 
 The DOS runtime owns A: and C:, the active drive, a separate current directory
 for each drive, media generations, volume labels, and FAT metadata. Production
@@ -715,7 +742,12 @@ programs at 64, expanded commands at 4096 characters, and output at 256,000
 characters. This is not native COMMAND.COM or `.COM`/`.EXE` execution. Unquoted
 Unix-style `&&` and `||` chains are rejected inside BAT control flow. Pipes and
 redirections remain documented safe-shell extensions, not claims of native
-COMMAND.COM semantics.
+COMMAND.COM semantics. DOS pipelines execute sequentially through uniquely owned
+strict-8.3 spool files under `C:\TEMP`; each consumed spool is deleted,
+disk-full/media failures abort unstarted stages, and no host temporary file is
+used. `DIR | MORE`, `TYPE file | MORE`, `MORE file`, and `MORE < file` are
+supported. `MORE` remains terminal-owned and is rejected by synchronous BAT; DOS
+deliberately rejects `LESS`, `2>`, `2>>`, `2>&1`, and `|&` before side effects.
 
 ```text
 files:  pwd cd ls cat mkdir rmdir touch rm cp mv ln readlink realpath find stat
@@ -729,7 +761,7 @@ process: ps top kill jobs fg bg wait nice nohup watch tty who w last service
 manual: man apropos
 info:   hostname uname date uptime cpuinfo free
 system: clear vi history time sleep crontab test [ umask sync shutdown reboot exit true false
-DOS:    EDIT DIR ATTRIB LABEL CHKDSK TREE VOL TIME TIMER DOSKEY MEM DEBUG + aliases
+DOS:    EDIT MORE DIR ATTRIB LABEL CHKDSK TREE VOL TIME TIMER DOSKEY MEM DEBUG + aliases
 toolchain: as cc c++ ld make nm run objdump csdb (make is Linux-only; QBASIC and DEBUG on DOS)
 version control: git (bounded local CS System Git repositories; Linux only)
 ```
@@ -750,11 +782,19 @@ unsupported compression, ZIP64, traversal, and symlink pivots fail explicitly.
 without bypassing shutdown finalization. `watch` remains finite: it has a
 bounded interval, a default count of 300, and an upper count of 3,600.
 
-The parser supports single and double quotes, backslash escapes, environment
-variables, `$?`, pipelines (`|`), input/output redirection (`<`, `>`, `>>`), and
-control operators (`&&`, `||`, `;`). Computer System Bash adds shebangs,
-positional parameters, conditionals, bounded loops, functions,
-`break`/`continue`/`return`, `source`, aliases, `command`, `read`,
+The CS-Linux parser supports single and double quotes, backslash escapes,
+environment variables, `$?`, foreground pipelines (`|` and `|&`), ordered
+redirection (`<`, `>`, `>>`, `2>`, `2>>`, and `2>&1`), and control operators
+(`&&`, `||`, `;`). Pipeline stages are scheduler-owned PIDs in one process group
+and exchange bytes through fixed 4 KiB rings with backpressure, EOF, and SIGPIPE
+status 141; the pipeline reports the final stage status. `less` and `more`
+consume a live final-stage stream with 64 KiB bounded history, and `q` closes
+the reader before the saved command-chain continuation resumes. Hosted CS ABI fd
+0/1/2 and Computer System Python output use the same endpoints rather than
+terminal replay. Parent-mutating commands, TUI commands outside the final pager,
+background pipelines, and `pipefail` are rejected explicitly. Computer System
+Bash also adds shebangs, positional parameters, conditionals, bounded loops,
+functions, `break`/`continue`/`return`, `source`, aliases, `command`, `read`,
 function-local variables, `shift`, and basic `getopts`. After authentication it
 loads `/etc/profile`, `/etc/bash.bashrc`, and then that account's `~/.bashrc`
 without replacing existing user files. Command length, tokens, pipeline stages,
@@ -983,13 +1023,13 @@ with 2 MiB RAM. Their versioned display profiles share an 80x25 VGA text mode,
 Desktop use 512 KiB VRAM and also expose 640x480 with 256 indexed colors. The
 Portable's physical 800x480 LCD centers the 640x480 guest image with 80-pixel
 side bars by default; 800x480 is not a guest video mode. At 20 server ticks per
-second those profiles receive at most 1,650,000, 3,300,000, and 800,000 modeled
-CPU cycles per tick respectively, while the scheduler retains the same global
-cap and round-robin fairness across Computers. The 386SX profile uses Intel
-80386-derived instruction clocks, value-dependent early-out multiplication,
-taken/not-taken branch costs, and explicit penalties for four-byte RAM and stack
-transfers over its 16-bit data bus. Timing dispatch remains O(1) per
-instruction.
+second those profiles have nominal pre-divisor budgets of 1,650,000, 3,300,000,
+and 800,000 modeled CPU cycles per tick respectively. Production admission
+applies the configured divisor described below, while round-robin fairness stays
+within each host execution resource. The 386SX profile uses Intel 80386-derived
+instruction clocks, value-dependent early-out multiplication, taken/not-taken
+branch costs, and explicit penalties for four-byte RAM and stack transfers over
+its 16-bit data bus. Timing dispatch remains O(1) per instruction.
 
 Power-on runs an original, deterministic 80x25 **CSBIOS Revision 1.1** sequence.
 At 20 server ticks per second its 70 ticks take about 3.5 seconds: black, CS-VGA
@@ -1029,20 +1069,33 @@ four 512 KiB 30-pin SIMMs and no L2. Cache contents and counters are transient
 per process and never enter persistence. Access, replacement, alignment, and
 timing selection remain O(1).
 
-Production Bedrock admission advances each guest CPU at approximately one
-hundredth of its persisted nominal clock. At 20 TPS this admits 8,000 cycles per
-tick for CS386SX 16 MHz, 16,500 for CS486DX 33 MHz, and 33,000 for CS486DX2 66
-MHz. A 40,000-instruction per-runtime ceiling and 200,000-instruction global
-ceiling remain bounded safety limits; under multi-Computer host contention the
-observable rate may be lower, never higher.
+Production Bedrock admission advances each guest CPU at approximately one half
+of its persisted nominal clock. At 20 TPS this admits 400,000 cycles per tick
+for CS386SX 16 MHz, 825,000 for CS486DX 33 MHz, and 1,650,000 for CS486DX2 66
+MHz. A 1,650,000-instruction per-runtime ceiling and a 1,650,000-instruction
+ceiling per scheduler resource remain bounded safety limits. Each runtime worker
+and the local Bedrock lane own a separate resource ceiling, so one resource can
+admit at most 33 MHz of aggregate modeled CPU work per tick. A two-worker pool
+can increase aggregate multi-Computer host capacity without increasing any
+Computer's guest admission rate. Each resource owns an independent round-robin
+cursor, so uneven worker placement does not bias long-term sharing among the
+Computers assigned to that worker. Under contention the observable rate may be
+lower, never higher.
 
-The authored Behavior Pack setting `packs/behavior/config/computer-system.json`
-controls this ratio through `guestRealtimeDivisor` (`1..10000`). `100` means
-approximately 1/100 realtime, `1` requests realtime admission, and larger values
-are slower. The build rejects unknown fields, unsupported versions, fractions,
-and out-of-range values. Rebuild the packs and restart BDS after changing it;
-the setting never mutates the persisted guest clock or rewrites guest timing
-from host elapsed time.
+The authored Behavior Pack configuration schema v2 at
+`packs/behavior/config/computer-system.json` controls this ratio through
+`guestRealtimeDivisor` (`1..10000`). `2` means approximately 1/2 realtime, `1`
+requests realtime admission, and larger values are slower.
+`collectMicroarchitectureStatsByDefault` is a strict boolean: `false` skips
+host-only cache/bus counter updates for ordinary processes while `run --stats`
+and `python --stats` still collect from process creation; `true` collects
+silently for every process as an operator diagnostic. Neither mode disables
+cache lookup, replacement, CS386SX prefetch state, modeled latency, guest
+cycles, or safety limits. The build rejects missing or unknown fields,
+unsupported versions, fractions, out-of-range divisors, and non-boolean
+instrumentation values. Rebuild the packs and restart BDS after changing either
+setting; neither setting mutates the persisted guest clock or rewrites guest
+timing from host elapsed time.
 
 Neither model claims dynamic branch prediction. CS486 control flow uses a
 simplified five-stage refill penalty, while CS386SX preserves its prefetch

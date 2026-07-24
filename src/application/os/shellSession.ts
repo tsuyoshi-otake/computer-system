@@ -1,4 +1,7 @@
-import type { InMemoryFilesystem } from "../../domain/filesystem/inMemoryFilesystem.js";
+import {
+  FilesystemError,
+  type InMemoryFilesystem,
+} from "../../domain/filesystem/inMemoryFilesystem.js";
 import type {
   CpuProcess,
   CpuProcessSliceResult,
@@ -24,6 +27,7 @@ import {
   type ShellTerminalCompletion,
   type ShellForegroundRequest,
   type ShellJobControlRequest,
+  type ShellOutputEvent,
   type ShellProcessMemoryAdmissionRequest,
   type ShellProcessMemoryGrant,
   type ShellRuntimeIdentityState,
@@ -163,11 +167,17 @@ import {
   parseShellProgram,
   ShellSyntaxError,
   type ShellCommandNode,
+  type ShellChainNode,
+  type ShellOpenRedirect,
   type ShellPipelineNode,
 } from "./shellSyntax.js";
 import { shellFrontendFor } from "./createShellFrontend.js";
 import type { ShellFrontend } from "./shellFrontend.js";
 import { shellTerminalStateOf } from "./shellTerminalState.js";
+import {
+  createStreamingLinuxPipeline,
+  executeStreamingLinuxPipeline,
+} from "./linuxPipeline.js";
 import { OsRuntimeState, type OsProcessSignal } from "./osRuntimeState.js";
 import { DosBatchEngine } from "./dosBatch.js";
 import {
@@ -190,6 +200,7 @@ export interface ShellResult {
   readonly foreground?: ShellForegroundRequest;
   readonly ioWaitEvent?: string;
   readonly jobControl?: ShellJobControlRequest;
+  readonly outputEvents?: readonly ShellOutputEvent[];
 }
 
 export interface ShellSessionOptions {
@@ -202,6 +213,7 @@ export interface ShellSessionOptions {
   readonly terminalHeight?: number;
   readonly terminalWidth?: number;
   readonly hardware?: ComputerHardwareProfile;
+  readonly collectMicroarchitectureStatsByDefault?: boolean;
   readonly guestRamLedger?: GuestRamLedger;
   readonly requireLogin?: boolean;
   readonly passwordSalt?: () => string;
@@ -260,6 +272,31 @@ const linuxMakeRecipeCommands: ReadonlySet<string> = new Set([
   "rmdir",
   "touch",
 ]);
+const linuxPipelineParentCommands: ReadonlySet<string> = new Set([
+  ".",
+  "alias",
+  "bg",
+  "cd",
+  "crontab",
+  "exit",
+  "export",
+  "fg",
+  "logout",
+  "make",
+  "passwd",
+  "reboot",
+  "set",
+  "shutdown",
+  "source",
+  "su",
+  "sudo",
+  "umask",
+  "unalias",
+  "unset",
+  "vi",
+  "vim",
+  "watch",
+]);
 const dosHimemResidentBytes = 14_592;
 const dosEmm386ResidentBytes = 22_528;
 const dosHimemCapsule = "CS-DOS XMS manager\n".padEnd(
@@ -287,6 +324,24 @@ interface ScriptExecution {
   readonly flow: ScriptFlow;
   readonly result: ShellCommandResult;
 }
+
+interface PipelineCaptureSink {
+  readonly descriptor: 1 | 2;
+  readonly kind: "capture";
+}
+
+interface PipelineFileSink {
+  readonly kind: "file";
+  readonly path: string;
+}
+
+interface PipelineBufferSink {
+  readonly kind: "pipe";
+  readonly spoolPath?: string;
+  text: string;
+}
+
+type PipelineSink = PipelineBufferSink | PipelineCaptureSink | PipelineFileSink;
 
 interface IdentityFrame {
   readonly aliases: ReadonlyMap<string, string>;
@@ -388,6 +443,9 @@ export class ShellSession {
     ((pid: number, signal: OsProcessSignal) => void) | undefined;
   private readonly loginSessionId = "tty1";
   private shellProcessId: number | undefined;
+  private nextDosPipeSpoolId = 1;
+  private pendingPagerContinuation: (() => ShellResult) | undefined;
+  private readonly deferGuestExecution: boolean;
 
   constructor(
     private readonly filesystem: InMemoryFilesystem,
@@ -395,6 +453,7 @@ export class ShellSession {
   ) {
     this.terminalWidth = options.terminalWidth ?? 51;
     this.terminalHeight = options.terminalHeight ?? 19;
+    this.deferGuestExecution = options.deferGuestExecution === true;
     const profile = getOsProfile(options.osProfile ?? "linux");
     this.hardware = options.hardware ?? defaultComputerHardware;
     this.guestRamLedger =
@@ -500,6 +559,12 @@ export class ShellSession {
         profile,
         ticksPerSecond,
         hardware: this.hardware,
+        ...(options.collectMicroarchitectureStatsByDefault === undefined
+          ? {}
+          : {
+              collectMicroarchitectureStatsByDefault:
+                options.collectMicroarchitectureStatsByDefault,
+            }),
         ...(this.dosMemory === undefined
           ? {}
           : {
@@ -695,6 +760,7 @@ export class ShellSession {
     this.vi = undefined;
     this.editor = undefined;
     this.pager = undefined;
+    this.pendingPagerContinuation = undefined;
     this.pendingEditorCommand = undefined;
     finalize(() => this.commands.closeDebugger());
     if (this.ownsGuestRamLedger) {
@@ -1128,6 +1194,14 @@ export class ShellSession {
     );
   }
 
+  activePagerScreen(): EditorScreen | undefined {
+    return this.pager?.screen();
+  }
+
+  activePagerRevision(): number | undefined {
+    return this.pager?.revision;
+  }
+
   keys(keys: readonly string[]): ShellResult {
     this.disconnected = false;
     this.cpuCyclesValue = keys.length;
@@ -1252,11 +1326,27 @@ export class ShellSession {
       return resultFromStreams("", "", 0);
     }
 
+    return this.executeProgramChains(
+      program.chains,
+      depth,
+      interactiveAllowed,
+      this.lastExitCode,
+    );
+  }
+
+  private executeProgramChains(
+    chains: readonly ShellChainNode[],
+    depth: number,
+    interactiveAllowed: boolean,
+    initialExitCode: number,
+  ): ShellResult {
     let stdout = "";
     let stderr = "";
+    const outputEvents: ShellOutputEvent[] = [];
     let action: ShellAction | undefined;
-    let exitCode = this.lastExitCode;
-    for (const chain of program.chains) {
+    let exitCode = initialExitCode;
+    for (let chainIndex = 0; chainIndex < chains.length; chainIndex += 1) {
+      const chain = chains[chainIndex]!;
       const shouldRun =
         chain.operator === undefined ||
         chain.operator === ";" ||
@@ -1266,34 +1356,122 @@ export class ShellSession {
       const executed = this.executePipeline(
         chain.pipeline,
         depth,
-        program.chains.length === 1 && interactiveAllowed,
+        chains.length === 1 && interactiveAllowed,
         interactiveAllowed,
       );
       stdout += executed.stdout;
       stderr += executed.stderr;
+      outputEvents.push(
+        ...(executed.outputEvents ?? [
+          ...(executed.stderr.length === 0
+            ? []
+            : [{ descriptor: 2 as const, text: executed.stderr }]),
+          ...(executed.stdout.length === 0
+            ? []
+            : [{ descriptor: 1 as const, text: executed.stdout }]),
+        ]),
+      );
       exitCode = executed.exitCode;
       this.lastExitCode = exitCode;
       if (executed.foreground !== undefined) {
+        let foreground = executed.foreground;
+        if (foreground.kind === "pipeline" && chainIndex + 1 < chains.length) {
+          const remaining = chains.slice(chainIndex + 1);
+          const completePipeline = foreground.complete;
+          foreground = {
+            ...foreground,
+            complete: (): ShellCommandResult => {
+              const completed = completePipeline();
+              this.lastExitCode = completed.exitCode;
+              if (completed.terminalScreen !== undefined) {
+                this.pendingPagerContinuation = (): ShellResult =>
+                  this.executeProgramChains(
+                    remaining,
+                    depth,
+                    interactiveAllowed,
+                    completed.exitCode,
+                  );
+                return completed;
+              }
+              const continued = this.executeProgramChains(
+                remaining,
+                depth,
+                interactiveAllowed,
+                completed.exitCode,
+              );
+              if (continued.foreground !== undefined) {
+                return mergeCommandResults(
+                  completed,
+                  commandFailure(
+                    "bash",
+                    "a second asynchronous foreground command cannot be admitted from a pipeline continuation",
+                    2,
+                  ),
+                );
+              }
+              return mergeCommandResults(completed, continued);
+            },
+          };
+        }
         return {
-          ...resultFromStreams(stdout, stderr, exitCode, action),
-          foreground: executed.foreground,
+          ...resultFromStreams(
+            stdout,
+            stderr,
+            exitCode,
+            action,
+            undefined,
+            outputEvents,
+          ),
+          foreground,
         };
       }
       if (executed.background !== undefined) {
         return {
-          ...resultFromStreams(stdout, stderr, exitCode, action),
+          ...resultFromStreams(
+            stdout,
+            stderr,
+            exitCode,
+            action,
+            undefined,
+            outputEvents,
+          ),
           background: executed.background,
         };
       }
       if (executed.jobControl !== undefined) {
         return {
-          ...resultFromStreams(stdout, stderr, exitCode, action),
+          ...resultFromStreams(
+            stdout,
+            stderr,
+            exitCode,
+            action,
+            undefined,
+            outputEvents,
+          ),
           jobControl: executed.jobControl,
         };
       }
       if (executed.terminalScreen !== undefined || executed.resetTerminal) {
+        if (this.pager !== undefined && chainIndex + 1 < chains.length) {
+          const remaining = chains.slice(chainIndex + 1);
+          const savedExitCode = exitCode;
+          this.pendingPagerContinuation = (): ShellResult =>
+            this.executeProgramChains(
+              remaining,
+              depth,
+              interactiveAllowed,
+              savedExitCode,
+            );
+        }
         return {
-          ...resultFromStreams(stdout, stderr, exitCode, action),
+          ...resultFromStreams(
+            stdout,
+            stderr,
+            exitCode,
+            action,
+            undefined,
+            outputEvents,
+          ),
           ...(executed.terminalScreen === undefined
             ? {}
             : { terminalScreen: executed.terminalScreen }),
@@ -1307,6 +1485,7 @@ export class ShellSession {
           exitCode,
           action,
           executed.sleepTicks,
+          outputEvents,
         );
       }
       if (executed.action !== undefined) {
@@ -1315,7 +1494,14 @@ export class ShellSession {
       }
     }
     this.lastExitCode = exitCode;
-    return resultFromStreams(stdout, stderr, exitCode, action);
+    return resultFromStreams(
+      stdout,
+      stderr,
+      exitCode,
+      action,
+      undefined,
+      outputEvents,
+    );
   }
 
   private executePipeline(
@@ -1327,8 +1513,272 @@ export class ShellSession {
     if (pipeline.background === true) {
       return this.executeBackgroundPipeline(pipeline, depth, foregroundAllowed);
     }
-    let stdin = "";
-    let stderr = "";
+    const expandedCommands = pipeline.commands.map((command) =>
+      this.expandCommand(command),
+    );
+    if (this.frontend.id === "linux" && expandedCommands.length > 1) {
+      try {
+        const lastCommand = expandedCommands.at(-1)!;
+        const lastName = this.commands.canonicalCommand(
+          lastCommand.words[0] ?? "",
+        );
+        const pagerPipeline =
+          (lastName === "less" || lastName === "more") &&
+          this.commands.isKnownCommand(lastName) &&
+          (lastCommand.words.length === 1 ||
+            (lastCommand.words.length === 2 && lastCommand.words[1] === "-"));
+        const streamingCommands = expandedCommands;
+        let livePagerStarted = false;
+        let initialPagerScreen: EditorScreen | undefined;
+        if (pagerPipeline) {
+          const opened = this.startPager(lastName, [], "", {
+            liveInput: true,
+            stdinProvided: true,
+          });
+          if (opened.exitCode !== 0) return opened;
+          livePagerStarted = true;
+          initialPagerScreen = opened.terminalScreen;
+        }
+        const host = {
+          commandAllowed: (command: ShellCommandNode): string | undefined =>
+            this.pipelineCommandRejection(command.words[0] ?? ""),
+          commandAvailable: (name: string): boolean =>
+            this.commands.isKnownCommand(name) ||
+            this.shellAliases.has(name) ||
+            this.shellFunctions.has(name),
+          execute: (
+            command: ShellCommandNode,
+            stdin: string,
+          ): ShellCommandResult =>
+            this.executeCommand(
+              command,
+              stdin,
+              depth,
+              false,
+              foregroundAllowed,
+            ),
+          prepareExternal: (
+            command: ShellCommandNode,
+          ):
+            | Extract<
+                ShellForegroundRequest,
+                { readonly kind: "cs486" | "python" }
+              >
+            | undefined => {
+            const name = this.commands.canonicalCommand(command.words[0] ?? "");
+            if (name !== "run" && name !== "python" && name !== "micropython") {
+              return undefined;
+            }
+            const prepared = this.executeCommand(
+              { ...command, redirects: [] },
+              "",
+              depth,
+              true,
+              foregroundAllowed,
+            );
+            if (
+              prepared.foreground?.kind === "cs486" ||
+              prepared.foreground?.kind === "python"
+            ) {
+              return prepared.foreground;
+            }
+            throw new Error(
+              prepared.stderr.trim() || `${name}: pipeline admission failed`,
+            );
+          },
+          ...(livePagerStarted
+            ? {
+                livePager: {
+                  append: (text: string): void => {
+                    this.pager?.append(text);
+                  },
+                  closed: (): boolean =>
+                    this.pager === undefined || this.pager.state === "closed",
+                  finish: (): void => {
+                    this.pager?.finishInput();
+                  },
+                },
+              }
+            : {}),
+          openRedirect: (redirect: ShellOpenRedirect): void =>
+            this.commands.writeFile(
+              redirect.path,
+              "",
+              redirect.mode === "append",
+            ),
+          readRedirectBytes: (redirect: ShellOpenRedirect): Uint8Array =>
+            this.commands.readFileBytes(redirect.path),
+          reserveMemory: (bytes: number): ShellUtilityMemoryGrant =>
+            this.admitLinuxUtilityMemory({
+              displayName: "shell pipeline",
+              moduleId: "pipeline",
+              residentBytes: bytes,
+            }),
+          transaction: (operation: () => void): void =>
+            this.commands.transaction(operation),
+          writeRedirectBytes: (path: string, bytes: Uint8Array): void =>
+            this.commands.writeFileBytes(path, bytes, true),
+        };
+        const finish = (streamed: ShellCommandResult): ShellCommandResult => {
+          if (!pagerPipeline) return streamed;
+          if (streamed.exitCode !== 0) {
+            this.releasePagerMemory();
+            this.pager = undefined;
+            return streamed;
+          }
+          const outputEvents = (streamed.outputEvents ?? []).filter(
+            ({ descriptor }) => descriptor === 2,
+          );
+          return {
+            exitCode: streamed.exitCode,
+            outputEvents,
+            stderr: outputEvents.map(({ text }) => text).join(""),
+            stdout: "",
+            ...(this.pager === undefined
+              ? { resetTerminal: true }
+              : { terminalScreen: this.pager.screen() }),
+          };
+        };
+        if (!this.deferGuestExecution) {
+          return finish(
+            executeStreamingLinuxPipeline(
+              streamingCommands,
+              pipeline.operators,
+              host,
+            ),
+          );
+        }
+        const admitted = createStreamingLinuxPipeline(
+          streamingCommands,
+          pipeline.operators,
+          host,
+        );
+        let started = false;
+        return {
+          exitCode: 0,
+          foreground: {
+            command: "pipeline",
+            complete: () => finish(admitted.result()),
+            credentials: this.credentialContext.current,
+            kind: "pipeline",
+            stageCommands: expandedCommands.map(
+              (command) => command.words[0] ?? "shell",
+            ),
+            stageExitCodes: admitted.stageExitCodes,
+            start: (startStage): CpuProcess => {
+              if (started) throw new Error("pipeline process already started");
+              started = true;
+              if (startStage !== undefined)
+                admitted.bindStageStarter(startStage);
+              return admitted.process;
+            },
+            umask: this.guestFilesystem.getUmask(),
+          },
+          stderr: "",
+          stdout: "",
+          ...(initialPagerScreen === undefined
+            ? {}
+            : { terminalScreen: initialPagerScreen }),
+        };
+      } catch (error: unknown) {
+        if (this.pager?.inputComplete === false) {
+          this.releasePagerMemory();
+          this.pager = undefined;
+        }
+        return commandFailure("bash", message(error));
+      }
+    }
+    let dosSpoolPaths: string[] = [];
+    const ownedDosSpools = new Set<string>();
+    const cleanupDosSpools = (): string | undefined => {
+      const failures: string[] = [];
+      for (const path of ownedDosSpools) {
+        try {
+          this.commands.deleteOwnedTemporaryFile(path);
+          ownedDosSpools.delete(path);
+        } catch (error: unknown) {
+          failures.push(`${path}: ${message(error)}`);
+        }
+      }
+      return failures.length === 0
+        ? undefined
+        : `COMMAND: pipeline spool cleanup failed: ${failures.join("; ")}\r\n`;
+    };
+    const finalizeDosSpools = (
+      result: ShellCommandResult,
+    ): ShellCommandResult => {
+      const failure = cleanupDosSpools();
+      return failure === undefined
+        ? result
+        : mergeCommandResults(result, {
+            exitCode: 1,
+            stderr: failure,
+            stdout: "",
+          });
+    };
+    const redirectedInput = new Map<ShellOpenRedirect, string>();
+    const inputRedirects: ShellOpenRedirect[] = [];
+    try {
+      dosSpoolPaths =
+        this.frontend.id === "dos"
+          ? this.allocateDosPipeSpoolPaths(
+              Math.max(0, expandedCommands.length - 1),
+            )
+          : [];
+      for (const command of expandedCommands) {
+        for (const redirect of command.redirects) {
+          if (
+            redirect.kind === "open" &&
+            redirect.descriptor === 0 &&
+            redirect.mode === "read"
+          ) {
+            // Validate every input before committing output setup. The value is
+            // read again after `>` truncation so same-file input/output does
+            // not retain a pre-open snapshot.
+            this.commands.readFile(redirect.path);
+            inputRedirects.push(redirect);
+          }
+        }
+      }
+      const requiresSetupTransaction =
+        dosSpoolPaths.length > 0 ||
+        expandedCommands.some((command) =>
+          command.redirects.some(
+            (redirect) => redirect.kind === "open" && redirect.descriptor !== 0,
+          ),
+        );
+      const prepareOutputs = (): void => {
+        for (const path of dosSpoolPaths) this.commands.writeFile(path, "");
+        for (const command of expandedCommands) {
+          for (const redirect of command.redirects) {
+            if (redirect.kind !== "open" || redirect.descriptor === 0) continue;
+            this.commands.writeFile(
+              redirect.path,
+              "",
+              redirect.mode === "append",
+            );
+          }
+        }
+      };
+      if (requiresSetupTransaction) this.commands.transaction(prepareOutputs);
+      for (const path of dosSpoolPaths) ownedDosSpools.add(path);
+      for (const redirect of inputRedirects) {
+        redirectedInput.set(redirect, this.commands.readFile(redirect.path));
+      }
+    } catch (error: unknown) {
+      return finalizeDosSpools({
+        exitCode: 1,
+        stderr: this.commandError(
+          expandedCommands[0]?.words[0] ?? "shell",
+          error,
+        ),
+        stdout: "",
+      });
+    }
+
+    const terminalEvents: ShellOutputEvent[] = [];
+    let previousPipe = "";
+    let previousSpoolPath: string | undefined;
     let exitCode = 0;
     let action: ShellAction | undefined;
     let sleepTicks: number | undefined;
@@ -1336,21 +1786,61 @@ export class ShellSession {
     let resetTerminal = false;
     let foreground: ShellForegroundRequest | undefined;
     let jobControl: ShellJobControlRequest | undefined;
-    for (const command of pipeline.commands) {
-      const expanded = this.expandCommand(command);
-      const inputRedirect = expanded.redirects.find(
-        ({ mode }) => mode === "read",
+    for (let index = 0; index < expandedCommands.length; index += 1) {
+      const expanded = expandedCommands[index]!;
+      const inputRedirect = expanded.redirects.findLast(
+        (redirect): redirect is ShellOpenRedirect =>
+          redirect.kind === "open" && redirect.descriptor === 0,
       );
-      if (inputRedirect !== undefined) {
-        try {
-          stdin = this.commands.readFile(inputRedirect.path);
-        } catch (error: unknown) {
-          return {
-            exitCode: 1,
-            stderr: this.commandError(expanded.words[0] ?? "shell", error),
-            stdout: "",
-          };
+      let stdin: string;
+      try {
+        stdin =
+          inputRedirect === undefined
+            ? previousSpoolPath === undefined
+              ? previousPipe
+              : this.commands.readFile(previousSpoolPath)
+            : (redirectedInput.get(inputRedirect) ?? "");
+        if (inputRedirect === undefined && previousSpoolPath !== undefined) {
+          this.commands.deleteOwnedTemporaryFile(previousSpoolPath);
+          ownedDosSpools.delete(previousSpoolPath);
         }
+      } catch (error: unknown) {
+        return finalizeDosSpools({
+          exitCode: 1,
+          stderr: this.commandError(expanded.words[0] ?? "shell", error),
+          stdout: "",
+        });
+      }
+
+      const pipe: PipelineBufferSink | undefined =
+        index + 1 < expandedCommands.length
+          ? {
+              kind: "pipe",
+              ...(dosSpoolPaths[index] === undefined
+                ? {}
+                : { spoolPath: dosSpoolPaths[index] }),
+              text: "",
+            }
+          : undefined;
+      let stdoutSink: PipelineSink = pipe ?? {
+        descriptor: 1,
+        kind: "capture",
+      };
+      let stderrSink: PipelineSink = { descriptor: 2, kind: "capture" };
+      for (const redirect of expanded.redirects) {
+        if (redirect.kind === "duplicate") {
+          stderrSink = stdoutSink;
+        } else if (redirect.descriptor === 1) {
+          stdoutSink = { kind: "file", path: redirect.path };
+        } else if (redirect.descriptor === 2) {
+          stderrSink = { kind: "file", path: redirect.path };
+        }
+      }
+      if (pipeline.operators[index] === "pipe-stdout-and-stderr") {
+        if (pipe === undefined) {
+          throw new Error("Pipeline stderr edge has no destination");
+        }
+        stderrSink = pipe;
       }
 
       let executed: ShellCommandResult;
@@ -1359,76 +1849,180 @@ export class ShellSession {
           expanded,
           stdin,
           depth,
-          interactiveAllowed && pipeline.commands.length === 1,
+          interactiveAllowed &&
+            (pipeline.commands.length === 1 ||
+              (this.frontend.id === "dos" &&
+                index === expandedCommands.length - 1 &&
+                this.commands.canonicalCommand(expanded.words[0] ?? "") ===
+                  "more")),
           foregroundAllowed,
         );
       } catch (error: unknown) {
-        return {
+        executed = {
           exitCode: 1,
           stderr: this.commandError(expanded.words[0] ?? "shell", error),
           stdout: "",
         };
       }
-      stderr += executed.stderr;
       exitCode = executed.exitCode;
       action = executed.action;
       sleepTicks = executed.sleepTicks;
       terminalScreen = executed.terminalScreen;
       resetTerminal = executed.resetTerminal ?? false;
       foreground = executed.foreground;
+      if (
+        foreground !== undefined &&
+        this.frontend.id === "linux" &&
+        (foreground.kind === "python" ||
+          (foreground.kind === "cs486" &&
+            foreground.hostedStartup !== undefined))
+      ) {
+        const routeSink = (sink: PipelineSink, text: string): boolean => {
+          if (sink.kind === "capture") return true;
+          if (sink.kind === "file") {
+            this.commands.writeFile(sink.path, text, true);
+            return false;
+          }
+          throw new Error("hosted CS ABI pipe endpoint was not admitted");
+        };
+        const hasDescriptorRouting = expanded.redirects.some(
+          (redirect) => redirect.kind !== "open" || redirect.descriptor !== 0,
+        );
+        foreground = {
+          ...foreground,
+          ...(foreground.kind !== "cs486" || inputRedirect === undefined
+            ? {}
+            : { standardInput: stdin }),
+          ...(hasDescriptorRouting
+            ? {
+                routeOutput: (descriptor: 1 | 2, text: string): boolean =>
+                  routeSink(descriptor === 1 ? stdoutSink : stderrSink, text),
+              }
+            : {}),
+        };
+      }
       jobControl = executed.jobControl;
       if (jobControl !== undefined && pipeline.commands.length > 1) {
-        return commandFailure(
-          expanded.words[0] ?? "shell",
-          "job control cannot run in a pipeline",
-          2,
+        return finalizeDosSpools(
+          commandFailure(
+            expanded.words[0] ?? "shell",
+            "job control cannot run in a pipeline",
+            2,
+          ),
         );
       }
       if (sleepTicks !== undefined && pipeline.commands.length > 1) {
-        return commandFailure("sleep", "cannot run in a pipeline");
+        return finalizeDosSpools(
+          commandFailure("sleep", "cannot run in a pipeline"),
+        );
       }
-      let stdout = executed.stdout;
-      const outputRedirect = expanded.redirects.find(
-        ({ mode }) => mode === "write" || mode === "append",
-      );
-      if (outputRedirect !== undefined) {
+      const events = executed.outputEvents ?? [
+        ...(executed.stderr.length === 0
+          ? []
+          : [{ descriptor: 2 as const, text: executed.stderr }]),
+        ...(executed.stdout.length === 0
+          ? []
+          : [{ descriptor: 1 as const, text: executed.stdout }]),
+      ];
+      for (const event of events) {
+        const sink = event.descriptor === 1 ? stdoutSink : stderrSink;
         try {
-          this.commands.writeFile(
-            outputRedirect.path,
-            stdout,
-            outputRedirect.mode === "append",
-          );
-          stdout = "";
+          if (sink.kind === "pipe") {
+            if (sink.spoolPath === undefined) sink.text += event.text;
+            else this.commands.writeFile(sink.spoolPath, event.text, true);
+          } else if (sink.kind === "file")
+            this.commands.writeFile(sink.path, event.text, true);
+          else
+            terminalEvents.push({
+              descriptor: sink.descriptor,
+              text: event.text,
+            });
         } catch (error: unknown) {
-          stderr += this.commandError(expanded.words[0] ?? "shell", error);
+          const failureEvent = {
+            descriptor: 2,
+            text: this.commandError(expanded.words[0] ?? "shell", error),
+          } as const;
+          terminalEvents.push(failureEvent);
           exitCode = 1;
-          stdout = "";
+          if (sink.kind === "pipe" && sink.spoolPath !== undefined) {
+            return finalizeDosSpools({
+              exitCode,
+              outputEvents: terminalEvents,
+              stderr: terminalEvents
+                .filter(({ descriptor }) => descriptor === 2)
+                .map(({ text }) => text)
+                .join(""),
+              stdout: terminalEvents
+                .filter(({ descriptor }) => descriptor === 1)
+                .map(({ text }) => text)
+                .join(""),
+            });
+          }
         }
       }
-      stdin = stdout;
-      if (stdin.length > maximumPipelineBuffer) {
-        return {
+      previousPipe = pipe?.text ?? "";
+      previousSpoolPath = pipe?.spoolPath;
+      if (previousPipe.length > maximumPipelineBuffer) {
+        return finalizeDosSpools({
           exitCode: 1,
-          stderr: this.frontend.pipelineLimitError(stderr),
+          stderr: this.frontend.pipelineLimitError(
+            terminalEvents
+              .filter(({ descriptor }) => descriptor === 2)
+              .map(({ text }) => text)
+              .join(""),
+          ),
           stdout: "",
-        };
+        });
       }
       if (action !== undefined) break;
       if (sleepTicks !== undefined) break;
       if (foreground !== undefined) break;
       if (jobControl !== undefined) break;
     }
-    return {
+    const stdout = terminalEvents
+      .filter(({ descriptor }) => descriptor === 1)
+      .map(({ text }) => text)
+      .join("");
+    const stderr = terminalEvents
+      .filter(({ descriptor }) => descriptor === 2)
+      .map(({ text }) => text)
+      .join("");
+    return finalizeDosSpools({
       ...(action === undefined ? {} : { action }),
       exitCode,
       stderr,
-      stdout: stdin,
+      outputEvents: terminalEvents,
+      stdout,
       ...(sleepTicks === undefined ? {} : { sleepTicks }),
       ...(terminalScreen === undefined ? {} : { terminalScreen }),
       ...(resetTerminal ? { resetTerminal: true } : {}),
       ...(foreground === undefined ? {} : { foreground }),
       ...(jobControl === undefined ? {} : { jobControl }),
-    };
+    });
+  }
+
+  private allocateDosPipeSpoolPaths(count: number): string[] {
+    const paths: string[] = [];
+    for (let edge = 0; edge < count; edge += 1) {
+      let selected: string | undefined;
+      for (let attempt = 0; attempt < 64; attempt += 1) {
+        const id = this.nextDosPipeSpoolId;
+        this.nextDosPipeSpoolId = (this.nextDosPipeSpoolId % 999_999) + 1;
+        const candidate = `C:\\TEMP\\P${String(id).padStart(6, "0")}.TMP`;
+        if (
+          !this.commands.pathExists(candidate) &&
+          !paths.includes(candidate)
+        ) {
+          selected = candidate;
+          break;
+        }
+      }
+      if (selected === undefined) {
+        throw new Error("DOS pipeline spool name limit exceeded");
+      }
+      paths.push(selected);
+    }
+    return paths;
   }
 
   private executeBackgroundPipeline(
@@ -1600,7 +2194,37 @@ export class ShellSession {
     }
     if (error instanceof Error && error.message === "Access is denied.")
       return "Access is denied.\r\n";
+    if (
+      this.frontend.id === "dos" &&
+      error instanceof FilesystemError &&
+      (error.code === "capacity" || error.code === "file_limit")
+    ) {
+      return "Insufficient disk space.\r\n";
+    }
     return this.frontend.commandError(command, error);
+  }
+
+  private pipelineCommandRejection(
+    requestedName: string,
+    visited: ReadonlySet<string> = new Set(),
+  ): string | undefined {
+    if (visited.has(requestedName))
+      return "recursive alias is unavailable in a pipeline";
+    if (this.shellFunctions.has(requestedName)) {
+      return "shell functions are unavailable in a pipeline";
+    }
+    const alias = this.shellAliases.get(requestedName);
+    if (alias !== undefined) {
+      const target = alias.trim().split(/\s+/u)[0] ?? "";
+      return this.pipelineCommandRejection(
+        target,
+        new Set([...visited, requestedName]),
+      );
+    }
+    const canonical = this.commands.canonicalCommand(requestedName);
+    return linuxPipelineParentCommands.has(canonical)
+      ? "parent-shell state cannot be changed from a pipeline"
+      : undefined;
   }
 
   private expandCommand(command: ShellCommandNode): ShellCommandNode {
@@ -1615,7 +2239,7 @@ export class ShellSession {
       words: command.words.map(expand),
       redirects: command.redirects.map((redirect) => ({
         ...redirect,
-        path: expand(redirect.path),
+        ...(redirect.kind === "open" ? { path: expand(redirect.path) } : {}),
       })),
     };
   }
@@ -1691,15 +2315,10 @@ export class ShellSession {
       return this.commands.execute(command.words, stdin);
     }
     if (sessionCommand === "linux-python") {
-      if (
-        depth !== 0 ||
-        !interactiveAllowed ||
-        !foregroundAllowed ||
-        command.redirects.length > 0
-      ) {
+      if (depth !== 0 || !interactiveAllowed || !foregroundAllowed) {
         return commandFailure(
           name,
-          "cannot run in a pipeline, redirect, script, or command chain",
+          "cannot run in a script or command chain",
           2,
         );
       }
@@ -1942,12 +2561,20 @@ export class ShellSession {
       const elapsed =
         (this.commands.currentTick() - startedAt) /
         this.commands.ticksPerSecond();
+      const timingText =
+        sessionCommand === "dos-timer"
+          ? `Elapsed time: ${elapsed.toFixed(3)} seconds\r\n`
+          : `real ${elapsed.toFixed(3)}s\n`;
       return {
         ...timed,
+        outputEvents: [
+          ...commandOutputEvents(timed),
+          { descriptor: 2, text: timingText },
+        ],
         stderr:
           sessionCommand === "dos-timer"
-            ? `${timed.stderr.replaceAll("\r\n", "\n").replaceAll("\n", "\r\n")}Elapsed time: ${elapsed.toFixed(3)} seconds\r\n`
-            : `${timed.stderr}real ${elapsed.toFixed(3)}s\n`,
+            ? `${timed.stderr.replaceAll("\r\n", "\n").replaceAll("\n", "\r\n")}${timingText}`
+            : `${timed.stderr}${timingText}`,
       };
     }
     if (sessionCommand === "vi") {
@@ -1971,10 +2598,18 @@ export class ShellSession {
           2,
         );
       }
-      if (!interactiveAllowed || command.redirects.length > 0) {
+      const hasOutputRedirect = command.redirects.some(
+        (redirect) =>
+          redirect.kind === "duplicate" || redirect.descriptor !== 0,
+      );
+      if (!interactiveAllowed || hasOutputRedirect) {
         return commandFailure(name, "cannot run in a pipeline or redirect");
       }
-      return this.startPager(sessionCommand, arguments_);
+      return this.startPager(sessionCommand, arguments_, stdin, {
+        stdinProvided: command.redirects.some(
+          (redirect) => redirect.kind === "open" && redirect.descriptor === 0,
+        ),
+      });
     }
     if (sessionCommand === "dos-editor") {
       if (!interactiveAllowed || command.redirects.length > 0) {
@@ -2824,8 +3459,11 @@ export class ShellSession {
       return commandSuccess("logout\n");
     }
     if (this.authentication?.enabled !== true) return undefined;
-    this.logoutAuthenticatedSession();
-    return commandSuccess("logout\n");
+    const warnings = this.logoutAuthenticatedSession();
+    const issue = this.readIssue() ?? [];
+    return commandSuccess(
+      ["logout", ...warnings, ...issue].map((line) => `${line}\n`).join(""),
+    );
   }
 
   private executeLogin(
@@ -4846,26 +5484,42 @@ export class ShellSession {
   private startPager(
     mode: PagerMode,
     arguments_: readonly string[],
+    stdin: string,
+    options: {
+      readonly liveInput?: boolean;
+      readonly stdinProvided?: boolean;
+    } = {},
   ): ShellCommandResult {
-    if (arguments_.length !== 1) return commandUsage(`${mode} <path>`);
-    const path = this.commands.resolvePath(arguments_[0]!);
+    if (arguments_.length > 1) return commandUsage(`${mode} [path]`);
+    if (
+      arguments_.length === 0 &&
+      stdin.length === 0 &&
+      options.stdinProvided !== true
+    )
+      return commandUsage(`${mode} [path]`);
+    const path =
+      arguments_[0] === undefined
+        ? undefined
+        : this.commands.resolvePath(arguments_[0]);
     try {
-      if (!this.guestFilesystem.exists(path)) {
+      if (path !== undefined && !this.guestFilesystem.exists(path)) {
         throw new Error("No such file or directory");
       }
-      if (this.guestFilesystem.isDirectory(path)) {
+      if (path !== undefined && this.guestFilesystem.isDirectory(path)) {
         throw new Error("Is a directory");
       }
-      const contents = this.commands.readFile(path);
+      const contents =
+        path === undefined ? stdin : this.commands.readFile(path);
       this.pager = this.createPagerSession(
         mode,
         () =>
           new PagerSession(
             mode,
-            path,
+            path ?? "(standard input)",
             contents,
             this.terminalWidth,
             this.terminalHeight,
+            options.liveInput === true,
           ),
       );
       return {
@@ -4958,7 +5612,15 @@ export class ShellSession {
     mode: PagerMode,
   ): SessionMemoryReservation {
     if (this.linuxMemory === undefined) {
-      throw new Error("Linux session memory admission is unavailable");
+      if (this.dosMemory === undefined || mode !== "more") {
+        throw new Error("pager memory admission is unavailable");
+      }
+      return this.dosMemory.reserveTransientResident({
+        bytes,
+        category: "process",
+        displayName: "MORE",
+        moduleId: "more",
+      });
     }
     const reservation = this.linuxMemory.reserveTransient({
       category: "editor",
@@ -5160,6 +5822,17 @@ export class ShellSession {
       this.releasePagerMemory();
       this.pager = undefined;
       this.lastExitCode = 0;
+      const continuation = this.pendingPagerContinuation;
+      this.pendingPagerContinuation = undefined;
+      if (continuation !== undefined) {
+        const resumed = continuation();
+        return {
+          ...resumed,
+          ...(resumed.terminalScreen === undefined
+            ? { resetTerminal: true }
+            : {}),
+        };
+      }
       return {
         ...resultFromStreams("", "", 0),
         resetTerminal: true,
@@ -6467,6 +7140,10 @@ function mergeCommandResults(
     exitCode: next.exitCode,
     stderr: previous.stderr + next.stderr,
     stdout: previous.stdout + next.stdout,
+    outputEvents: [
+      ...commandOutputEvents(previous),
+      ...commandOutputEvents(next),
+    ],
     ...(next.sleepTicks === undefined ? {} : { sleepTicks: next.sleepTicks }),
     ...(next.terminalScreen === undefined
       ? {}
@@ -6485,8 +7162,21 @@ function resultFromStreams(
   exitCode: number,
   action?: ShellAction,
   sleepTicks?: number,
+  outputEvents?: readonly ShellOutputEvent[],
 ): ShellResult {
-  const normalized = `${stderr}${stdout}`.replaceAll("\r\n", "\n");
+  const normalized = (
+    outputEvents ?? [
+      ...(stderr.length === 0
+        ? []
+        : [{ descriptor: 2 as const, text: stderr }]),
+      ...(stdout.length === 0
+        ? []
+        : [{ descriptor: 1 as const, text: stdout }]),
+    ]
+  )
+    .map(({ text }) => text)
+    .join("")
+    .replaceAll("\r\n", "\n");
   const lines = normalized.length === 0 ? [] : normalized.split("\n");
   if (lines.at(-1) === "") lines.pop();
   return {
@@ -6495,6 +7185,7 @@ function resultFromStreams(
     lines,
     stderr,
     stdout,
+    ...(outputEvents === undefined ? {} : { outputEvents }),
     ...(sleepTicks === undefined ? {} : { sleepTicks }),
   };
 }
@@ -6523,6 +7214,7 @@ function shellResultFromCommand(result: ShellCommandResult): ShellResult {
       result.exitCode,
       result.action,
       result.sleepTicks,
+      result.outputEvents,
     ),
     ...(result.cpuCycles === undefined ? {} : { cpuCycles: result.cpuCycles }),
     ...(result.foreground === undefined
@@ -6542,6 +7234,21 @@ function shellResultFromCommand(result: ShellCommandResult): ShellResult {
       : { terminalScreen: result.terminalScreen }),
     ...(result.resetTerminal ? { resetTerminal: true } : {}),
   };
+}
+
+function commandOutputEvents(
+  result: ShellCommandResult,
+): readonly ShellOutputEvent[] {
+  return (
+    result.outputEvents ?? [
+      ...(result.stderr.length === 0
+        ? []
+        : [{ descriptor: 2 as const, text: result.stderr }]),
+      ...(result.stdout.length === 0
+        ? []
+        : [{ descriptor: 1 as const, text: result.stdout }]),
+    ]
+  );
 }
 
 function parseLinuxId(value: string, label: "GID" | "UID"): number {
@@ -6595,6 +7302,7 @@ function dosBatchCommandRequiresInteractiveOwner(commandLine: string): boolean {
     "edit",
     "ld",
     "micropython",
+    "more",
     "python",
     "qbasic",
     "reboot",

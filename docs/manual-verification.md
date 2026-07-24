@@ -81,7 +81,11 @@ Verify lifecycle and persistence:
   startup transcript is printed. Input is masked and absent from command
   history. Reboot and verify the prior display is cleared, `/etc/shadow` remains
   present, `<computer-id> login:` accepts `cs`, a wrong password is rejected,
-  and the correct password reaches `/home/cs` with a `$` prompt.
+  and the correct password reaches `/home/cs` with a `$` prompt. Run `exit` or
+  `logout` from that top-level login shell and expect `logout`, the current
+  optional `/etc/issue`, and `<computer-id> login:` in that order. Exiting
+  `sudo -i` or `su -` must instead return directly to the parent shell without
+  printing `/etc/issue`.
 - On a DOS-profile Portable Computer, run `EDIT C:\DEMO.TXT`, enter text in the
   blue full-screen viewport, save with F2, and exit through File > Exit. Modify
   it again and verify the Save/Discard/Cancel prompt owns the dirty exit. On a
@@ -378,7 +382,7 @@ administrator configuration is not changed:
 
 ```powershell
 $config = Join-Path $env:TEMP "computer-system-web-verification.json"
-npm run web:config -- set --port 18080 --url http://127.0.0.1:18080 --config-file $config
+npm run web:config -- set --port 18080 --url http://127.0.0.1:18080 --runtime-workers 2 --config-file $config
 npm run web:config -- show --config-file $config
 $env:WEB_COMPANION_CONFIG_FILE = $config
 npm run dev:bds:web
@@ -386,17 +390,38 @@ npm run dev:bds:web
 
 Verify:
 
-- `Verify:` Inspect `show` output. `Expect:` Version 1, port 18080, and the
-  normalized public origin are present and `restartRequired` was reported by
-  `set`.
+- `Verify:` Inspect `show` output. `Expect:` Version 2, port 18080, the
+  normalized public origin, and `runtimeWorkerCount: 2` are present and
+  `restartRequired` was reported by `set`.
 - `Verify:` Open `http://127.0.0.1:18080/`. `Expect:` The stable Web Terminal
   entry page loads and a Computer handoff uses the configured public origin.
 - `Verify:` Restart the companion without setting `WEB_COMPANION_PORT` or
-  `WEB_COMPANION_PUBLIC_ORIGIN`. `Expect:` It listens on 18080 again.
+  `WEB_COMPANION_PUBLIC_ORIGIN`. `Expect:` It listens on 18080 again and starts
+  two persistent runtime workers.
 - `Verify:` Start once with `WEB_COMPANION_PORT=18081`. `Expect:` The temporary
   environment override wins without changing the persisted 18080 value.
+- `Verify:` Start once with `WEB_COMPANION_RUNTIME_WORKERS=1`. `Expect:` The
+  temporary environment override starts one worker without changing the
+  persisted two-worker value.
+- `Verify:` Attempt `--runtime-workers 0` and `--runtime-workers 17`. `Expect:`
+  Both configurations fail explicitly; valid worker counts are integers from 1
+  through 16.
+- `Verify:` Open one CS386SX and one CS486 Web Terminal. `Expect:` Each header
+  shows a small stable `Wn/2` CPU badge; an isolated CS executable changes its
+  state to worker, while host-backed execution is labeled local or mixed.
+- `Verify:` Run the same bounded isolated program before and after changing the
+  worker count. `Expect:` CPU model, registers, output, modeled cycles, cycle
+  debt, and virtual time are identical. Only aggregate multi-Computer host
+  capacity and the worker badge may change.
+- `Verify:` Point managed startup at a preserved world with Beta APIs disabled.
+  `Expect:` Startup fails without editing the world. After BDS is stopped, make
+  a complete world-directory backup and obtain explicit operator consent before
+  enabling the irreversible experiment. Only a freshly generated disposable
+  `ComputerSystemAcceptance` world beneath the current user's temporary
+  directory may be enabled automatically.
 - `Verify:` Run `npm run web:config -- reset --config-file $config`. `Expect:`
-  the file is removed and the next unmodified start returns to port 80.
+  the file is removed and the next unmodified start returns to port 80 with two
+  runtime workers.
 
 For the real system-wide configuration, repeat `set` without `--config-file`
 from an administrator/root shell. Open only the selected LAN firewall port.
@@ -463,8 +488,8 @@ The earlier standalone Monitor feasibility probe is historical evidence only;
 the production Desktop and Advanced Desktop now carry their CRT in the same
 placeable block.
 
-`Verify:` Run `npm run build`, install Resource Pack 0.1.17 with Behavior Pack
-0.1.10 in the Windows GDK client, and inspect both placed blocks and inventory
+`Verify:` Run `npm run build`, install Resource Pack 0.1.18 with Behavior Pack
+0.1.12 in the Windows GDK client, and inspect both placed blocks and inventory
 items for Computer, Advanced, Portable, and Floppy Disk.
 
 `Expect:` Computer and Advanced share one cream square all-in-one Deskpro-style
@@ -476,11 +501,14 @@ compact right-mounted 3.5-inch floppy drive; Advanced has two; both keep the
 power control on the left. Portable retains the existing thin open-laptop block
 silhouette, darker keyboard deck, trackball, and 4:3 black screen. No 5.25-inch
 drive appears. The desktop screen sits nearly flush against the CRT housing
-without a visible thick slab along its side or lower edge. Item silhouettes
-remain legible at inventory scale, block faces resolve without missing-material
-purple, and all four cardinal placements face the player consistently. The
-Floppy Disk artwork occupies 75% of its 256 px item-texture canvas, remains
-centered, and reads at a similar visual scale to the neighboring machine items.
+without a visible thick slab along its side or lower edge. At straight-on,
+oblique, above, and below viewing angles, near and far from the block, the
+screen has no stripes, shimmer, case-color breakthrough, or apparent
+transparency. Item silhouettes remain legible at inventory scale, block faces
+resolve without missing-material purple, and all four cardinal placements face
+the player consistently. The Floppy Disk artwork occupies 75% of its 256 px
+item-texture canvas, remains centered, and reads at a similar visual scale to
+the neighboring machine items.
 
 `Verify:` Inspect the generated Behavior/Resource Packs, place each desktop, and
 interact with it directly within three blocks.
@@ -760,9 +788,13 @@ the Chrome timing criteria below.
    The deterministic fixture holds `/api/input` at 429 with `Retry-After: 1`,
    then releases it with one matching accepted admission. It also offers 1,025
    keys to an empty editor queue and replaces the session while a batch is
-   unacknowledged. `Expect:` Busy input remains queued and retries at most five
-   times with bounded exponential backoff and jitter; acceptance removes the
-   batch exactly once; the 1,025-key offer is rejected atomically with a visible
+   unacknowledged. Make the BDS relay reject one input write and repeat with an
+   HTTP 500/503/504 response. `Expect:` Busy and transient transport failures
+   remain queued and retry at most five times with bounded exponential backoff
+   and jitter; the relay failure is a safe `503 companion_unavailable`, not an
+   unclassified internal error; acceptance removes the batch exactly once. If
+   retries are exhausted, the dialog offers `Retry input` and resumes the same
+   queue on demand. The 1,025-key offer is rejected atomically with a visible
    queue-full error; replacement explicitly discards the old generation instead
    of replaying it.
 4. `Verify:` Record one Chrome Performance trace for the 32-key burst and

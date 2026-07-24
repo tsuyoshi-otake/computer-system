@@ -17,32 +17,34 @@ The project-scoped [`.codex/config.toml`](../.codex/config.toml) registers the
 `computer_system_bds` stdio server. Trust this repository and restart Codex (or
 start a new Codex session) after pulling or changing the configuration.
 
-The server uses these optional environment variables:
+The repository's MCP and managed launchers use these optional environment
+variables:
 
-| Variable                           | Default                                             | Purpose                                                        |
-| ---------------------------------- | --------------------------------------------------- | -------------------------------------------------------------- |
-| `BDS_HOME`                         | `%USERPROFILE%\tmp\computer-system-bds\runtime`     | Extracted official BDS distribution used only as a copy source |
-| `BDS_MCP_WORKDIR`                  | `%USERPROFILE%\tmp\computer-system-bds\mcp-runtime` | Isolated MCP debug runtime                                     |
-| `BDS_MCP_PORT`                     | `19142`                                             | IPv4 server port; IPv6 uses the following port                 |
-| `BDS_MCP_WORLD`                    | `ComputerSystemMcpDebug`                            | Debug world name                                               |
-| `WEB_COMPANION_HOST`               | `0.0.0.0`                                           | Web listener interface for trusted LAN access                  |
-| `WEB_COMPANION_PORT`               | `80`                                                | Web listener TCP port                                          |
-| `WEB_COMPANION_PUBLIC_HOST`        | Listener host                                       | Reachable host used in generated HTTP links                    |
-| `WEB_COMPANION_PUBLIC_ORIGIN`      | unset                                               | Complete HTTPS origin advertised behind a reverse proxy        |
-| `WEB_COMPANION_CONFIG_FILE`        | system-wide platform path                           | Persistent administrator configuration file                    |
-| `WEB_COMPANION_ALLOWED_ORIGINS`    | unset                                               | Extra origins, or `*` to accept every request Origin           |
-| `WEB_COMPANION_AUTO_OPEN`          | `1`                                                 | `0` disables and `1` enables host-browser opening              |
-| `WEB_COMPANION_DEBUG_IGNORE_RANGE` | `0`                                                 | Debug only: skip the placed-machine range and dimension check  |
+| Variable                           | Default                                             | Purpose                                                         |
+| ---------------------------------- | --------------------------------------------------- | --------------------------------------------------------------- |
+| `BDS_HOME`                         | `%USERPROFILE%\tmp\computer-system-bds\runtime`     | Extracted official BDS distribution used only as a copy source  |
+| `BDS_MCP_WORKDIR`                  | `%USERPROFILE%\tmp\computer-system-bds\mcp-runtime` | Isolated MCP debug runtime                                      |
+| `BDS_MCP_PORT`                     | `19142`                                             | IPv4 server port; IPv6 uses the following port                  |
+| `BDS_MCP_WORLD`                    | `ComputerSystemMcpDebug`                            | Debug world name                                                |
+| `WEB_COMPANION_HOST`               | `0.0.0.0`                                           | Web listener interface for trusted LAN access                   |
+| `WEB_COMPANION_PORT`               | `80`                                                | Web listener TCP port                                           |
+| `WEB_COMPANION_PUBLIC_HOST`        | Listener host                                       | Reachable host used in generated HTTP links                     |
+| `WEB_COMPANION_PUBLIC_ORIGIN`      | unset                                               | Complete HTTPS origin advertised behind a reverse proxy         |
+| `WEB_COMPANION_CONFIG_FILE`        | system-wide platform path                           | Persistent administrator configuration file                     |
+| `WEB_COMPANION_RUNTIME_WORKERS`    | `2`                                                 | Managed `dev:bds:web` worker threads; integer from 1 through 16 |
+| `WEB_COMPANION_ALLOWED_ORIGINS`    | unset                                               | Extra origins, or `*` to accept every request Origin            |
+| `WEB_COMPANION_AUTO_OPEN`          | `1`                                                 | `0` disables and `1` enables host-browser opening               |
+| `WEB_COMPANION_DEBUG_IGNORE_RANGE` | `0`                                                 | Debug only: skip the placed-machine range and dimension check   |
 
 No API key or `.env` file is required.
 
 ### Persistent administrator networking configuration
 
-Use the host command below to persist the Web listener port and advertised
-public origin across process and machine restarts:
+Use the host command below to persist the Web listener port, advertised public
+origin, and managed runtime-worker count across process and machine restarts:
 
 ```powershell
-npm run web:config -- set --port 80 --url http://10.255.10.90
+npm run web:config -- set --port 80 --url http://10.255.10.90 --runtime-workers 2
 npm run web:config -- show
 ```
 
@@ -51,14 +53,19 @@ Windows and `/etc/computer-system/web-companion.json` on Linux. The command
 fails explicitly when the caller cannot write the system location, the port is
 outside 1 through 65534, the URL is not an absolute HTTP(S) origin, or the JSON
 contains an unknown field. Restart `npm run dev:bds:web` or the MCP companion
-after changing the file. Use `--clear-port`, `--clear-url`, or `reset` to remove
-settings. `WEB_COMPANION_PORT` and `WEB_COMPANION_PUBLIC_ORIGIN` override the
-file for one process, which preserves isolated test and emergency recovery
-workflows. Generated HTTP links omit `:80`. Explicit origins are URL-normalized,
-so `http://host:80` is displayed as `http://host` and `https://host:443` is
-displayed as `https://host`. The latter is valid only when a TLS reverse proxy
-actually terminates HTTPS; the Node companion does not turn into an HTTPS server
-merely by listening on TCP 443.
+after changing the file. Runtime workers default to 2 and accept only strict
+integers from 1 through 16. `--clear-port`, `--clear-url`, and
+`--clear-runtime-workers` restore their respective defaults; `reset` removes the
+complete file. `WEB_COMPANION_PORT`, `WEB_COMPANION_PUBLIC_ORIGIN`, and
+`WEB_COMPANION_RUNTIME_WORKERS` override the file for one process, which
+preserves isolated test and emergency recovery workflows. The worker setting is
+consumed by the combined `npm run dev:bds:web` launcher; it changes
+multi-Computer host concurrency, not any CS386SX or CS486 guest clock. Generated
+HTTP links omit `:80`. Explicit origins are URL-normalized, so `http://host:80`
+is displayed as `http://host` and `https://host:443` is displayed as
+`https://host`. The latter is valid only when a TLS reverse proxy actually
+terminates HTTPS; the Node companion does not turn into an HTTPS server merely
+by listening on TCP 443.
 
 ## MCP workflow
 
@@ -79,6 +86,13 @@ merely by listening on TCP 443.
 `bds_start({ resetWorld: false })`; use a dedicated `BDS_MCP_WORKDIR` and free
 BDS/Web ports, and never point a second companion at a work directory that is
 already running.
+
+The ordinary MCP debug workflow uses the stable release build. When switching a
+preserved world to the managed `dev:bds:web` runtime-worker build, first stop
+BDS and copy the complete world directory as described below. That build needs
+the irreversible Beta APIs experiment and fails explicitly while it is disabled;
+neither `bds_start({ resetWorld: false })` nor the managed launcher enables it
+silently.
 
 `bds_run_command` is intentionally restricted to `list`, the server-side
 `headless` probe, and player-scoped Computer System probes. It rejects arbitrary
@@ -206,6 +220,17 @@ exchanges the activation for a browser bearer token bound to the exact
 `c-xxxxxx` identity and then claims the writer lease. Invalid guesses are
 limited to eight attempts per client per minute, and an active number collision
 returns an explicit conflict.
+
+The launcher starts the configured fixed-size worker pool before BDS. It assigns
+each Computer ID to one stable worker across its processes; CS386SX, CS486DX,
+and CS486DX2 use the same policy without changing CPU model, clock, cycle debt,
+or per-tick guest admission. The header badge shows `Wn/N` during isolated
+worker execution and reports local or mixed placement for host-backed work.
+Managed BDS requires the irreversible Beta APIs experiment. Existing worlds are
+never modified automatically: stop and fully back them up before an operator
+deliberately enables it. Automatic enablement is restricted to a newly generated
+disposable `ComputerSystemAcceptance` world beneath the current user's temporary
+directory.
 
 For a one-action workflow on the companion host, leave `WEB_COMPANION_AUTO_OPEN`
 unset. A Desktop/Advanced block interaction or Portable Computer System use
@@ -391,6 +416,19 @@ limits remain enforced. Do not publish the plain HTTP listener directly.
   transmissions, then the suite passes and BDS returns to `idle`.
 - `Verify:` Run `npm run validate`. `Expect:` Formatting, lint, type checking,
   host tests, and the pack build all pass.
+- `Verify:` Persist `--runtime-workers 2`, then start `npm run dev:bds:web` on a
+  prepared managed world and run isolated programs on one CS386SX and one CS486
+  Computer. `Expect:` Both models retain deterministic guest results, timing,
+  and cycle debt, remain on stable `Wn/2` assignments, and separate Computers
+  may execute on both healthy workers.
+- `Verify:` Try `--runtime-workers 0` and `17`, then `--clear-runtime-workers`.
+  `Expect:` Both out-of-range values fail before startup, and clearing restores
+  the default value 2.
+- `Verify:` Start the managed build against a preserved world whose Beta APIs
+  experiment is disabled. `Expect:` Startup fails explicitly without changing
+  `level.dat`. Generate the exact disposable acceptance world under the current
+  user's temporary directory instead. `Expect:` its bounded level-data patch is
+  applied idempotently before the managed worker roundtrip.
 - `Verify:` Run
   `npx vitest run tests/phase0/transactionalPagedStore.test.ts tests/computer/snapshotMigration.test.ts tests/computer/storageMigration.test.ts`.
   `Expect:` Schema-1 page and snapshot conversion, current-head-first fallback,

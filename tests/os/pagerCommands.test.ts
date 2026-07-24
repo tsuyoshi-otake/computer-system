@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import { ShellSession } from "../../src/application/os/shellSession.js";
-import { InMemoryFilesystem } from "../../src/domain/filesystem/inMemoryFilesystem.js";
+import {
+  defaultFilesystemLimits,
+  InMemoryFilesystem,
+} from "../../src/domain/filesystem/inMemoryFilesystem.js";
 
 describe("CS-Linux more/less pager commands", (): void => {
   it("opens more, pages forward with Space, and quits back to the prompt", (): void => {
@@ -59,15 +62,27 @@ describe("CS-Linux more/less pager commands", (): void => {
     expect(shell.submit("less a b")).toMatchObject({ exitCode: 2 });
   });
 
-  it("rejects more/less in a pipeline or redirect", (): void => {
+  it("opens more/less from a Linux pipe and rejects redirected display", (): void => {
     const filesystem = new InMemoryFilesystem();
     const shell = new ShellSession(filesystem);
     filesystem.writeFile("/home/cs/demo.txt", "content");
 
-    expect(shell.submit("cat demo.txt | more")).toMatchObject({ exitCode: 1 });
-    expect(shell.submit("cat demo.txt | more").stderr).toContain(
-      "cannot run in a pipeline or redirect",
-    );
+    const more = shell.submit("cat demo.txt | more");
+    expect(more.terminalScreen).toBeDefined();
+    expect(topLine(more)).toBe("content");
+    expect(shell.keys(["q"]).resetTerminal).toBe(true);
+
+    const less = shell.submit("dmesg | less");
+    expect(less.terminalScreen).toBeDefined();
+    expect(screenText(less)).toContain("CS-Linux");
+    expect(shell.keys(["q"]).resetTerminal).toBe(true);
+
+    expect(
+      shell.submit("dmesg | less && echo done").terminalScreen,
+    ).toBeDefined();
+    const resumed = shell.keys(["q"]);
+    expect(resumed.resetTerminal).toBe(true);
+    expect(resumed.lines).toEqual(["done"]);
     expect(shell.submit("less demo.txt > out.txt")).toMatchObject({
       exitCode: 1,
     });
@@ -80,6 +95,88 @@ describe("CS-Linux more/less pager commands", (): void => {
     filesystem.delete("/usr/bin/less");
 
     expect(shell.submit("less demo.txt")).toMatchObject({ exitCode: 127 });
+  });
+});
+
+describe("CS-DOS MORE", (): void => {
+  it("pages files, redirected input, and guest-spooled pipelines", (): void => {
+    const filesystem = new InMemoryFilesystem();
+    const shell = new ShellSession(filesystem, { osProfile: "dos" });
+    filesystem.writeFile(
+      "/drives/c/temp/demo.txt",
+      Array.from({ length: 40 }, (_, index) => `DOS ${String(index + 1)}`).join(
+        "\r\n",
+      ),
+    );
+    filesystem.writeFile("/drives/c/temp/p000001.tmp", "user-owned");
+
+    const file = shell.submit("MORE C:\\TEMP\\DEMO.TXT");
+    expect(file.terminalScreen).toBeDefined();
+    expect(topLine(file)).toBe("DOS 1");
+    expect(shell.keys(["q"]).resetTerminal).toBe(true);
+
+    const redirected = shell.submit("MORE < C:\\TEMP\\DEMO.TXT");
+    expect(topLine(redirected)).toBe("DOS 1");
+    expect(shell.keys(["q"]).resetTerminal).toBe(true);
+
+    const piped = shell.submit("TYPE C:\\TEMP\\DEMO.TXT | MORE");
+    expect(topLine(piped)).toBe("DOS 1");
+    expect(shell.keys(["q"]).resetTerminal).toBe(true);
+    expect(filesystem.readFile("/drives/c/temp/p000001.tmp")).toBe(
+      "user-owned",
+    );
+    expect(
+      filesystem
+        .list("/drives/c/temp")
+        .filter((name) => /^p\d{6}\.tmp$/u.test(name)),
+    ).toEqual(["p000001.tmp"]);
+  });
+
+  it("does not expose LESS or Linux descriptor redirect syntax", (): void => {
+    const shell = new ShellSession(new InMemoryFilesystem(), {
+      osProfile: "dos",
+    });
+    expect(shell.submit("LESS C:\\AUTOEXEC.BAT").exitCode).toBe(127);
+    expect(shell.submit("DIR 2>NUL").exitCode).toBe(2);
+    expect(shell.submit("DIR |& MORE").exitCode).toBe(2);
+  });
+
+  it("rejects terminal-owned MORE from synchronous BAT execution", (): void => {
+    const filesystem = new InMemoryFilesystem();
+    const shell = new ShellSession(filesystem, { osProfile: "dos" });
+    filesystem.writeFile(
+      "/drives/c/page.bat",
+      "@ECHO OFF\r\nMORE C:\\AUTOEXEC.BAT\r\n",
+    );
+
+    const result = shell.submit("PAGE");
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr).toContain(
+      "asynchronous or terminal-control commands are not supported",
+    );
+    expect(result.terminalScreen).toBeUndefined();
+  });
+
+  it("aborts and cleans its owned spool when guest disk capacity is exhausted", (): void => {
+    const filesystem = new InMemoryFilesystem({
+      ...defaultFilesystemLimits,
+      capacityBytes: 2 * 1_024 * 1_024,
+    });
+    const shell = new ShellSession(filesystem, { osProfile: "dos" });
+    filesystem.writeFile(
+      "/drives/c/fill.bin",
+      "x".repeat(filesystem.getFreeSpace() - 1),
+    );
+
+    const result = shell.submit("ECHO too-large | MORE");
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toMatch(/capacity|space|full/iu);
+    expect(
+      filesystem
+        .list("/drives/c/temp")
+        .filter((name) => /^p\d{6}\.tmp$/u.test(name)),
+    ).toEqual([]);
+    expect(result.terminalScreen).toBeUndefined();
   });
 });
 

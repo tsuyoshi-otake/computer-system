@@ -499,6 +499,15 @@ describe("default Computer System Linux boot", (): void => {
 
     runtime.queueEvent(record.computerId, "terminal_line", command);
     runtime.runTick();
+    for (let tick = 0; tick < 100; tick += 1) {
+      if (
+        record.lifecycle.state.kind === "waiting_event" &&
+        record.lifecycle.state.filter === undefined
+      ) {
+        break;
+      }
+      runtime.runTick();
+    }
     runtime.queueEvent(record.computerId, "terminal_line", "cat count");
     runtime.runTick();
 

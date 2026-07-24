@@ -145,7 +145,7 @@ describe("CS-Linux multi-user sessions", (): void => {
     const logout = shell.submit("logout");
     expect(logout).toMatchObject({
       exitCode: 0,
-      stdout: "logout\n",
+      stdout: "logout\nCS-Linux 1.0 console tty1\n",
     });
     expect(logout.action).toBeUndefined();
     expect(shell.prompt()).toBe("c-multi1 login: ");
@@ -167,6 +167,33 @@ describe("CS-Linux multi-user sessions", (): void => {
     expect(shell.submit("sudo -n whoami").stderr).toContain(
       "password is required",
     );
+  });
+
+  it("replays the current optional issue before each top-level login prompt", (): void => {
+    const filesystem = new InMemoryFilesystem();
+    const shell = initializedShell(filesystem);
+    filesystem.writeFile(
+      "/etc/issue",
+      "CS-Linux maintenance console\nAuthorized users only\n",
+    );
+
+    expect(shell.submit("exit")).toMatchObject({
+      exitCode: 0,
+      stdout: "logout\nCS-Linux maintenance console\nAuthorized users only\n",
+    });
+    expect(shell.prompt()).toBe("c-multi1 login: ");
+
+    shell.submit("cs");
+    shell.submit(administratorPassword);
+    filesystem.writeFile("/etc/issue", "");
+    expect(shell.submit("logout").stdout).toBe("logout\n");
+    expect(shell.prompt()).toBe("c-multi1 login: ");
+
+    shell.submit("cs");
+    shell.submit(administratorPassword);
+    filesystem.delete("/etc/issue");
+    expect(shell.submit("exit").stdout).toBe("logout\n");
+    expect(shell.prompt()).toBe("c-multi1 login: ");
   });
 
   it("does not let sudo hide the authenticated account from active-user checks", (): void => {
@@ -350,7 +377,9 @@ describe("CS-Linux multi-user sessions", (): void => {
 
     expect(shell.submit("sudo export SCOPE=root").exitCode).toBe(0);
     expect(shell.submit("printenv SCOPE").stdout).toBe("caller\n");
-    expect(shell.submit("exit").stdout).toBe("logout\n");
+    expect(shell.submit("exit").stdout).toBe(
+      "logout\nCS-Linux 1.0 console tty1\n",
+    );
     expect(shell.prompt()).toBe("c-multi1 login: ");
   });
 

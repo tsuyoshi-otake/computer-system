@@ -14,6 +14,15 @@ import {
 } from "../../src/domain/computer/hardware.js";
 
 describe("ComputerRuntime", (): void => {
+  it("rejects a non-boolean default statistics policy", (): void => {
+    expect(
+      () =>
+        new ComputerRuntime({
+          collectMicroarchitectureStatsByDefault: "false",
+        } as never),
+    ).toThrowError(/must be a boolean/u);
+  });
+
   it("holds guest input and CPU through staged POST before startup completes", (): void => {
     const record = computer(
       "computer-1",

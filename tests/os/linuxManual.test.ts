@@ -54,6 +54,18 @@ describe("CS-Linux manual metadata", (): void => {
     expect(math).toContain("MATH(7)");
     expect(math).toContain("round-to-nearest ties-to-even");
     expect(math).toContain("never delegate to host libm");
+    const shell = renderLinuxManualPage(linuxManualPage("cs-linux")!);
+    expect(shell).toContain("fixed 4 KiB byte ring");
+    expect(shell).toContain("|& connects stdout and stderr");
+    expect(shell).toContain("Redirects are applied from left to right");
+    expect(shell).toContain("probe 2>&1 >out");
+    const less = renderLinuxManualPage(linuxManualPage("less")!);
+    expect(less).toContain("COMMAND | less");
+    expect(less).toContain("live pipe input");
+    expect(less).toContain("SIGPIPE status 141");
+    const more = renderLinuxManualPage(linuxManualPage("more")!);
+    expect(more).toContain("COMMAND | more");
+    expect(more).toContain("live pipe input");
   });
 
   it("serves man and apropos through installed sandbox utilities", (): void => {
@@ -66,6 +78,20 @@ describe("CS-Linux manual metadata", (): void => {
       exitCode: 1,
       stderr: "man: no manual entry for nethack\n",
     });
+    expect(shell.submit("help").stdout).toContain(
+      "|&  >  >>  <  2>  2>>  2>&1",
+    );
+    expect(shell.submit("man less").stdout).toContain("COMMAND | less");
+    const dos = new ShellSession(new InMemoryFilesystem(), {
+      osProfile: "dos",
+    });
+    expect(dos.submit("help").stdout).toContain("TYPE file | MORE");
+    expect(dos.submit("help").stdout).toContain(
+      "LESS, 2>, 2>>, 2>&1, and |& are not",
+    );
+    expect(dos.submit("help more").stdout).toContain(
+      "sequential pipeline backed by strict-8.3 guest spools",
+    );
     const apropos = shell.submit("apropos process");
     expect(apropos.exitCode).toBe(0);
     expect(apropos.stdout).toContain("ps (1)");

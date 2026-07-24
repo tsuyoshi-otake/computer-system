@@ -31,3 +31,18 @@ repositories.
   credentials into guest-visible output.
 - Focus tests in the matching application suite plus the owning domain/adapter
   boundary. Include capacity-plus-one, injected failure, and exactly-once cases.
+
+## Managed runtime-worker boundary
+
+- Keep remote CS386SX/CS486 execution behind injected application ports and the
+  ordinary `CpuProcess` contract; application code remains independent of
+  Minecraft, Node worker threads, and concrete WebSockets.
+- Retain deterministic Computer-to-worker affinity across its processes.
+  Worker-count changes affect placement and host concurrency only, never CPU
+  model, clock, cycle debt, statistics, results, or guest admission.
+- Remote commands are at-most-once: never replay after possible dispatch or fall
+  back to the same local slice. Bound requests, payloads, timeouts, output, and
+  identifiers; reject stale, duplicate, malformed, or wrong-version replies.
+- Response, rejection, timeout, connection close, disposal, termination, and
+  shutdown each settle ownership exactly once. Worker failure remains observable
+  and never becomes an accidental ready process.

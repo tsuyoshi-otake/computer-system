@@ -4,6 +4,7 @@ import {
   editorKeyFromKeyboardEvent,
   hasCopySelection,
   insertPastedCommand,
+  isRetryableEditorInputError,
   resolveTerminalCtrlCAction,
   terminalInteractionFromTerminal,
 } from "/terminal-input.js";
@@ -123,6 +124,8 @@ const elements = {
   powerIndicator: document.querySelector("#power-indicator"),
   hddIndicator: document.querySelector("#hdd-indicator"),
   fddIndicator: document.querySelector("#fdd-indicator"),
+  runtimeWorkerIndicator: document.querySelector("#runtime-worker-indicator"),
+  runtimeWorkerState: document.querySelector("#runtime-worker-state"),
   ejectButton: document.querySelector("#eject-button"),
   ejectFeedback: document.querySelector("#eject-feedback"),
   powerButton: document.querySelector("#power-button"),
@@ -174,6 +177,7 @@ let dosTuiPresentation = false;
 let terminalPresentation = DEFAULT_TERMINAL_PRESENTATION;
 let editorKeyPending = false;
 let editorInputGeneration = 0;
+let retryEditorInputOnDismiss = false;
 let mouseRequestPending = false;
 let pendingMouseMove;
 let mouseSequence = Date.now() * 1_000;
@@ -425,7 +429,20 @@ elements.errorDismiss.addEventListener("click", () => {
     location.reload();
     return;
   }
+  const retryEditorInput = retryEditorInputOnDismiss;
+  retryEditorInputOnDismiss = false;
   elements.errorDialog.close();
+  if (
+    retryEditorInput &&
+    editorKeyQueue.length > 0 &&
+    !sessionClosed &&
+    connectionState === "online" &&
+    accessMode === "writer" &&
+    terminalInteraction?.inputMode === "keys"
+  ) {
+    setInputAvailable(true, interactionStateLabel());
+    void drainEditorKeys();
+  }
 });
 elements.copyButton.addEventListener("click", () => {
   void copyTerminalText();
@@ -1415,7 +1432,7 @@ async function drainEditorKeys() {
         });
       } catch (error) {
         if (generation !== editorInputGeneration) return;
-        const retryable = error?.status === 429 || error?.code === "input_busy";
+        const retryable = isRetryableEditorInputError(error);
         if (
           !retryable ||
           retry >= 5 ||
@@ -1457,6 +1474,8 @@ async function drainEditorKeys() {
     showError(
       `${errorMessage(error)} ${String(editorKeyQueue.length)} editor key(s) remain unacknowledged.`,
       "Editor input paused",
+      false,
+      true,
     );
   } finally {
     const superseded = generation !== editorInputGeneration;
@@ -1529,6 +1548,7 @@ function updateMachinePanel(payload) {
       ? "Floppy disk not present"
       : `Floppy disk ${floppyDriveState}`,
   );
+  updateRuntimeWorkerIndicator(payload?.execution);
   updateEjectButton();
   updatePowerButton();
 
@@ -1539,6 +1559,47 @@ function updateMachinePanel(payload) {
   } else if (!wasInteractive && connectionState === "online") {
     setInputAvailable(true, "INPUT");
   }
+}
+
+function updateRuntimeWorkerIndicator(execution) {
+  const workerCount = Number(execution?.workerCount);
+  const workerIndex = Number(execution?.assignedWorkerIndex);
+  const hasWorker =
+    Number.isInteger(workerCount) &&
+    workerCount >= 1 &&
+    workerCount <= 16 &&
+    Number.isInteger(workerIndex) &&
+    workerIndex >= 1 &&
+    workerIndex <= workerCount;
+  const requestedBackend = String(execution?.activeBackend ?? "idle");
+  const backend = ["bedrock", "idle", "mixed", "worker"].includes(
+    requestedBackend,
+  )
+    ? requestedBackend
+    : "idle";
+
+  let text = "LOCAL";
+  let label = "CPU execution local";
+  if (hasWorker) {
+    const placement = `W${String(workerIndex)}/${String(workerCount)}`;
+    if (backend === "worker") {
+      text = placement;
+      label = `CPU executing on runtime worker ${String(workerIndex)} of ${String(workerCount)}`;
+    } else if (backend === "mixed") {
+      text = `${placement}+L`;
+      label = `CPU executing on runtime worker ${String(workerIndex)} of ${String(workerCount)} and the Bedrock thread`;
+    } else if (backend === "bedrock") {
+      text = `L\u00b7${placement}`;
+      label = `CPU executing on the Bedrock thread; assigned runtime worker ${String(workerIndex)} of ${String(workerCount)}`;
+    } else {
+      text = `IDLE\u00b7${placement}`;
+      label = `CPU idle; assigned runtime worker ${String(workerIndex)} of ${String(workerCount)}`;
+    }
+  }
+  elements.runtimeWorkerState.textContent = text;
+  elements.runtimeWorkerIndicator.dataset.backend = backend;
+  elements.runtimeWorkerIndicator.setAttribute("aria-label", label);
+  elements.runtimeWorkerIndicator.title = label;
 }
 
 function setHardwareIndicator(element, requestedState, label) {
@@ -2308,15 +2369,19 @@ function showError(
   message,
   title = "Terminal unavailable",
   reloadRequired = false,
+  retryEditorInput = false,
 ) {
   interactionProtocolReload = reloadRequired;
+  retryEditorInputOnDismiss = retryEditorInput;
   elements.errorTitle.textContent = title;
   elements.errorMessage.textContent = message;
   elements.handoffForm.hidden = true;
   elements.errorDismiss.hidden = false;
   elements.errorDismiss.textContent = reloadRequired
     ? "Reload page"
-    : "Dismiss";
+    : retryEditorInput
+      ? "Retry input"
+      : "Dismiss";
   if (!elements.errorDialog.open) elements.errorDialog.showModal();
   queueMicrotask(() => elements.errorDismiss.focus());
 }

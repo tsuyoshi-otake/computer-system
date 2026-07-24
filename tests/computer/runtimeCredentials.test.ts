@@ -580,6 +580,24 @@ describe("ComputerRuntime process credentials", (): void => {
     ).toMatchObject({ exitCode: 2, outcome: "completed" });
   });
 
+  it("starts the post-disconnect login prompt on a fresh row instead of the stale shell prompt's row", (): void => {
+    const record = new ComputerRecord("c-000218", "standard");
+    const runtime = authenticatedRuntime(record);
+
+    const staleRow = record.terminal.cursorY;
+    expect(record.terminal.cursorX).toBeGreaterThan(1);
+    const staleRowTextBefore = record.terminal.snapshot().rows[staleRow - 1];
+
+    expect(
+      runtime.queueEvent(record.computerId, "terminal_closed").outcome,
+    ).toBe("accepted");
+    runtime.runTick();
+
+    const rows = record.terminal.snapshot().rows;
+    expect(rows[staleRow - 1]).toBe(staleRowTextBefore);
+    expect(rows[staleRow]).toContain("login:");
+  });
+
   it("does not leave a phantom debug job when scheduler admission fails", (): void => {
     const record = new ComputerRecord("c-000210", "standard");
     record.configureHardware({

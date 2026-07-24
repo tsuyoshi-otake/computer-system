@@ -1,10 +1,23 @@
 export type ChainOperator = "&&" | "||" | ";";
 export type RedirectMode = "append" | "read" | "write";
+export type ShellDescriptor = 0 | 1 | 2;
+export type PipelineOperator = "pipe-stdout" | "pipe-stdout-and-stderr";
 
-export interface ShellRedirect {
+export interface ShellOpenRedirect {
+  readonly descriptor: ShellDescriptor;
+  readonly kind: "open";
   readonly mode: RedirectMode;
   readonly path: string;
 }
+
+export interface ShellDuplicateRedirect {
+  readonly descriptor: 2;
+  readonly kind: "duplicate";
+  readonly target: 1;
+}
+
+/** Redirections remain in source order because descriptor duplication is ordered. */
+export type ShellRedirect = ShellDuplicateRedirect | ShellOpenRedirect;
 
 export interface ShellCommandNode {
   readonly redirects: readonly ShellRedirect[];
@@ -15,6 +28,8 @@ export interface ShellPipelineNode {
   /** Linux-only trailing `&`; execution policy decides which forms are safe. */
   readonly background?: boolean;
   readonly commands: readonly ShellCommandNode[];
+  /** One operator for each edge between adjacent commands. */
+  readonly operators: readonly PipelineOperator[];
 }
 
 export interface ShellChainNode {
@@ -32,6 +47,8 @@ export interface ShellSyntaxFeatures {
   readonly backgroundJobs: boolean;
   readonly chainOperators: ReadonlySet<ChainOperator>;
   readonly comments: boolean;
+  readonly descriptorRedirects: boolean;
+  readonly pipeStderr: boolean;
   readonly singleQuotes: boolean;
   readonly variables: boolean;
 }
@@ -40,6 +57,8 @@ export const busyBoxShellSyntaxFeatures: ShellSyntaxFeatures = {
   backgroundJobs: true,
   chainOperators: new Set(["&&", "||", ";"]),
   comments: true,
+  descriptorRedirects: true,
+  pipeStderr: true,
   singleQuotes: true,
   variables: true,
 };
@@ -48,6 +67,8 @@ export const dosShellSyntaxFeatures: ShellSyntaxFeatures = {
   backgroundJobs: false,
   chainOperators: new Set(["&&", "||"]),
   comments: false,
+  descriptorRedirects: false,
+  pipeStderr: false,
   singleQuotes: false,
   variables: false,
 };
@@ -56,6 +77,7 @@ const maximumSourceLength = 4_096;
 const maximumTokens = 256;
 const maximumPipelines = 32;
 const maximumCommandsPerPipeline = 16;
+const maximumRedirectsPerCommand = 16;
 
 type Token =
   | { readonly kind: "operator"; readonly value: string }
@@ -84,6 +106,7 @@ export function parseShellProgram(
       throw new ShellSyntaxError("too many command groups");
     }
     const commands: ShellCommandNode[] = [];
+    const operators: PipelineOperator[] = [];
     while (true) {
       if (commands.length >= maximumCommandsPerPipeline) {
         throw new ShellSyntaxError("pipeline is too long");
@@ -92,7 +115,13 @@ export function parseShellProgram(
       commands.push(parsed.command);
       cursor = parsed.cursor;
       const token = tokens[cursor];
-      if (token?.kind === "operator" && token.value === "|") {
+      if (
+        token?.kind === "operator" &&
+        (token.value === "|" || token.value === "|&")
+      ) {
+        operators.push(
+          token.value === "|" ? "pipe-stdout" : "pipe-stdout-and-stderr",
+        );
         cursor += 1;
         if (cursor >= tokens.length) {
           throw new ShellSyntaxError("expected command after '|'");
@@ -121,7 +150,11 @@ export function parseShellProgram(
 
     chains.push({
       ...(nextOperator === undefined ? {} : { operator: nextOperator }),
-      pipeline: { commands, ...(background ? { background: true } : {}) },
+      pipeline: {
+        commands,
+        operators,
+        ...(background ? { background: true } : {}),
+      },
     });
     if (background) break;
     const separator = tokens[cursor];
@@ -158,16 +191,32 @@ function parseCommand(
       cursor += 1;
       continue;
     }
-    if (token.value === "<" || token.value === ">" || token.value === ">>") {
+    if (
+      token.value === "<" ||
+      token.value === ">" ||
+      token.value === ">>" ||
+      token.value === "2>" ||
+      token.value === "2>>"
+    ) {
       const target = tokens[cursor + 1];
       if (target?.kind !== "word") {
         throw new ShellSyntaxError(`expected path after '${token.value}'`);
       }
+      if (redirects.length >= maximumRedirectsPerCommand) {
+        throw new ShellSyntaxError("too many redirects");
+      }
+      const descriptor = token.value.startsWith("2")
+        ? 2
+        : token.value === "<"
+          ? 0
+          : 1;
       redirects.push({
+        descriptor,
+        kind: "open",
         mode:
           token.value === "<"
             ? "read"
-            : token.value === ">>"
+            : token.value === ">>" || token.value === "2>>"
               ? "append"
               : "write",
         path: target.value,
@@ -175,13 +224,17 @@ function parseCommand(
       cursor += 2;
       continue;
     }
+    if (token.value === "2>&1") {
+      if (redirects.length >= maximumRedirectsPerCommand) {
+        throw new ShellSyntaxError("too many redirects");
+      }
+      redirects.push({ descriptor: 2, kind: "duplicate", target: 1 });
+      cursor += 1;
+      continue;
+    }
     break;
   }
   if (words.length === 0) throw new ShellSyntaxError("expected command");
-  const inputCount = redirects.filter(({ mode }) => mode === "read").length;
-  const outputCount = redirects.length - inputCount;
-  if (inputCount > 1) throw new ShellSyntaxError("ambiguous input redirect");
-  if (outputCount > 1) throw new ShellSyntaxError("ambiguous output redirect");
   return { command: { words, redirects }, cursor };
 }
 
@@ -266,6 +319,24 @@ function tokenize(
     )
       break;
     if (quote === undefined) {
+      const descriptorRedirect =
+        !wordStarted && source.startsWith("2>&1", index)
+          ? "2>&1"
+          : !wordStarted && source.startsWith("2>>", index)
+            ? "2>>"
+            : !wordStarted && source.startsWith("2>", index)
+              ? "2>"
+              : undefined;
+      if (descriptorRedirect !== undefined) {
+        if (!features.descriptorRedirects) {
+          throw new ShellSyntaxError(
+            `operator '${descriptorRedirect}' is not supported`,
+          );
+        }
+        pushOperator(descriptorRedirect);
+        index += descriptorRedirect.length;
+        continue;
+      }
       const pair = source.slice(index, index + 2);
       if (pair === "&&" || pair === "||") {
         if (!features.chainOperators.has(pair))
@@ -275,6 +346,13 @@ function tokenize(
         continue;
       }
       if (pair === ">>") {
+        pushOperator(pair);
+        index += 2;
+        continue;
+      }
+      if (pair === "|&") {
+        if (!features.pipeStderr)
+          throw new ShellSyntaxError("operator '|&' is not supported");
         pushOperator(pair);
         index += 2;
         continue;

@@ -5,6 +5,11 @@ and observability boundary for Computer System work. It measures host time, but
 guest CPU cycles and device wire clocks remain independent deterministic model
 inputs. Host timing never changes a guest program's modeled result.
 
+For managed BDS, this boundary still admits and finalizes work on the Bedrock
+thread, while eligible isolated CS instruction slices execute on the
+Computer-affine runtime worker. CS386SX and CS486 profiles share that placement
+policy; worker count changes aggregate host concurrency, not guest timing.
+
 ## Production contract
 
 Each host tick opens exactly one `TickWorkScope`. A caller submits an already
@@ -64,6 +69,13 @@ timing.
   charged to `terminal`. Redstone guest access and fixed-face Bedrock input/
   output synchronization are charged separately. Topology refresh covers the six
   fixed faces.
+- CS ABI framebuffer presentation performs only constant-time dimension and
+  memory-range checks before `terminal` admission. A deferred frame returns
+  `EAGAIN` without reading framebuffer cells or mutating terminal state. Once
+  admitted, the bounded framebuffer decode and `applyFrame` form one measured
+  atom; malformed cells return `EINVAL` without partial mutation. Guest memory
+  accesses retain their deterministic CPU/cache timing and host measurements do
+  not feed back into that timing.
 - `block_io` admits only due HDD/FDD completions from one global
   minimum-deadline heap. Idle devices are not polled. Seek, rotational,
   controller, transfer, and media timings use deterministic guest nanoseconds;
@@ -109,6 +121,10 @@ count as BDS diagnostics.
 - `Verify:`
   `npx vitest run tests/runtime/computerWorkMonitor.test.ts tests/tools/bdsDebugSession.test.mjs`
   `Expect:` fixed-histogram percentiles and normalized MCP status records pass.
+- `Verify:` `npx vitest run tests/runtime/csAbi.test.ts` `Expect:` deferred
+  framebuffer presentation performs zero framebuffer reads, admitted valid
+  frames update atomically, and admitted malformed frames return `EINVAL`
+  without terminal mutation.
 - `Verify:` `npm run validate` `Expect:` formatting, lint, types, all host
   tests, and the pack build pass.
 - `Verify:` run `npm run test:mcp:serial:bds` with free isolated ports and a new

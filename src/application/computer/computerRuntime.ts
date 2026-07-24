@@ -2,6 +2,7 @@ import {
   createAccountedNativeEnvironment,
   renderTerminalScreen,
   writeTerminalLines,
+  writeTerminalPrompt,
   type BackgroundProcessStartResult,
   type ForegroundProcessStartResult,
   type JobControlStartResult,
@@ -18,6 +19,7 @@ import type {
   TickWorkScope,
 } from "../runtime/computerWorkMonitor.js";
 import type {
+  CpuProcessExecutionLocation,
   CpuProcessSliceResult,
   CpuProcessState,
 } from "../../domain/runtime/cpuProcess.js";
@@ -26,6 +28,7 @@ import {
   Cs486Process,
   runCs486,
   type Cs486Executable,
+  type Cs486RunObservation,
   type Cs486SyscallHandler,
 } from "../../domain/cpu/cs486.js";
 import type {
@@ -138,6 +141,7 @@ import {
   CsAbiRuntime,
   csAbiErrno,
   prepareCsAbiStartup,
+  writeTerminalText,
 } from "../runtime/csAbi.js";
 import {
   advanceCompileJobContinuation,
@@ -147,6 +151,10 @@ import {
   type CompileJobContinuation,
   type CompileJobProgress,
 } from "./compileJobPlan.js";
+import type {
+  RemoteCs486ProcessFactory,
+  ObservableCs486Process,
+} from "../runtime/remoteCs486Process.js";
 
 export interface ComputerRuntimeOptions {
   readonly clock?: ShellClockSource;
@@ -155,11 +163,27 @@ export interface ComputerRuntimeOptions {
   readonly schedulerLimits?: SchedulerLimits;
   /** Wall-time slowdown relative to each persisted guest CPU clock. */
   readonly guestRealtimeDivisor?: number;
+  /**
+   * Enables host-only CS486 cache/bus counters for every guest process.
+   * Explicit `--stats` requests enable them regardless of this default.
+   */
+  readonly collectMicroarchitectureStatsByDefault?: boolean;
   readonly defaultBootSource?: string;
   readonly ticksPerSecond?: number;
   readonly requireLinuxLogin?: boolean;
   readonly serial?: SerialLinkBroker;
   readonly peripherals?: PeripheralBusBroker;
+  /**
+   * Optional companion-backed executor for isolated machine-code processes.
+   * Hosted ABI, Python, debugger, and pipeline processes remain Bedrock-local.
+   */
+  readonly remoteCs486ProcessFactory?: RemoteCs486ProcessFactory;
+}
+
+export interface ComputerExecutionStatus {
+  readonly activeBackend: "bedrock" | "idle" | "mixed" | "worker";
+  readonly assignedWorkerIndex?: number;
+  readonly workerCount: number;
 }
 
 export type RuntimeCommandResult =
@@ -211,8 +235,11 @@ export class ComputerRuntime {
   private readonly clock: ShellClockSource | undefined;
   private readonly hostElapsedMilliseconds: (() => number) | undefined;
   private readonly guestRealtimeDivisor: number;
+  private readonly collectMicroarchitectureStatsByDefault: boolean;
   private readonly ticksPerSecond: number;
   private readonly requireLinuxLogin: boolean;
+  private readonly remoteCs486ProcessFactory:
+    RemoteCs486ProcessFactory | undefined;
   private filesystemIoRequester:
     | ((
         computerId: string,
@@ -253,8 +280,16 @@ export class ComputerRuntime {
     ) {
       throw new RangeError("guestRealtimeDivisor must be a positive integer");
     }
+    this.collectMicroarchitectureStatsByDefault =
+      options.collectMicroarchitectureStatsByDefault ?? false;
+    if (typeof this.collectMicroarchitectureStatsByDefault !== "boolean") {
+      throw new TypeError(
+        "collectMicroarchitectureStatsByDefault must be a boolean when provided",
+      );
+    }
     this.ticksPerSecond = options.ticksPerSecond ?? 20;
     this.requireLinuxLogin = options.requireLinuxLogin ?? false;
+    this.remoteCs486ProcessFactory = options.remoteCs486ProcessFactory;
   }
 
   get tickNumber(): number {
@@ -306,6 +341,46 @@ export class ComputerRuntime {
 
   linuxMemoryStatus(computerId: string): LinuxGuestMemorySnapshot | undefined {
     return this.entries.get(computerId)?.linuxGuestMemoryManager?.snapshot();
+  }
+
+  executionStatus(computerId: string): ComputerExecutionStatus | undefined {
+    const entry = this.entries.get(computerId);
+    if (entry === undefined) return undefined;
+    let bedrockActive = false;
+    let workerActive = false;
+    const observe = (process: CpuProcess | undefined): void => {
+      if (
+        process === undefined ||
+        (process.state.kind !== "ready" && !process.hasPendingCpuCycles)
+      )
+        return;
+      const location: CpuProcessExecutionLocation =
+        process.executionLocation ?? { backend: "bedrock" };
+      if (location.backend === "worker") workerActive = true;
+      else bedrockActive = true;
+    };
+    observe(entry.vm);
+    observe(entry.foreground?.process);
+    observe(entry.debugJob?.process);
+    for (const background of entry.backgroundJobs.values())
+      observe(background.process);
+
+    const activeBackend =
+      bedrockActive && workerActive
+        ? "mixed"
+        : workerActive
+          ? "worker"
+          : bedrockActive
+            ? "bedrock"
+            : "idle";
+    const factory = this.remoteCs486ProcessFactory;
+    return factory === undefined
+      ? { activeBackend, workerCount: 0 }
+      : {
+          activeBackend,
+          assignedWorkerIndex: factory.workerIndex(computerId),
+          workerCount: factory.workerCount,
+        };
   }
 
   attachFloppyMedia(computerId: string, media: FloppyMedia): void {
@@ -485,7 +560,7 @@ export class ComputerRuntime {
       return { outcome: "ignored", reason: "not_running" };
     }
     if (entry.foreground !== undefined) {
-      this.signalOsProcess(entry, entry.foreground.osPid, "SIGINT");
+      this.signalForegroundProcesses(entry, entry.foreground, "SIGINT");
       return { outcome: "accepted", state: "foreground_interrupted" };
     }
     if (entry.compileJob !== undefined) {
@@ -518,7 +593,7 @@ export class ComputerRuntime {
       return { outcome: "ignored", reason: "not_running" };
     }
     writeTerminalLines(entry.record.terminal, ["^C"]);
-    entry.record.terminal.write(entry.shell.prompt());
+    writeTerminalPrompt(entry.record.terminal, entry.shell.prompt());
     return { outcome: "accepted", state: "line_aborted" };
   }
 
@@ -551,6 +626,35 @@ export class ComputerRuntime {
         outcome: typeof arguments_[0] === "string" ? arguments_[0] : "failed",
       };
       this.compileReady.add(entry);
+      return { outcome: "accepted", state: entry.record.lifecycle.state.kind };
+    }
+    if (
+      entry.foreground?.kind === "pipeline" &&
+      name === "terminal_keys" &&
+      typeof arguments_[0] === "string"
+    ) {
+      let decoded: unknown;
+      try {
+        decoded = JSON.parse(arguments_[0]);
+      } catch {
+        return failure(new Error("invalid terminal key batch"));
+      }
+      if (
+        !Array.isArray(decoded) ||
+        decoded.length > 32 ||
+        decoded.some((key) => typeof key !== "string" || key.length > 32)
+      ) {
+        return failure(new Error("invalid terminal key batch"));
+      }
+      const result = entry.shell?.keys(decoded);
+      if (result?.terminalScreen !== undefined) {
+        renderTerminalScreen(entry.record.terminal, result.terminalScreen);
+      } else if (result?.resetTerminal) {
+        entry.record.terminal.setTextColor(0);
+        entry.record.terminal.setBackgroundColor(15);
+        entry.record.terminal.clear();
+        entry.record.terminal.setCursorPosition(1, 1);
+      }
       return { outcome: "accepted", state: entry.record.lifecycle.state.kind };
     }
     const csAbi = entry.foreground?.csAbi;
@@ -648,11 +752,14 @@ export class ComputerRuntime {
               foreground.compileCycles + measured.cpuCycles,
             );
             foreground.executedInstructions = measured.executedInstructions;
-            this.accountLiveOsProcess(
-              entry,
-              foreground.osPid,
-              foreground.cpuCycles,
-            );
+            const pids = foreground.osPids ?? [foreground.osPid];
+            for (const pid of pids) {
+              this.accountLiveOsProcess(
+                entry,
+                pid,
+                Math.floor(foreground.cpuCycles / Math.max(1, pids.length)),
+              );
+            }
           }
           if (
             foreground.instructionLimit !== undefined &&
@@ -661,6 +768,19 @@ export class ComputerRuntime {
           ) {
             foreground.limitReached = true;
             foreground.process.terminate("execution limit reached");
+          }
+          if (foreground.kind === "pipeline") {
+            const revision = entry.shell?.activePagerRevision();
+            if (
+              revision !== undefined &&
+              revision !== foreground.lastPagerRevision
+            ) {
+              const screen = entry.shell?.activePagerScreen();
+              if (screen !== undefined) {
+                renderTerminalScreen(entry.record.terminal, screen);
+                foreground.lastPagerRevision = revision;
+              }
+            }
           }
           const foregroundState = foreground.process.state;
           if (
@@ -796,7 +916,7 @@ export class ComputerRuntime {
     const completion = entry.shell.completeTerminal(line, cursor);
     if (completion.response.outcome === "listed") {
       writeTerminalLines(entry.record.terminal, [line, ...completion.lines]);
-      entry.record.terminal.write(entry.shell.prompt());
+      writeTerminalPrompt(entry.record.terminal, entry.shell.prompt());
     }
     return completion.response;
   }
@@ -834,6 +954,13 @@ export class ComputerRuntime {
           secretInput: false,
         }),
       );
+    }
+    if (
+      entry.foreground?.kind === "pipeline" &&
+      (interaction.context === "less" || interaction.context === "more") &&
+      entry.stopIntent === undefined
+    ) {
+      return own(interaction);
     }
     const vmState = entry.vm?.state;
     const acceptsTerminalInput =
@@ -879,7 +1006,7 @@ export class ComputerRuntime {
       return { outcome: "ignored", reason: "not_running" };
     }
     writeTerminalLines(entry.record.terminal, ["^C"]);
-    entry.record.terminal.write(entry.shell.prompt());
+    writeTerminalPrompt(entry.record.terminal, entry.shell.prompt());
     return { outcome: "accepted", state: "interaction_cancelled" };
   }
 
@@ -1037,18 +1164,29 @@ export class ComputerRuntime {
             instanceId,
           );
           try {
+            const collectMicroarchitectureStats =
+              this.shouldCollectMicroarchitectureStats(request.stats);
             const executed =
               request.hostedStartup === undefined
-                ? runCs486(request.executable, {
-                    cpuModel: entry.record.hardware.cpuModel,
-                    instructionLimit: 100_000,
-                    memoryBytes: grant.memoryBytes,
-                  })
+                ? collectMicroarchitectureStats
+                  ? runCs486(request.executable, {
+                      collectMicroarchitectureStats: true,
+                      cpuModel: entry.record.hardware.cpuModel,
+                      instructionLimit: 100_000,
+                      memoryBytes: grant.memoryBytes,
+                    })
+                  : runCs486(request.executable, {
+                      collectMicroarchitectureStats: false,
+                      cpuModel: entry.record.hardware.cpuModel,
+                      instructionLimit: 100_000,
+                      memoryBytes: grant.memoryBytes,
+                    })
                 : this.runSynchronousHostedCs486(
                     entry,
                     request,
                     request.hostedStartup,
                     grant.memoryBytes,
+                    collectMicroarchitectureStats,
                   );
             const cpuCycles = Math.min(
               1_000_000,
@@ -1252,6 +1390,9 @@ export class ComputerRuntime {
         this.runHostWork(lane, units, entry.record.computerId, operation),
     });
     const prepared = preparePythonCs486Program({
+      collectMicroarchitectureStats: this.shouldCollectMicroarchitectureStats(
+        request.stats,
+      ),
       cpuModel: entry.record.hardware.cpuModel,
       environment,
       filesystem,
@@ -1300,7 +1441,13 @@ export class ComputerRuntime {
       request.executable,
       request.command,
       runtimeId,
-      rejectCsAbiSyscallHandler,
+      {
+        collectMicroarchitectureStats: this.shouldCollectMicroarchitectureStats(
+          request.stats,
+        ),
+        remoteFactory: this.remoteCs486ProcessFactory,
+        syscallHandler: rejectCsAbiSyscallHandler,
+      },
     );
     this.startDebugJob(
       entry,
@@ -1343,19 +1490,21 @@ export class ComputerRuntime {
     job: Omit<DebugGuestJob, "cpuCycles" | "executedInstructions" | "osPid">,
     owner: OsGuestProcessOwner,
   ): void {
-    const osPid =
-      owner.osPid ??
-      this.startOsProcess(entry, owner.command, owner.credentials);
-    const active: DebugGuestJob = {
-      ...job,
-      cpuCycles: 0,
-      executedInstructions: 0,
-      osPid,
-      ...(job.stats
-        ? { startedHostMilliseconds: this.readHostElapsedMilliseconds() }
-        : {}),
-    };
+    let osPid: number | undefined;
+    let scheduled = false;
     try {
+      osPid =
+        owner.osPid ??
+        this.startOsProcess(entry, owner.command, owner.credentials);
+      const active: DebugGuestJob = {
+        ...job,
+        cpuCycles: 0,
+        executedInstructions: 0,
+        osPid,
+        ...(job.stats
+          ? { startedHostMilliseconds: this.readHostElapsedMilliseconds() }
+          : {}),
+      };
       active.memoryGrant?.bindProcess(osPid);
       this.scheduler.add(
         active.runtimeId,
@@ -1366,12 +1515,18 @@ export class ComputerRuntime {
           this.guestRealtimeDivisor,
         ),
       );
+      scheduled = true;
       this.runtimeOwners.set(active.runtimeId, entry);
       this.runtimeLanes.set(active.runtimeId, "mcp_debug");
       entry.debugJob = active;
     } catch (error: unknown) {
-      releaseGuestProcessMemory(active.memoryGrant);
-      this.completeOsProcess(entry, osPid, 1);
+      if (scheduled) this.unschedule(job.runtimeId);
+      terminateAndDisposeRejectedProcess(
+        job.process,
+        "debug process admission failed",
+      );
+      releaseGuestProcessMemory(job.memoryGrant);
+      if (osPid !== undefined) this.completeOsProcess(entry, osPid, 1);
       throw error;
     }
   }
@@ -1490,7 +1645,7 @@ export class ComputerRuntime {
     const stdout =
       job.kind === "python"
         ? terminalStdout(job.terminal!)
-        : (job.process as Cs486Process).output;
+        : observableCs486Process(job.process).output;
     let result: DebugShellCommandCompletion;
     if (job.termination === "instruction_limit") {
       result = {
@@ -1548,7 +1703,7 @@ export class ComputerRuntime {
                   job.cpuCycles,
                   "halted",
                   entry.record.hardware,
-                  job.process as Cs486Process,
+                  observableCs486Process(job.process),
                   this.elapsedHostMilliseconds(job.startedHostMilliseconds),
                 ).join("\n")}\n`
               : "",
@@ -1656,6 +1811,9 @@ export class ComputerRuntime {
         this.runHostWork(lane, units, entry.record.computerId, operation),
     });
     const prepared = preparePythonCs486Program({
+      collectMicroarchitectureStats: this.shouldCollectMicroarchitectureStats(
+        request.stats,
+      ),
       cpuModel: entry.record.hardware.cpuModel,
       environment,
       filesystem,
@@ -1863,6 +2021,8 @@ export class ComputerRuntime {
         guestFilesystem: startupFilesystem,
         terminal: entry.record.terminal,
         hardware: entry.record.hardware,
+        collectMicroarchitectureStatsByDefault:
+          this.collectMicroarchitectureStatsByDefault,
         guestRamLedger: requireGuestRamLedger(entry),
         redstone: entry.record.redstone,
         currentTick: () => this.scheduler.tickNumber,
@@ -1944,6 +2104,8 @@ export class ComputerRuntime {
       }
       bootPhase = "Python-to-CS486 preparation";
       const preparedBootProgram = preparePythonCs486Program({
+        collectMicroarchitectureStats:
+          this.shouldCollectMicroarchitectureStats(),
         cpuModel: entry.record.hardware.cpuModel,
         environment,
         filesystem: startupFilesystem,
@@ -2051,8 +2213,11 @@ export class ComputerRuntime {
     let memoryGrant: GuestProcessMemoryGrant | undefined;
     let csAbi: CsAbiRuntime | undefined;
     let osPid: number | undefined;
+    let osPids: number[] = [];
+    let runtimeId: number | undefined;
+    let scheduled = false;
     try {
-      const runtimeId = this.nextRuntimeId++;
+      runtimeId = this.nextRuntimeId++;
       const completionEvent = `${foregroundCompletionEvent}:${String(runtimeId)}`;
       if (request.kind === "python") {
         const granted = this.createForegroundPythonProcess(
@@ -2062,6 +2227,42 @@ export class ComputerRuntime {
         );
         process = granted.process;
         memoryGrant = granted.memoryGrant;
+      } else if (request.kind === "pipeline") {
+        process = request.start((stageRequest) => {
+          const stageRuntimeId = this.nextRuntimeId++;
+          if (stageRequest.kind === "python") {
+            const granted = this.createForegroundPythonProcess(
+              entry,
+              stageRequest,
+              stageRuntimeId,
+            );
+            let finalized = false;
+            return {
+              finalize: (): void => {
+                if (finalized) return;
+                finalized = true;
+                releaseGuestProcessMemory(granted.memoryGrant);
+              },
+              process: granted.process,
+            };
+          }
+          const granted = this.createForegroundCs486Process(
+            entry,
+            stageRequest,
+            stageRuntimeId,
+            false,
+          );
+          let finalized = false;
+          return {
+            finalize: (): void => {
+              if (finalized) return;
+              finalized = true;
+              granted.csAbi?.finalize();
+              releaseGuestProcessMemory(granted.grant);
+            },
+            process: granted.process,
+          };
+        });
       } else if (request.kind === "debugger") {
         process = request.start();
       } else {
@@ -2074,12 +2275,30 @@ export class ComputerRuntime {
         memoryGrant = granted.grant;
         csAbi = granted.csAbi;
       }
-      osPid = this.startOsProcess(
-        entry,
-        request.command,
-        request.credentials,
-        request.niceValue,
-      );
+      if (request.kind === "pipeline") {
+        let processGroupId: number | undefined;
+        for (const command of request.stageCommands) {
+          const stagePid = this.startOsProcess(
+            entry,
+            command,
+            request.credentials,
+            request.niceValue,
+            processGroupId,
+          );
+          processGroupId ??= stagePid;
+          osPids.push(stagePid);
+        }
+      } else {
+        osPids = [
+          this.startOsProcess(
+            entry,
+            request.command,
+            request.credentials,
+            request.niceValue,
+          ),
+        ];
+      }
+      osPid = osPids[0]!;
       memoryGrant?.bindProcess(osPid);
       const foreground: ForegroundGuestProcess = {
         command: request.command,
@@ -2089,17 +2308,29 @@ export class ComputerRuntime {
         ...(request.kind === "debugger"
           ? { debuggerCompletion: request.complete }
           : {}),
+        ...(request.kind === "pipeline"
+          ? {
+              pipelineCompletion: request.complete,
+              pipelineStageExitCodes: request.stageExitCodes,
+            }
+          : {}),
         executedInstructions: 0,
         instructionLimit:
           request.kind === "cs486" && csAbi === undefined ? 100_000 : undefined,
         kind: request.kind,
         ...(memoryGrant === undefined ? {} : { memoryGrant }),
         osPid,
+        osPids,
         process,
         ...(csAbi === undefined ? {} : { csAbi }),
         runtimeId,
-        stats: request.kind === "debugger" ? false : request.stats,
-        ...(request.kind !== "debugger" && request.stats
+        stats:
+          request.kind === "debugger" || request.kind === "pipeline"
+            ? false
+            : request.stats,
+        ...(request.kind !== "debugger" &&
+        request.kind !== "pipeline" &&
+        request.stats
           ? {
               startedHostMilliseconds: this.readHostElapsedMilliseconds(),
             }
@@ -2117,21 +2348,22 @@ export class ComputerRuntime {
           request.niceValue,
         ),
       );
+      scheduled = true;
       this.runtimeOwners.set(runtimeId, entry);
       this.runtimeLanes.set(runtimeId, "guest_cpu");
       entry.foreground = foreground;
       return { completionEvent, outcome: "started" };
     } catch (error: unknown) {
+      if (scheduled && runtimeId !== undefined) this.unschedule(runtimeId);
+      terminateAndDisposeRejectedProcess(
+        process,
+        "unable to schedule foreground execution",
+      );
       csAbi?.finalize();
       releaseGuestProcessMemory(memoryGrant);
-      if (request.kind === "debugger") {
-        try {
-          process?.terminate("unable to schedule debugger execution");
-        } catch {
-          // The scheduler/admission error below remains authoritative.
-        }
+      for (const startedPid of osPids) {
+        this.completeOsProcess(entry, startedPid, 1);
       }
-      if (osPid !== undefined) this.completeOsProcess(entry, osPid, 1);
       const normalized =
         error instanceof Error ? error : new Error(String(error));
       return {
@@ -2193,7 +2425,12 @@ export class ComputerRuntime {
           request.executable,
           request.command,
           runtimeId,
-          rejectCsAbiSyscallHandler,
+          {
+            collectMicroarchitectureStats:
+              this.shouldCollectMicroarchitectureStats(request.stats),
+            remoteFactory: this.remoteCs486ProcessFactory,
+            syscallHandler: rejectCsAbiSyscallHandler,
+          },
         );
         process = granted.process;
         memoryGrant = granted.grant;
@@ -2274,13 +2511,12 @@ export class ComputerRuntime {
       this.syncOsRuntimeState(entry);
       return { jobId, outcome: "started", pid: osPid };
     } catch (error: unknown) {
-      releaseGuestProcessMemory(memoryGrant);
       if (scheduled) this.unschedule(runtimeId);
-      try {
-        process?.terminate("background admission failed");
-      } catch {
-        // The admission error below remains authoritative.
-      }
+      terminateAndDisposeRejectedProcess(
+        process,
+        "background admission failed",
+      );
+      releaseGuestProcessMemory(memoryGrant);
       this.rollbackBackgroundAdmission(entry, jobId, osPid);
       const normalized =
         error instanceof Error ? error : new Error(String(error));
@@ -2296,10 +2532,11 @@ export class ComputerRuntime {
     entry: RuntimeEntry,
     request: Extract<ShellForegroundRequest, { readonly kind: "cs486" }>,
     runtimeId: number,
+    allowRemote = true,
   ): {
     readonly csAbi?: CsAbiRuntime;
     readonly grant: GuestProcessMemoryGrant;
-    readonly process: Cs486Process;
+    readonly process: ObservableCs486Process;
   } {
     if (request.hostedStartup === undefined) {
       return createGrantedCs486Process(
@@ -2307,7 +2544,14 @@ export class ComputerRuntime {
         request.executable,
         request.command,
         runtimeId,
-        rejectCsAbiSyscallHandler,
+        {
+          collectMicroarchitectureStats:
+            this.shouldCollectMicroarchitectureStats(request.stats),
+          ...(allowRemote
+            ? { remoteFactory: this.remoteCs486ProcessFactory }
+            : {}),
+          syscallHandler: rejectCsAbiSyscallHandler,
+        },
       );
     }
     if (activeOsProfile(entry) !== "linux" || request.command !== "run") {
@@ -2334,6 +2578,21 @@ export class ComputerRuntime {
       ),
       heapBaseBytes: prepared.heapBaseBytes,
       heapWords: prepared.heapWords,
+      ...(request.standardInput === undefined
+        ? {}
+        : { standardInput: request.standardInput }),
+      ...(request.standardIo === undefined
+        ? {}
+        : { standardIo: request.standardIo }),
+      ...(request.routeOutput === undefined
+        ? {}
+        : {
+            outputObserver: (descriptor: 1 | 2, text: string): void => {
+              if (request.routeOutput?.(descriptor, text) === true) {
+                writeTerminalText(entry.record.terminal, text);
+              }
+            },
+          }),
       startupAddress: prepared.startupAddress,
       runHostWork: (lane, deterministicUnits, action): boolean => {
         const scope = this.activeWorkScope;
@@ -2361,15 +2620,23 @@ export class ComputerRuntime {
         }
       | undefined;
     try {
-      granted = createGrantedCs486Process(
+      const candidate = createGrantedCs486Process(
         entry,
         request.executable,
         request.command,
         runtimeId,
-        csAbi.syscallHandler,
+        {
+          collectMicroarchitectureStats:
+            this.shouldCollectMicroarchitectureStats(request.stats),
+          syscallHandler: csAbi.syscallHandler,
+        },
       );
-      granted.process.initializeProcessImage(prepared.image);
-      return { ...granted, csAbi };
+      if (!(candidate.process instanceof Cs486Process)) {
+        throw new Error("Hosted CS ABI process must execute on the Bedrock VM");
+      }
+      granted = { grant: candidate.grant, process: candidate.process };
+      candidate.process.initializeProcessImage(prepared.image);
+      return { grant: candidate.grant, process: candidate.process, csAbi };
     } catch (error: unknown) {
       csAbi.finalize();
       releaseGuestProcessMemory(granted?.grant);
@@ -2387,7 +2654,8 @@ export class ComputerRuntime {
       >["hostedStartup"]
     >,
     memoryBytes: number,
-  ): ReturnType<typeof runCs486> {
+    collectMicroarchitectureStats: boolean,
+  ): Cs486RunObservation {
     const prepared = prepareCsAbiStartup(
       request.executable,
       hostedStartup,
@@ -2411,18 +2679,27 @@ export class ComputerRuntime {
       heapBaseBytes: prepared.heapBaseBytes,
       heapWords: prepared.heapWords,
       outputObserver: (descriptor, text): void => {
-        if (descriptor === 1) stdout += text;
+        const terminalOutput = request.routeOutput?.(descriptor, text) ?? true;
+        if (terminalOutput && descriptor === 1) stdout += text;
+        else if (terminalOutput) writeTerminalText(entry.record.terminal, text);
       },
       runHostWork: (_lane, _deterministicUnits, action): boolean => {
         action();
         return true;
       },
       startupAddress: prepared.startupAddress,
+      ...(request.standardInput === undefined
+        ? {}
+        : { standardInput: request.standardInput }),
+      ...(request.standardIo === undefined
+        ? {}
+        : { standardIo: request.standardIo }),
       terminal: entry.record.terminal,
     });
     let finalized = false;
     try {
       const process = new Cs486Process(request.executable, {
+        collectMicroarchitectureStats,
         cpuModel: entry.record.hardware.cpuModel,
         memoryBytes,
         syscallHandler: csAbi.syscallHandler,
@@ -2435,7 +2712,9 @@ export class ComputerRuntime {
       return {
         cycles: slice.cpuCycles,
         executedInstructions: slice.executedInstructions,
-        microarchitecture: process.microarchitectureStats,
+        microarchitecture: process.microarchitectureStatsEnabled
+          ? process.microarchitectureStats
+          : null,
         output: process.output + stdout,
         registers: process.registers,
         state: process.state.kind === "completed" ? "halted" : "yielded",
@@ -2913,7 +3192,12 @@ export class ComputerRuntime {
           output,
           job.request.command,
           runtimeId,
-          rejectCsAbiSyscallHandler,
+          {
+            collectMicroarchitectureStats:
+              this.shouldCollectMicroarchitectureStats(),
+            remoteFactory: this.remoteCs486ProcessFactory,
+            syscallHandler: rejectCsAbiSyscallHandler,
+          },
         );
         this.startDebugJob(
           entry,
@@ -2995,7 +3279,12 @@ export class ComputerRuntime {
       executable,
       command,
       runtimeId,
-      rejectCsAbiSyscallHandler,
+      {
+        collectMicroarchitectureStats:
+          this.shouldCollectMicroarchitectureStats(),
+        remoteFactory: this.remoteCs486ProcessFactory,
+        syscallHandler: rejectCsAbiSyscallHandler,
+      },
     );
     const process = granted.process;
     const foreground: ForegroundGuestProcess = {
@@ -3013,6 +3302,7 @@ export class ComputerRuntime {
       runtimeId,
       stats: false,
     };
+    let scheduled = false;
     try {
       granted.grant.bindProcess(osPid);
       this.scheduler.add(
@@ -3024,10 +3314,16 @@ export class ComputerRuntime {
           this.guestRealtimeDivisor,
         ),
       );
+      scheduled = true;
       this.runtimeOwners.set(runtimeId, entry);
       this.runtimeLanes.set(runtimeId, "guest_cpu");
       entry.foreground = foreground;
     } catch (error: unknown) {
+      if (scheduled) this.unschedule(runtimeId);
+      terminateAndDisposeRejectedProcess(
+        process,
+        "compiled foreground admission failed",
+      );
       releaseGuestProcessMemory(granted.grant);
       this.completeOsProcess(entry, osPid, 1, compileCycles);
       throw error;
@@ -3143,6 +3439,9 @@ export class ComputerRuntime {
       currentTick: () => this.scheduler.tickNumber,
       queueEvent: (name, ...arguments_) =>
         this.scheduler.queueEvent(runtimeId, name, ...arguments_),
+      ...(request.routeOutput === undefined
+        ? {}
+        : { routeOutput: request.routeOutput }),
       startTimer: (delay) => this.scheduler.startTimer(runtimeId, delay),
       cancelTimer: (timerId) => this.scheduler.cancelTimer(runtimeId, timerId),
       shutdown: () => this.requestEntryStop(entry, "shutdown", "shutdown"),
@@ -3155,6 +3454,9 @@ export class ComputerRuntime {
         this.runHostWork(lane, units, entry.record.computerId, operation),
     });
     const prepared = preparePythonCs486Program({
+      collectMicroarchitectureStats: this.shouldCollectMicroarchitectureStats(
+        request.stats,
+      ),
       cpuModel: entry.record.hardware.cpuModel,
       environment,
       filesystem,
@@ -3221,6 +3523,9 @@ export class ComputerRuntime {
         this.runHostWork(lane, units, entry.record.computerId, operation),
     });
     const prepared = preparePythonCs486Program({
+      collectMicroarchitectureStats: this.shouldCollectMicroarchitectureStats(
+        request.stats,
+      ),
       cpuModel: entry.record.hardware.cpuModel,
       environment,
       filesystem,
@@ -3254,12 +3559,53 @@ export class ComputerRuntime {
     entry.foreground = undefined;
     this.finalizeForegroundResources(foreground);
     if (entry.stopIntent !== undefined || entry.vm === undefined) {
-      this.completeOsProcess(
+      this.completeForegroundOsProcesses(
         entry,
-        foreground.osPid,
+        foreground,
         terminalForegroundExitCode(foreground, state),
-        foreground.cpuCycles,
         state.kind === "terminated" ? foreground.terminationSignal : undefined,
+      );
+      return;
+    }
+
+    if (foreground.kind === "pipeline") {
+      let result: ShellCommandResult;
+      try {
+        if (foreground.pipelineCompletion === undefined) {
+          throw new Error("pipeline completion owner is missing");
+        }
+        result = foreground.pipelineCompletion();
+      } catch (error: unknown) {
+        const normalized =
+          error instanceof Error ? error : new Error(String(error));
+        result = {
+          exitCode: 1,
+          stderr: `pipeline: ${normalized.name}: ${normalized.message}\n`,
+          stdout: "",
+        };
+      }
+      const stageExitCodes = foreground.pipelineStageExitCodes?.() ?? [];
+      const pids = foreground.osPids ?? [foreground.osPid];
+      for (let index = 0; index < pids.length; index += 1) {
+        this.completeOsProcess(
+          entry,
+          pids[index]!,
+          stageExitCodes[index] ?? result.exitCode,
+          Math.floor(foreground.cpuCycles / Math.max(1, pids.length)),
+          state.kind === "terminated"
+            ? foreground.terminationSignal
+            : undefined,
+        );
+      }
+      writeShellCommandOutput(entry.record.terminal, result);
+      if (result.terminalScreen !== undefined) {
+        renderTerminalScreen(entry.record.terminal, result.terminalScreen);
+      }
+      entry.shell?.completeForegroundProcess(result.exitCode);
+      this.scheduler.queueEvent(
+        entry.runtimeId,
+        foreground.completionEvent,
+        result.exitCode,
       );
       return;
     }
@@ -3296,6 +3642,12 @@ export class ComputerRuntime {
       return;
     }
 
+    if (foreground.csAbi?.usedRawFramePresentation === true) {
+      entry.record.terminal.setTextColor(0);
+      entry.record.terminal.setBackgroundColor(15);
+      entry.record.terminal.clear();
+      entry.record.terminal.setCursorPosition(1, 1);
+    }
     let exitCode: number;
     let stateName: string;
     if (foreground.limitReached === true) {
@@ -3327,7 +3679,7 @@ export class ComputerRuntime {
     }
     const processOutput =
       foreground.kind === "cs486"
-        ? (foreground.process as Cs486Process).output
+        ? observableCs486Process(foreground.process).output
         : "";
     let completionTranscript: GuestToolchainTranscript;
     let transcriptLimitExceeded = false;
@@ -3382,7 +3734,7 @@ export class ComputerRuntime {
               foreground.cpuCycles,
               stateName,
               entry.record.hardware,
-              foreground.process as Cs486Process,
+              observableCs486Process(foreground.process),
               this.elapsedHostMilliseconds(foreground.startedHostMilliseconds),
             )),
       ]);
@@ -3431,6 +3783,10 @@ export class ComputerRuntime {
   ): void {
     foreground.csAbi?.finalize();
     releaseGuestProcessMemory(foreground.memoryGrant);
+  }
+
+  private shouldCollectMicroarchitectureStats(requested = false): boolean {
+    return requested || this.collectMicroarchitectureStatsByDefault;
   }
 
   private readHostElapsedMilliseconds(): number | undefined {
@@ -3492,12 +3848,12 @@ export class ComputerRuntime {
 
     if (
       background.kind === "cs486" &&
-      (background.process as Cs486Process).output.length > 0
+      observableCs486Process(background.process).output.length > 0
     ) {
       writeTerminalLines(
         entry.record.terminal,
-        (background.process as Cs486Process).output
-          .replaceAll("\r\n", "\n")
+        observableCs486Process(background.process)
+          .output.replaceAll("\r\n", "\n")
           .replace(/\n$/u, "")
           .split("\n"),
       );
@@ -3519,7 +3875,7 @@ export class ComputerRuntime {
               background.cpuCycles,
               stateName,
               entry.record.hardware,
-              background.process as Cs486Process,
+              observableCs486Process(background.process),
               this.elapsedHostMilliseconds(background.startedHostMilliseconds),
             )),
       ]);
@@ -3611,6 +3967,35 @@ export class ComputerRuntime {
     });
   }
 
+  private signalForegroundProcesses(
+    entry: RuntimeEntry,
+    foreground: ForegroundGuestProcess,
+    signal: OsProcessSignal,
+  ): void {
+    for (const pid of foreground.osPids ?? [foreground.osPid]) {
+      this.signalOsProcess(entry, pid, signal);
+    }
+  }
+
+  private completeForegroundOsProcesses(
+    entry: RuntimeEntry,
+    foreground: ForegroundGuestProcess,
+    exitCode: number,
+    signal?: OsProcessSignal,
+  ): void {
+    const pids = foreground.osPids ?? [foreground.osPid];
+    const stageExitCodes = foreground.pipelineStageExitCodes?.() ?? [];
+    for (let index = 0; index < pids.length; index += 1) {
+      this.completeOsProcess(
+        entry,
+        pids[index]!,
+        signal === undefined ? (stageExitCodes[index] ?? exitCode) : exitCode,
+        Math.floor(foreground.cpuCycles / Math.max(1, pids.length)),
+        signal,
+      );
+    }
+  }
+
   private requestStop(
     computerId: string,
     intent: StopIntent,
@@ -3683,13 +4068,7 @@ export class ComputerRuntime {
         unsafeFinalization = true;
       }
       this.unschedule(foreground.runtimeId);
-      this.completeOsProcess(
-        entry,
-        foreground.osPid,
-        130,
-        foreground.cpuCycles,
-        "SIGHUP",
-      );
+      this.completeForegroundOsProcesses(entry, foreground, 130, "SIGHUP");
       entry.shell?.completeForegroundProcess(130);
       try {
         this.scheduler.queueEvent(
@@ -3827,7 +4206,7 @@ export class ComputerRuntime {
               "SIGTERM",
             );
           if (entry.foreground !== undefined)
-            this.signalOsProcess(entry, entry.foreground.osPid, "SIGTERM");
+            this.signalForegroundProcesses(entry, entry.foreground, "SIGTERM");
           if (entry.debugJob !== undefined)
             this.signalOsProcess(entry, entry.debugJob.osPid, "SIGTERM");
           this.finalizeBackgroundProcesses(entry, "SIGTERM");
@@ -4083,13 +4462,7 @@ export class ComputerRuntime {
       foreground.terminationSignal = "SIGKILL";
       foreground.process.terminate("shutdown deadline exceeded");
       this.unschedule(foreground.runtimeId);
-      this.completeOsProcess(
-        entry,
-        foreground.osPid,
-        137,
-        foreground.cpuCycles,
-        "SIGKILL",
-      );
+      this.completeForegroundOsProcesses(entry, foreground, 137, "SIGKILL");
       if (
         foreground.jobId !== undefined &&
         entry.osRuntimeState.job(foreground.jobId)?.state === "done"
@@ -4288,6 +4661,7 @@ export class ComputerRuntime {
     command: string,
     credentials: ProcessCredentials,
     niceValue = 0,
+    processGroupId?: number,
   ): number {
     const shellPid = entry.shell?.processId();
     const parentPid =
@@ -4300,6 +4674,7 @@ export class ComputerRuntime {
       gid: credentials.effectiveGroupId,
       niceValue,
       parentPid,
+      ...(processGroupId === undefined ? {} : { processGroupId }),
       startTick: this.scheduler.tickNumber,
       state: "running",
       uid: credentials.effectiveUserId,
@@ -4518,11 +4893,10 @@ export class ComputerRuntime {
       this.unschedule(foreground.runtimeId);
       entry.foreground = undefined;
       this.finalizeForegroundResources(foreground);
-      this.completeOsProcess(
+      this.completeForegroundOsProcesses(
         entry,
-        foreground.osPid,
+        foreground,
         130,
-        foreground.cpuCycles,
         foreground.terminationSignal ?? "SIGTERM",
       );
       if (
@@ -4843,6 +5217,7 @@ interface ForegroundGuestProcess {
     | "csdb"
     | "debug"
     | "micropython"
+    | "pipeline"
     | "python"
     | "qbasic"
     | "run"
@@ -4858,10 +5233,14 @@ interface ForegroundGuestProcess {
   executedInstructions: number;
   readonly instructionLimit?: number;
   readonly jobId?: number;
-  readonly kind: "cs486" | "debugger" | "python" | "sleep";
+  readonly kind: "cs486" | "debugger" | "pipeline" | "python" | "sleep";
+  lastPagerRevision?: number;
   limitReached?: boolean;
   readonly memoryGrant?: GuestProcessMemoryGrant;
   readonly osPid: number;
+  readonly osPids?: readonly number[];
+  readonly pipelineCompletion?: () => ShellCommandResult;
+  readonly pipelineStageExitCodes?: () => readonly number[];
   readonly process: CpuProcess;
   readonly runtimeId: number;
   readonly startedHostMilliseconds?: number;
@@ -4938,12 +5317,23 @@ function pythonStats(
   return `Python/${runtimeName}: ${String(instructions)} machine instructions, ${String(cpuCycles)} CPU cycles, ${microseconds.toFixed(3)} us at ${formatClock(hardware.clockHz)}, ${state}\n${hostStats === undefined ? "" : `${hostStats}\n`}`;
 }
 
+function observableCs486Process(process: CpuProcess): ObservableCs486Process {
+  const candidate = process as Partial<ObservableCs486Process>;
+  if (
+    typeof candidate.output !== "string" ||
+    typeof candidate.microarchitectureStatsEnabled !== "boolean"
+  ) {
+    throw new Error("CS486 process observation is unavailable");
+  }
+  return candidate as ObservableCs486Process;
+}
+
 function cs486Stats(
   instructions: number,
   cpuCycles: number,
   state: string,
   hardware: ComputerHardwareProfile,
-  process: Cs486Process,
+  process: ObservableCs486Process,
   hostElapsedMilliseconds?: number,
 ): readonly string[] {
   const microseconds = cpuCyclesToMicroseconds(cpuCycles, hardware.clockHz);
@@ -4977,12 +5367,17 @@ function hostElapsedStats(
 }
 
 function cs486RunResultStats(
-  result: ReturnType<typeof runCs486>,
+  result: Cs486RunObservation,
   hardware: ComputerHardwareProfile,
 ): readonly string[] {
   const microseconds = cpuCyclesToMicroseconds(result.cycles, hardware.clockHz);
   const runtimeName = cpuModelSpecification(hardware.cpuModel).runtimeName;
   const stats = result.microarchitecture;
+  if (stats === null) {
+    throw new Error(
+      "CS486 statistics were requested without microarchitecture collection",
+    );
+  }
   return [
     `${runtimeName}: ${String(result.executedInstructions)} instructions, ${String(result.cycles)} CPU cycles, ${microseconds.toFixed(3)} us at ${formatClock(hardware.clockHz)}, ${result.state}`,
     `memory: L1 ${String(stats.l1Hits)} hit/${String(stats.l1Misses)} miss, L2 ${String(stats.l2Hits)} hit/${String(stats.l2Misses)} miss, ${String(stats.busTransfers)} bus transfers, ${String(stats.unalignedAccesses)} unaligned, ${String(stats.pipelineFlushes)} pipeline flushes`,
@@ -5030,7 +5425,15 @@ function writeShellCommandOutput(
   terminal: TerminalBuffer,
   result: ShellCommandResult,
 ): void {
-  for (const text of [result.stdout, result.stderr]) {
+  const events = result.outputEvents ?? [
+    ...(result.stderr.length === 0
+      ? []
+      : [{ descriptor: 2 as const, text: result.stderr }]),
+    ...(result.stdout.length === 0
+      ? []
+      : [{ descriptor: 1 as const, text: result.stdout }]),
+  ];
+  for (const { text } of events) {
     if (text.length === 0) continue;
     const normalized = text.replaceAll("\r\n", "\n").replaceAll("\r", "\n");
     const withoutFinalNewline = normalized.endsWith("\n")
@@ -5255,10 +5658,14 @@ function createGrantedCs486Process(
   executable: Cs486Executable,
   command: string,
   runtimeId: number,
-  syscallHandler?: Cs486SyscallHandler,
+  options: {
+    readonly collectMicroarchitectureStats: boolean;
+    readonly remoteFactory?: RemoteCs486ProcessFactory;
+    readonly syscallHandler?: Cs486SyscallHandler;
+  },
 ): {
   readonly grant: GuestProcessMemoryGrant;
-  readonly process: Cs486Process;
+  readonly process: ObservableCs486Process;
 } {
   const grant = grantExecutableProcessMemory(
     entry,
@@ -5269,16 +5676,56 @@ function createGrantedCs486Process(
   try {
     return {
       grant,
-      process: new Cs486Process(executable, {
-        cpuModel: entry.record.hardware.cpuModel,
-        memoryBytes: grant.memoryBytes,
-        ...(syscallHandler === undefined ? {} : { syscallHandler }),
-      }),
+      process:
+        options.remoteFactory === undefined
+          ? new Cs486Process(executable, {
+              collectMicroarchitectureStats:
+                options.collectMicroarchitectureStats,
+              cpuModel: entry.record.hardware.cpuModel,
+              memoryBytes: grant.memoryBytes,
+              ...(options.syscallHandler === undefined
+                ? {}
+                : { syscallHandler: options.syscallHandler }),
+            })
+          : createRemoteGrantedCs486Process(
+              options.remoteFactory,
+              entry,
+              executable,
+              runtimeId,
+              grant.memoryBytes,
+              options,
+            ),
     };
   } catch (error: unknown) {
     releaseGuestProcessMemory(grant);
     throw error;
   }
+}
+
+function createRemoteGrantedCs486Process(
+  factory: RemoteCs486ProcessFactory,
+  entry: RuntimeEntry,
+  executable: Cs486Executable,
+  runtimeId: number,
+  memoryBytes: number,
+  options: {
+    readonly collectMicroarchitectureStats: boolean;
+    readonly syscallHandler?: Cs486SyscallHandler;
+  },
+): ObservableCs486Process {
+  if (options.syscallHandler !== rejectCsAbiSyscallHandler) {
+    throw new Error(
+      "Companion execution requires the isolated CS486 syscall policy",
+    );
+  }
+  return factory.create({
+    collectMicroarchitectureStats: options.collectMicroarchitectureStats,
+    computerId: entry.record.computerId,
+    cpuModel: entry.record.hardware.cpuModel,
+    executable,
+    memoryBytes,
+    runtimeId,
+  });
 }
 
 function guestProcessMemoryAdmission(
@@ -5398,6 +5845,20 @@ function escapeMakeDependency(path: string): string {
     .replaceAll("$", () => "$$")
     .replaceAll("#", "\\#")
     .replaceAll(" ", "\\ ");
+}
+
+function terminateAndDisposeRejectedProcess(
+  process: CpuProcess | undefined,
+  reason: string,
+): void {
+  if (process === undefined) return;
+  try {
+    process.terminate(reason);
+  } catch {
+    // The original admission error remains authoritative, but disposal below
+    // still owns final release of an isolated worker actor.
+  }
+  process.dispose?.();
 }
 
 function failure(error: unknown): RuntimeCommandResult {

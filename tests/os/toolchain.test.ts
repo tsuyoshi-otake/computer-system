@@ -43,6 +43,24 @@ describe("CS486DX shell toolchain", (): void => {
     expect(shell.submit("objdump /work/sum").stdout).toContain('"op":"add"');
   });
 
+  it("collects configured diagnostics silently until the command requests them", (): void => {
+    const filesystem = new InMemoryFilesystem();
+    const shell = new ShellSession(filesystem, {
+      collectMicroarchitectureStatsByDefault: true,
+    });
+    filesystem.makeDirectory("/work");
+    filesystem.writeFile("/work/answer.asm", "mov eax, 42\nprint eax\nhalt\n");
+
+    expect(shell.submit("as /work/answer.asm -o /work/answer").exitCode).toBe(
+      0,
+    );
+    const plain = shell.submit("run /work/answer");
+    expect(plain).toMatchObject({ exitCode: 0, stderr: "", stdout: "42" });
+
+    const measured = shell.submit("run --stats /work/answer");
+    expect(measured.stderr).toMatch(/memory: L1 \d+ hit\/\d+ miss/u);
+  });
+
   it("compiles BASIC, C, and C++ subsets to the same executable format", (): void => {
     const filesystem = new InMemoryFilesystem();
     const shell = new ShellSession(filesystem);

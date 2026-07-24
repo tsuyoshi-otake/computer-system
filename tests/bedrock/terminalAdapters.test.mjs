@@ -146,6 +146,8 @@ describe("Bedrock terminal adapters", () => {
     expect(bridge).toContain('"terminal_mouse"');
     expect(bridge).toContain("isTerminalKeyBatch");
     expect(bridge).toContain("computerHost.runtime.terminalInteraction");
+    expect(bridge).toContain("computerHost.runtime.executionStatus");
+    expect(bridge).toContain("readonly execution: ComputerExecutionStatus");
     expect(bridge).toContain(
       "readonly interaction: TerminalInteractionDescriptor",
     );
@@ -270,6 +272,8 @@ describe("Bedrock terminal adapters", () => {
     expect(emit).toContain("session.lastSnapshotMetadata === metadata");
     expect(emit).toContain("const interaction =");
     expect(emit).toContain("interaction,");
+    expect(emit).toContain("const execution:");
+    expect(emit).toContain("execution,");
     expect(emit).not.toContain("secretInput,");
     expect(emit).toContain("audio.events.length === 0");
     expect(emit.match(/record\.terminal\.snapshot\(\)/gu)).toHaveLength(1);

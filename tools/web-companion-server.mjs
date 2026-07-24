@@ -1297,8 +1297,16 @@ export class WebCompanionServer {
         `scriptevent computer_system:web-input ${sessionId} ${requestId} ${String(interactionGeneration)} ${kind} ${encoded}`,
       );
     } catch (error) {
+      const relayError =
+        error instanceof WebSessionError
+          ? error
+          : new WebSessionError(
+              "companion_unavailable",
+              "The terminal input relay is temporarily unavailable.",
+              503,
+            );
       this.finalizePendingInput(requestId, pending, () => {
-        rejectAdmission(error);
+        rejectAdmission(relayError);
       });
     }
     return requireAcceptedInput(await completion);
@@ -1787,7 +1795,10 @@ export class WebCompanionServer {
     }
     writeJson(response, status, {
       code: error instanceof WebSessionError ? error.code : "internal",
-      error: status >= 500 ? "Internal companion error." : message(error),
+      error:
+        error instanceof WebSessionError
+          ? message(error)
+          : "Internal companion error.",
     });
   }
 }

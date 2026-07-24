@@ -1,15 +1,54 @@
+import { mkdir, mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+
 import { describe, expect, it } from "vitest";
 
 import {
   acceptanceFixtureWorldName,
   BdsDebugSession,
+  createManagedRuntimeWorkerConfigFiles,
   isAllowedBdsCommand,
   isAllowedWebRelayCommand,
   isDiagnosticLine,
-  parseWorkMonitorLine,
+  managedBdsScriptModuleId,
+  managedRuntimeWorkerPermissionLimits,
+  normalizeManagedRuntimeWorkers,
+  patchDisposableBetaApisLevelDat,
   parseBdsPort,
+  parseWorkMonitorLine,
   validateAcceptanceFixtureStart,
+  writeManagedRuntimeWorkerConfig,
 } from "../../tools/bds-debug-session.mjs";
+
+const runtimeWorkerToken = Buffer.alloc(32, 1).toString("base64url");
+
+function nbtByteTag(name, value) {
+  const encodedName = Buffer.from(name, "utf8");
+  const tag = Buffer.alloc(encodedName.byteLength + 4);
+  tag[0] = 1;
+  tag.writeUInt16LE(encodedName.byteLength, 1);
+  encodedName.copy(tag, 3);
+  tag[tag.byteLength - 1] = value;
+  return tag;
+}
+
+function disposableLevelDat() {
+  const experimentsName = Buffer.from("experiments", "utf8");
+  const payload = Buffer.concat([
+    Buffer.from([10, 0, 0]),
+    Buffer.from([10, experimentsName.byteLength, 0]),
+    experimentsName,
+    nbtByteTag("experiments_ever_used", 0),
+    nbtByteTag("saved_with_toggled_experiments", 0),
+    Buffer.from([0, 0]),
+  ]);
+  const levelDat = Buffer.alloc(payload.byteLength + 8);
+  levelDat.writeUInt32LE(10, 0);
+  levelDat.writeUInt32LE(payload.byteLength, 4);
+  payload.copy(levelDat, 8);
+  return levelDat;
+}
 
 describe("BDS debug session", () => {
   it("accepts only bounded Computer System debug commands", () => {
@@ -139,12 +178,160 @@ describe("BDS debug session", () => {
     ).not.toThrow();
   });
 
+  it("enables Beta APIs only by bounded idempotent level.dat patching", () => {
+    const original = disposableLevelDat();
+    const patched = patchDisposableBetaApisLevelDat(original);
+
+    expect(patched).not.toBe(original);
+    expect(patched.readUInt32LE(0)).toBe(10);
+    expect(patched.readUInt32LE(4)).toBe(patched.byteLength - 8);
+    for (const name of [
+      "gametest",
+      "experiments_ever_used",
+      "saved_with_toggled_experiments",
+    ]) {
+      expect(patched.includes(nbtByteTag(name, 1))).toBe(true);
+    }
+    expect(original.includes(nbtByteTag("gametest", 1))).toBe(false);
+    expect(patchDisposableBetaApisLevelDat(patched)).toBe(patched);
+
+    const wrongVersion = Buffer.from(original);
+    wrongVersion.writeUInt32LE(11, 0);
+    expect(() => patchDisposableBetaApisLevelDat(wrongVersion)).toThrow(
+      /version must be 10/u,
+    );
+    expect(() =>
+      patchDisposableBetaApisLevelDat(original.subarray(0, -1)),
+    ).toThrow(/payload length/u);
+  });
+
   it("validates ports without silently accepting trailing text", () => {
     expect(parseBdsPort(undefined)).toBe(19_142);
     expect(parseBdsPort("20000")).toBe(20_000);
     expect(() => parseBdsPort("20000debug")).toThrow(/between 1 and 65534/u);
     expect(() => parseBdsPort("0")).toThrow(/between 1 and 65534/u);
     expect(() => parseBdsPort("65535")).toThrow(/between 1 and 65534/u);
+  });
+
+  it("accepts only an exact authenticated loopback runtime worker boundary", () => {
+    const expected = {
+      count: 2,
+      endpoint: "ws://127.0.0.1:19145/internal/cs486/v1",
+      token: runtimeWorkerToken,
+    };
+    expect(normalizeManagedRuntimeWorkers(expected)).toEqual(expected);
+    expect(normalizeManagedRuntimeWorkers(undefined)).toBeUndefined();
+    for (const invalid of [
+      { ...expected, count: 0 },
+      { ...expected, count: 17 },
+      { ...expected, endpoint: "ws://localhost:19145/internal/cs486/v1" },
+      { ...expected, endpoint: "wss://127.0.0.1:19145/internal/cs486/v1" },
+      { ...expected, endpoint: "ws://127.0.0.1:19145/other" },
+      { ...expected, token: "not-a-256-bit-token" },
+      { ...expected, token: "B".repeat(43) },
+      { ...expected, extra: true },
+    ]) {
+      expect(() => normalizeManagedRuntimeWorkers(invalid)).toThrow();
+    }
+  });
+
+  it("builds least-privilege module config without copying the secret into permissions or variables", () => {
+    const value = {
+      count: 2,
+      endpoint: "ws://127.0.0.1:19145/internal/cs486/v1",
+      token: runtimeWorkerToken,
+    };
+    const files = createManagedRuntimeWorkerConfigFiles(value);
+    expect(files["permissions.json"]).toEqual({
+      allowed_modules: [
+        "@minecraft/server",
+        "@minecraft/server-ui",
+        "@minecraft/server-admin",
+        "@minecraft/server-net",
+      ],
+      module_permissions: {
+        "@minecraft/server-net": {
+          allowed_uris: [value.endpoint],
+          force_tls: false,
+          max_body_bytes: managedRuntimeWorkerPermissionLimits.maxBodyBytes,
+          max_concurrent_requests:
+            managedRuntimeWorkerPermissionLimits.maxConcurrentRequests,
+          max_message_size: managedRuntimeWorkerPermissionLimits.maxMessageSize,
+          max_websocket_connections:
+            managedRuntimeWorkerPermissionLimits.maxWebSocketConnections,
+        },
+      },
+    });
+    expect(files["variables.json"]).toEqual({
+      cs486ComputeEndpoint: value.endpoint,
+      cs486RuntimeWorkerCount: 2,
+    });
+    expect(files["secrets.json"]).toEqual({
+      cs486ComputeToken: `Bearer ${runtimeWorkerToken}`,
+    });
+    expect(
+      JSON.stringify([files["permissions.json"], files["variables.json"]]),
+    ).not.toContain(runtimeWorkerToken);
+  });
+
+  it("atomically installs all managed runtime worker files under the script module UUID", async () => {
+    const temporaryParent = path.join(os.homedir(), "tmp");
+    await mkdir(temporaryParent, { recursive: true });
+    const workRoot = await mkdtemp(
+      path.join(temporaryParent, "computer-system-worker-config-"),
+    );
+    try {
+      const value = {
+        count: 3,
+        endpoint: "ws://127.0.0.1:29481/internal/cs486/v1",
+        token: runtimeWorkerToken,
+      };
+      const configRoot = await writeManagedRuntimeWorkerConfig(workRoot, value);
+      expect(configRoot).toBe(
+        path.join(workRoot, "config", managedBdsScriptModuleId),
+      );
+      expect((await readdir(configRoot)).sort()).toEqual([
+        "permissions.json",
+        "secrets.json",
+        "variables.json",
+      ]);
+      const [permissions, variables, secrets] = await Promise.all(
+        ["permissions.json", "variables.json", "secrets.json"].map(
+          async (filename) =>
+            JSON.parse(await readFile(path.join(configRoot, filename), "utf8")),
+        ),
+      );
+      expect(
+        permissions.module_permissions["@minecraft/server-net"].allowed_uris,
+      ).toEqual([value.endpoint]);
+      expect(variables).toEqual({
+        cs486ComputeEndpoint: value.endpoint,
+        cs486RuntimeWorkerCount: 3,
+      });
+      expect(secrets).toEqual({
+        cs486ComputeToken: `Bearer ${runtimeWorkerToken}`,
+      });
+
+      const rotatedToken = Buffer.alloc(32, 2).toString("base64url");
+      await writeManagedRuntimeWorkerConfig(workRoot, {
+        ...value,
+        token: rotatedToken,
+      });
+      expect(
+        JSON.parse(
+          await readFile(path.join(configRoot, "secrets.json"), "utf8"),
+        ),
+      ).toEqual({
+        cs486ComputeToken: `Bearer ${rotatedToken}`,
+      });
+      expect((await readdir(configRoot)).sort()).toEqual([
+        "permissions.json",
+        "secrets.json",
+        "variables.json",
+      ]);
+    } finally {
+      await rm(workRoot, { force: true, recursive: true });
+    }
   });
 
   it("accepts only the internal browser-terminal relay protocol", () => {
@@ -274,6 +461,11 @@ describe("BDS debug session", () => {
   it("classifies Bedrock content diagnostics", () => {
     expect(isDiagnosticLine("[Scripting] Error: boom")).toBe(true);
     expect(isDiagnosticLine("[Json] warning: invalid control")).toBe(true);
+    expect(
+      isDiagnosticLine(
+        "[Scripting] Plugin [Computer System] - requesting dependency on beta APIs [@minecraft/server-admin - 1.0.0-beta], but the Beta APIs experiment is not enabled.",
+      ),
+    ).toBe(true);
     expect(isDiagnosticLine("Server started.")).toBe(false);
     expect(
       isDiagnosticLine(
@@ -320,6 +512,26 @@ describe("BDS debug session", () => {
       lastError: null,
     });
     expect(() => session.runCommand("list")).toThrow(/not running/u);
+  });
+
+  it("reports managed worker placement without exposing its bearer token", () => {
+    const session = new BdsDebugSession({
+      environment: {
+        BDS_HOME: "C:/does-not-need-to-exist-until-start",
+      },
+      runtimeWorkers: {
+        count: 2,
+        endpoint: "ws://127.0.0.1:19145/internal/cs486/v1",
+        token: runtimeWorkerToken,
+      },
+    });
+    expect(session.getStatus().runtimeWorkers).toEqual({
+      count: 2,
+      endpoint: "ws://127.0.0.1:19145/internal/cs486/v1",
+    });
+    expect(JSON.stringify(session.getStatus())).not.toContain(
+      runtimeWorkerToken,
+    );
   });
 
   it("preserves run --stats microarchitecture output in MCP responses", async () => {

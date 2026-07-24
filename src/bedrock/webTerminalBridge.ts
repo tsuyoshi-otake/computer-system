@@ -1,7 +1,10 @@
 import { system, world, type Block, type Player } from "@minecraft/server";
 
 import type { ComputerRecord } from "../domain/computer/computer.js";
-import type { RuntimeCommandResult } from "../application/computer/computerRuntime.js";
+import type {
+  ComputerExecutionStatus,
+  RuntimeCommandResult,
+} from "../application/computer/computerRuntime.js";
 import type { ShellTerminalCompletionResponse } from "../application/os/shellTypes.js";
 import type { TerminalInteractionDescriptor } from "../application/terminal/terminalInteraction.js";
 import { TerminalSnapshotScheduler } from "../application/terminal/terminalSnapshotScheduler.js";
@@ -77,6 +80,7 @@ interface SharedSnapshotFrame {
   readonly payload: {
     readonly computerId: string;
     readonly displayState: ComputerRecord["display"]["state"]["kind"];
+    readonly execution: ComputerExecutionStatus;
     readonly label: string;
     readonly lifecycle: string;
     readonly storage: ReturnType<typeof computerHost.storageStatus>;
@@ -1162,6 +1166,11 @@ function emitSnapshot(session: ActiveSession, force: boolean): boolean {
   const displayState = record.display.state.kind;
   const lifecycle = record.lifecycle.state.kind;
   const storage = computerHost.storageStatus(record.computerId);
+  const execution: ComputerExecutionStatus =
+    computerHost.runtime.executionStatus(record.computerId) ?? {
+      activeBackend: "idle",
+      workerCount: 0,
+    };
   const interaction = computerHost.runtime.terminalInteraction(
     record.computerId,
   );
@@ -1169,6 +1178,7 @@ function emitSnapshot(session: ActiveSession, force: boolean): boolean {
   const terminalRevision = record.terminal.revision;
   const frameMetadata = JSON.stringify({
     displayState,
+    execution,
     interaction,
     label,
     lifecycle,
@@ -1188,6 +1198,7 @@ function emitSnapshot(session: ActiveSession, force: boolean): boolean {
   const frame = getSharedSnapshotFrame(
     record,
     displayState,
+    execution,
     label,
     lifecycle,
     storage,
@@ -1211,6 +1222,7 @@ function emitSnapshot(session: ActiveSession, force: boolean): boolean {
 function getSharedSnapshotFrame(
   record: ComputerRecord,
   displayState: ComputerRecord["display"]["state"]["kind"],
+  execution: ComputerExecutionStatus,
   label: string,
   lifecycle: string,
   storage: ReturnType<typeof computerHost.storageStatus>,
@@ -1232,6 +1244,7 @@ function getSharedSnapshotFrame(
     payload: {
       computerId: record.computerId,
       displayState,
+      execution,
       label,
       lifecycle,
       storage,

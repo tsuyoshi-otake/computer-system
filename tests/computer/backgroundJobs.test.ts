@@ -283,7 +283,15 @@ describe("ComputerRuntime background jobs", (): void => {
     expect(state.lastLogin("cs")).toMatchObject({ logoutReason: "logout" });
     expect(state.job(job.jobId)).toBeUndefined();
     expect(state.process(job.pid)).toBeUndefined();
-    expect(terminalText(record)).toContain("login:");
+    const transcript = record.terminal
+      .snapshot()
+      .rows.map((row) => row.trimEnd())
+      .join("\n");
+    const issueIndex = transcript.lastIndexOf("CS-Linux 1.0 console tty1");
+    const loginIndex = transcript.lastIndexOf("c-000837 login:");
+    expect(transcript).toContain("logout");
+    expect(issueIndex).toBeGreaterThan(-1);
+    expect(loginIndex).toBeGreaterThan(issueIndex);
   });
 
   it("hangs up an elevated job by login-shell ownership instead of effective UID", (): void => {

@@ -1,4 +1,8 @@
-import { encodeUtf8, utf8ByteLength } from "../../domain/text/utf8.js";
+import {
+  decodeUtf8,
+  encodeUtf8,
+  utf8ByteLength,
+} from "../../domain/text/utf8.js";
 import type { SynchronousTransactionOperation } from "../../domain/filesystem/inMemoryFilesystem.js";
 import {
   DosPathError,
@@ -164,6 +168,7 @@ export type {
   ShellForegroundRequest,
   ShellForegroundPython,
   ShellJobControlRequest,
+  ShellOutputEvent,
 } from "./shellTypes.js";
 
 export interface ShellCommandRuntimeOptions {
@@ -176,6 +181,7 @@ export interface ShellCommandRuntimeOptions {
   readonly profile: OsProfile;
   readonly ticksPerSecond: number;
   readonly hardware: ComputerHardwareProfile;
+  readonly collectMicroarchitectureStatsByDefault?: boolean;
   readonly dosMemorySnapshot?: () => DosGuestMemorySnapshot;
   readonly linuxMemorySnapshot?: () => LinuxGuestMemorySnapshot;
   readonly admitProcessMemory: ShellProcessMemoryAdmission;
@@ -1159,6 +1165,28 @@ export class ShellCommandRuntime {
         this.environment.get("HOME") ?? this.options.profile.home,
       ),
     );
+  }
+
+  /** One credentialed redirect/spool setup boundary owned by the guest shell. */
+  transaction<Result>(
+    operation: SynchronousTransactionOperation<Result>,
+  ): Result {
+    return this.options.profile.id === "dos"
+      ? this.runDosFilesystemTransaction(operation)
+      : this.filesystem.transaction(operation);
+  }
+
+  /** Removes one exact shell-owned temporary file and its DOS FAT metadata. */
+  deleteOwnedTemporaryFile(path: string): void {
+    const resolved = this.resolvePath(path);
+    if (!this.filesystem.exists(resolved)) return;
+    if (this.filesystem.isDirectory(resolved)) {
+      throw new Error(`${path}: temporary path is a directory`);
+    }
+    this.runDosFilesystemTransaction(() => {
+      this.filesystem.delete(resolved);
+      this.deleteDosFatMetadata(resolved);
+    });
   }
 
   private selectDosDrive(letter: string): ShellCommandResult {
@@ -2385,7 +2413,7 @@ export class ShellCommandRuntime {
             "utility: history time sleep seq cut test [",
             "toolchain: as cc c++ ld make nm run objdump csdb",
             "version control: git (local repositories; remote transport unavailable)",
-            "syntax: |  >  >>  <  &&  ||  ;  '...'  \"...\"  $VAR  $?",
+            "syntax: |  |&  >  >>  <  2>  2>>  2>&1  &&  ||  ;  '...'  \"...\"  $VAR  $?",
           ].join("\n") + "\n",
         );
       case "pwd":
@@ -3610,9 +3638,8 @@ export class ShellCommandRuntime {
 
   readFileBytes(path: string): Uint8Array {
     const resolved = this.resolvePath(path);
-    if (this.virtualDevice(resolved) !== undefined) {
-      throw new Error(`${path}: binary device I/O is not supported`);
-    }
+    const device = this.virtualDevice(resolved);
+    if (device !== undefined) return encodeUtf8(device.read());
     if (!this.filesystem.hasAccess(resolved, 0b100)) {
       throw new Error(`${path}: Permission denied`);
     }
@@ -3678,10 +3705,12 @@ export class ShellCommandRuntime {
     this.ioWriteBytes += utf8ByteLength(contents);
   }
 
-  writeFileBytes(path: string, contents: Uint8Array): void {
+  writeFileBytes(path: string, contents: Uint8Array, append = false): void {
     const resolved = this.resolvePath(path);
-    if (this.virtualDevice(resolved) !== undefined) {
-      throw new Error(`${path}: binary device I/O is not supported`);
+    const device = this.virtualDevice(resolved);
+    if (device !== undefined) {
+      device.write(decodeUtf8(contents));
+      return;
     }
     const accessPath = this.filesystem.exists(resolved)
       ? resolved
@@ -3690,7 +3719,17 @@ export class ShellCommandRuntime {
     if (!this.filesystem.hasAccess(accessPath, required)) {
       throw new Error(`${path}: Permission denied`);
     }
-    this.filesystem.writeFileBytes(resolved, contents);
+    if (append && this.filesystem.exists(resolved)) {
+      const previous = this.filesystem.readFileBytes(resolved);
+      const combined = new Uint8Array(
+        previous.byteLength + contents.byteLength,
+      );
+      combined.set(previous);
+      combined.set(contents, previous.byteLength);
+      this.filesystem.writeFileBytes(resolved, combined);
+    } else {
+      this.filesystem.writeFileBytes(resolved, contents);
+    }
     this.ioWriteBytes += contents.byteLength;
   }
 
@@ -4288,6 +4327,18 @@ export class ShellCommandRuntime {
           ].join("\r\n"),
         );
       }
+      if (name === "MORE") {
+        return success(
+          [
+            "CS-DOS MORE 1.0",
+            "Usage: MORE [file|-]",
+            "Examples: DIR | MORE, TYPE file | MORE, MORE file, MORE < file",
+            "MORE is the final interactive stage of a sequential pipeline backed by strict-8.3 guest spools under C:\\TEMP.",
+            "LESS and Linux-only 2>, 2>>, 2>&1, and |& syntax are unavailable.",
+            "",
+          ].join("\r\n"),
+        );
+      }
       if (!this.isKnownCommand(name)) {
         return status(1, "", `Help not available for ${name}.\r\n`);
       }
@@ -4301,10 +4352,12 @@ export class ShellCommandRuntime {
         "",
         "CD CHDIR CLS COPY DATE DEL DIR DOSKEY ECHO EDIT ERASE EXIT",
         "MD MEM MKDIR MOVE PATH PROMPT RD REN RENAME RMDIR SET TIME",
-        "I2C SPI TIMER TREE TYPE VER VOL",
+        "I2C SPI TIMER TREE TYPE VER VOL MORE",
         "",
         "Development: CS ASM 1.0 (AS/ASM/CSASM), CS C/C++ 1.0 (CC/C++/PWB)",
         "Also available: CS QBASIC 1.0, LD, NM, OBJDUMP, RUN, DEBUG, VI",
+        "Pipelines: DIR | MORE and TYPE file | MORE use strict-8.3 guest spools under C:\\TEMP.",
+        "Redirects: <, >, and >> are available; LESS, 2>, 2>>, 2>&1, and |& are not.",
         "Type HELP command for a short availability summary.",
         "",
       ].join("\r\n"),
@@ -5146,7 +5199,9 @@ export class ShellCommandRuntime {
       stats,
       0,
       this.options.profile.id === "linux" &&
-        (executable.version === 4 || executable.version === 5) &&
+        (executable.version === 4 ||
+          executable.version === 5 ||
+          executable.version === 6) &&
         executable.symbols?.some(
           ({ name, section, type }) =>
             name === "main" && section === "text" && type === "function",
@@ -5250,6 +5305,8 @@ export class ShellCommandRuntime {
         );
       }
       const runOptions = {
+        collectMicroarchitectureStats:
+          stats || this.options.collectMicroarchitectureStatsByDefault === true,
         cpuModel: this.options.hardware.cpuModel,
         // Keep guest execution bounded, but allow medium-sized benchmark and
         // compiled workloads to complete in the same 100k-instruction envelope
@@ -5301,11 +5358,17 @@ export class ShellCommandRuntime {
       this.options.hardware.cpuModel,
     ).runtimeName;
     const newline = this.textPolicy.newline;
-    const runtimeStderr = stats
-      ? `${runtimeName}: ${result.executedInstructions} instructions, ${result.cycles} CPU cycles, ${cpuCyclesToMicroseconds(result.cycles, this.options.hardware.clockHz).toFixed(3)} us at ${formatClock(this.options.hardware.clockHz)}, ${result.state}${newline}${formatMicroarchitectureStats(result.microarchitecture)}${newline}`
-      : result.state === "yielded"
-        ? `${runtimeName}: execution limit reached${newline}`
-        : "";
+    let runtimeStderr = "";
+    if (stats) {
+      if (result.microarchitecture === null) {
+        throw new Error(
+          "CS486 statistics were requested without microarchitecture collection",
+        );
+      }
+      runtimeStderr = `${runtimeName}: ${result.executedInstructions} instructions, ${result.cycles} CPU cycles, ${cpuCyclesToMicroseconds(result.cycles, this.options.hardware.clockHz).toFixed(3)} us at ${formatClock(this.options.hardware.clockHz)}, ${result.state}${newline}${formatMicroarchitectureStats(result.microarchitecture)}${newline}`;
+    } else if (result.state === "yielded") {
+      runtimeStderr = `${runtimeName}: execution limit reached${newline}`;
+    }
     return {
       exitCode: result.state === "halted" ? 0 : 124,
       stderr:
@@ -5428,6 +5491,8 @@ export class ShellCommandRuntime {
             );
           }
           debugger_ = Cs486Debugger.load(executable, {
+            collectMicroarchitectureStats:
+              this.options.collectMicroarchitectureStatsByDefault === true,
             cpuModel: this.options.hardware.cpuModel,
             memoryBytes: grant.memoryBytes,
           });

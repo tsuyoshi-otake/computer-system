@@ -25,6 +25,7 @@ import {
   type GuestFilesystem,
 } from "../os/guestFilesystem.js";
 import type { ProcessCredentials } from "../os/linuxCredentials.js";
+import { encodeUtf8 } from "../../domain/text/utf8.js";
 
 export const csAbiVersion = 1;
 export const csAbiStartupMagic = 0x43_53_41_31;
@@ -86,8 +87,34 @@ export const csAbiErrno = Object.freeze({
   einval: 22,
   emfile: 24,
   enospc: 28,
+  epipe: 32,
   erange: 34,
 });
+
+export type CsAbiStandardInputResult =
+  | { readonly kind: "data"; readonly units: readonly number[] }
+  | { readonly kind: "eof" }
+  | { readonly kind: "would-block" };
+
+export type CsAbiStandardOutputResult =
+  | { readonly kind: "broken-pipe" }
+  | { readonly kind: "would-block" }
+  | { readonly kind: "written"; readonly unitsWritten: number };
+
+/** Process-scoped fd 0/1/2 endpoints supplied by a scheduler-owned pipeline. */
+export interface CsAbiStandardIo {
+  readonly inputReady: () => boolean;
+  readonly outputReady: (descriptor: 1 | 2) => boolean;
+  readonly read: (
+    dataModel: Cs486DataModel,
+    maximumUnits: number,
+  ) => CsAbiStandardInputResult;
+  readonly write: (
+    descriptor: 1 | 2,
+    dataModel: Cs486DataModel,
+    units: readonly number[],
+  ) => CsAbiStandardOutputResult;
+}
 
 export const csAbiKeycodes = Object.freeze({
   arrowDown: 0x101,
@@ -131,6 +158,8 @@ export interface CsAbiRuntimeOptions {
   readonly currentTick: () => number;
   readonly currentWallTimeMilliseconds: () => number;
   readonly outputObserver?: (descriptor: 1 | 2, text: string) => void;
+  readonly standardIo?: CsAbiStandardIo;
+  readonly standardInput?: string;
   readonly runHostWork: (
     lane: ComputerWorkLane,
     deterministicUnits: number,
@@ -179,9 +208,11 @@ export function prepareCsAbiStartup(
   const requirements = cs486ExecutableMemoryRequirements(executable);
   if (
     requirements.kind !== "declared" ||
-    (requirements.version !== 4 && requirements.version !== 5)
+    (requirements.version !== 4 &&
+      requirements.version !== 5 &&
+      requirements.version !== 6)
   ) {
-    throw new Error("CS ABI requires a version 4 or 5 executable");
+    throw new Error("CS ABI requires a version 4, 5, or 6 executable");
   }
   const main = executable.symbols?.find(
     ({ name, section, type }) =>
@@ -386,10 +417,17 @@ export class CsAbiRuntime {
   private readonly directories = new Map<number, OpenDirectory>();
   private readonly keys: number[] = [];
   private outputWords = 0;
+  private presentedRawFrame = false;
   private stdoutBuffer = "";
+  private standardInputCursor = 0;
+  private standardInputUnits: readonly number[] | undefined;
 
   constructor(private readonly options: CsAbiRuntimeOptions) {
     this.cwd = options.cwd;
+  }
+
+  get usedRawFramePresentation(): boolean {
+    return this.presentedRawFrame;
   }
 
   readonly syscallHandler: Cs486SyscallHandler = (
@@ -543,6 +581,7 @@ export class CsAbiRuntime {
   }
 
   private present(context: Cs486SyscallContext): Cs486SyscallResult {
+    this.presentedRawFrame = true;
     const pointer = context.readRegister("ecx");
     const packedDimensions = context.readRegister("edx") >>> 0;
     const width = packedDimensions & 0xffff;
@@ -563,38 +602,41 @@ export class CsAbiRuntime {
       return completeErrno(context, csAbiErrno.einval);
     }
     requireMemoryRange(context, pointer, width * height);
-    const rows: TerminalCell[][] = [];
-    for (let y = 0; y < height; y += 1) {
-      const row: TerminalCell[] = [];
-      for (let x = 0; x < width; x += 1) {
-        const word = context.readInt32(pointer + (y * width + x) * 4) >>> 0;
-        const codePoint = word & 0xffff;
-        if (
-          codePoint === 0 ||
-          codePoint === 10 ||
-          codePoint === 13 ||
-          (codePoint >= 0xd8_00 && codePoint <= 0xdf_ff)
-        ) {
-          return completeErrno(context, csAbiErrno.einval);
-        }
-        row.push({
-          background: (word >>> 20) & 0xf,
-          character: String.fromCodePoint(codePoint),
-          foreground: (word >>> 16) & 0xf,
-        });
-      }
-      rows.push(row);
-    }
+    let frameErrno: number | undefined;
     const ran = this.options.runHostWork("terminal", 1, () => {
+      const rows: TerminalCell[][] = [];
+      for (let y = 0; y < height; y += 1) {
+        const row: TerminalCell[] = [];
+        for (let x = 0; x < width; x += 1) {
+          const word = context.readInt32(pointer + (y * width + x) * 4) >>> 0;
+          const codePoint = word & 0xffff;
+          if (
+            codePoint === 0 ||
+            codePoint === 10 ||
+            codePoint === 13 ||
+            (codePoint >= 0xd8_00 && codePoint <= 0xdf_ff)
+          ) {
+            frameErrno = csAbiErrno.einval;
+            return;
+          }
+          row.push({
+            background: (word >>> 20) & 0xf,
+            character: String.fromCodePoint(codePoint),
+            foreground: (word >>> 16) & 0xf,
+          });
+        }
+        rows.push(row);
+      }
       this.options.terminal.applyFrame(rows, {
         blink,
         x: cursorX,
         y: cursorY,
       });
     });
-    return ran
+    if (!ran) return completeErrno(context, csAbiErrno.eagain);
+    return frameErrno === undefined
       ? completeSuccess(context, 0)
-      : completeErrno(context, csAbiErrno.eagain);
+      : completeErrno(context, frameErrno);
   }
 
   private waitKey(context: Cs486SyscallContext): Cs486SyscallResult {
@@ -695,6 +737,21 @@ export class CsAbiRuntime {
     requireIoMemoryRange(context, pointer, count);
     if (descriptor === 0) {
       if (count === 0) return completeSuccess(context, 0);
+      if (this.options.standardIo !== undefined) {
+        return this.readStandardIo(context, pointer, count);
+      }
+      if (this.options.standardInput !== undefined) {
+        const units = this.getStandardInputUnits(context);
+        const available = units.slice(
+          this.standardInputCursor,
+          this.standardInputCursor + count,
+        );
+        for (const [index, value] of available.entries()) {
+          writeGuestIoUnit(context, pointer, index, value);
+        }
+        this.standardInputCursor += available.length;
+        return completeSuccess(context, available.length);
+      }
       if (this.keys.length > 0)
         return completeSuccess(
           context,
@@ -761,6 +818,9 @@ export class CsAbiRuntime {
       text += String.fromCodePoint(codePoint);
     }
     if (descriptor === 1 || descriptor === 2) {
+      if (this.options.standardIo !== undefined) {
+        return this.writeStandardIo(context, descriptor, values);
+      }
       if (this.outputWords + count > csAbiLimits.outputWords) {
         return completeErrno(context, csAbiErrno.enospc);
       }
@@ -772,8 +832,7 @@ export class CsAbiRuntime {
       }
       const ran = this.options.runHostWork("terminal", 1, () => {
         if (descriptor === 2) {
-          writeTerminalText(this.options.terminal, text);
-          this.options.outputObserver?.(2, text);
+          this.emitOutput(2, text);
         } else if (count === 0) {
           this.flushStdout();
         } else {
@@ -1162,30 +1221,109 @@ export class CsAbiRuntime {
     return available.length;
   }
 
+  private getStandardInputUnits(
+    context: Cs486SyscallContext,
+  ): readonly number[] {
+    if (this.standardInputUnits !== undefined) return this.standardInputUnits;
+    this.standardInputUnits =
+      contextDataModel(context) === cs486Byte8DataModel
+        ? [...encodeUtf8(this.options.standardInput ?? "")]
+        : [...(this.options.standardInput ?? "")].map((character) =>
+            character.codePointAt(0)!,
+          );
+    return this.standardInputUnits;
+  }
+
+  private readStandardIo(
+    context: Cs486SyscallContext,
+    pointer: number,
+    count: number,
+  ): Cs486SyscallResult {
+    const standardIo = this.options.standardIo!;
+    const attempt = (): boolean => {
+      const read = standardIo.read(contextDataModel(context), count);
+      if (read.kind === "would-block") return false;
+      if (read.kind === "eof") {
+        context.writeRegister("eax", 0);
+        return true;
+      }
+      for (const [index, value] of read.units.entries()) {
+        writeGuestIoUnit(context, pointer, index, value);
+      }
+      context.writeRegister("eax", read.units.length);
+      return true;
+    };
+    if (attempt()) return { kind: "continue" };
+    return {
+      filter: "csabi_fd0",
+      kind: "wait_event",
+      resume: (): void => {
+        if (!attempt()) context.writeRegister("eax", -csAbiErrno.eagain);
+      },
+    };
+  }
+
+  private writeStandardIo(
+    context: Cs486SyscallContext,
+    descriptor: 1 | 2,
+    values: readonly number[],
+  ): Cs486SyscallResult {
+    if (this.outputWords + values.length > csAbiLimits.outputWords) {
+      return completeErrno(context, csAbiErrno.enospc);
+    }
+    const standardIo = this.options.standardIo!;
+    const attempt = (): boolean => {
+      const written = standardIo.write(
+        descriptor,
+        contextDataModel(context),
+        values,
+      );
+      if (written.kind === "would-block") return false;
+      if (written.kind === "broken-pipe") {
+        context.writeRegister("eax", -csAbiErrno.epipe);
+        return true;
+      }
+      this.outputWords += written.unitsWritten;
+      context.writeRegister("eax", written.unitsWritten);
+      return true;
+    };
+    if (attempt()) return { kind: "continue" };
+    return {
+      filter: `csabi_fd${String(descriptor)}`,
+      kind: "wait_event",
+      resume: (): void => {
+        if (!attempt()) context.writeRegister("eax", -csAbiErrno.eagain);
+      },
+    };
+  }
+
+  private emitOutput(descriptor: 1 | 2, text: string): void {
+    if (this.options.outputObserver === undefined) {
+      writeTerminalText(this.options.terminal, text);
+    } else {
+      this.options.outputObserver(descriptor, text);
+    }
+  }
+
   private writeStdout(text: string): void {
     this.stdoutBuffer += text;
     const finalNewline = this.stdoutBuffer.lastIndexOf("\n");
     if (finalNewline < 0) return;
-    writeTerminalText(
-      this.options.terminal,
-      this.stdoutBuffer.slice(0, finalNewline + 1),
-    );
-    this.options.outputObserver?.(
-      1,
-      this.stdoutBuffer.slice(0, finalNewline + 1),
-    );
+    this.emitOutput(1, this.stdoutBuffer.slice(0, finalNewline + 1));
     this.stdoutBuffer = this.stdoutBuffer.slice(finalNewline + 1);
   }
 
   private flushStdout(): void {
     if (this.stdoutBuffer.length === 0) return;
-    writeTerminalText(this.options.terminal, this.stdoutBuffer);
-    this.options.outputObserver?.(1, this.stdoutBuffer);
+    this.emitOutput(1, this.stdoutBuffer);
     this.stdoutBuffer = "";
   }
 }
 
-function writeTerminalText(terminal: TerminalBuffer, text: string): void {
+export function writeTerminalText(
+  terminal: TerminalBuffer,
+  text: string,
+): void {
   const newline = (): void => {
     if (terminal.cursorY >= terminal.height) terminal.scroll(1);
     terminal.setCursorPosition(

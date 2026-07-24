@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { createNativeEnvironment } from "../../src/application/runtime/nativeModules.js";
+import {
+  createNativeEnvironment,
+  writeTerminalPrompt,
+} from "../../src/application/runtime/nativeModules.js";
 import { RoundRobinScheduler } from "../../src/application/runtime/scheduler.js";
 import { ShellSession } from "../../src/application/os/shellSession.js";
 import { InMemoryFilesystem } from "../../src/domain/filesystem/inMemoryFilesystem.js";
@@ -200,6 +203,66 @@ output = redstone.get_output("right")
     expect(submit.call(["DIR"], new Map())).toMatchObject({ kind: "work" });
     expect(admissionCount).toBe(1);
     expect(submitSpy).toHaveBeenCalledWith("DIR");
+  });
+
+  it("starts shell.prompt() output on a fresh row when the cursor is left mid-line", (): void => {
+    const filesystem = new InMemoryFilesystem();
+    const terminal = new TerminalBuffer(20, 4);
+    const shell = new ShellSession(filesystem, { osProfile: "dos" });
+    const environment = createNativeEnvironment({
+      computerId: 5,
+      filesystem,
+      osProfile: "dos",
+      shell,
+      terminal,
+    });
+    const shellModule = environment.modules.get("shell");
+    const prompt = shellModule?.values.get("prompt") as NativeFunction;
+    const expectedPrompt = shell.prompt();
+
+    terminal.write("C:\\>DIR");
+    expect(terminal.cursorX).toBeGreaterThan(1);
+    const staleRowBefore = terminal.line(1);
+
+    prompt.call([], new Map());
+
+    expect(terminal.line(1)).toBe(staleRowBefore);
+    expect(terminal.cursorY).toBe(2);
+    expect(terminal.line(2).startsWith(expectedPrompt)).toBe(true);
+  });
+
+  it("writes shell.prompt() directly when the cursor is already at column 1", (): void => {
+    const filesystem = new InMemoryFilesystem();
+    const terminal = new TerminalBuffer(20, 4);
+    const shell = new ShellSession(filesystem, { osProfile: "dos" });
+    const environment = createNativeEnvironment({
+      computerId: 6,
+      filesystem,
+      osProfile: "dos",
+      shell,
+      terminal,
+    });
+    const shellModule = environment.modules.get("shell");
+    const prompt = shellModule?.values.get("prompt") as NativeFunction;
+    const expectedPrompt = shell.prompt();
+
+    expect(terminal.cursorX).toBe(1);
+    expect(terminal.cursorY).toBe(1);
+
+    prompt.call([], new Map());
+
+    expect(terminal.cursorY).toBe(1);
+    expect(terminal.line(1).startsWith(expectedPrompt)).toBe(true);
+  });
+
+  it("does not move a TUI cursor when the shell prompt is empty", (): void => {
+    const terminal = new TerminalBuffer(20, 4);
+    terminal.setCursorPosition(7, 3);
+
+    writeTerminalPrompt(terminal, "");
+
+    expect(terminal.cursorX).toBe(7);
+    expect(terminal.cursorY).toBe(3);
   });
 });
 

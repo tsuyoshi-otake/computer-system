@@ -23,6 +23,7 @@ export const cs486DebuggerLimits = {
 } as const;
 
 export interface Cs486DebuggerOptions {
+  readonly collectMicroarchitectureStats?: boolean;
   readonly cpuModel?: CpuModel;
   readonly memoryBytes: number;
 }
@@ -639,12 +640,12 @@ function cloneExecutable(executable: Cs486Executable): Cs486Executable {
           symbols: executable.symbols.map((symbol) => ({ ...symbol })),
         }),
   };
-  if (executable.version === 5)
+  if (executable.version === 5 || executable.version === 6)
     return {
       ...cloned,
       dataModel: executable.dataModel,
       memory: Object.freeze({ ...executable.memory }),
-      version: 5,
+      version: executable.version,
     };
   if (executable.version === 3 || executable.version === 4)
     return {

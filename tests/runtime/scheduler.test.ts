@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { createNativeEnvironment } from "../../src/application/runtime/nativeModules.js";
 import {
+  defaultSchedulerLimits,
   RoundRobinScheduler,
   type SchedulerLimits,
 } from "../../src/application/runtime/scheduler.js";
@@ -22,6 +23,11 @@ const limits: SchedulerLimits = {
 };
 
 describe("round-robin scheduler", (): void => {
+  it("keeps the production instruction ceilings explicit and bounded", (): void => {
+    expect(defaultSchedulerLimits.instructionsPerComputer).toBe(1_650_000);
+    expect(defaultSchedulerLimits.instructionsPerTick).toBe(1_650_000);
+  });
+
   it("gives 20 CPU-bound computers equal deterministic slices", (): void => {
     const scheduler = new RoundRobinScheduler(limits);
     for (let id = 0; id < 20; id += 1)
@@ -184,6 +190,165 @@ describe("round-robin scheduler", (): void => {
 
     expect(visited.size).toBe(1_000);
   });
+
+  it("applies one aggregate budget lane per execution resource", (): void => {
+    const scheduler = new RoundRobinScheduler({
+      ...limits,
+      cpuCyclesPerComputer: 100,
+      cpuCyclesPerTick: 100,
+      instructionsPerComputer: 10,
+      instructionsPerTick: 10,
+    });
+    scheduler.add(1, accountingProcess("cs486-worker-1", 100, 10));
+    scheduler.add(2, accountingProcess("cs486-worker-1", 100, 10));
+    scheduler.add(3, accountingProcess("cs486-worker-2", 100, 10));
+    scheduler.add(4, accountingProcess("cs486-worker-2", 100, 10));
+
+    const result = scheduler.runTick();
+
+    expect(result).toMatchObject({
+      admittedCpuCycles: 200,
+      admittedInstructions: 20,
+      cpuCycles: 200,
+      executedInstructions: 20,
+    });
+    expect(
+      result.computers.map(({ cpuCycles, executedInstructions }) => ({
+        cpuCycles,
+        executedInstructions,
+      })),
+    ).toEqual([
+      { cpuCycles: 100, executedInstructions: 10 },
+      { cpuCycles: 0, executedInstructions: 0 },
+      { cpuCycles: 100, executedInstructions: 10 },
+      { cpuCycles: 0, executedInstructions: 0 },
+    ]);
+  });
+
+  it("rotates contention independently within each execution resource", (): void => {
+    const scheduler = new RoundRobinScheduler({
+      ...limits,
+      cpuCyclesPerComputer: 100,
+      cpuCyclesPerTick: 100,
+      instructionsPerComputer: 10,
+      instructionsPerTick: 10,
+    });
+    scheduler.add(1, accountingProcess("cs486-worker-1", 100, 10));
+    scheduler.add(2, accountingProcess("cs486-worker-1", 100, 10));
+    scheduler.add(3, accountingProcess("cs486-worker-1", 100, 10));
+    scheduler.add(4, accountingProcess("cs486-worker-2", 100, 10));
+
+    let result = scheduler.runTick();
+    for (let tick = 1; tick < 6; tick += 1) result = scheduler.runTick();
+
+    expect(
+      result.computers.map(({ cpuCycles, executedInstructions }) => ({
+        cpuCycles,
+        executedInstructions,
+      })),
+    ).toEqual([
+      { cpuCycles: 200, executedInstructions: 20 },
+      { cpuCycles: 200, executedInstructions: 20 },
+      { cpuCycles: 200, executedInstructions: 20 },
+      { cpuCycles: 600, executedInstructions: 60 },
+    ]);
+  });
+
+  it("charges asynchronous dispatch admission separately from settled work", (): void => {
+    const scheduler = new RoundRobinScheduler({
+      ...limits,
+      cpuCyclesPerComputer: 100,
+      cpuCyclesPerTick: 100,
+      instructionsPerComputer: 10,
+      instructionsPerTick: 10,
+    });
+    scheduler.add(
+      1,
+      accountingProcess("cs486-worker-1", 40, 4, {
+        admittedCpuCycles: 100,
+        admittedInstructions: 10,
+      }),
+    );
+    scheduler.add(2, accountingProcess("cs486-worker-1", 100, 10));
+
+    const result = scheduler.runTick();
+
+    expect(result).toMatchObject({
+      admittedCpuCycles: 100,
+      admittedInstructions: 10,
+      cpuCycles: 40,
+      executedInstructions: 4,
+    });
+    expect(result.computers[1]).toMatchObject({
+      cpuCycles: 0,
+      executedInstructions: 0,
+    });
+  });
+
+  it("bounds asynchronous instruction reservations by the offered cycle credit", (): void => {
+    const scheduler = new RoundRobinScheduler({
+      ...limits,
+      cpuCyclesPerComputer: 1_650_000,
+      cpuCyclesPerTick: 1_650_000,
+      instructionsPerComputer: 1_650_000,
+      instructionsPerTick: 1_650_000,
+    });
+    const offers: {
+      readonly cpuCycleBudget: number;
+      readonly instructionBudget: number;
+    }[] = [];
+    for (let id = 1; id <= 4; id += 1) {
+      const process = alwaysReadyProcess();
+      scheduler.add(
+        id,
+        {
+          ...process,
+          schedulerResourceId: "cs486-worker-1",
+          runCpuSlice: (cpuCycleBudget, instructionBudget = 1) => {
+            offers.push({ cpuCycleBudget, instructionBudget });
+            return {
+              admittedCpuCycles: cpuCycleBudget,
+              admittedInstructions: instructionBudget,
+              cpuCycles: 0,
+              executedInstructions: 0,
+              state: process.state,
+            };
+          },
+        },
+        400_000,
+      );
+    }
+
+    const result = scheduler.runTick();
+
+    expect(offers).toEqual(
+      Array.from({ length: 4 }, () => ({
+        cpuCycleBudget: 400_000,
+        instructionBudget: 400_000,
+      })),
+    );
+    expect(result).toMatchObject({
+      admittedCpuCycles: 1_600_000,
+      admittedInstructions: 1_600_000,
+      cpuCycles: 0,
+      executedInstructions: 0,
+    });
+  });
+
+  it("disposes a removed process exactly once", (): void => {
+    const scheduler = new RoundRobinScheduler(limits);
+    let disposeCalls = 0;
+    scheduler.add(91, {
+      ...alwaysReadyProcess(),
+      dispose: (): void => {
+        disposeCalls += 1;
+      },
+    });
+
+    expect(scheduler.remove(91)).toBe(true);
+    expect(scheduler.remove(91)).toBe(false);
+    expect(disposeCalls).toBe(1);
+  });
 });
 
 function alwaysReadyProcess(): CpuProcess {
@@ -210,6 +375,31 @@ function alwaysReadyProcess(): CpuProcess {
       state = { kind: "terminated", reason };
       return state;
     },
+  };
+}
+
+function accountingProcess(
+  schedulerResourceId: string,
+  cpuCycles: number,
+  executedInstructions: number,
+  admission: {
+    readonly admittedCpuCycles: number;
+    readonly admittedInstructions: number;
+  } = {
+    admittedCpuCycles: cpuCycles,
+    admittedInstructions: executedInstructions,
+  },
+): CpuProcess {
+  const process = alwaysReadyProcess();
+  return {
+    ...process,
+    schedulerResourceId,
+    runCpuSlice: () => ({
+      ...admission,
+      cpuCycles,
+      executedInstructions,
+      state: process.state,
+    }),
   };
 }
 

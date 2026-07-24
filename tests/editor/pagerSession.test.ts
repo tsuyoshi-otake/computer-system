@@ -175,6 +175,46 @@ describe("PagerSession", (): void => {
       inputMode: "none",
     });
   });
+
+  it("appends bounded live stdin and changes the unknown-length status at EOF", (): void => {
+    const pager = new PagerSession(
+      "less",
+      "(standard input)",
+      "",
+      40,
+      10,
+      true,
+    );
+    expect(rowText(pager.screen().rows.at(-1)!)).toContain("Live");
+    pager.append("first\nsec");
+    pager.append("ond\n");
+    expect(rowText(pager.screen().rows[0]!)).toContain("first");
+    expect(rowText(pager.screen().rows[1]!)).toContain("second");
+    expect(pager.inputComplete).toBe(false);
+    pager.finishInput();
+    expect(pager.inputComplete).toBe(true);
+    expect(rowText(pager.screen().rows.at(-1)!)).toContain("All");
+    expect(() => pager.append("late")).toThrow(
+      "pager input is already complete",
+    );
+  });
+
+  it("normalizes CRLF split across live input chunks without adding a phantom line", (): void => {
+    const pager = new PagerSession(
+      "less",
+      "(standard input)",
+      "",
+      40,
+      10,
+      true,
+    );
+    pager.append("first\r");
+    pager.append("\nsecond\r");
+    pager.finishInput();
+    expect(rowText(pager.screen().rows[0]!).trimEnd()).toBe("first");
+    expect(rowText(pager.screen().rows[1]!).slice(0, 7)).toBe("second\r");
+    expect(rowText(pager.screen().rows[2]!).trimEnd()).toBe("");
+  });
 });
 
 function rowText(row: readonly { readonly character: string }[]): string {

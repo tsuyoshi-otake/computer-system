@@ -6,6 +6,7 @@ import type { ProcessCredentials } from "./linuxCredentials.js";
 import type { GuestToolchainResult } from "../toolchain/guestToolchainTranscript.js";
 import type { Cs486LinkInput } from "../toolchain/cs486Archive.js";
 import type { Cs486DataModel } from "../../domain/cpu/cs486Compatibility.js";
+import type { CsAbiStandardIo } from "../runtime/csAbi.js";
 
 interface ShellProcessContext {
   /** Immutable credentials captured when the shell admits the process. */
@@ -24,6 +25,8 @@ export interface ShellForegroundPython extends ShellProcessContext {
   readonly command: "micropython" | "python";
   readonly kind: "python";
   readonly path: string;
+  /** Returns true when stdout still targets the controlling terminal. */
+  readonly routeOutput?: (descriptor: 1 | 2, text: string) => boolean;
   readonly stats: boolean;
 }
 
@@ -38,6 +41,12 @@ export interface ShellForegroundCs486 extends ShellProcessContext {
     readonly environment: readonly (readonly [name: string, value: string])[];
   };
   readonly kind: "cs486";
+  /** Redirected fd 0 contents; undefined preserves interactive terminal input. */
+  readonly standardInput?: string;
+  /** Live scheduler-owned fd 0/1/2 endpoints for a pipeline stage. */
+  readonly standardIo?: CsAbiStandardIo;
+  /** Returns true when this write still targets the terminal. */
+  readonly routeOutput?: (descriptor: 1 | 2, text: string) => boolean;
   readonly stats: boolean;
 }
 
@@ -55,6 +64,25 @@ export interface ShellForegroundDebugger extends ShellProcessContext {
   readonly kind: "debugger";
   readonly start: () => CpuProcess;
 }
+
+/** One Linux foreground pipeline admitted as a scheduler-owned state machine. */
+export interface ShellForegroundPipeline extends ShellProcessContext {
+  readonly command: "pipeline";
+  readonly complete: () => ShellCommandResult;
+  readonly kind: "pipeline";
+  readonly stageCommands: readonly string[];
+  readonly stageExitCodes: () => readonly number[];
+  readonly start: (startStage?: ShellPipelineStageStarter) => CpuProcess;
+}
+
+export interface ShellPipelineStageProcess {
+  readonly finalize: () => void;
+  readonly process: CpuProcess;
+}
+
+export type ShellPipelineStageStarter = (
+  request: ShellForegroundCs486 | ShellForegroundPython,
+) => ShellPipelineStageProcess;
 
 export interface ShellMakeIoCompletion {
   readonly code?: string;
@@ -137,6 +165,7 @@ export type ShellForegroundRequest =
   | ShellForegroundCompile
   | ShellForegroundCs486
   | ShellForegroundDebugger
+  | ShellForegroundPipeline
   | ShellForegroundPython;
 
 export interface ShellToolchainCommandResult extends GuestToolchainResult {
@@ -187,6 +216,13 @@ export interface ShellCommandResult {
   readonly foreground?: ShellForegroundRequest;
   readonly ioWaitEvent?: string;
   readonly jobControl?: ShellJobControlRequest;
+  /** Chronological writes before descriptor routing; absent on legacy producers. */
+  readonly outputEvents?: readonly ShellOutputEvent[];
+}
+
+export interface ShellOutputEvent {
+  readonly descriptor: 1 | 2;
+  readonly text: string;
 }
 
 export type ShellCompletionCandidateKind =

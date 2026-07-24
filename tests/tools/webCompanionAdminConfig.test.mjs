@@ -63,30 +63,60 @@ describe("persistent Web companion administrator configuration", () => {
     await saveWebCompanionAdminConfig(configPath, {
       port: 8_080,
       publicOrigin: "https://terminal.example.test",
+      runtimeWorkerCount: 4,
     });
 
     expect(await loadWebCompanionAdminConfig(configPath)).toEqual({
-      version: 1,
+      version: 2,
       port: 8_080,
       publicOrigin: "https://terminal.example.test",
+      runtimeWorkerCount: 4,
     });
     expect(JSON.parse(await readFile(configPath, "utf8"))).toEqual({
-      version: 1,
+      version: 2,
       port: 8_080,
       publicOrigin: "https://terminal.example.test",
+      runtimeWorkerCount: 4,
     });
+  });
+
+  it("migrates version 1 in memory and rejects invalid worker counts", () => {
+    expect(
+      validateWebCompanionAdminConfig({
+        version: 1,
+        port: 80,
+      }),
+    ).toEqual({ version: 2, port: 80 });
+    expect(() =>
+      validateWebCompanionAdminConfig({
+        version: 1,
+        runtimeWorkerCount: 2,
+      }),
+    ).toThrow(/version 1/u);
+    expect(() =>
+      validateWebCompanionAdminConfig({
+        version: 2,
+        runtimeWorkerCount: 0,
+      }),
+    ).toThrow(/between 1 and 16/u);
+    expect(() =>
+      validateWebCompanionAdminConfig({
+        version: 2,
+        runtimeWorkerCount: 17,
+      }),
+    ).toThrow(/between 1 and 16/u);
   });
 
   it("rejects unknown fields, invalid ports, and URL paths", () => {
     expect(() =>
-      validateWebCompanionAdminConfig({ version: 1, bind: "0.0.0.0" }),
+      validateWebCompanionAdminConfig({ version: 2, bind: "0.0.0.0" }),
     ).toThrow(/Unknown/u);
     expect(() =>
-      validateWebCompanionAdminConfig({ version: 1, port: 0 }),
+      validateWebCompanionAdminConfig({ version: 2, port: 0 }),
     ).toThrow(/between 1 and 65534/u);
     expect(() =>
       validateWebCompanionAdminConfig({
-        version: 1,
+        version: 2,
         publicOrigin: "https://example.test/terminal",
       }),
     ).toThrow(/absolute HTTP\(S\) origin/u);
@@ -96,22 +126,26 @@ describe("persistent Web companion administrator configuration", () => {
     expect(resolveWebCompanionAdminOptions({}, {})).toEqual({
       port: "80",
       publicOrigin: undefined,
+      runtimeWorkerCount: 2,
     });
     expect(
       resolveWebCompanionAdminOptions(
         {
           WEB_COMPANION_PORT: "19",
           WEB_COMPANION_PUBLIC_ORIGIN: "https://override.example.test",
+          WEB_COMPANION_RUNTIME_WORKERS: "6",
         },
         {
-          version: 1,
+          version: 2,
           port: 80,
           publicOrigin: "https://persisted.example.test",
+          runtimeWorkerCount: 4,
         },
       ),
     ).toEqual({
       port: "19",
       publicOrigin: "https://override.example.test",
+      runtimeWorkerCount: 6,
     });
   });
 
@@ -124,6 +158,8 @@ describe("persistent Web companion administrator configuration", () => {
       "80",
       "--url",
       "http://10.255.10.90:80",
+      "--runtime-workers",
+      "2",
       "--config-file",
       configPath,
     ]);
@@ -131,9 +167,10 @@ describe("persistent Web companion administrator configuration", () => {
     expect(JSON.parse(setResult.stdout)).toMatchObject({
       path: configPath,
       configuration: {
-        version: 1,
+        version: 2,
         port: 80,
         publicOrigin: "http://10.255.10.90",
+        runtimeWorkerCount: 2,
       },
       restartRequired: true,
     });

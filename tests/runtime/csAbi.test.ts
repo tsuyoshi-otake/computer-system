@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   CsAbiRuntime,
+  type CsAbiStandardIo,
   csAbiErrno,
   csAbiLimits,
   csAbiSelectors,
@@ -425,7 +426,7 @@ describe("CS ABI 1.0", (): void => {
     ).toThrow("environment entry limit");
   });
 
-  it("validates a whole frame before one terminal work admission", (): void => {
+  it("admits one terminal atom before decoding and validates before mutation", (): void => {
     const harness = createHarness();
     harness.context.writeRegister("ebx", csAbiSelectors.termPresent);
     harness.context.writeRegister("ecx", 0);
@@ -440,17 +441,22 @@ describe("CS ABI 1.0", (): void => {
     });
     expect(harness.context.readRegister("eax")).toBe(-csAbiErrno.eagain);
     expect(harness.terminal.line(1).slice(0, 2)).toBe("  ");
+    expect(harness.context.readInt32Count).toBe(0);
+    expect(harness.work).toEqual([]);
 
     harness.defer = false;
     harness.runtime.syscallHandler("cs", harness.context);
     expect(harness.context.readRegister("eax")).toBe(0);
     expect(harness.terminal.line(1).slice(0, 2)).toBe("AB");
+    expect(harness.context.readInt32Count).toBe(2);
     expect(harness.work).toEqual(["terminal"]);
 
     harness.memory[1] = 10;
     harness.runtime.syscallHandler("cs", harness.context);
     expect(harness.context.readRegister("eax")).toBe(-csAbiErrno.einval);
     expect(harness.terminal.line(1).slice(0, 2)).toBe("AB");
+    expect(harness.context.readInt32Count).toBe(4);
+    expect(harness.work).toEqual(["terminal", "terminal"]);
   });
 
   it("owns a bounded key FIFO for poll and wait-event resume", (): void => {
@@ -523,6 +529,107 @@ describe("CS ABI 1.0", (): void => {
     harness.context.writeRegister("ecx", 1);
     harness.runtime.syscallHandler("cs", harness.context);
     expect(harness.context.readRegister("eax")).toBe(-csAbiErrno.ebadf);
+  });
+
+  it("routes redirected word32 standard input and ordered fd 1/2 output without terminal leakage", (): void => {
+    const events: Array<{ descriptor: 1 | 2; text: string }> = [];
+    const harness = createHarness({
+      outputObserver: (descriptor, text): void => {
+        events.push({ descriptor, text });
+      },
+      standardInput: "A🙂",
+    });
+    harness.context.writeRegister("ebx", csAbiSelectors.fsRead);
+    harness.context.writeRegister("ecx", 0);
+    harness.context.writeRegister("edx", 256);
+    harness.context.writeRegister("esi", 2);
+    harness.runtime.syscallHandler("cs", harness.context);
+    expect(harness.context.readRegister("eax")).toBe(2);
+    expect([...harness.memory.slice(64, 66)]).toEqual([
+      "A".codePointAt(0),
+      "🙂".codePointAt(0),
+    ]);
+    harness.runtime.syscallHandler("cs", harness.context);
+    expect(harness.context.readRegister("eax")).toBe(0);
+
+    writeWords(harness.memory, 64, [79, 85, 84, 10]);
+    harness.context.writeRegister("ebx", csAbiSelectors.fsWrite);
+    harness.context.writeRegister("ecx", 1);
+    harness.context.writeRegister("edx", 256);
+    harness.context.writeRegister("esi", 4);
+    harness.runtime.syscallHandler("cs", harness.context);
+    writeWords(harness.memory, 64, [69, 82, 82]);
+    harness.context.writeRegister("ecx", 2);
+    harness.context.writeRegister("esi", 3);
+    harness.runtime.syscallHandler("cs", harness.context);
+
+    expect(events).toEqual([
+      { descriptor: 1, text: "OUT\n" },
+      { descriptor: 2, text: "ERR" },
+    ]);
+    expect(harness.terminal.line(1).trim()).toBe("");
+  });
+
+  it("blocks, resumes, reports partial writes and EOF, and surfaces EPIPE on standard endpoints", (): void => {
+    let readAttempts = 0;
+    const writes: number[][] = [];
+    let writeMode: "block" | "partial" | "broken" = "block";
+    const standardIo: CsAbiStandardIo = {
+      inputReady: (): boolean => readAttempts > 0,
+      outputReady: (): boolean => writeMode !== "block",
+      read: () => {
+        readAttempts += 1;
+        if (readAttempts === 1) return { kind: "would-block" };
+        if (readAttempts === 2) return { kind: "data", units: [65] };
+        return { kind: "eof" };
+      },
+      write: (_descriptor, _dataModel, units) => {
+        writes.push([...units]);
+        if (writeMode === "block") return { kind: "would-block" };
+        if (writeMode === "broken") return { kind: "broken-pipe" };
+        return { kind: "written", unitsWritten: 2 };
+      },
+    };
+    const harness = createHarness({ standardIo });
+    harness.context.writeRegister("ebx", csAbiSelectors.fsRead);
+    harness.context.writeRegister("ecx", 0);
+    harness.context.writeRegister("edx", 256);
+    harness.context.writeRegister("esi", 4);
+    const blockedRead = harness.runtime.syscallHandler("cs", harness.context);
+    expect(blockedRead).toMatchObject({
+      filter: "csabi_fd0",
+      kind: "wait_event",
+    });
+    if (blockedRead.kind !== "wait_event") throw new Error("expected fd0 wait");
+    blockedRead.resume?.(null);
+    expect(harness.context.readRegister("eax")).toBe(1);
+    expect(harness.memory[64]).toBe(65);
+    harness.runtime.syscallHandler("cs", harness.context);
+    expect(harness.context.readRegister("eax")).toBe(0);
+
+    writeWords(harness.memory, 64, [65, 66, 67, 68]);
+    harness.context.writeRegister("ebx", csAbiSelectors.fsWrite);
+    harness.context.writeRegister("ecx", 1);
+    harness.context.writeRegister("edx", 256);
+    harness.context.writeRegister("esi", 4);
+    const blockedWrite = harness.runtime.syscallHandler("cs", harness.context);
+    expect(blockedWrite).toMatchObject({
+      filter: "csabi_fd1",
+      kind: "wait_event",
+    });
+    if (blockedWrite.kind !== "wait_event")
+      throw new Error("expected fd1 wait");
+    writeMode = "partial";
+    blockedWrite.resume?.(null);
+    expect(harness.context.readRegister("eax")).toBe(2);
+    expect(writes).toEqual([
+      [65, 66, 67, 68],
+      [65, 66, 67, 68],
+    ]);
+
+    writeMode = "broken";
+    harness.runtime.syscallHandler("cs", harness.context);
+    expect(harness.context.readRegister("eax")).toBe(-csAbiErrno.epipe);
   });
 
   it("returns exact errno for selector, count, pointer, and word-string boundaries", (): void => {
@@ -856,7 +963,13 @@ describe("CS ABI 1.0", (): void => {
   });
 });
 
-function createHarness(): {
+function createHarness(
+  options: {
+    readonly outputObserver?: (descriptor: 1 | 2, text: string) => void;
+    readonly standardIo?: CsAbiStandardIo;
+    readonly standardInput?: string;
+  } = {},
+): {
   context: TestSyscallContext;
   defer: boolean;
   filesystem: ReturnType<typeof unrestrictedGuestFilesystem>;
@@ -887,6 +1000,7 @@ function createHarness(): {
     filesystem,
     heapBaseBytes: 1_024,
     heapWords: 4_096,
+    ...options,
     startupAddress: 512,
     runHostWork: (lane, _units, action): boolean => {
       if (harness.defer) return false;
@@ -902,6 +1016,7 @@ function createHarness(): {
 class TestSyscallContext implements Cs486SyscallContext {
   readonly memory: Int32Array;
   readonly memoryLimitBytes: number;
+  readInt32Count = 0;
   private readonly registers = new Map<Cs486Register, number>();
 
   constructor(memoryBytes: number) {
@@ -910,6 +1025,7 @@ class TestSyscallContext implements Cs486SyscallContext {
   }
 
   readInt32(address: number): number {
+    this.readInt32Count += 1;
     return this.memory[address / 4]!;
   }
 

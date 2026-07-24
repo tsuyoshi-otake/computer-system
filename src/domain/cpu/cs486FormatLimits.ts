@@ -1,5 +1,5 @@
 export type Cs486ObjectFormatVersion = 1 | 2 | 3 | 4;
-export type Cs486ExecutableFormatVersion = 1 | 2 | 3 | 4 | 5;
+export type Cs486ExecutableFormatVersion = 1 | 2 | 3 | 4 | 5 | 6;
 
 export type Cs486FormatLimitRequest =
   | {
@@ -19,7 +19,7 @@ export interface Cs486FormatLimits {
 }
 
 export const currentCs486ObjectFormatVersion = 4 as const;
-export const currentCs486ExecutableFormatVersion = 5 as const;
+export const currentCs486ExecutableFormatVersion = 6 as const;
 
 const mib = 1_048_576;
 
@@ -43,12 +43,18 @@ const largeLimits: Cs486FormatLimits = Object.freeze({
   symbols: 16_384,
 });
 
+const extendedTextLimits: Cs486FormatLimits = Object.freeze({
+  ...largeLimits,
+  instructions: 524_288,
+});
+
 /**
  * Returns the immutable structural ceiling for one serialized format version.
  * Object v3 and executable v4 are the first large-capacity formats. Object v4
  * and executable v5 retain those ceilings while adding an explicit data-model
- * identity. Older readers deliberately retain their original rejection
- * boundary.
+ * identity. Executable v6 keeps the v5 data model while raising the linked
+ * instruction ceiling to 524,288; per-object ceilings are unchanged. Older
+ * readers deliberately retain their original rejection boundary.
  */
 export function cs486FormatLimits(
   request: Cs486FormatLimitRequest,
@@ -57,7 +63,9 @@ export function cs486FormatLimits(
     ? request.version === 3 || request.version === 4
       ? largeLimits
       : legacyLimits
-    : request.version === 4 || request.version === 5
-      ? largeLimits
-      : legacyLimits;
+    : request.version === 6
+      ? extendedTextLimits
+      : request.version === 4 || request.version === 5
+        ? largeLimits
+        : legacyLimits;
 }

@@ -5,6 +5,16 @@ export function hasCopySelection(input, documentSelection) {
   );
 }
 
+export function isRetryableEditorInputError(error) {
+  const status = error?.status;
+  return (
+    error?.code === "input_busy" ||
+    status === 429 ||
+    (Number.isSafeInteger(status) && status >= 500 && status <= 599) ||
+    (status === undefined && error instanceof TypeError)
+  );
+}
+
 const functionKeyPattern = /^F(?:[1-9]|1[0-2])$/u;
 const navigationKeys = new Set([
   "ArrowDown",

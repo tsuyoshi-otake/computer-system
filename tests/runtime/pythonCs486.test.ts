@@ -48,6 +48,33 @@ describe("Computer System Python CS486 backend", (): void => {
     expect(program.runtime.globals.get("answer")).toBe(42);
   });
 
+  it("propagates host-only statistics policy without changing Python execution", (): void => {
+    const filesystem = new InMemoryFilesystem();
+    const environment = createNativeEnvironment({
+      computerId: 101,
+      filesystem,
+      terminal: new TerminalBuffer(40, 8),
+    });
+    const prepared = preparePythonCs486Program({
+      collectMicroarchitectureStats: false,
+      environment,
+      filesystem: environment.filesystem,
+      managedRuntimeMemoryBytes: 131_072,
+      path: "/main.py",
+      source: "answer = 6 * 7\n",
+    });
+    const program = prepared.create(
+      prepared.requirements.linearAddressSpaceBytes,
+    );
+
+    expect(program.process.microarchitectureStatsEnabled).toBe(false);
+    run(program.process);
+    expect(program.runtime.globals.get("answer")).toBe(42);
+    expect(() => program.process.microarchitectureStats).toThrowError(
+      /statistics collection is disabled/u,
+    );
+  });
+
   it("can include a bounded managed runtime inside an owning composite process grant", (): void => {
     const filesystem = new InMemoryFilesystem();
     const environment = createNativeEnvironment({

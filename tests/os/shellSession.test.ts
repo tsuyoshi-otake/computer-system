@@ -45,7 +45,7 @@ describe("Computer System Linux shell and editor", (): void => {
 
   it("prepares Python as one direct CS-Linux foreground process", (): void => {
     const filesystem = new InMemoryFilesystem();
-    const shell = new ShellSession(filesystem);
+    const shell = new ShellSession(filesystem, { deferGuestExecution: true });
     filesystem.writeFile("/tmp/demo.py", "print(42)\n");
 
     expect(shell.submit("python --stats /tmp/demo.py")).toMatchObject({
@@ -66,14 +66,12 @@ describe("Computer System Linux shell and editor", (): void => {
     });
     expect(shell.submit("python /tmp/demo.py | cat")).toMatchObject({
       exitCode: 0,
-      stderr:
-        "python: cannot run in a pipeline, redirect, script, or command chain\n",
+      foreground: { command: "pipeline", kind: "pipeline" },
     });
     expect(shell.submit("python /tmp/demo.py > /tmp/output.txt")).toMatchObject(
       {
-        exitCode: 2,
-        stderr:
-          "python: cannot run in a pipeline, redirect, script, or command chain\n",
+        exitCode: 0,
+        foreground: { command: "python", kind: "python" },
       },
     );
 
@@ -170,6 +168,59 @@ describe("Computer System Linux shell and editor", (): void => {
       "2",
       "3",
     ]);
+    expect(shell.submit("yes | head -n 3 && echo done").lines).toEqual([
+      "y",
+      "y",
+      "y",
+      "done",
+    ]);
+  });
+
+  it("applies Linux descriptor redirects in source order before execution", (): void => {
+    const filesystem = new InMemoryFilesystem();
+    const shell = new ShellSession(filesystem);
+
+    expect(shell.submit("time echo out > /tmp/all 2>&1").lines).toEqual([]);
+    expect(filesystem.readFile("/tmp/all")).toBe("out\nreal 0.000s\n");
+
+    expect(shell.submit("time echo out 2>&1 > /tmp/out").lines).toEqual([
+      "real 0.000s",
+    ]);
+    expect(filesystem.readFile("/tmp/out")).toBe("out\n");
+
+    expect(shell.submit("time echo out 2> /tmp/err | cat").lines).toEqual([
+      "out",
+    ]);
+    expect(filesystem.readFile("/tmp/err")).toBe("real 0.000s\n");
+
+    expect(shell.submit("time echo out 2> /tmp/err |& cat").lines).toEqual([
+      "out",
+      "real 0.000s",
+    ]);
+    expect(filesystem.readFile("/tmp/err")).toBe("");
+  });
+
+  it("opens redirects before command reads and rejects Linux fd syntax on DOS", (): void => {
+    const filesystem = new InMemoryFilesystem();
+    const shell = new ShellSession(filesystem);
+    filesystem.writeFile("/tmp/same", "before\n");
+    expect(shell.submit("cat /tmp/same > /tmp/same").exitCode).toBe(0);
+    expect(filesystem.readFile("/tmp/same")).toBe("");
+    filesystem.writeFile("/tmp/same", "before\n");
+    expect(shell.submit("cat < /tmp/same > /tmp/same").exitCode).toBe(0);
+    expect(filesystem.readFile("/tmp/same")).toBe("");
+
+    filesystem.writeFile("/tmp/input", "from file\n");
+    expect(shell.submit("yes | cat < /tmp/input").lines).toEqual(["from file"]);
+    expect(shell.submit("echo hidden > /tmp/out | cat").lines).toEqual([]);
+    expect(filesystem.readFile("/tmp/out")).toBe("hidden\n");
+
+    const dos = new ShellSession(new InMemoryFilesystem(), {
+      osProfile: "dos",
+    });
+    expect(dos.submit("ECHO ok 2>C:\\SIDE.TXT")).toMatchObject({ exitCode: 2 });
+    expect(dos.submit("DIR |& MORE")).toMatchObject({ exitCode: 2 });
+    expect(dos.submit("IF EXIST C:\\SIDE.TXT ECHO bad").stdout).toBe("");
   });
 
   it("completes commands and filesystem paths at the cursor", (): void => {

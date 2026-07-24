@@ -6,6 +6,7 @@ import {
   editorKeyFromKeyboardEvent,
   hasCopySelection,
   insertPastedCommand,
+  isRetryableEditorInputError,
   resolveTerminalCtrlCAction,
   terminalInteractionFromTerminal,
 } from "../../web/terminal-input.js";
@@ -37,6 +38,19 @@ describe("Web terminal input helpers", () => {
       cursor: 8,
       value: "echo new",
     });
+  });
+
+  it("retries transient editor transport failures but not contract failures", () => {
+    expect(isRetryableEditorInputError({ status: 429 })).toBe(true);
+    expect(isRetryableEditorInputError({ code: "input_busy" })).toBe(true);
+    expect(isRetryableEditorInputError({ status: 500 })).toBe(true);
+    expect(isRetryableEditorInputError({ status: 503 })).toBe(true);
+    expect(isRetryableEditorInputError({ status: 504 })).toBe(true);
+    expect(isRetryableEditorInputError(new TypeError("fetch failed"))).toBe(
+      true,
+    );
+    expect(isRetryableEditorInputError({ status: 409 })).toBe(false);
+    expect(isRetryableEditorInputError(new Error("invalid input"))).toBe(false);
   });
 
   it("normalizes multiline paste and enforces the terminal line bound", () => {

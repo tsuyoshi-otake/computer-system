@@ -64,9 +64,11 @@ describe("computer block generator", () => {
           block.components["minecraft:material_instances"][front].texture,
         ).toBe(machineBlockTextureKeys[front]);
         expect(
-          block.components["minecraft:material_instances"].desktop_screen
-            .texture,
-        ).toBe(machineBlockTextureKeys.desktop_screen);
+          block.components["minecraft:material_instances"].desktop_screen,
+        ).toEqual({
+          render_method: "opaque",
+          texture: machineBlockTextureKeys.desktop_screen,
+        });
       }
     }
   });

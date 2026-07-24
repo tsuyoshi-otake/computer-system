@@ -72,6 +72,8 @@ export interface NativeModuleContext {
    */
   readonly guestFilesystem?: GuestFilesystem;
   readonly terminal: TerminalBuffer;
+  /** Process-scoped stdout/stderr router; true retains terminal presentation. */
+  readonly routeOutput?: (descriptor: 1 | 2, text: string) => boolean;
   readonly redstone?: RedstoneState;
   readonly currentTick?: () => number;
   readonly queueEvent?: (
@@ -84,6 +86,7 @@ export interface NativeModuleContext {
   readonly reboot?: () => void;
   readonly ticksPerSecond?: number;
   readonly hardware?: ComputerHardwareProfile;
+  readonly collectMicroarchitectureStatsByDefault?: boolean;
   readonly guestRamLedger?: GuestRamLedger;
   readonly requireLinuxLogin?: boolean;
   readonly shell?: ShellSession;
@@ -194,6 +197,12 @@ export function createNativeEnvironment(
       signalProcess: context.signalProcess,
       ticksPerSecond: context.ticksPerSecond,
       hardware: context.hardware,
+      ...(context.collectMicroarchitectureStatsByDefault === undefined
+        ? {}
+        : {
+            collectMicroarchitectureStatsByDefault:
+              context.collectMicroarchitectureStatsByDefault,
+          }),
       ...(context.guestRamLedger === undefined
         ? {}
         : { guestRamLedger: context.guestRamLedger }),
@@ -402,7 +411,7 @@ function createShellModule(
   const prompt = fn("prompt", (positional, keywords) => {
     requireArity(positional, keywords, 0, 0);
     context.terminal.setTextColor(0);
-    context.terminal.write(shell.prompt());
+    writeTerminalPrompt(context.terminal, shell.prompt());
     return null;
   });
   const submit = fn("submit", (positional, keywords) => {
@@ -489,6 +498,15 @@ function advanceTerminalLine(terminal: TerminalBuffer): void {
     terminal.scroll(1);
     terminal.setCursorPosition(1, terminal.height);
   } else terminal.setCursorPosition(1, terminal.cursorY + 1);
+}
+
+export function writeTerminalPrompt(
+  terminal: TerminalBuffer,
+  promptText: string,
+): void {
+  if (promptText.length === 0) return;
+  if (terminal.cursorX !== 1) advanceTerminalLine(terminal);
+  terminal.write(promptText);
 }
 
 function createRedstoneModule(context: NativeModuleContext): RuntimeNamespace {
@@ -745,7 +763,13 @@ function createPrint(context: NativeModuleContext): NativeFunction {
           "print accepts positional arguments only",
         );
       }
-      terminal.write(positional.map(displayValue).join(" "));
+      const text = `${positional.map(displayValue).join(" ")}\n`;
+      if (context.routeOutput !== undefined) {
+        if (context.routeOutput(1, text))
+          writeTerminalLines(terminal, [text.slice(0, -1)]);
+        return null;
+      }
+      terminal.write(text.slice(0, -1));
       if (terminal.cursorY >= terminal.height) {
         terminal.scroll(1);
         terminal.setCursorPosition(1, terminal.height);

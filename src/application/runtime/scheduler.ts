@@ -27,8 +27,8 @@ export const defaultSchedulerLimits: SchedulerLimits = {
   timerCapacity: 128,
   cpuCyclesPerComputer: Math.floor(computerNominalClockHz / 20),
   cpuCyclesPerTick: Math.floor(computerNominalClockHz / 20),
-  instructionsPerComputer: 40_000,
-  instructionsPerTick: 200_000,
+  instructionsPerComputer: 1_650_000,
+  instructionsPerTick: 1_650_000,
   computersPerTick: 64,
 };
 
@@ -48,6 +48,10 @@ export interface ScheduledComputerView {
 }
 
 export interface SchedulerTickResult {
+  /** Newly reserved modeled CPU budget for work dispatched in this tick. */
+  readonly admittedCpuCycles: number;
+  /** Newly reserved instruction budget for work dispatched in this tick. */
+  readonly admittedInstructions: number;
   readonly cpuCycles: number;
   readonly tick: number;
   readonly executedInstructions: number;
@@ -58,6 +62,7 @@ export class RoundRobinScheduler {
   private readonly computers = new Map<number, ScheduledComputer>();
   private order: number[] = [];
   private readonly orderIndices = new Map<number, number>();
+  private readonly nextComputerByResource = new Map<string, number>();
   private cursor = 0;
   private tickValue = 0;
   private readonly instructionsPerComputer: number;
@@ -114,8 +119,9 @@ export class RoundRobinScheduler {
   }
 
   remove(id: number): boolean {
-    const removed = this.computers.delete(id);
-    if (!removed) return false;
+    const computer = this.computers.get(id);
+    if (computer === undefined) return false;
+    this.computers.delete(id);
     const index = this.orderIndices.get(id);
     if (index === undefined)
       throw new Error(`Computer ${id} has no order index`);
@@ -130,6 +136,10 @@ export class RoundRobinScheduler {
     if (index < this.cursor) this.cursor -= 1;
     if (this.order.length === 0) this.cursor = 0;
     else this.cursor %= this.order.length;
+    this.nextComputerByResource.delete(
+      computer.process.schedulerResourceId ?? bedrockSchedulerResourceId,
+    );
+    computer.process.dispose?.();
     return true;
   }
 
@@ -176,8 +186,13 @@ export class RoundRobinScheduler {
 
   runTick(observer?: SchedulerWorkObserver): SchedulerTickResult {
     this.tickValue += 1;
-    let remaining = this.limits.cpuCyclesPerTick;
-    let remainingInstructions = this.instructionsPerTick;
+    const remainingByResource = new Map<
+      string,
+      { cpuCycles: number; instructions: number }
+    >();
+    let totalAdmittedCpuCycles = 0;
+    let totalAdmittedInstructions = 0;
+    let cpuCycles = 0;
     let executedInstructions = 0;
     let cpuCursorAdvance = 0;
     const scheduledCount = this.order.length;
@@ -196,11 +211,12 @@ export class RoundRobinScheduler {
       visited.push(computer);
     }
 
-    for (
-      let offset = 0;
-      offset < count && remaining > 0 && remainingInstructions > 0;
-      offset += 1
-    ) {
+    const dispatchSlots: {
+      readonly resourceId: string;
+      readonly visitedOffset: number;
+    }[] = [];
+    const resourceByComputerId = new Map<number, string>();
+    for (let offset = 0; offset < visited.length; offset += 1) {
       const computer = visited[offset];
       if (computer === undefined) continue;
       if (computer.paused) continue;
@@ -209,10 +225,88 @@ export class RoundRobinScheduler {
         !computer.process.hasPendingCpuCycles
       )
         continue;
-      const budget = Math.min(computer.cpuCyclesPerTick, remaining);
+      const resourceId =
+        computer.process.schedulerResourceId ?? bedrockSchedulerResourceId;
+      dispatchSlots.push({ resourceId, visitedOffset: offset });
+      resourceByComputerId.set(computer.id, resourceId);
+    }
+
+    const computersByResource = new Map<string, ScheduledComputer[]>();
+    let stableStart = 0;
+    for (let index = 1; index < visited.length; index += 1) {
+      const candidate = visited[index];
+      const current = visited[stableStart];
+      if (
+        candidate !== undefined &&
+        current !== undefined &&
+        this.orderIndices.get(candidate.id)! <
+          this.orderIndices.get(current.id)!
+      ) {
+        stableStart = index;
+      }
+    }
+    for (let offset = 0; offset < visited.length; offset += 1) {
+      const computer = visited[(stableStart + offset) % visited.length];
+      if (computer === undefined) continue;
+      const resourceId = resourceByComputerId.get(computer.id);
+      if (resourceId === undefined) continue;
+      const resourceComputers = computersByResource.get(resourceId);
+      if (resourceComputers === undefined) {
+        computersByResource.set(resourceId, [computer]);
+      } else {
+        resourceComputers.push(computer);
+      }
+    }
+
+    const dispatchByResource = new Map<
+      string,
+      {
+        readonly computers: readonly ScheduledComputer[];
+        dispatched: boolean;
+        nextOffset: number;
+        readonly startIndex: number;
+      }
+    >();
+    for (const [resourceId, resourceComputers] of computersByResource) {
+      const nextComputerId = this.nextComputerByResource.get(resourceId);
+      const storedStart =
+        nextComputerId === undefined
+          ? -1
+          : resourceComputers.findIndex(
+              (computer) => computer.id === nextComputerId,
+            );
+      dispatchByResource.set(resourceId, {
+        computers: resourceComputers,
+        dispatched: false,
+        nextOffset: 0,
+        startIndex: storedStart < 0 ? 0 : storedStart,
+      });
+    }
+
+    for (const slot of dispatchSlots) {
+      const dispatch = dispatchByResource.get(slot.resourceId);
+      if (dispatch === undefined)
+        throw new Error(`Scheduler resource ${slot.resourceId} has no queue`);
+      const computer =
+        dispatch.computers[
+          (dispatch.startIndex + dispatch.nextOffset) %
+            dispatch.computers.length
+        ]!;
+      dispatch.nextOffset += 1;
+      let remaining = remainingByResource.get(slot.resourceId);
+      if (remaining === undefined) {
+        remaining = {
+          cpuCycles: this.limits.cpuCyclesPerTick,
+          instructions: this.instructionsPerTick,
+        };
+        remainingByResource.set(slot.resourceId, remaining);
+      }
+      if (remaining.cpuCycles <= 0 || remaining.instructions <= 0) continue;
+      const budget = Math.min(computer.cpuCyclesPerTick, remaining.cpuCycles);
       const instructionBudget = Math.min(
         this.instructionsPerComputer,
-        remainingInstructions,
+        remaining.instructions,
+        budget,
       );
       const operation = (): CpuProcessSliceResult =>
         computer.process.runCpuSlice(budget, instructionBudget);
@@ -221,12 +315,42 @@ export class RoundRobinScheduler {
           ? operation()
           : observer.runCpuSlice(computer.id, operation);
       if (result === undefined) break;
+      dispatch.dispatched = true;
+      const admittedCpuCycles = result.admittedCpuCycles ?? result.cpuCycles;
+      const admittedInstructions =
+        result.admittedInstructions ?? result.executedInstructions;
+      requireSliceAmount(result.cpuCycles, "cpuCycles");
+      requireSliceAmount(result.executedInstructions, "executedInstructions");
+      requireSliceAmount(admittedCpuCycles, "admittedCpuCycles");
+      requireSliceAmount(admittedInstructions, "admittedInstructions");
+      if (admittedCpuCycles > budget) {
+        throw new RangeError(
+          "CPU process admitted more cycles than the offered slice budget",
+        );
+      }
+      if (admittedInstructions > instructionBudget) {
+        throw new RangeError(
+          "CPU process admitted more instructions than the offered slice budget",
+        );
+      }
       computer.cpuCycles += result.cpuCycles;
       computer.executedInstructions += result.executedInstructions;
-      cpuCursorAdvance = offset + 1;
+      cpuCursorAdvance = slot.visitedOffset + 1;
+      cpuCycles += result.cpuCycles;
       executedInstructions += result.executedInstructions;
-      remaining -= result.cpuCycles;
-      remainingInstructions -= result.executedInstructions;
+      totalAdmittedCpuCycles += admittedCpuCycles;
+      totalAdmittedInstructions += admittedInstructions;
+      remaining.cpuCycles -= admittedCpuCycles;
+      remaining.instructions -= admittedInstructions;
+    }
+    for (const [resourceId, dispatch] of dispatchByResource) {
+      if (!dispatch.dispatched) continue;
+      this.nextComputerByResource.set(
+        resourceId,
+        dispatch.computers[
+          (dispatch.startIndex + 1) % dispatch.computers.length
+        ]!.id,
+      );
     }
     if (scheduledCount > 0 && visited.length > 0) {
       const advance =
@@ -252,7 +376,9 @@ export class RoundRobinScheduler {
       executedInstructions: computer.executedInstructions,
     }));
     return {
-      cpuCycles: this.limits.cpuCyclesPerTick - remaining,
+      admittedCpuCycles: totalAdmittedCpuCycles,
+      admittedInstructions: totalAdmittedInstructions,
+      cpuCycles,
       tick: this.tickValue,
       executedInstructions,
       computers,
@@ -291,6 +417,8 @@ export class RoundRobinScheduler {
   }
 }
 
+const bedrockSchedulerResourceId = "bedrock";
+
 interface ScheduledComputer {
   cpuCycles: number;
   readonly id: number;
@@ -305,4 +433,9 @@ interface ScheduledComputer {
 function requirePositiveInteger(value: number, name: string): void {
   if (!Number.isInteger(value) || value <= 0)
     throw new RangeError(`${name} must be positive`);
+}
+
+function requireSliceAmount(value: number, name: string): void {
+  if (!Number.isSafeInteger(value) || value < 0)
+    throw new RangeError(`${name} must be a non-negative safe integer`);
 }

@@ -1,4 +1,4 @@
-const configurationVersion = 1;
+const configurationVersion = 2;
 const maximumGuestRealtimeDivisor = 10_000;
 
 export function parseBehaviorPackConfig(value) {
@@ -7,7 +7,11 @@ export function parseBehaviorPackConfig(value) {
   }
   const keys = Object.keys(value);
   for (const key of keys) {
-    if (key !== "version" && key !== "guestRealtimeDivisor") {
+    if (
+      key !== "version" &&
+      key !== "guestRealtimeDivisor" &&
+      key !== "collectMicroarchitectureStatsByDefault"
+    ) {
       throw new Error(`Unknown Behavior Pack configuration field: ${key}`);
     }
   }
@@ -25,7 +29,14 @@ export function parseBehaviorPackConfig(value) {
       `guestRealtimeDivisor must be an integer between 1 and ${String(maximumGuestRealtimeDivisor)}.`,
     );
   }
+  if (typeof value.collectMicroarchitectureStatsByDefault !== "boolean") {
+    throw new TypeError(
+      "collectMicroarchitectureStatsByDefault must be a boolean.",
+    );
+  }
   return Object.freeze({
+    collectMicroarchitectureStatsByDefault:
+      value.collectMicroarchitectureStatsByDefault,
     guestRealtimeDivisor: value.guestRealtimeDivisor,
     version: configurationVersion,
   });

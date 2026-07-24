@@ -207,7 +207,7 @@ describe("CS486 versioned byte data model", (): void => {
     });
     expect(executable).toMatchObject({
       dataModel: cs486Byte8DataModel,
-      version: 5,
+      version: 6,
     });
     expect(
       Cs486Debugger.load(executable, {
@@ -279,7 +279,7 @@ describe("CS486 versioned byte data model", (): void => {
 
     expect(executable).toMatchObject({
       dataModel: cs486Byte8DataModel,
-      version: 5,
+      version: 6,
     });
     expect(result.registers.eax).toBe(833);
     expect(executable.instructions).toEqual(

@@ -47,6 +47,9 @@ const outputRoot = resolveOutputRoot(process.env.COMPUTER_SYSTEM_PACK_OUTPUT);
 const acceptanceFixtureBuild = parseAcceptanceFixtureBuild(
   process.env.COMPUTER_SYSTEM_ACCEPTANCE_FIXTURE,
 );
+const managedBdsBuild = parseManagedBdsBuild(
+  process.env.COMPUTER_SYSTEM_MANAGED_BDS,
+);
 const wasmProbeBuild = parseWasmProbeBuild(
   process.env.COMPUTER_SYSTEM_WASM_PROBE,
 );
@@ -72,6 +75,10 @@ await Promise.all([
     recursive: true,
   }),
 ]);
+
+if (managedBdsBuild) {
+  await addManagedBdsDependencies(path.join(behaviorOutput, "manifest.json"));
+}
 
 const generatedBlocksDirectory = path.join(behaviorOutput, "blocks");
 const generatedItemsDirectory = path.join(behaviorOutput, "items");
@@ -192,13 +199,29 @@ await build({
   bundle: true,
   define: {
     __CS_ACCEPTANCE_FIXTURE__: JSON.stringify(acceptanceFixtureBuild),
+    __CS_COLLECT_MICROARCHITECTURE_STATS_BY_DEFAULT__: JSON.stringify(
+      behaviorPackConfig.collectMicroarchitectureStatsByDefault,
+    ),
     __CS_GUEST_REALTIME_DIVISOR__: JSON.stringify(
       behaviorPackConfig.guestRealtimeDivisor,
     ),
     __CS_WASM_PROBE__: JSON.stringify(wasmProbeBuild),
   },
-  entryPoints: [path.join(root, "src", "bedrock", "main.ts")],
-  external: ["@minecraft/server", "@minecraft/server-ui"],
+  entryPoints: [
+    path.join(
+      root,
+      "src",
+      "bedrock",
+      managedBdsBuild ? "managedMain.ts" : "main.ts",
+    ),
+  ],
+  external: [
+    "@minecraft/server",
+    "@minecraft/server-ui",
+    ...(managedBdsBuild
+      ? ["@minecraft/server-admin", "@minecraft/server-net"]
+      : []),
+  ],
   format: "esm",
   jsx: "automatic",
   jsxImportSource: "@bedrock-core/ui",
@@ -265,4 +288,50 @@ function parseAcceptanceFixtureBuild(value) {
   if (value === undefined || value === "0") return false;
   if (value === "1") return true;
   throw new Error("COMPUTER_SYSTEM_ACCEPTANCE_FIXTURE must be 0 or 1.");
+}
+
+function parseManagedBdsBuild(value) {
+  if (value === undefined || value === "0") return false;
+  if (value === "1") return true;
+  throw new Error("COMPUTER_SYSTEM_MANAGED_BDS must be 0 or 1.");
+}
+
+function parseWasmProbeBuild(value) {
+  if (value === undefined || value === "0") return false;
+  if (value === "1") return true;
+  throw new Error("COMPUTER_SYSTEM_WASM_PROBE must be 0 or 1.");
+}
+
+async function addManagedBdsDependencies(manifestPath) {
+  const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+  if (!Array.isArray(manifest.dependencies)) {
+    throw new Error("Behavior-pack manifest dependencies must be an array.");
+  }
+  const managedDependencies = [
+    {
+      module_name: "@minecraft/server-admin",
+      version: "1.0.0-beta",
+    },
+    {
+      module_name: "@minecraft/server-net",
+      version: "1.0.0-beta",
+    },
+  ];
+  for (const dependency of managedDependencies) {
+    if (
+      manifest.dependencies.some(
+        (candidate) => candidate?.module_name === dependency.module_name,
+      )
+    ) {
+      throw new Error(
+        `Authored behavior-pack manifest must not declare managed-only dependency ${dependency.module_name}.`,
+      );
+    }
+    manifest.dependencies.push(dependency);
+  }
+  await writeFile(
+    manifestPath,
+    `${JSON.stringify(manifest, null, 2)}\n`,
+    "utf8",
+  );
 }

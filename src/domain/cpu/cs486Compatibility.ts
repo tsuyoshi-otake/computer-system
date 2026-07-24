@@ -18,7 +18,7 @@ export const CS486_FORMAT_COMPATIBILITY = Object.freeze({
   legacyDataModel: legacyCs486WordDataModel,
   executable: Object.freeze({
     format: "CS486",
-    versions: [1, 2, 3, 4, 5] as const,
+    versions: [1, 2, 3, 4, 5, 6] as const,
   }),
   object: Object.freeze({
     format: "CS486OBJ",
@@ -40,7 +40,7 @@ export function isSupportedCs486ObjectVersion(
 
 export function isSupportedCs486ExecutableVersion(
   value: unknown,
-): value is 1 | 2 | 3 | 4 | 5 {
+): value is 1 | 2 | 3 | 4 | 5 | 6 {
   return CS486_FORMAT_COMPATIBILITY.executable.versions.some(
     (version) => version === value,
   );

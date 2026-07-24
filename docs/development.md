@@ -23,8 +23,10 @@ the production Behavior/Resource Pack build. Phase evidence is recorded in
 - `@minecraft/vanilla-data` 1.26.33
 - Node.js 24 or later
 
-The Phase 0 baseline intentionally uses stable Script APIs and does not require
-the Beta APIs experiment.
+The normal release-pack Phase 0 baseline intentionally uses stable Script APIs
+and does not require the Beta APIs experiment. The separate managed-BDS
+runtime-worker build is an operator service with its own Beta-only module
+boundary; it does not change the release-pack baseline.
 
 ## Commands
 
@@ -422,6 +424,12 @@ identity to survive the server restart. Every suite branch must emit a
 `CS_PROBE_RESULT` terminal record. The runner uses an allowlist and keeps Xbox
 Live authentication enabled so no player can join the isolated server.
 
+The ordinary Phase 0 runner remains Beta-free. A managed-worker acceptance run
+may enable Beta APIs automatically only after generating the exact disposable
+`ComputerSystemAcceptance` world beneath the current user's temporary directory.
+Preserved and custom worlds are never patched automatically because the
+experiment toggle is irreversible.
+
 The harness was verified against Bedrock Dedicated Server 1.26.33.2. Both
 sessions completed with 20 computers receiving exactly 2,000 instructions over
 40 ticks, and the Dynamic Property sequence advanced from 1 to 2 after restart.
@@ -569,19 +577,42 @@ keeping the common allocation path O(1) while making the uncommon reclamation
 check O(N) in reachable objects. Disk quota remains an independent filesystem
 concern.
 
+Validated CS486 executables are semantically predecoded once into shared numeric
+opcode/flag bytes and two signed operand lanes. The bounded O(N) preparation
+replaces instruction, operand-kind, and register-name string dispatch in the
+dominant execution loop while retaining O(1) work per executed instruction. The
+four semantic lanes have a 10-byte payload per instruction and are shared by
+every process and CPU model using the same immutable executable; model-specific
+base-cycle and branch-delta lanes add five bytes per instruction only for each
+CPU model actually used. Do not replace this with one closure per instruction or
+guest-derived host code: current executable formats permit 524,288 instructions,
+and guest data must remain outside the host execution engine.
+
 CS486DX and CS486DX2 programs use a separate verified register-machine
 executable under the same Computer hardware limits and CPU-cycle budget. Their
 persisted and visible clocks are 33 MHz and 66 MHz. `run --stats` is the
 deterministic optimization measurement: compare CPU-cycle totals and virtual
 microseconds, not host wall time or language-specific instruction counts.
-Executables are JSON preceded by `CS486\n`, validated again at load, and never
-passed to a host process. Non-hosted terminal execution is a resumable
-foreground scheduler job capped at 100,000 instructions and returns exit 124 on
-a bounded yield. A CS-Linux legacy version-4 word executable or current
-version-5 model-declared executable launched through the hosted foreground `run`
-path instead remains a tick-sliced CS ABI 1.0 process until `main` returns,
-`exit` completes it, or its lifecycle owner terminates it. The scheduler still
-enforces per-Computer and global instruction ceilings on every tick.
+Production ordinary processes set `collectMicroarchitectureStats` from the
+build-validated `collectMicroarchitectureStatsByDefault` policy, which ships
+`false`; an explicit `run --stats` or `python --stats` request forces collection
+from process creation. Disabling collection gates counter writes only. Cache
+tags, LRU state, CS386SX prefetch invalidation, transfer latency, guest cycles,
+cycle debt, and every execution/finalization branch remain on the shared
+authoritative path. A disabled process rejects a statistics snapshot instead of
+returning misleading zero counters. Setting the authored policy to `true`
+collects silently and does not make plain commands display diagnostics or start
+the optional host wall timer. Executables are JSON preceded by `CS486\n`,
+validated again at load, and never passed to a host process. Non-hosted terminal
+execution is a resumable foreground scheduler job capped at 100,000 instructions
+and returns exit 124 on a bounded yield. A CS-Linux legacy version-4 word
+executable or current version-5 model-declared executable launched through the
+hosted foreground `run` path instead remains a tick-sliced CS ABI 1.0 process
+until `main` returns, `exit` completes it, or its lifecycle owner terminates it.
+The scheduler still enforces a per-Computer ceiling and an independent global
+ceiling for each execution resource on every tick. A local Bedrock lane and each
+fixed runtime worker therefore share the same finite policy without serializing
+unrelated workers behind one host-global counter.
 
 Host-load admission and remaining scale risks are specified in
 `docs/work-monitor.md`. Keep deterministic guest timing separate from measured
@@ -761,6 +792,36 @@ model completes the requested instruction count with identical authoritative
 guest evidence while host median and p95 timing remain explicitly separate
 fields.
 
+`npm run benchmark:cs486:concurrency` is the host-only Issue #16 capacity PoC.
+It defaults to ten independent CS486DX2 Computers, 330,000 instructions per
+runtime per tick, ten ticks, 21 rotated samples, and two long-lived Node worker
+threads. A one-worker pool and the requested pool execute the same bounded
+Computer batches in alternating order. Every run must retain identical
+registers, instruction pointer, process state, output, modeled cycles, pending
+cycle state, and full guest-RAM SHA-256 before host throughput is compared. The
+report includes median/p95 batch time, aggregate instructions per second, the
+batch-average per-tick cost, end-to-end and interpreter-only critical-path
+speedup, thread CPU time, a serialized IPC-payload byte estimate, per-worker
+memory observations, the combined benchmark-pool RSS increase, shard imbalance,
+startup cost, and worker efficiency. Each worker admits at most 1,650,000
+instructions per tick, so the default two-worker profile assigns five equal
+330,000-instruction shares to each worker and rejects capacity-plus-one instead
+of silently oversubscribing. Scheduler contention rotates independently within
+each execution resource, so an uneven Computer-to-worker distribution cannot
+bias long-term service toward the first Computer IDs on a worker.
+
+This benchmark constructs a fresh deterministic Computer process for each
+rotated sample while keeping the worker threads alive; each process remains on
+one worker for the complete multi-tick batch. It neither moves production state
+out of the Behavior Pack nor proves companion transport, real-BDS tick capacity,
+disk/terminal scaling, or guest-clock speed. Verify: run the default command on
+the target host. Expect: `deterministicAcrossWorkerCounts` is `true`, the
+compared execution count is 42, and host measurements are reported without
+changing any guest evidence. A disposable real-BDS roundtrip now proves the
+managed loopback transport and worker cleanup path; production-world adoption
+still requires the Issue #16 concurrent MCP/tick evidence and capacity-plus-one
+checks.
+
 The Issue #106 Phase 4 wasm batch-executor prototype is optional tooling; it is
 not part of the production execution path and `npm run validate` never requires
 it. Building the artifacts needs Rust with the `wasm32-unknown-unknown` target
@@ -776,6 +837,32 @@ cargo-free. `npm run benchmark:cs486:wasm-ab` runs the full engine/corpus/
 profile/instrumentation matrix with rotated warm samples and aborts on any
 cross-engine guest-evidence mismatch. Adoption-gate evidence lives in
 `docs/issues/issue-106-wasm-batch-executor.md`.
+
+`npm run dev:bds:web` turns that boundary into a persistent managed-BDS service.
+It loads `runtimeWorkerCount` from Web companion configuration (default 2, range
+1 through 16), creates the worker-thread pool and authenticated loopback
+WebSocket listener before Web/BDS startup, and tears them down after BDS and Web
+have stopped. A stable FNV-1a mapping pins all processes for one Computer to the
+same one-based worker index. This applies equally to CS386SX, CS486DX, and
+CS486DX2; neither the hash nor worker count changes guest timing.
+
+Only CS executables using the isolated deny-all syscall policy cross this
+boundary. Python-managed values, host-backed CS ABI calls, debugger sessions,
+and pipelines retain Bedrock ownership because their live filesystem, terminal,
+and application capabilities are not transferable. Their truthful placement is
+reported as local or mixed rather than silently approximated. Requests and
+payloads are capped, commands are never replayed after an uncertain send, and a
+connection close owns bounded termination, cycle-debt drain, and disposal of
+exactly the actors created by that connection. The server-admin/server-net
+imports and Beta manifest dependencies exist only in the managed-BDS build;
+normal release packs remain Beta-free.
+
+The managed build requires the world's irreversible Beta APIs experiment. A
+fresh disposable `ComputerSystemAcceptance` world beneath the current user's
+temporary directory is the only world the harness may enable automatically. A
+preserved or custom world instead fails startup explicitly while the experiment
+is disabled. Enabling it requires an operator decision made after BDS is fully
+stopped and the complete world directory has been backed up.
 
 C++ deliberately emits the same unmangled CS ABI as C. Individual `extern "C"`
 declarations are accepted as an explanatory spelling; linkage blocks, other

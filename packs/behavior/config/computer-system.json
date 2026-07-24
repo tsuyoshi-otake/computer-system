@@ -1,4 +1,5 @@
 {
-  "version": 1,
-  "guestRealtimeDivisor": 100
+  "version": 2,
+  "guestRealtimeDivisor": 2,
+  "collectMicroarchitectureStatsByDefault": false
 }

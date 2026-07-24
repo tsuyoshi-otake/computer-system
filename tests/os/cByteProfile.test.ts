@@ -35,7 +35,7 @@ describe("CS-Linux C byte profile", (): void => {
     validateCs486Executable(executable);
     expect(executable).toMatchObject({
       dataModel: cs486Byte8DataModel,
-      version: 5,
+      version: 6,
     });
     expect(shell.submit("run /work/byte")).toMatchObject({
       exitCode: 0,
@@ -46,7 +46,7 @@ describe("CS-Linux C byte profile", (): void => {
       "# data-model cs-byte8-v1",
     );
     expect(shell.submit("objdump /work/byte").stdout).toContain(
-      "format cs486-executable v5 cs-byte8-v1",
+      "format cs486-executable v6 cs-byte8-v1",
     );
     expect(shell.submit("csdb /work/byte").stdout).toContain("cs-byte8-v1");
   });

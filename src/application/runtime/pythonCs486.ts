@@ -38,6 +38,7 @@ import {
   type Cs486ExecutableV3,
   type Cs486ExecutableV4,
   type Cs486ExecutableV5,
+  type Cs486ExecutableV6,
   type Cs486Flat32MemoryMetadata,
   type Cs486FunctionEntry,
   type Cs486Instruction,
@@ -129,6 +130,7 @@ def __next__(self):
 `;
 
 export interface PythonCs486Options {
+  readonly collectMicroarchitectureStats?: boolean;
   readonly cpuModel?: CpuModel;
   readonly environment: NativeEnvironment;
   readonly filesystem: GuestFilesystem;
@@ -258,6 +260,12 @@ function preparePythonCs486ProgramUnchecked(
     create(linearMemoryBytes: number): PythonCs486Program {
       const runtimeHolder: { runtime?: PythonCs486Runtime } = {};
       const process = new Cs486Process(executable.executable, {
+        ...(options.collectMicroarchitectureStats === undefined
+          ? {}
+          : {
+              collectMicroarchitectureStats:
+                options.collectMicroarchitectureStats,
+            }),
         cpuModel: options.cpuModel,
         externalMemoryUsageBytes: (): number =>
           runtimeHolder.runtime?.memoryUsageBytes ?? 0,
@@ -3628,7 +3636,7 @@ function appendExtensionObjects(
           ? `${extension.path} exports no zero-argument integer functions`
           : `${extension.path} exports no functions`,
       );
-    let linked: Cs486ExecutableV5;
+    let linked: Cs486ExecutableV6;
     try {
       linked = linkCs486Objects([extension.object], { entry });
     } catch (error: unknown) {

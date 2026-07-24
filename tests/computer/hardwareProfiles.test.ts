@@ -39,15 +39,24 @@ describe("Computer hardware profiles", (): void => {
     expect(hardwareCpuCyclesPerTick(advanced.hardware.clockHz, 20)).toBe(
       3_300_000,
     );
-    expect(hardwareCpuCyclesPerTick(standard.hardware.clockHz, 20, 100)).toBe(
-      16_500,
+    expect(
+      hardwareCpuCyclesPerTick(portableComputerHardware.clockHz, 20, 2),
+    ).toBe(400_000);
+    expect(hardwareCpuCyclesPerTick(standard.hardware.clockHz, 20, 2)).toBe(
+      825_000,
     );
-    expect(hardwareCpuCyclesPerTick(advanced.hardware.clockHz, 20, 100)).toBe(
+    expect(hardwareCpuCyclesPerTick(advanced.hardware.clockHz, 20, 2)).toBe(
+      1_650_000,
+    );
+    expect(hardwareCpuCyclesPerTick(standard.hardware.clockHz, 20, 50)).toBe(
       33_000,
     );
+    expect(hardwareCpuCyclesPerTick(advanced.hardware.clockHz, 20, 50)).toBe(
+      66_000,
+    );
     expect(
-      hardwareCpuCyclesPerTick(portableComputerHardware.clockHz, 20, 100),
-    ).toBe(8_000);
+      hardwareCpuCyclesPerTick(portableComputerHardware.clockHz, 20, 50),
+    ).toBe(16_000);
     expect(() => hardwareCpuCyclesPerTick(33_000_000, 20, 0)).toThrow(
       "realtimeDivisor must be a positive integer",
     );

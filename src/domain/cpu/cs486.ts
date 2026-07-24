@@ -267,14 +267,22 @@ export interface Cs486ExecutableV5 extends Cs486ExecutableBase {
   readonly version: 5;
 }
 
+export interface Cs486ExecutableV6 extends Cs486ExecutableBase {
+  readonly dataModel: Cs486DataModel;
+  readonly memory: Cs486Flat32MemoryMetadata;
+  readonly version: 6;
+}
+
 export type Cs486StructuredExecutable =
-  Cs486ExecutableV3 | Cs486ExecutableV4 | Cs486ExecutableV5;
+  Cs486ExecutableV3 | Cs486ExecutableV4 | Cs486ExecutableV5 | Cs486ExecutableV6;
 export type Cs486Executable = Cs486LegacyExecutable | Cs486StructuredExecutable;
 
 export function cs486ExecutableDataModel(
   executable: Cs486Executable,
 ): Cs486DataModel {
-  return executable.version === 5 ? executable.dataModel : cs486Word32DataModel;
+  return executable.version === 5 || executable.version === 6
+    ? executable.dataModel
+    : cs486Word32DataModel;
 }
 
 export type Cs486ExecutableMemoryRequirements =
@@ -291,7 +299,7 @@ export type Cs486ExecutableMemoryRequirements =
       readonly model: "cs-flat32-v1";
       readonly physicalReservationBytes: number;
       readonly stackBytes: number;
-      readonly version: 3 | 4 | 5;
+      readonly version: 3 | 4 | 5 | 6;
     };
 
 export function createCs486Flat32MemoryMetadata(
@@ -311,13 +319,32 @@ export function createCs486Flat32MemoryMetadata(
   return Object.freeze(metadata);
 }
 
-export interface Cs486RunResult {
+interface Cs486RunResultBase {
   readonly cycles: number;
   readonly executedInstructions: number;
   readonly output: string;
   readonly registers: Readonly<Record<Cs486Register, number>>;
   readonly state: "halted" | "yielded";
+}
+
+export interface Cs486RunResult extends Cs486RunResultBase {
   readonly microarchitecture: CpuMicroarchitectureStats;
+}
+
+export interface Cs486RunResultWithoutMicroarchitectureStats extends Cs486RunResultBase {
+  readonly microarchitecture: null;
+}
+
+export type Cs486RunObservation =
+  Cs486RunResult | Cs486RunResultWithoutMicroarchitectureStats;
+
+export interface Cs486RunOptions {
+  readonly collectMicroarchitectureStats?: boolean;
+  readonly cpuModel?: CpuModel;
+  readonly memoryBytes: number;
+  readonly instructionLimit?: number;
+  readonly processImage?: Cs486ProcessImageInitialization;
+  readonly syscallHandler?: Cs486SyscallHandler;
 }
 
 export interface Cs486SyscallContext {
@@ -382,17 +409,40 @@ export class Cs486Fault extends Error {
 
 const maximumOutputBytes = 64_000;
 const maximumInspectionBytes = 4_096;
+const minimumHotBurstInstructions = 8;
+
+interface Cs486HotBurstResult {
+  readonly cpuCycles: number;
+  readonly executedInstructions: number;
+  /**
+   * True when the next instruction belongs to the faulting, memory, stack,
+   * syscall, output, or lifecycle path still owned by executeNext().
+   */
+  readonly stoppedOnColdInstruction: boolean;
+}
 
 export function runCs486(
   executable: Cs486Executable,
-  options: {
-    readonly cpuModel?: CpuModel;
-    readonly memoryBytes: number;
-    readonly instructionLimit?: number;
-    readonly processImage?: Cs486ProcessImageInitialization;
-    readonly syscallHandler?: Cs486SyscallHandler;
+  options: Omit<Cs486RunOptions, "collectMicroarchitectureStats"> & {
+    readonly collectMicroarchitectureStats: false;
   },
-): Cs486RunResult {
+): Cs486RunResultWithoutMicroarchitectureStats;
+export function runCs486(
+  executable: Cs486Executable,
+  options: Omit<Cs486RunOptions, "collectMicroarchitectureStats"> & {
+    readonly collectMicroarchitectureStats: boolean;
+  },
+): Cs486RunObservation;
+export function runCs486(
+  executable: Cs486Executable,
+  options: Omit<Cs486RunOptions, "collectMicroarchitectureStats"> & {
+    readonly collectMicroarchitectureStats?: true;
+  },
+): Cs486RunResult;
+export function runCs486(
+  executable: Cs486Executable,
+  options: Cs486RunOptions,
+): Cs486RunObservation {
   const instructionLimit = options.instructionLimit ?? 100_000;
   if (!Number.isSafeInteger(instructionLimit) || instructionLimit <= 0)
     throw new RangeError("CS486 instruction limit must be positive");
@@ -412,7 +462,9 @@ export function runCs486(
     output: process.output,
     registers: process.registers,
     state: process.state.kind === "completed" ? "halted" : "yielded",
-    microarchitecture: process.microarchitectureStats,
+    microarchitecture: process.microarchitectureStatsEnabled
+      ? process.microarchitectureStats
+      : null,
   };
 }
 
@@ -429,6 +481,11 @@ export class Cs486Process implements CpuProcess {
   private readonly instructionBaseCycles: Uint32Array;
   private readonly instructionBranchCycleDeltas: Uint8Array;
   private readonly instructionExecutionFlags: Uint8Array;
+  private readonly hasHotBurstEntries: boolean;
+  private readonly instructionHotBurstEntries: Uint8Array;
+  private readonly instructionOpcodes: Uint8Array;
+  private readonly instructionOperandA: Int32Array;
+  private readonly instructionOperandB: Int32Array;
   private readonly memoryBytes: number;
   private readonly heapBaseBytes: number;
   private readonly functionEntries = new Map<number, Cs486FunctionSignature>();
@@ -446,6 +503,7 @@ export class Cs486Process implements CpuProcess {
   constructor(
     private readonly executable: Cs486Executable,
     private readonly options: {
+      readonly collectMicroarchitectureStats?: boolean;
       readonly externalMemoryUsageBytes?: () => number;
       readonly cpuModel?: CpuModel;
       readonly memoryBytes: number;
@@ -454,14 +512,23 @@ export class Cs486Process implements CpuProcess {
   ) {
     const requirements = cs486ExecutableMemoryRequirements(executable);
     this.cpuModel = options.cpuModel ?? defaultCpuModel;
-    this.memoryHierarchy = new CpuMemoryHierarchy(this.cpuModel);
-    const preparedInstructions = prepareCs486Instructions(
+    this.memoryHierarchy = new CpuMemoryHierarchy(this.cpuModel, {
+      collectMicroarchitectureStats:
+        options.collectMicroarchitectureStats ?? true,
+    });
+    const preparedSemantics = prepareCs486SemanticInstructions(executable);
+    const preparedTiming = prepareCs486InstructionTiming(
       executable,
       this.cpuModel,
     );
-    this.instructionBaseCycles = preparedInstructions.baseCycles;
-    this.instructionBranchCycleDeltas = preparedInstructions.branchCycleDeltas;
-    this.instructionExecutionFlags = preparedInstructions.executionFlags;
+    this.instructionBaseCycles = preparedTiming.baseCycles;
+    this.instructionBranchCycleDeltas = preparedTiming.branchCycleDeltas;
+    this.instructionExecutionFlags = preparedSemantics.executionFlags;
+    this.hasHotBurstEntries = preparedSemantics.hasHotBurstEntries;
+    this.instructionHotBurstEntries = preparedSemantics.hotBurstEntries;
+    this.instructionOpcodes = preparedSemantics.opcodes;
+    this.instructionOperandA = preparedSemantics.operandA;
+    this.instructionOperandB = preparedSemantics.operandB;
     const availableMemoryBytes = Math.min(
       options.memoryBytes,
       maximumCs486LinearAddressSpaceBytes,
@@ -694,6 +761,10 @@ export class Cs486Process implements CpuProcess {
     return this.memoryHierarchy.stats;
   }
 
+  get microarchitectureStatsEnabled(): boolean {
+    return this.memoryHierarchy.statsEnabled;
+  }
+
   get hasPendingCpuCycles(): boolean {
     return this.cycleDebt > 0;
   }
@@ -725,7 +796,56 @@ export class Cs486Process implements CpuProcess {
       );
     if (this.stateValue.kind !== "ready" && this.cycleDebt === 0)
       return { cpuCycles: 0, executedInstructions: 0, state: this.stateValue };
+    return this.hasHotBurstEntries
+      ? this.runCpuSliceWithHotBurst(cpuCycleBudget, instructionBudget)
+      : this.runCpuSliceWithoutHotBurst(cpuCycleBudget, instructionBudget);
+  }
 
+  private runCpuSliceWithHotBurst(
+    cpuCycleBudget: number,
+    instructionBudget: number,
+  ): CpuProcessSliceResult {
+    let cpuCycles = 0;
+    let executedInstructions = 0;
+    while (
+      cpuCycles < cpuCycleBudget &&
+      (this.stateValue.kind === "ready" || this.cycleDebt > 0)
+    ) {
+      if (this.cycleDebt > 0) {
+        const paid = Math.min(this.cycleDebt, cpuCycleBudget - cpuCycles);
+        this.cycleDebt -= paid;
+        cpuCycles += paid;
+        continue;
+      }
+      if (executedInstructions >= instructionBudget) break;
+      if (this.stateValue.kind !== "ready") break;
+      if (this.instructionHotBurstEntries[this.instructionPointer] === 1) {
+        const hotBurst = this.runHotCpuBurst(
+          cpuCycleBudget - cpuCycles,
+          instructionBudget - executedInstructions,
+        );
+        cpuCycles += hotBurst.cpuCycles;
+        executedInstructions += hotBurst.executedInstructions;
+        if (!hotBurst.stoppedOnColdInstruction) continue;
+      }
+      try {
+        const cycles = this.executeNext();
+        if (cycles === undefined) break;
+        executedInstructions += 1;
+        const paid = Math.min(cycles, cpuCycleBudget - cpuCycles);
+        cpuCycles += paid;
+        this.cycleDebt = cycles - paid;
+      } catch (error: unknown) {
+        this.crash(error);
+      }
+    }
+    return { cpuCycles, executedInstructions, state: this.stateValue };
+  }
+
+  private runCpuSliceWithoutHotBurst(
+    cpuCycleBudget: number,
+    instructionBudget: number,
+  ): CpuProcessSliceResult {
     let cpuCycles = 0;
     let executedInstructions = 0;
     while (
@@ -744,7 +864,9 @@ export class Cs486Process implements CpuProcess {
         const cycles = this.executeNext();
         if (cycles === undefined) break;
         executedInstructions += 1;
-        this.cycleDebt += cycles;
+        const paid = Math.min(cycles, cpuCycleBudget - cpuCycles);
+        cpuCycles += paid;
+        this.cycleDebt = cycles - paid;
       } catch (error: unknown) {
         this.crash(error);
       }
@@ -773,6 +895,189 @@ export class Cs486Process implements CpuProcess {
       }
     }
     return { cpuCycles, executedInstructions, state: this.stateValue };
+  }
+
+  /**
+   * Executes the common register/ALU/control-transfer subset in one tight host
+   * loop. The caller retains finalization ownership for every cold instruction,
+   * while this loop remains bounded by both scheduler budgets. Modeled cache,
+   * branch, cycle-debt, and original instruction-count semantics are preserved
+   * per guest instruction.
+   */
+  private runHotCpuBurst(
+    cpuCycleBudget: number,
+    instructionBudget: number,
+  ): Cs486HotBurstResult {
+    const instructionOpcodes = this.instructionOpcodes;
+    const instructionOperandA = this.instructionOperandA;
+    const instructionOperandB = this.instructionOperandB;
+    const instructionExecutionFlags = this.instructionExecutionFlags;
+    const instructionBaseCycles = this.instructionBaseCycles;
+    const instructionBranchCycleDeltas = this.instructionBranchCycleDeltas;
+    const registerValues = this.registerValues;
+    const memoryHierarchy = this.memoryHierarchy;
+    let instructionPointer = this.instructionPointer;
+    let compared = this.compared;
+    let cpuCycles = 0;
+    let executedInstructions = 0;
+
+    while (
+      cpuCycles < cpuCycleBudget &&
+      executedInstructions < instructionBudget
+    ) {
+      if (
+        instructionPointer < 0 ||
+        instructionPointer >= instructionOpcodes.length
+      ) {
+        this.instructionPointer = instructionPointer;
+        this.compared = compared;
+        return {
+          cpuCycles,
+          executedInstructions,
+          stoppedOnColdInstruction: true,
+        };
+      }
+      const instructionIndex = instructionPointer;
+      const opcode = instructionOpcodes[instructionIndex]!;
+      const operandA = instructionOperandA[instructionIndex]!;
+      const operandB = instructionOperandB[instructionIndex]!;
+      let branchTaken = false;
+
+      switch (opcode) {
+        case preparedOpcode.movImmediate:
+          registerValues[operandA] = operandB;
+          break;
+        case preparedOpcode.movRegister:
+          registerValues[operandA] = registerValues[operandB]!;
+          break;
+        case preparedOpcode.addImmediate:
+          registerValues[operandA] = registerValues[operandA]! + operandB;
+          break;
+        case preparedOpcode.addRegister:
+          registerValues[operandA] =
+            registerValues[operandA]! + registerValues[operandB]!;
+          break;
+        case preparedOpcode.subtractImmediate:
+          registerValues[operandA] = registerValues[operandA]! - operandB;
+          break;
+        case preparedOpcode.subtractRegister:
+          registerValues[operandA] =
+            registerValues[operandA]! - registerValues[operandB]!;
+          break;
+        case preparedOpcode.andImmediate:
+          registerValues[operandA] = registerValues[operandA]! & operandB;
+          break;
+        case preparedOpcode.andRegister:
+          registerValues[operandA] =
+            registerValues[operandA]! & registerValues[operandB]!;
+          break;
+        case preparedOpcode.orImmediate:
+          registerValues[operandA] = registerValues[operandA]! | operandB;
+          break;
+        case preparedOpcode.orRegister:
+          registerValues[operandA] =
+            registerValues[operandA]! | registerValues[operandB]!;
+          break;
+        case preparedOpcode.xorImmediate:
+          registerValues[operandA] = registerValues[operandA]! ^ operandB;
+          break;
+        case preparedOpcode.xorRegister:
+          registerValues[operandA] =
+            registerValues[operandA]! ^ registerValues[operandB]!;
+          break;
+        case preparedOpcode.shiftLeftImmediate:
+          registerValues[operandA] =
+            registerValues[operandA]! << (operandB & 31);
+          break;
+        case preparedOpcode.shiftLeftRegister:
+          registerValues[operandA] =
+            registerValues[operandA]! << (registerValues[operandB]! & 31);
+          break;
+        case preparedOpcode.shiftRightImmediate:
+          registerValues[operandA] =
+            registerValues[operandA]! >> (operandB & 31);
+          break;
+        case preparedOpcode.shiftRightRegister:
+          registerValues[operandA] =
+            registerValues[operandA]! >> (registerValues[operandB]! & 31);
+          break;
+        case preparedOpcode.unsignedShiftRightImmediate:
+          registerValues[operandA] =
+            registerValues[operandA]! >>> (operandB & 31);
+          break;
+        case preparedOpcode.unsignedShiftRightRegister:
+          registerValues[operandA] =
+            registerValues[operandA]! >>> (registerValues[operandB]! & 31);
+          break;
+        case preparedOpcode.compareImmediate:
+          compared = registerValues[operandA]! - operandB;
+          break;
+        case preparedOpcode.compareRegister:
+          compared = registerValues[operandA]! - registerValues[operandB]!;
+          break;
+        case preparedOpcode.branchEqual:
+          branchTaken = compared === 0;
+          break;
+        case preparedOpcode.branchNotEqual:
+          branchTaken = compared !== 0;
+          break;
+        case preparedOpcode.branchLess:
+          branchTaken = compared < 0;
+          break;
+        case preparedOpcode.branchLessOrEqual:
+          branchTaken = compared <= 0;
+          break;
+        case preparedOpcode.branchGreater:
+          branchTaken = compared > 0;
+          break;
+        case preparedOpcode.branchGreaterOrEqual:
+          branchTaken = compared >= 0;
+          break;
+        case preparedOpcode.jump:
+          branchTaken = true;
+          break;
+        default:
+          this.instructionPointer = instructionPointer;
+          this.compared = compared;
+          return {
+            cpuCycles,
+            executedInstructions,
+            stoppedOnColdInstruction: true,
+          };
+      }
+
+      const executionFlags = instructionExecutionFlags[instructionIndex]!;
+      let cycles =
+        instructionBaseCycles[instructionIndex]! +
+        (branchTaken ? instructionBranchCycleDeltas[instructionIndex]! : 0) +
+        memoryHierarchy.fetchInstruction(instructionIndex);
+      const controlTransfer =
+        branchTaken ||
+        (executionFlags & unconditionalControlTransferInstructionFlag) !== 0;
+      memoryHierarchy.recordControlTransfer(controlTransfer);
+      instructionPointer =
+        controlTransfer &&
+        ((executionFlags & conditionalBranchInstructionFlag) !== 0 ||
+          opcode === preparedOpcode.jump)
+          ? operandA
+          : instructionIndex + 1;
+      executedInstructions += 1;
+      const paid = Math.min(cycles, cpuCycleBudget - cpuCycles);
+      cpuCycles += paid;
+      cycles -= paid;
+      if (cycles > 0) {
+        this.cycleDebt = cycles;
+        break;
+      }
+    }
+
+    this.instructionPointer = instructionPointer;
+    this.compared = compared;
+    return {
+      cpuCycles,
+      executedInstructions,
+      stoppedOnColdInstruction: false,
+    };
   }
 
   advanceTick(tick: number): CpuProcessState {
@@ -810,31 +1115,61 @@ export class Cs486Process implements CpuProcess {
 
   private executeNext(): number | undefined {
     const instructionIndex = this.instructionPointer;
-    const instruction = this.executable.instructions[instructionIndex];
-    if (instruction === undefined) {
-      if (instructionIndex === this.executable.instructions.length) {
+    if (
+      instructionIndex < 0 ||
+      instructionIndex >= this.instructionOpcodes.length
+    ) {
+      if (instructionIndex === this.instructionOpcodes.length) {
         this.complete();
         return undefined;
       }
       throw new Cs486Fault(
         "ExecutableFormatError",
-        `instruction pointer ${String(instructionIndex)} is outside executable range 0..${String(this.executable.instructions.length)}`,
+        `instruction pointer ${String(instructionIndex)} is outside executable range 0..${String(this.instructionOpcodes.length)}`,
       );
     }
     this.instructionPointer += 1;
+    const opcode = this.instructionOpcodes[instructionIndex]!;
+    const operandA = this.instructionOperandA[instructionIndex]!;
+    const operandB = this.instructionOperandB[instructionIndex]!;
     const executionFlags = this.instructionExecutionFlags[instructionIndex]!;
-    const branchTaken =
-      (executionFlags & conditionalBranchInstructionFlag) !== 0 &&
-      this.branchTaken(instruction) === true;
+    let branchTaken = false;
+    if ((executionFlags & conditionalBranchInstructionFlag) !== 0) {
+      switch (opcode) {
+        case preparedOpcode.branchEqual:
+          branchTaken = this.compared === 0;
+          break;
+        case preparedOpcode.branchNotEqual:
+          branchTaken = this.compared !== 0;
+          break;
+        case preparedOpcode.branchLess:
+          branchTaken = this.compared < 0;
+          break;
+        case preparedOpcode.branchLessOrEqual:
+          branchTaken = this.compared <= 0;
+          break;
+        case preparedOpcode.branchGreater:
+          branchTaken = this.compared > 0;
+          break;
+        case preparedOpcode.branchGreaterOrEqual:
+          branchTaken = this.compared >= 0;
+          break;
+      }
+    }
     const baseCycles =
-      (executionFlags & dynamicMultiplyInstructionFlag) === 0
+      (executionFlags & dynamicMultiplyInstructionFlag) === 0 ||
+      this.cpuModel !== "cs386sx"
         ? this.instructionBaseCycles[instructionIndex]!
-        : instructionCycleCost(this.cpuModel, instruction, {
-            multiplier:
-              instruction.op === "mul"
-                ? this.read(instruction.source)
-                : undefined,
-          });
+        : instructionCycleCost(
+            this.cpuModel,
+            this.executable.instructions[instructionIndex]!,
+            {
+              multiplier:
+                opcode === preparedOpcode.mulImmediate
+                  ? operandB
+                  : this.registerValues[operandB]!,
+            },
+          );
     let cycles =
       baseCycles +
       (branchTaken ? this.instructionBranchCycleDeltas[instructionIndex]! : 0) +
@@ -843,223 +1178,347 @@ export class Cs486Process implements CpuProcess {
       branchTaken ||
         (executionFlags & unconditionalControlTransferInstructionFlag) !== 0,
     );
-    switch (instruction.op) {
-      case "mov":
-        this.write(instruction.destination, this.read(instruction.source));
+    if ((executionFlags & conditionalBranchInstructionFlag) !== 0) {
+      if (branchTaken) this.instructionPointer = operandA;
+      return cycles;
+    }
+    if (opcode === preparedOpcode.jump) {
+      this.instructionPointer = operandA;
+      return cycles;
+    }
+    switch (opcode) {
+      case preparedOpcode.movImmediate:
+        this.registerValues[operandA] = operandB;
         break;
-      case "load": {
-        const address = this.address(instruction.address, 4);
+      case preparedOpcode.movRegister:
+        this.registerValues[operandA] = this.registerValues[operandB]!;
+        break;
+      case preparedOpcode.loadImmediate: {
+        const address = this.checkedAddress(operandB);
         cycles += this.memoryHierarchy.accessData(address, "read");
-        this.write(
-          instruction.destination,
-          this.memory.getInt32(address, true),
-        );
+        this.registerValues[operandA] = this.memory.getInt32(address, true);
         break;
       }
-      case "load8s":
-      case "load8u":
-      case "load16s":
-      case "load16u": {
-        const width = instruction.op.startsWith("load8") ? 1 : 2;
-        const address = this.address(instruction.address, width, width);
+      case preparedOpcode.loadRegister: {
+        const address = this.checkedAddress(this.registerValues[operandB]!);
         cycles += this.memoryHierarchy.accessData(address, "read");
-        const signed = instruction.op.endsWith("s");
-        this.write(
-          instruction.destination,
-          width === 1
-            ? signed
-              ? this.memory.getInt8(address)
-              : this.memory.getUint8(address)
-            : signed
-              ? this.memory.getInt16(address, true)
-              : this.memory.getUint16(address, true),
-        );
+        this.registerValues[operandA] = this.memory.getInt32(address, true);
         break;
       }
-      case "store": {
-        const address = this.address(instruction.address, 4);
+      case preparedOpcode.load8SignedImmediate: {
+        const address = this.checkedAddress(operandB, 1, 1);
+        cycles += this.memoryHierarchy.accessData(address, "read");
+        this.registerValues[operandA] = this.memory.getInt8(address);
+        break;
+      }
+      case preparedOpcode.load8SignedRegister: {
+        const address = this.checkedAddress(
+          this.registerValues[operandB]!,
+          1,
+          1,
+        );
+        cycles += this.memoryHierarchy.accessData(address, "read");
+        this.registerValues[operandA] = this.memory.getInt8(address);
+        break;
+      }
+      case preparedOpcode.load8UnsignedImmediate: {
+        const address = this.checkedAddress(operandB, 1, 1);
+        cycles += this.memoryHierarchy.accessData(address, "read");
+        this.registerValues[operandA] = this.memory.getUint8(address);
+        break;
+      }
+      case preparedOpcode.load8UnsignedRegister: {
+        const address = this.checkedAddress(
+          this.registerValues[operandB]!,
+          1,
+          1,
+        );
+        cycles += this.memoryHierarchy.accessData(address, "read");
+        this.registerValues[operandA] = this.memory.getUint8(address);
+        break;
+      }
+      case preparedOpcode.load16SignedImmediate: {
+        const address = this.checkedAddress(operandB, 2, 2);
+        cycles += this.memoryHierarchy.accessData(address, "read");
+        this.registerValues[operandA] = this.memory.getInt16(address, true);
+        break;
+      }
+      case preparedOpcode.load16SignedRegister: {
+        const address = this.checkedAddress(
+          this.registerValues[operandB]!,
+          2,
+          2,
+        );
+        cycles += this.memoryHierarchy.accessData(address, "read");
+        this.registerValues[operandA] = this.memory.getInt16(address, true);
+        break;
+      }
+      case preparedOpcode.load16UnsignedImmediate: {
+        const address = this.checkedAddress(operandB, 2, 2);
+        cycles += this.memoryHierarchy.accessData(address, "read");
+        this.registerValues[operandA] = this.memory.getUint16(address, true);
+        break;
+      }
+      case preparedOpcode.load16UnsignedRegister: {
+        const address = this.checkedAddress(
+          this.registerValues[operandB]!,
+          2,
+          2,
+        );
+        cycles += this.memoryHierarchy.accessData(address, "read");
+        this.registerValues[operandA] = this.memory.getUint16(address, true);
+        break;
+      }
+      case preparedOpcode.storeImmediate: {
+        const address = this.checkedAddress(operandA);
         cycles += this.memoryHierarchy.accessData(address, "write");
-        this.memory.setInt32(
+        this.memory.setInt32(address, this.registerValues[operandB]!, true);
+        break;
+      }
+      case preparedOpcode.storeRegister: {
+        const address = this.checkedAddress(this.registerValues[operandA]!);
+        cycles += this.memoryHierarchy.accessData(address, "write");
+        this.memory.setInt32(address, this.registerValues[operandB]!, true);
+        break;
+      }
+      case preparedOpcode.store8Immediate: {
+        const address = this.checkedAddress(operandA, 1, 1);
+        cycles += this.memoryHierarchy.accessData(address, "write");
+        this.memory.setUint8(address, this.registerValues[operandB]! & 0xff);
+        break;
+      }
+      case preparedOpcode.store8Register: {
+        const address = this.checkedAddress(
+          this.registerValues[operandA]!,
+          1,
+          1,
+        );
+        cycles += this.memoryHierarchy.accessData(address, "write");
+        this.memory.setUint8(address, this.registerValues[operandB]! & 0xff);
+        break;
+      }
+      case preparedOpcode.store16Immediate: {
+        const address = this.checkedAddress(operandA, 2, 2);
+        cycles += this.memoryHierarchy.accessData(address, "write");
+        this.memory.setUint16(
           address,
-          this.readRegister(instruction.source),
+          this.registerValues[operandB]! & 0xffff,
           true,
         );
         break;
       }
-      case "store8":
-      case "store16": {
-        const width = instruction.op === "store8" ? 1 : 2;
-        const address = this.address(instruction.address, width, width);
+      case preparedOpcode.store16Register: {
+        const address = this.checkedAddress(
+          this.registerValues[operandA]!,
+          2,
+          2,
+        );
         cycles += this.memoryHierarchy.accessData(address, "write");
-        const value = this.readRegister(instruction.source);
-        if (width === 1) this.memory.setUint8(address, value & 0xff);
-        else this.memory.setUint16(address, value & 0xffff, true);
+        this.memory.setUint16(
+          address,
+          this.registerValues[operandB]! & 0xffff,
+          true,
+        );
         break;
       }
-      case "add":
-        this.write(
-          instruction.destination,
-          this.readRegister(instruction.destination) +
-            this.read(instruction.source),
+      case preparedOpcode.addImmediate:
+        this.registerValues[operandA] =
+          this.registerValues[operandA]! + operandB;
+        break;
+      case preparedOpcode.addRegister:
+        this.registerValues[operandA] =
+          this.registerValues[operandA]! + this.registerValues[operandB]!;
+        break;
+      case preparedOpcode.subtractImmediate:
+        this.registerValues[operandA] =
+          this.registerValues[operandA]! - operandB;
+        break;
+      case preparedOpcode.subtractRegister:
+        this.registerValues[operandA] =
+          this.registerValues[operandA]! - this.registerValues[operandB]!;
+        break;
+      case preparedOpcode.mulImmediate:
+        this.registerValues[operandA] = Math.imul(
+          this.registerValues[operandA]!,
+          operandB,
         );
         break;
-      case "sub":
-        this.write(
-          instruction.destination,
-          this.readRegister(instruction.destination) -
-            this.read(instruction.source),
+      case preparedOpcode.mulRegister:
+        this.registerValues[operandA] = Math.imul(
+          this.registerValues[operandA]!,
+          this.registerValues[operandB]!,
         );
         break;
-      case "mul":
-        this.write(
-          instruction.destination,
-          Math.imul(
-            this.readRegister(instruction.destination),
-            this.read(instruction.source),
-          ),
-        );
-        break;
-      case "div": {
-        const divisor = this.read(instruction.source);
+      case preparedOpcode.divideImmediate: {
+        const divisor = operandB;
         if (divisor === 0)
           throw new Cs486Fault("DivisionByZeroError", "division by zero");
-        this.write(
-          instruction.destination,
-          Math.trunc(this.readRegister(instruction.destination) / divisor),
+        this.registerValues[operandA] = Math.trunc(
+          this.registerValues[operandA]! / divisor,
         );
         break;
       }
-      case "udiv": {
-        const divisor = this.read(instruction.source) >>> 0;
+      case preparedOpcode.divideRegister: {
+        const divisor = this.registerValues[operandB]!;
         if (divisor === 0)
           throw new Cs486Fault("DivisionByZeroError", "division by zero");
-        this.write(
-          instruction.destination,
-          Math.trunc(
-            (this.readRegister(instruction.destination) >>> 0) / divisor,
-          ),
+        this.registerValues[operandA] = Math.trunc(
+          this.registerValues[operandA]! / divisor,
         );
         break;
       }
-      case "mod": {
-        const divisor = this.read(instruction.source);
+      case preparedOpcode.unsignedDivideImmediate: {
+        const divisor = operandB >>> 0;
         if (divisor === 0)
           throw new Cs486Fault("DivisionByZeroError", "division by zero");
-        this.write(
-          instruction.destination,
-          this.readRegister(instruction.destination) % divisor,
+        this.registerValues[operandA] = Math.trunc(
+          (this.registerValues[operandA]! >>> 0) / divisor,
         );
         break;
       }
-      case "umod": {
-        const divisor = this.read(instruction.source) >>> 0;
+      case preparedOpcode.unsignedDivideRegister: {
+        const divisor = this.registerValues[operandB]! >>> 0;
         if (divisor === 0)
           throw new Cs486Fault("DivisionByZeroError", "division by zero");
-        this.write(
-          instruction.destination,
-          (this.readRegister(instruction.destination) >>> 0) % divisor,
+        this.registerValues[operandA] = Math.trunc(
+          (this.registerValues[operandA]! >>> 0) / divisor,
         );
         break;
       }
-      case "and":
-        this.write(
-          instruction.destination,
-          this.readRegister(instruction.destination) &
-            this.read(instruction.source),
-        );
+      case preparedOpcode.moduloImmediate: {
+        const divisor = operandB;
+        if (divisor === 0)
+          throw new Cs486Fault("DivisionByZeroError", "division by zero");
+        this.registerValues[operandA] =
+          this.registerValues[operandA]! % divisor;
         break;
-      case "or":
-        this.write(
-          instruction.destination,
-          this.readRegister(instruction.destination) |
-            this.read(instruction.source),
-        );
+      }
+      case preparedOpcode.moduloRegister: {
+        const divisor = this.registerValues[operandB]!;
+        if (divisor === 0)
+          throw new Cs486Fault("DivisionByZeroError", "division by zero");
+        this.registerValues[operandA] =
+          this.registerValues[operandA]! % divisor;
         break;
-      case "xor":
-        this.write(
-          instruction.destination,
-          this.readRegister(instruction.destination) ^
-            this.read(instruction.source),
-        );
+      }
+      case preparedOpcode.unsignedModuloImmediate: {
+        const divisor = operandB >>> 0;
+        if (divisor === 0)
+          throw new Cs486Fault("DivisionByZeroError", "division by zero");
+        this.registerValues[operandA] =
+          (this.registerValues[operandA]! >>> 0) % divisor;
         break;
-      case "shl":
-        this.write(
-          instruction.destination,
-          this.readRegister(instruction.destination) <<
-            (this.read(instruction.source) & 31),
-        );
+      }
+      case preparedOpcode.unsignedModuloRegister: {
+        const divisor = this.registerValues[operandB]! >>> 0;
+        if (divisor === 0)
+          throw new Cs486Fault("DivisionByZeroError", "division by zero");
+        this.registerValues[operandA] =
+          (this.registerValues[operandA]! >>> 0) % divisor;
         break;
-      case "shr":
-        this.write(
-          instruction.destination,
-          this.readRegister(instruction.destination) >>
-            (this.read(instruction.source) & 31),
-        );
+      }
+      case preparedOpcode.andImmediate:
+        this.registerValues[operandA] =
+          this.registerValues[operandA]! & operandB;
         break;
-      case "ushr":
-        this.write(
-          instruction.destination,
-          this.readRegister(instruction.destination) >>>
-            (this.read(instruction.source) & 31),
-        );
+      case preparedOpcode.andRegister:
+        this.registerValues[operandA] =
+          this.registerValues[operandA]! & this.registerValues[operandB]!;
         break;
-      case "cmp":
+      case preparedOpcode.orImmediate:
+        this.registerValues[operandA] =
+          this.registerValues[operandA]! | operandB;
+        break;
+      case preparedOpcode.orRegister:
+        this.registerValues[operandA] =
+          this.registerValues[operandA]! | this.registerValues[operandB]!;
+        break;
+      case preparedOpcode.xorImmediate:
+        this.registerValues[operandA] =
+          this.registerValues[operandA]! ^ operandB;
+        break;
+      case preparedOpcode.xorRegister:
+        this.registerValues[operandA] =
+          this.registerValues[operandA]! ^ this.registerValues[operandB]!;
+        break;
+      case preparedOpcode.shiftLeftImmediate:
+        this.registerValues[operandA] =
+          this.registerValues[operandA]! << (operandB & 31);
+        break;
+      case preparedOpcode.shiftLeftRegister:
+        this.registerValues[operandA] =
+          this.registerValues[operandA]! <<
+          (this.registerValues[operandB]! & 31);
+        break;
+      case preparedOpcode.shiftRightImmediate:
+        this.registerValues[operandA] =
+          this.registerValues[operandA]! >> (operandB & 31);
+        break;
+      case preparedOpcode.shiftRightRegister:
+        this.registerValues[operandA] =
+          this.registerValues[operandA]! >>
+          (this.registerValues[operandB]! & 31);
+        break;
+      case preparedOpcode.unsignedShiftRightImmediate:
+        this.registerValues[operandA] =
+          this.registerValues[operandA]! >>> (operandB & 31);
+        break;
+      case preparedOpcode.unsignedShiftRightRegister:
+        this.registerValues[operandA] =
+          this.registerValues[operandA]! >>>
+          (this.registerValues[operandB]! & 31);
+        break;
+      case preparedOpcode.compareImmediate:
+        this.compared = this.registerValues[operandA]! - operandB;
+        break;
+      case preparedOpcode.compareRegister:
         this.compared =
-          this.readRegister(instruction.left) - this.read(instruction.right);
+          this.registerValues[operandA]! - this.registerValues[operandB]!;
         break;
-      case "jmp":
-        this.instructionPointer = instruction.target;
+      case preparedOpcode.pushImmediate:
+        cycles += this.push(operandA);
         break;
-      case "je":
-        if (this.compared === 0) this.instructionPointer = instruction.target;
+      case preparedOpcode.pushRegister:
+        cycles += this.push(this.registerValues[operandA]!);
         break;
-      case "jne":
-        if (this.compared !== 0) this.instructionPointer = instruction.target;
-        break;
-      case "jl":
-        if (this.compared < 0) this.instructionPointer = instruction.target;
-        break;
-      case "jle":
-        if (this.compared <= 0) this.instructionPointer = instruction.target;
-        break;
-      case "jg":
-        if (this.compared > 0) this.instructionPointer = instruction.target;
-        break;
-      case "jge":
-        if (this.compared >= 0) this.instructionPointer = instruction.target;
-        break;
-      case "push":
-        cycles += this.push(this.read(instruction.source));
-        break;
-      case "pop": {
+      case preparedOpcode.pop: {
         const popped = this.pop();
         cycles += popped.cycles;
-        this.write(instruction.destination, popped.value);
+        this.registerValues[operandA] = popped.value;
         break;
       }
-      case "call": {
+      case preparedOpcode.call: {
         cycles += this.push(this.instructionPointer);
-        this.instructionPointer = instruction.target;
+        this.instructionPointer = operandA;
         break;
       }
-      case "call_indirect": {
+      case preparedOpcode.callIndirectImmediate:
+      case preparedOpcode.callIndirectRegister: {
+        const instruction = this.executable.instructions[
+          instructionIndex
+        ] as Extract<Cs486Instruction, { readonly op: "call_indirect" }>;
         const target = this.checkedIndirectFunctionTarget(
-          this.read(instruction.source),
+          opcode === preparedOpcode.callIndirectImmediate
+            ? operandA
+            : this.registerValues[operandA]!,
           instruction.functionSignature as Cs486FunctionSignature,
         );
         cycles += this.push(this.instructionPointer);
         this.instructionPointer = target;
         break;
       }
-      case "ret": {
+      case preparedOpcode.return: {
         const popped = this.pop();
         cycles += popped.cycles;
         this.instructionPointer = this.checkedInstructionTarget(popped.value);
         break;
       }
-      case "syscall": {
+      case preparedOpcode.syscall: {
+        const instruction = this.executable.instructions[
+          instructionIndex
+        ] as Extract<Cs486Instruction, { readonly op: "syscall" }>;
         if (instruction.name === "cs.print.character") {
-          const codePoint = this.readRegister("eax");
+          const codePoint = this.registerValues[eaxRegisterIndex]!;
           if (
             codePoint < 0 ||
             codePoint > 0x10_ff_ff ||
@@ -1134,19 +1593,33 @@ export class Cs486Process implements CpuProcess {
         const transitionCycles = this.applySyscallResult(result);
         return cycles + extraCycles + syscallMemoryCycles + transitionCycles;
       }
-      case "print": {
-        const value =
-          typeof instruction.source === "string"
-            ? instruction.source
-            : String(this.read(instruction.source));
-        this.outputValue += value;
+      case preparedOpcode.printString: {
+        const instruction = this.executable.instructions[
+          instructionIndex
+        ] as Extract<Cs486Instruction, { readonly op: "print" }>;
+        this.outputValue += instruction.source as string;
         if (this.outputValue.length > maximumOutputBytes)
           throw new Cs486Fault("OutputLimitError", "output limit exceeded");
         break;
       }
-      case "halt":
+      case preparedOpcode.printImmediate:
+        this.outputValue += String(operandA);
+        if (this.outputValue.length > maximumOutputBytes)
+          throw new Cs486Fault("OutputLimitError", "output limit exceeded");
+        break;
+      case preparedOpcode.printRegister:
+        this.outputValue += String(this.registerValues[operandA]!);
+        if (this.outputValue.length > maximumOutputBytes)
+          throw new Cs486Fault("OutputLimitError", "output limit exceeded");
+        break;
+      case preparedOpcode.halt:
         this.complete();
         break;
+      default:
+        throw new Cs486Fault(
+          "ExecutableFormatError",
+          "invalid prepared instruction opcode",
+        );
     }
     return cycles;
   }
@@ -1433,43 +1906,12 @@ export class Cs486Process implements CpuProcess {
     return cycles;
   }
 
-  private branchTaken(instruction: Cs486Instruction): boolean | undefined {
-    switch (instruction.op) {
-      case "jmp":
-        return true;
-      case "je":
-        return this.compared === 0;
-      case "jne":
-        return this.compared !== 0;
-      case "jl":
-        return this.compared < 0;
-      case "jle":
-        return this.compared <= 0;
-      case "jg":
-        return this.compared > 0;
-      case "jge":
-        return this.compared >= 0;
-      default:
-        return undefined;
-    }
-  }
-
-  private read(operand: Cs486Operand): number {
-    return operand.kind === "immediate"
-      ? operand.value | 0
-      : this.readRegister(operand.register);
-  }
-
   private readRegister(register: Cs486Register): number {
     return this.registerValues[indexOf(register)]!;
   }
 
   private write(register: Cs486Register, value: number): void {
     this.registerValues[indexOf(register)] = value | 0;
-  }
-
-  private address(operand: Cs486Operand, width = 4, alignment = 1): number {
-    return this.checkedAddress(this.read(operand), width, alignment);
   }
 
   private checkedAddress(value: number, width = 4, alignment = 1): number {
@@ -1686,7 +2128,8 @@ export function validateCs486Executable(
   if (
     candidate.version === 3 ||
     candidate.version === 4 ||
-    candidate.version === 5
+    candidate.version === 5 ||
+    candidate.version === 6
   ) {
     validateCs486Flat32MemoryMetadata(candidate.memory);
     flat32MemoryRequirements(
@@ -1700,7 +2143,7 @@ export function validateCs486Executable(
     );
   }
   if (
-    candidate.version === 5
+    candidate.version === 5 || candidate.version === 6
       ? !isCs486DataModel(candidate.dataModel)
       : candidate.dataModel !== undefined
   ) {
@@ -1724,7 +2167,9 @@ export function validateCs486Executable(
     throw new Cs486Fault("ExecutableFormatError", "invalid initial data");
   if (
     candidate.functionEntries !== undefined &&
-    ((candidate.version !== 4 && candidate.version !== 5) ||
+    ((candidate.version !== 4 &&
+      candidate.version !== 5 &&
+      candidate.version !== 6) ||
       !Array.isArray(candidate.functionEntries) ||
       candidate.functionEntries.length > limits.symbols)
   )
@@ -1842,7 +2287,9 @@ export function validateCs486Executable(
         (candidateInstruction.target as number) < candidate.instructions.length;
     } else if (op === "call_indirect")
       valid =
-        (candidate.version === 4 || candidate.version === 5) &&
+        (candidate.version === 4 ||
+          candidate.version === 5 ||
+          candidate.version === 6) &&
         operand("source") &&
         isCs486FunctionSignature(candidateInstruction.functionSignature);
     else if (op === "push") valid = operand("source");
@@ -1858,12 +2305,14 @@ export function validateCs486Executable(
       op === "load16u"
     )
       valid =
-        (op === "load" || candidate.version === 5) &&
+        (op === "load" || candidate.version === 5 || candidate.version === 6) &&
         register("destination") &&
         operand("address");
     else if (op === "store" || op === "store8" || op === "store16")
       valid =
-        (op === "store" || candidate.version === 5) &&
+        (op === "store" ||
+          candidate.version === 5 ||
+          candidate.version === 6) &&
         operand("address") &&
         register("source");
     else if (op === "cmp") valid = register("left") && operand("right");
@@ -1897,7 +2346,12 @@ export function cs486ExecutableMemoryRequirements(
   value: unknown,
 ): Cs486ExecutableMemoryRequirements {
   validateCs486Executable(value);
-  if (value.version !== 3 && value.version !== 4 && value.version !== 5)
+  if (
+    value.version !== 3 &&
+    value.version !== 4 &&
+    value.version !== 5 &&
+    value.version !== 6
+  )
     return Object.freeze({ kind: "legacy", version: value.version });
   const requirements = flat32MemoryRequirements(
     value.dataBytes ?? 0,
@@ -2098,39 +2552,640 @@ function indexOf(register: Cs486Register): number {
   }
 }
 
+const eaxRegisterIndex = 0;
+
+const preparedOpcode = {
+  movImmediate: 1,
+  movRegister: 2,
+  loadImmediate: 3,
+  loadRegister: 4,
+  load8SignedImmediate: 5,
+  load8SignedRegister: 6,
+  load8UnsignedImmediate: 7,
+  load8UnsignedRegister: 8,
+  load16SignedImmediate: 9,
+  load16SignedRegister: 10,
+  load16UnsignedImmediate: 11,
+  load16UnsignedRegister: 12,
+  storeImmediate: 13,
+  storeRegister: 14,
+  store8Immediate: 15,
+  store8Register: 16,
+  store16Immediate: 17,
+  store16Register: 18,
+  addImmediate: 19,
+  addRegister: 20,
+  subtractImmediate: 21,
+  subtractRegister: 22,
+  mulImmediate: 23,
+  mulRegister: 24,
+  divideImmediate: 25,
+  divideRegister: 26,
+  unsignedDivideImmediate: 27,
+  unsignedDivideRegister: 28,
+  moduloImmediate: 29,
+  moduloRegister: 30,
+  unsignedModuloImmediate: 31,
+  unsignedModuloRegister: 32,
+  andImmediate: 33,
+  andRegister: 34,
+  orImmediate: 35,
+  orRegister: 36,
+  xorImmediate: 37,
+  xorRegister: 38,
+  shiftLeftImmediate: 39,
+  shiftLeftRegister: 40,
+  shiftRightImmediate: 41,
+  shiftRightRegister: 42,
+  unsignedShiftRightImmediate: 43,
+  unsignedShiftRightRegister: 44,
+  compareImmediate: 45,
+  compareRegister: 46,
+  branchEqual: 47,
+  branchNotEqual: 48,
+  branchLess: 49,
+  branchLessOrEqual: 50,
+  branchGreater: 51,
+  branchGreaterOrEqual: 52,
+  jump: 53,
+  pushImmediate: 54,
+  pushRegister: 55,
+  pop: 56,
+  call: 57,
+  callIndirectImmediate: 58,
+  callIndirectRegister: 59,
+  return: 60,
+  syscall: 61,
+  printString: 62,
+  printImmediate: 63,
+  printRegister: 64,
+  halt: 65,
+} as const;
+
+function isPreparedHotOpcode(opcode: number | undefined): boolean {
+  return (
+    opcode !== undefined &&
+    ((opcode >= preparedOpcode.movImmediate &&
+      opcode <= preparedOpcode.movRegister) ||
+      (opcode >= preparedOpcode.addImmediate &&
+        opcode <= preparedOpcode.subtractRegister) ||
+      (opcode >= preparedOpcode.andImmediate && opcode <= preparedOpcode.jump))
+  );
+}
+
 const conditionalBranchInstructionFlag = 1 << 0;
 const unconditionalControlTransferInstructionFlag = 1 << 1;
 const dynamicMultiplyInstructionFlag = 1 << 2;
 
-interface PreparedCs486Instructions {
-  readonly baseCycles: Uint32Array;
-  readonly branchCycleDeltas: Uint8Array;
+interface PreparedCs486SemanticInstructions {
   readonly executionFlags: Uint8Array;
+  readonly hasHotBurstEntries: boolean;
+  readonly hotBurstEntries: Uint8Array;
+  readonly opcodes: Uint8Array;
+  readonly operandA: Int32Array;
+  readonly operandB: Int32Array;
 }
 
-const preparedCs486InstructionsByExecutable = new WeakMap<
+interface PreparedCs486InstructionTiming {
+  readonly baseCycles: Uint32Array;
+  readonly branchCycleDeltas: Uint8Array;
+}
+
+const preparedCs486SemanticsByExecutable = new WeakMap<
   Cs486Executable,
-  Map<CpuModel, PreparedCs486Instructions>
+  PreparedCs486SemanticInstructions
+>();
+const preparedCs486TimingByExecutable = new WeakMap<
+  Cs486Executable,
+  Map<CpuModel, PreparedCs486InstructionTiming>
 >();
 
 /**
- * Predecodes immutable timing/control metadata once per process. This keeps the
- * modeled guest cycle result identical while removing two opcode classifiers
- * from the dominant O(instructions) execution loop.
+ * Decodes the immutable executable's semantic shape once. Every process and
+ * CPU model that runs the same validated executable shares these bounded typed
+ * arrays; model-dependent timing remains in its own cache.
  */
-function prepareCs486Instructions(
+function prepareCs486SemanticInstructions(
+  executable: Cs486Executable,
+): PreparedCs486SemanticInstructions {
+  const cached = preparedCs486SemanticsByExecutable.get(executable);
+  if (cached !== undefined) return cached;
+  const instructions = executable.instructions;
+  const opcodes = new Uint8Array(instructions.length);
+  const operandA = new Int32Array(instructions.length);
+  const operandB = new Int32Array(instructions.length);
+  const executionFlags = new Uint8Array(instructions.length);
+  for (let index = 0; index < instructions.length; index += 1) {
+    const instruction = instructions[index]!;
+    switch (instruction.op) {
+      case "mov":
+        operandA[index] = indexOf(instruction.destination);
+        prepareCs486Operand(
+          opcodes,
+          operandB,
+          index,
+          instruction.source,
+          preparedOpcode.movImmediate,
+          preparedOpcode.movRegister,
+        );
+        break;
+      case "load":
+        operandA[index] = indexOf(instruction.destination);
+        prepareCs486Operand(
+          opcodes,
+          operandB,
+          index,
+          instruction.address,
+          preparedOpcode.loadImmediate,
+          preparedOpcode.loadRegister,
+        );
+        break;
+      case "load8s":
+        operandA[index] = indexOf(instruction.destination);
+        prepareCs486Operand(
+          opcodes,
+          operandB,
+          index,
+          instruction.address,
+          preparedOpcode.load8SignedImmediate,
+          preparedOpcode.load8SignedRegister,
+        );
+        break;
+      case "load8u":
+        operandA[index] = indexOf(instruction.destination);
+        prepareCs486Operand(
+          opcodes,
+          operandB,
+          index,
+          instruction.address,
+          preparedOpcode.load8UnsignedImmediate,
+          preparedOpcode.load8UnsignedRegister,
+        );
+        break;
+      case "load16s":
+        operandA[index] = indexOf(instruction.destination);
+        prepareCs486Operand(
+          opcodes,
+          operandB,
+          index,
+          instruction.address,
+          preparedOpcode.load16SignedImmediate,
+          preparedOpcode.load16SignedRegister,
+        );
+        break;
+      case "load16u":
+        operandA[index] = indexOf(instruction.destination);
+        prepareCs486Operand(
+          opcodes,
+          operandB,
+          index,
+          instruction.address,
+          preparedOpcode.load16UnsignedImmediate,
+          preparedOpcode.load16UnsignedRegister,
+        );
+        break;
+      case "store":
+        operandB[index] = indexOf(instruction.source);
+        prepareCs486Operand(
+          opcodes,
+          operandA,
+          index,
+          instruction.address,
+          preparedOpcode.storeImmediate,
+          preparedOpcode.storeRegister,
+        );
+        break;
+      case "store8":
+        operandB[index] = indexOf(instruction.source);
+        prepareCs486Operand(
+          opcodes,
+          operandA,
+          index,
+          instruction.address,
+          preparedOpcode.store8Immediate,
+          preparedOpcode.store8Register,
+        );
+        break;
+      case "store16":
+        operandB[index] = indexOf(instruction.source);
+        prepareCs486Operand(
+          opcodes,
+          operandA,
+          index,
+          instruction.address,
+          preparedOpcode.store16Immediate,
+          preparedOpcode.store16Register,
+        );
+        break;
+      case "add":
+        prepareCs486BinaryInstruction(
+          opcodes,
+          operandA,
+          operandB,
+          index,
+          instruction.destination,
+          instruction.source,
+          preparedOpcode.addImmediate,
+          preparedOpcode.addRegister,
+        );
+        break;
+      case "sub":
+        prepareCs486BinaryInstruction(
+          opcodes,
+          operandA,
+          operandB,
+          index,
+          instruction.destination,
+          instruction.source,
+          preparedOpcode.subtractImmediate,
+          preparedOpcode.subtractRegister,
+        );
+        break;
+      case "mul":
+        executionFlags[index] = dynamicMultiplyInstructionFlag;
+        prepareCs486BinaryInstruction(
+          opcodes,
+          operandA,
+          operandB,
+          index,
+          instruction.destination,
+          instruction.source,
+          preparedOpcode.mulImmediate,
+          preparedOpcode.mulRegister,
+        );
+        break;
+      case "div":
+        prepareCs486BinaryInstruction(
+          opcodes,
+          operandA,
+          operandB,
+          index,
+          instruction.destination,
+          instruction.source,
+          preparedOpcode.divideImmediate,
+          preparedOpcode.divideRegister,
+        );
+        break;
+      case "udiv":
+        prepareCs486BinaryInstruction(
+          opcodes,
+          operandA,
+          operandB,
+          index,
+          instruction.destination,
+          instruction.source,
+          preparedOpcode.unsignedDivideImmediate,
+          preparedOpcode.unsignedDivideRegister,
+        );
+        break;
+      case "mod":
+        prepareCs486BinaryInstruction(
+          opcodes,
+          operandA,
+          operandB,
+          index,
+          instruction.destination,
+          instruction.source,
+          preparedOpcode.moduloImmediate,
+          preparedOpcode.moduloRegister,
+        );
+        break;
+      case "umod":
+        prepareCs486BinaryInstruction(
+          opcodes,
+          operandA,
+          operandB,
+          index,
+          instruction.destination,
+          instruction.source,
+          preparedOpcode.unsignedModuloImmediate,
+          preparedOpcode.unsignedModuloRegister,
+        );
+        break;
+      case "and":
+        prepareCs486BinaryInstruction(
+          opcodes,
+          operandA,
+          operandB,
+          index,
+          instruction.destination,
+          instruction.source,
+          preparedOpcode.andImmediate,
+          preparedOpcode.andRegister,
+        );
+        break;
+      case "or":
+        prepareCs486BinaryInstruction(
+          opcodes,
+          operandA,
+          operandB,
+          index,
+          instruction.destination,
+          instruction.source,
+          preparedOpcode.orImmediate,
+          preparedOpcode.orRegister,
+        );
+        break;
+      case "xor":
+        prepareCs486BinaryInstruction(
+          opcodes,
+          operandA,
+          operandB,
+          index,
+          instruction.destination,
+          instruction.source,
+          preparedOpcode.xorImmediate,
+          preparedOpcode.xorRegister,
+        );
+        break;
+      case "shl":
+        prepareCs486BinaryInstruction(
+          opcodes,
+          operandA,
+          operandB,
+          index,
+          instruction.destination,
+          instruction.source,
+          preparedOpcode.shiftLeftImmediate,
+          preparedOpcode.shiftLeftRegister,
+        );
+        break;
+      case "shr":
+        prepareCs486BinaryInstruction(
+          opcodes,
+          operandA,
+          operandB,
+          index,
+          instruction.destination,
+          instruction.source,
+          preparedOpcode.shiftRightImmediate,
+          preparedOpcode.shiftRightRegister,
+        );
+        break;
+      case "ushr":
+        prepareCs486BinaryInstruction(
+          opcodes,
+          operandA,
+          operandB,
+          index,
+          instruction.destination,
+          instruction.source,
+          preparedOpcode.unsignedShiftRightImmediate,
+          preparedOpcode.unsignedShiftRightRegister,
+        );
+        break;
+      case "cmp":
+        operandA[index] = indexOf(instruction.left);
+        prepareCs486Operand(
+          opcodes,
+          operandB,
+          index,
+          instruction.right,
+          preparedOpcode.compareImmediate,
+          preparedOpcode.compareRegister,
+        );
+        break;
+      case "je":
+        prepareCs486Branch(
+          opcodes,
+          operandA,
+          executionFlags,
+          index,
+          instruction.target,
+          preparedOpcode.branchEqual,
+        );
+        break;
+      case "jne":
+        prepareCs486Branch(
+          opcodes,
+          operandA,
+          executionFlags,
+          index,
+          instruction.target,
+          preparedOpcode.branchNotEqual,
+        );
+        break;
+      case "jl":
+        prepareCs486Branch(
+          opcodes,
+          operandA,
+          executionFlags,
+          index,
+          instruction.target,
+          preparedOpcode.branchLess,
+        );
+        break;
+      case "jle":
+        prepareCs486Branch(
+          opcodes,
+          operandA,
+          executionFlags,
+          index,
+          instruction.target,
+          preparedOpcode.branchLessOrEqual,
+        );
+        break;
+      case "jg":
+        prepareCs486Branch(
+          opcodes,
+          operandA,
+          executionFlags,
+          index,
+          instruction.target,
+          preparedOpcode.branchGreater,
+        );
+        break;
+      case "jge":
+        prepareCs486Branch(
+          opcodes,
+          operandA,
+          executionFlags,
+          index,
+          instruction.target,
+          preparedOpcode.branchGreaterOrEqual,
+        );
+        break;
+      case "jmp":
+        opcodes[index] = preparedOpcode.jump;
+        operandA[index] = instruction.target;
+        executionFlags[index] = unconditionalControlTransferInstructionFlag;
+        break;
+      case "push":
+        prepareCs486Operand(
+          opcodes,
+          operandA,
+          index,
+          instruction.source,
+          preparedOpcode.pushImmediate,
+          preparedOpcode.pushRegister,
+        );
+        break;
+      case "pop":
+        opcodes[index] = preparedOpcode.pop;
+        operandA[index] = indexOf(instruction.destination);
+        break;
+      case "call":
+        opcodes[index] = preparedOpcode.call;
+        operandA[index] = instruction.target;
+        executionFlags[index] = unconditionalControlTransferInstructionFlag;
+        break;
+      case "call_indirect":
+        executionFlags[index] = unconditionalControlTransferInstructionFlag;
+        prepareCs486Operand(
+          opcodes,
+          operandA,
+          index,
+          instruction.source,
+          preparedOpcode.callIndirectImmediate,
+          preparedOpcode.callIndirectRegister,
+        );
+        break;
+      case "ret":
+        opcodes[index] = preparedOpcode.return;
+        executionFlags[index] = unconditionalControlTransferInstructionFlag;
+        break;
+      case "syscall":
+        opcodes[index] = preparedOpcode.syscall;
+        break;
+      case "print":
+        if (typeof instruction.source === "string")
+          opcodes[index] = preparedOpcode.printString;
+        else
+          prepareCs486Operand(
+            opcodes,
+            operandA,
+            index,
+            instruction.source,
+            preparedOpcode.printImmediate,
+            preparedOpcode.printRegister,
+          );
+        break;
+      case "halt":
+        opcodes[index] = preparedOpcode.halt;
+        break;
+    }
+  }
+  const hotBurstEntries = prepareCs486HotBurstEntries(
+    opcodes,
+    operandA,
+    executionFlags,
+  );
+  const prepared = {
+    executionFlags,
+    hasHotBurstEntries: hotBurstEntries.includes(1),
+    hotBurstEntries,
+    opcodes,
+    operandA,
+    operandB,
+  };
+  preparedCs486SemanticsByExecutable.set(executable, prepared);
+  return prepared;
+}
+
+/**
+ * Marks only entries that are guaranteed to execute the minimum number of hot
+ * instructions before reaching a cold boundary, regardless of a conditional
+ * branch outcome. The fixed pass count keeps preparation O(N) and prevents
+ * short mixed hot/cold runs from paying burst setup cost.
+ */
+function prepareCs486HotBurstEntries(
+  opcodes: Uint8Array,
+  operandA: Int32Array,
+  executionFlags: Uint8Array,
+): Uint8Array {
+  let previousDepth = new Uint8Array(opcodes.length);
+  for (let index = 0; index < opcodes.length; index += 1)
+    previousDepth[index] = isPreparedHotOpcode(opcodes[index]) ? 1 : 0;
+
+  for (let depth = 2; depth <= minimumHotBurstInstructions; depth += 1) {
+    const currentDepth = new Uint8Array(opcodes.length);
+    for (let index = 0; index < opcodes.length; index += 1) {
+      if (!isPreparedHotOpcode(opcodes[index])) continue;
+      const flags = executionFlags[index]!;
+      if ((flags & conditionalBranchInstructionFlag) !== 0) {
+        currentDepth[index] =
+          previousDepth[index + 1] === 1 &&
+          previousDepth[operandA[index]!] === 1
+            ? 1
+            : 0;
+      } else if ((flags & unconditionalControlTransferInstructionFlag) !== 0) {
+        currentDepth[index] = previousDepth[operandA[index]!] === 1 ? 1 : 0;
+      } else {
+        currentDepth[index] = previousDepth[index + 1] === 1 ? 1 : 0;
+      }
+    }
+    previousDepth = currentDepth;
+  }
+  return previousDepth;
+}
+
+function prepareCs486Operand(
+  opcodes: Uint8Array,
+  operandValues: Int32Array,
+  index: number,
+  operand: Cs486Operand,
+  immediateOpcode: number,
+  registerOpcode: number,
+): void {
+  if (operand.kind === "immediate") {
+    opcodes[index] = immediateOpcode;
+    operandValues[index] = operand.value;
+  } else {
+    opcodes[index] = registerOpcode;
+    operandValues[index] = indexOf(operand.register);
+  }
+}
+
+function prepareCs486BinaryInstruction(
+  opcodes: Uint8Array,
+  operandA: Int32Array,
+  operandB: Int32Array,
+  index: number,
+  destination: Cs486Register,
+  source: Cs486Operand,
+  immediateOpcode: number,
+  registerOpcode: number,
+): void {
+  operandA[index] = indexOf(destination);
+  prepareCs486Operand(
+    opcodes,
+    operandB,
+    index,
+    source,
+    immediateOpcode,
+    registerOpcode,
+  );
+}
+
+function prepareCs486Branch(
+  opcodes: Uint8Array,
+  targets: Int32Array,
+  executionFlags: Uint8Array,
+  index: number,
+  target: number,
+  branchOpcode: number,
+): void {
+  opcodes[index] = branchOpcode;
+  targets[index] = target;
+  executionFlags[index] = conditionalBranchInstructionFlag;
+}
+
+/**
+ * Precomputes model-specific timing once per executable/model pair. Semantic
+ * arrays are deliberately absent so all three CPU models share one decode.
+ */
+function prepareCs486InstructionTiming(
   executable: Cs486Executable,
   cpuModel: CpuModel,
-): PreparedCs486Instructions {
-  let byCpuModel = preparedCs486InstructionsByExecutable.get(executable);
+): PreparedCs486InstructionTiming {
+  let byCpuModel = preparedCs486TimingByExecutable.get(executable);
   const cached = byCpuModel?.get(cpuModel);
   if (cached !== undefined) return cached;
-  byCpuModel ??= new Map<CpuModel, PreparedCs486Instructions>();
-  preparedCs486InstructionsByExecutable.set(executable, byCpuModel);
+  byCpuModel ??= new Map<CpuModel, PreparedCs486InstructionTiming>();
+  preparedCs486TimingByExecutable.set(executable, byCpuModel);
   const instructions = executable.instructions;
   const baseCycles = new Uint32Array(instructions.length);
   const branchCycleDeltas = new Uint8Array(instructions.length);
-  const executionFlags = new Uint8Array(instructions.length);
   for (let index = 0; index < instructions.length; index += 1) {
     const instruction = instructions[index]!;
     switch (instruction.op) {
@@ -2140,7 +3195,6 @@ function prepareCs486Instructions(
       case "jle":
       case "jg":
       case "jge": {
-        executionFlags[index] = conditionalBranchInstructionFlag;
         const notTakenCycles = instructionCycleCost(cpuModel, instruction, {
           branchTaken: false,
         });
@@ -2151,25 +3205,15 @@ function prepareCs486Instructions(
         branchCycleDeltas[index] = takenCycles - notTakenCycles;
         break;
       }
-      case "jmp":
-      case "call":
-      case "call_indirect":
-      case "ret":
-        executionFlags[index] = unconditionalControlTransferInstructionFlag;
-        baseCycles[index] = instructionCycleCost(cpuModel, instruction);
-        break;
       case "mul":
-        if (cpuModel === "cs386sx") {
-          executionFlags[index] = dynamicMultiplyInstructionFlag;
-          break;
-        }
-        baseCycles[index] = instructionCycleCost(cpuModel, instruction);
+        if (cpuModel !== "cs386sx")
+          baseCycles[index] = instructionCycleCost(cpuModel, instruction);
         break;
       default:
         baseCycles[index] = instructionCycleCost(cpuModel, instruction);
     }
   }
-  const prepared = { baseCycles, branchCycleDeltas, executionFlags };
+  const prepared = { baseCycles, branchCycleDeltas };
   byCpuModel.set(cpuModel, prepared);
   return prepared;
 }
