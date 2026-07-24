@@ -1627,6 +1627,11 @@ export class Cs486Process implements CpuProcess {
   private executeFloatSyscall(name: string): number | undefined {
     const match = /^cs\.fp\.(f32|f64)\.([a-z0-9.]+)$/u.exec(name);
     if (match === null) return undefined;
+    if (this.cpuModel === "cs386sx")
+      throw new Cs486Fault(
+        "UnsupportedError",
+        `${name} requires an 80387 coprocessor unavailable on CS386SX`,
+      );
     const format: CsFloatFormat = match[1] === "f32" ? "binary32" : "binary64";
     const operation = match[2]!;
     const left = this.readFloatBits(format, "left");

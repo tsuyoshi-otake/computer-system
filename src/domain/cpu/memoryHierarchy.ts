@@ -134,7 +134,7 @@ export class CpuMemoryHierarchy {
         this.busTransfersValue += transfers;
         if (transfers === 3) this.unalignedAccessesValue += 1;
       }
-      return (transfers - 2) * this.specification.mainMemoryTransferCycles;
+      return transfers * this.specification.mainMemoryTransferCycles;
     }
 
     const unaligned = (address & dwordAlignmentMask) !== 0;

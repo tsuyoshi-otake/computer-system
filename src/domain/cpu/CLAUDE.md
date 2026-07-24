@@ -38,6 +38,13 @@
 - Instruction timing selection is O(1). CS386SX models Intel 80386 arithmetic,
   branch, early-out multiply, and 16-bit data-bus penalties. CS486DX/DX2 share
   486 instruction costs and differ by persisted clock.
+- CS386SX has no on-die FPU, matching the real 80386SX's dependency on a
+  discrete 80387SX coprocessor. Every `cs.fp.*` syscall faults on CS386SX with
+  `Cs486Fault("UnsupportedError", ...)` at dispatch. The fault is a runtime
+  dispatch check inside `executeFloatSyscall`, not a static pre-execution
+  rejection, so linking `printf`-family float formatting without exercising it
+  at runtime stays unaffected. CS486DX/DX2 model an on-die FPU and execute every
+  `cs.fp.*` operation at its documented cycle cost.
 - Neither CPU has dynamic branch prediction. Taken control transfers incur the
   deterministic pipeline/prefetch flush defined by the model.
 
@@ -46,9 +53,14 @@
 - `CpuMemoryHierarchy` is transient, fixed-size, and O(1) per access. Never
   persist tags, recency, prefetch state, counters, or warm-cache state.
 - CS386SX has no cache. An even-addressed 32-bit access uses two 16-bit
-  transfers; an odd-addressed access uses three.
+  transfers; an odd-addressed access uses three. Every transfer pays the full
+  `mainMemoryTransferCycles` cost, matching CS486DX/DX2's per-transfer rate,
+  because there is no cache line to absorb repeat traffic.
 - CS486DX has a cold 8 KiB four-way unified, 16-byte-line, write-through L1.
-  CS486DX2 adds a 256 KiB external L2.
+  CS486DX2 adds a 256 KiB external L2. A cache hit stays effectively free; only
+  an L1/L2 miss pays `mainMemoryTransferCycles` per line transfer, so CS386SX
+  (no cache) pays that main-memory cost far more often than CS486DX/DX2 despite
+  sharing the same per-transfer rate.
 - Keep instruction, L1/L2 hit/miss, bus transfer, unaligned access, pipeline
   flush, and cycle diagnostics synchronized with `run --stats`, CSBIOS, tests,
   and manual content.

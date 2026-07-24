@@ -25,7 +25,7 @@ describe("cs486 wasm batch-executor ABI", () => {
       cacheLineShift: 4,
       l1SetCount: 0,
       l2SetCount: 0,
-      mainMemoryTransferCycles: 2,
+      mainMemoryTransferCycles: 3,
     });
     expect(cs486WasmCacheGeometry("cs486dx")).toEqual({
       cacheLineShift: 4,

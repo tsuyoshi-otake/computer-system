@@ -528,11 +528,15 @@ global scheduler cap arbitrates mixed-speed Computers in round-robin order.
 
 `CpuMemoryHierarchy` is recreated cold for every shared CS process. CS386SX has
 no cache and charges two 16-bit transfers for even dwords or three for odd
-dwords. CS486DX/DX2 use a fixed 8 KiB four-way unified L1 with 16-byte lines and
-write-through stores; DX2 adds a fixed 256 KiB external L2. Tags, recency,
-prefetch state, and counters are transient and O(1) per access. Taken control
-flow records a deterministic prefetch/pipeline flush; no profile claims dynamic
-branch prediction. Keep exact alignment, locality, eviction, cold-start, and
+dwords, and every transfer pays the full `mainMemoryTransferCycles` cost because
+there is no cache line to absorb repeat traffic. CS486DX/DX2 use a fixed 8 KiB
+four-way unified L1 with 16-byte lines and write-through stores; DX2 adds a
+fixed 256 KiB external L2. A cache hit stays inexpensive, and CS486DX/DX2 pay
+that same per-transfer `mainMemoryTransferCycles` cost only on an L1/L2 miss —
+CS386SX pays it on every access instead. Tags, recency, prefetch state, and
+counters are transient and O(1) per access. Taken control flow records a
+deterministic prefetch/pipeline flush; no profile claims dynamic branch
+prediction. Keep exact alignment, locality, eviction, cold-start, and
 branch-direction tests whenever timing changes.
 
 Display hardware is a separate versioned snapshot field. Portable uses
@@ -687,7 +691,12 @@ WebAssembly, and native addons are not result authorities. Compiler folding and
 runtime `cs.fp.*` operations call the same core. The latter run inside the
 admitted CS486 process, charge fixed operation cycles plus modeled guest-memory
 access, and retain process-local invalid/divide-by-zero/overflow/underflow/
-inexact status.
+inexact status. CS486DX/DX2 model an on-die FPU and execute every `cs.fp.*`
+operation; CS386SX has no on-die FPU (matching the real 80386SX's dependency on
+a discrete, unfitted 80387SX coprocessor) and faults every `cs.fp.*` dispatch
+with `Cs486Fault("UnsupportedError", ...)` at runtime instead of a static
+pre-execution check, so `printf`-family binaries that link float formatting but
+never format a float at runtime stay unaffected on CS386SX.
 
 Rootfs v19 `<float.h>` and `<math.h>` expose the exact limits and the initial
 guest libm surface: `fabs`, `copysign`, integral rounding, `fmod`, `sqrt`,

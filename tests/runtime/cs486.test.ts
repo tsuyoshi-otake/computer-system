@@ -115,7 +115,7 @@ describe("CS486DX execution core", (): void => {
     expect(cs386sx.executedInstructions).toBe(cs486dx.executedInstructions);
     expect(cs486dx.cycles).toBeGreaterThan(26);
     expect(cs486dx2.cycles).toBeGreaterThan(cs486dx.cycles);
-    expect(cs386sx.cycles).toBe(48);
+    expect(cs386sx.cycles).toBe(60);
     expect(cs386sx.microarchitecture.l1Misses).toBe(0);
     expect(cs486dx.microarchitecture.l1Misses).toBeGreaterThan(0);
   });

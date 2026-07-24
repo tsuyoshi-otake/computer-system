@@ -39,7 +39,6 @@ describe("CS486 deterministic floating ABI runtime", () => {
   });
 
   it.each([
-    ["cs386sx", 117],
     ["cs486dx", 119],
     ["cs486dx2", 131],
   ] as const)(
@@ -57,6 +56,22 @@ describe("CS486 deterministic floating ABI runtime", () => {
       ).toBe(cycles);
     },
   );
+
+  it("faults every cs.fp.* syscall on CS386SX (no 80387 coprocessor)", () => {
+    const executable = assembleCs486(`
+      mov eax, 1069547520
+      mov edx, 1073741824
+      syscall cs.fp.f32.mul
+      halt
+    `);
+
+    expect(() =>
+      runCs486(executable, { cpuModel: "cs386sx", memoryBytes: 65_536 }),
+    ).toThrow(Cs486Fault);
+    expect(() =>
+      runCs486(executable, { cpuModel: "cs386sx", memoryBytes: 65_536 }),
+    ).toThrow(/80387/u);
+  });
 
   it("reports canonical special values and process-local status", () => {
     const result = runCs486(

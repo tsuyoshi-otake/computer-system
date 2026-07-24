@@ -37,7 +37,7 @@ const specifications: Readonly<Record<CpuModel, CpuModelSpecification>> = {
       cacheLineBytes: 16,
       externalCacheBytes: 0,
       l1CacheBytes: 0,
-      mainMemoryTransferCycles: 2,
+      mainMemoryTransferCycles: 3,
       memoryModules: "2 x 1 MiB 30-pin SIMM DRAM",
       pipeline: "prefetch-overlap",
     },

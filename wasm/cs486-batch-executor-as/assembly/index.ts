@@ -530,7 +530,7 @@ function accessDataCycles(address: i32, write: bool): i32 {
       statAdd(STAT_BUS_TRANSFERS, <u64>transfers);
       if (transfers == 3) statAdd(STAT_UNALIGNED_ACCESSES, 1);
     }
-    return (transfers - 2) * cfgMainMemoryTransferCycles;
+    return transfers * cfgMainMemoryTransferCycles;
   }
   const a: u32 = <u32>address;
   const unaligned = (a & 3) != 0;

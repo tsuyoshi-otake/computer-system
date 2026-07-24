@@ -37,8 +37,10 @@ describe("CS386SX and CS486 memory hierarchy", (): void => {
   it("charges the 386SX third 16-bit transfer only for odd dword addresses", (): void => {
     const aligned = run("load eax, [1024]\nhalt", "cs386sx");
     const unaligned = run("load eax, [1025]\nhalt", "cs386sx");
+    const { mainMemoryTransferCycles } =
+      cpuModelSpecification("cs386sx").microarchitecture;
 
-    expect(unaligned.cycles - aligned.cycles).toBe(2);
+    expect(unaligned.cycles - aligned.cycles).toBe(mainMemoryTransferCycles);
     expect(unaligned.microarchitecture.unalignedAccesses).toBe(1);
     expect(unaligned.microarchitecture.busTransfers).toBe(
       aligned.microarchitecture.busTransfers + 1,
@@ -209,13 +211,15 @@ describe("CS386SX and CS486 memory hierarchy", (): void => {
         hierarchy.accessData(maximumProductionDataDwordAddress, "read"),
       ).toBe(
         cpuModel === "cs386sx"
-          ? 0
+          ? 2 * specification.mainMemoryTransferCycles
           : cacheLineTransfers * specification.mainMemoryTransferCycles,
       );
       expect(
         hierarchy.accessData(maximumProductionDataDwordAddress, "write"),
       ).toBe(
-        cpuModel === "cs386sx" ? 0 : specification.mainMemoryTransferCycles,
+        cpuModel === "cs386sx"
+          ? 2 * specification.mainMemoryTransferCycles
+          : specification.mainMemoryTransferCycles,
       );
       expect(hierarchy.stats).toEqual({
         busTransfers: cpuModel === "cs386sx" ? 4 : cacheLineTransfers + 1,
@@ -241,7 +245,7 @@ describe("CS386SX and CS486 memory hierarchy", (): void => {
         hierarchy.accessData(maximumProductionDataByteAddress, "read"),
       ).toBe(
         cpuModel === "cs386sx"
-          ? specification.mainMemoryTransferCycles
+          ? 3 * specification.mainMemoryTransferCycles
           : 1 + 2 * cacheLineTransfers * specification.mainMemoryTransferCycles,
       );
       expect(hierarchy.stats).toEqual({
@@ -267,15 +271,15 @@ describe("CS386SX and CS486 memory hierarchy", (): void => {
 
       expect(hierarchy.accessData(lineEnd, "read")).toBe(
         cpuModel === "cs386sx"
-          ? specification.mainMemoryTransferCycles
+          ? 3 * specification.mainMemoryTransferCycles
           : 1 + 2 * cacheLineTransfers * specification.mainMemoryTransferCycles,
       );
       expect(hierarchy.accessData(lineEnd, "read")).toBe(
-        cpuModel === "cs386sx" ? specification.mainMemoryTransferCycles : 1,
+        cpuModel === "cs386sx" ? 3 * specification.mainMemoryTransferCycles : 1,
       );
       expect(hierarchy.accessData(lineEnd, "write")).toBe(
         cpuModel === "cs386sx"
-          ? specification.mainMemoryTransferCycles
+          ? 3 * specification.mainMemoryTransferCycles
           : 1 + 2 * specification.mainMemoryTransferCycles,
       );
       expect(hierarchy.stats).toEqual({

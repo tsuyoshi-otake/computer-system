@@ -1071,13 +1071,25 @@ text terminal.
 The shared CS process also models a deterministic, fixed-capacity memory
 hierarchy. CS386SX has no on-chip cache: its 16-bit external bus performs two
 transfers for an even-addressed 32-bit operand and three for an odd-addressed
-operand. Its default 2 MiB memory is identified as two 1 MiB 30-pin SIMM DRAM
-modules. CS486DX and CS486DX2 use a cold 8 KiB, four-way unified L1 with 16-byte
-lines and write-through stores. Advanced CS486DX2 adds a modeled 256 KiB
-external L2 and identifies two 4 MiB 72-pin SIMMs; standard CS486DX identifies
-four 512 KiB 30-pin SIMMs and no L2. Cache contents and counters are transient
-per process and never enter persistence. Access, replacement, alignment, and
-timing selection remain O(1).
+operand, and every transfer pays the full main-memory cycle cost because there
+is no cache line to absorb repeat traffic. Its default 2 MiB memory is
+identified as two 1 MiB 30-pin SIMM DRAM modules. CS486DX and CS486DX2 use a
+cold 8 KiB, four-way unified L1 with 16-byte lines and write-through stores, so
+a cache hit stays inexpensive and that same per-transfer main-memory cost is
+paid only on an L1/L2 miss. Advanced CS486DX2 adds a modeled 256 KiB external L2
+and identifies two 4 MiB 72-pin SIMMs; standard CS486DX identifies four 512 KiB
+30-pin SIMMs and no L2. Cache contents and counters are transient per process
+and never enter persistence. Access, replacement, alignment, and timing
+selection remain O(1).
+
+CS386SX also has no on-die FPU: like the real 80386SX, which needed a discrete
+80387SX coprocessor for hardware floating point, every `cs.fp.*` syscall faults
+with an explicit `UnsupportedError` at dispatch instead of executing. The fault
+is dynamic, not a static pre-execution rejection, so guest programs that link
+`printf`-family formatting but never exercise a `%f` conversion at runtime are
+unaffected. CS486DX and CS486DX2 both model an on-die FPU from the 80486
+generation onward and execute every `cs.fp.*` operation at its documented cycle
+cost.
 
 Production Bedrock admission advances each guest CPU at approximately one half
 of its persisted nominal clock. At 20 TPS this admits 400,000 cycles per tick

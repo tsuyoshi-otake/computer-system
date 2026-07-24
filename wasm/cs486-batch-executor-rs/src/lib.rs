@@ -669,7 +669,7 @@ fn access_data_cycles(c: &Config, address: i32, write: bool) -> i32 {
                 stat_add(c, STAT_UNALIGNED_ACCESSES, 1);
             }
         }
-        return (transfers - 2) * c.main_memory_transfer_cycles;
+        return transfers * c.main_memory_transfer_cycles;
     }
     let a = address as u32;
     let unaligned = a & 3 != 0;
