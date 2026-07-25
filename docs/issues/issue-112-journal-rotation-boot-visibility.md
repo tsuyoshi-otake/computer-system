@@ -2,17 +2,19 @@
 
 GitHub Issue: https://github.com/tsuyoshi-otake/computer-system/issues/112
 
-Status: implemented and host-verified 2026-07-25. Changes A, B, and C below are
-in `main`'s working tree with focused tests; the real managed-BDS recovery
-evidence and the real-browser check are the only acceptance items still open,
-and they are marked as such. Root cause and every path below were confirmed by
-reading the sources and by one observed live managed-BDS occurrence before any
-code changed. Two claims from the planning pass were wrong and are corrected in
-place below (the Planned change C premise, and the Web frame-metadata item in
-B); the original wording is kept alongside the correction rather than silently
-replaced. Related: #111 (implemented, its remaining real-session acceptance item
-was blocked by this defect on the affected Computer), #108 (different root
-cause, keeps its own scope), #20 (OS presence lifecycle), #39 (login text and
+Status: implemented and host-verified 2026-07-25, deployed to the live managed
+BDS world the same day. Changes A, B, and C below are in `main` with focused
+tests, and the managed companion now runs the fixed build against the preserved
+interactive world; the in-game power-on readback of the affected Computer and
+the real-browser check are the only acceptance items still open, and they are
+marked as such. Root cause and every path below were confirmed by reading the
+sources and by one observed live managed-BDS occurrence before any code changed.
+Two claims from the planning pass were wrong and are corrected in place below
+(the Planned change C premise, and the Web frame-metadata item in B); the
+original wording is kept alongside the correction rather than silently replaced.
+Related: #111 (implemented, its remaining real-session acceptance item was
+blocked by this defect on the affected Computer), #108 (different root cause,
+keeps its own scope), #20 (OS presence lifecycle), #39 (login text and
 last-login history).
 
 ## Reported symptom
@@ -520,8 +522,19 @@ newest records; a failed boot shows the halt screen instead of a blank display.
 Record the date, engine selection, and observed result here before the Issue
 closes.
 
-Result: open. Host verification does not substitute for it, and it is also what
-unblocks the remaining #111 real-session acceptance item on the affected
+Result: partially observed on 2026-07-25, still open. The managed companion was
+restarted on the fixed build against the preserved interactive world
+(`resetWorld: false`, world backed up first, compute engine selected as
+`wasm-rust`), and it reached a healthy steady state: companion `running`, BDS
+`running`, Web service listening, compute pool `ready wasm-rust`, `lastError`
+`null`, and `CS_STORAGE_MIGRATION` reporting `"state":"complete"` with no
+missing and no skipped Computers about ten seconds after start. That is the
+restart half only. The power-on readback of the affected Computer is still open:
+activating a Web Terminal handoff needs an in-game player interaction, and the
+`bds_get_tui_screen` / `bds_verify_tui_screen` path was unavailable in the
+session that produced this record because no MCP server was connected to it.
+Host verification does not substitute for the readback, and the readback is also
+what unblocks the remaining #111 real-session acceptance item on the affected
 Computer. Never restart the interactive world with `resetWorld: true`.
 
 Verify: Real Web Terminal session in a browser on the fixed build.
