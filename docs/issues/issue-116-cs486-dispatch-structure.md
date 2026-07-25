@@ -2,8 +2,7 @@
 
 GitHub Issue: https://github.com/tsuyoshi-otake/computer-system/issues/116
 
-Status: implemented and host-verified. Real-BDS `run --stats` comparison remains
-open.
+Status: implemented, host-verified, and real-BDS verified.
 
 Depends on #115, which removed the Rust wasm batch executor and left
 `Cs486Process` as the single production CS486 implementation. This Issue changes
@@ -119,13 +118,74 @@ pack build, and the 16-chapter Pages build pass.
 
 Result: PASS.
 
-## Open
+Verify on 2026-07-26: hoist the per-instruction `try`/`catch` out of all three
+slice loops in `cs486.ts` — `runCpuSliceWithHotBurst`,
+`runCpuSliceWithoutHotBurst`, and `runInstructionSlice` — into one
+`for (;;) { try { while (...) { ... } break } catch { this.crash(error) } }` per
+slice, then measure it with the same alternating A/B command as above.
 
-Real-BDS `run --stats` before/after comparison on a guest-built program. Expect:
-identical modeled `cpuCycles` and microarchitecture statistics with only host
-wall time reduced. Guest timing must stay independent of host elapsed time, so a
-change in wall clock alone is not evidence of correctness — the modeled fields
-carry that.
+Expect: complete equivalence across all three profiles, and a throughput ratio
+large enough to justify the structure.
+
+Result: REVERTED. Equivalence held (`EQUIVALENT across 3 rounds`), but the
+geometric mean over all 18 configurations was 1.002x, with every individual
+configuration inside ±2% on cs386sx, cs486dx, and cs486dx2 alike. V8 already
+costs a `try` region around a loop body at effectively nothing, so there was
+nothing to recover. The hoist was not free either: the baseline `try` wraps only
+`executeNext` and leaves the `runHotCpuBurst` call outside it, so hoisting would
+have converted a throw escaping the burst into a crashed process instead of
+letting it propagate. That path is unreachable by construction — the burst
+refuses every faulting instruction before its first side effect — but it weakens
+the invariant that `executeNext` owns every fault, and a measured 1.002x buys
+nothing to pay for it.
+
+Verify on 2026-07-26: real-BDS `run --stats` before/after comparison on a
+guest-built program. Two detached worktrees hold the adjacent pair — `1113724`
+(v0.1.0-alpha.10, the commit before this change) and `472d059` (this change) —
+because `main` also carries #111, #112, and #113, one of which altered
+cumulative CPU accounting. A driver speaks stdio JSON-RPC to
+`tools/bds-mcp-server.mjs` with `BDS_MCP_WORKDIR` under `%USERPROFILE%\tmp` and
+`BDS_MCP_WORLD=ComputerSystemAcceptance`, starts each build with
+`bds_start({resetWorld:true, acceptanceFixture:true})`, waits for
+`CS_STORAGE_MIGRATION {"state":"complete"`, provisions the fixture Computer,
+polls `whoami` until CSBIOS hands the shell over, writes a compute-shaped C
+program with `echo` one line at a time, builds it with `cc`, and runs
+`run --stats /tmp/b` five times. The program fills a 64-element `int` array and
+then loops a leaf call over it, so loads, stores, `push`, `pop`, `call`, and
+`ret` all run inside the burst rather than only ALU instructions.
+
+Expect: identical modeled `cpuCycles` and microarchitecture statistics with only
+host wall time reduced. Guest timing must stay independent of host elapsed time,
+so a change in wall clock alone is not evidence of correctness — the modeled
+fields carry that.
+
+Result: PASS on the fixture Computer's CS486DX2 at 66 MHz. Every modeled field
+is identical between the two builds, in all ten runs:
+
+```text
+CS486DX2: 116987 instructions, 240885 CPU cycles, 3649.773 us at 66 MHz, halted
+memory: L1 147205 hit/134 miss, L2 0 hit/134 miss, 14114 bus transfers,
+        0 unaligned, 4176 pipeline flushes
+```
+
+Only the `host:` line moved. Host wall elapsed per run, five runs each:
+
+| build            | wall elapsed (ms)       | median | guest CPU cycles/s |
+| ---------------- | ----------------------- | ------ | ------------------ |
+| `1113724` before | 212, 229, 245, 226, 229 | 229    | 1,051,900          |
+| `472d059` after  | 158, 161, 164, 163, 164 | 163    | 1,477,822          |
+
+That is 1.40x on the median and 1.34x on the best run, which reproduces the host
+A/B harness's 1.37x for `hosted-c-mid cpu-slice` on CS486DX2 from an independent
+instrument. The in-world path is the scheduler's `runCpuSlice`: the guest
+process is admitted in bounded sub-slices whose throttle is a host-microsecond
+budget, so a faster interpreter finishes in fewer ticks and the guest OS reports
+less wall time. The modeled 3649.773 us of guest time is unchanged, which is the
+point — host elapsed time never rewrote guest timing.
+
+The fixture provisions one Computer, so this is CS486DX2 evidence. CS386SX and
+CS486DX rest on the host A/B harness, which measured equivalence and throughput
+on all three profiles.
 
 ## Explicit exclusions
 
@@ -135,6 +195,8 @@ modeled cycle cost, cache geometry, fault message, or syscall policy. It also
 does not change where a process runs; engine selection stays operator
 configuration.
 
-A separate measured attempt to split `SetAssociativeCache`'s replacement hint
-and inline its hit path was reverted: it measured equivalent but at 0.997x,
-which is no measurable benefit for the added structure.
+Two separately measured attempts were reverted rather than shipped, and are
+recorded above so neither is retried blind: splitting `SetAssociativeCache`'s
+replacement hint and inlining its hit path (0.997x), and hoisting the
+per-instruction `try`/`catch` out of the three slice loops (1.002x). Both
+measured equivalent; neither measured faster.
