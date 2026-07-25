@@ -76,6 +76,17 @@ removed from Minecraft chat.
      JSON page; one connected writer tab; boundary movement produces one Web UI
      state transition without Minecraft chat spam.
 
+8. A typed four-digit number reaches the session it names even after that
+   Computer's activation was spent.
+   - Verify:
+     `npm test -- tests/tools/webCompanionServer.test.mjs tests/tools/webUi.test.mjs`
+   - Expect: `POST /api/handoff` for an in-range session whose activation is
+     already consumed answers `401 unauthorized`, the following
+     `POST /api/reconnect` for the same number answers `200` with the same
+     `sessionId`, `access: "in_range"`, and a rotated token that invalidates the
+     superseded one; the client dialog treats `401` and `410` as a fall-through
+     into the bounded reconnect exchange instead of a terminal failure.
+
 ## Residual verification
 
 Criteria 1 through 6 are verified. For criterion 7, the isolated real-BDS pack
@@ -100,3 +111,35 @@ existing interactive BDS world was intentionally left running and unmodified.
   GDK.
   - Result: pending; use the criterion 7 procedure without resetting the
     currently running interactive world.
+
+## Manual connection-code entry (2026-07-25)
+
+The four-digit number is permanent, so it names two different things: an
+unconsumed activation, and the session that already owns the number. `/p/NNNN`
+and `/?computer=NNNN` already branched between the one-use exchange and the
+bounded reconnect exchange, but the dialog's own manual-entry path only ever
+implemented the one-use half. A browser holding no token therefore dead-ended on
+`A valid browser terminal token is required.` while standing inside the 3-block
+range, even though the 3-block rule exists only to stop a distant player from
+reading the screen. `connectWithCode` now treats `401` and `410` as a
+fall-through into the existing `reconnectWithCode`, which already owns range
+waiting, bounded backoff, the 64-attempt and 30-minute caps, and the terminal
+"activate the Computer in Minecraft" outcome.
+
+- Verify: with the managed companion running and a placed in-range Computer
+  whose activation was already consumed, clear the tab's `sessionStorage` and
+  `localStorage`, load the companion root with no query, type that Computer's
+  four-digit number, and press CONNECT.
+  - Result: passed in real Chrome. Before the change the same sequence stopped
+    at `A valid browser terminal token is required.`; after it the tab settles
+    at `/?computer=NNNN`, the header reads `CONNECTED`, and the footer reads
+    `CONTROL · LOGIN · 80 × 25 · WAITING_EVENT` over the live CS-Linux `login:`
+    screen.
+- Verify: the criterion 8 focused suites.
+  - Result: passed; the added companion test measures the `401` handoff and
+    `200` reconnect pair against a real HTTP server on an ephemeral port, and
+    the added UI test locks the client fall-through and the dialog wording.
+
+The dialog copy and canonical manual chapter 8.1 now state that the number
+reconnects a terminal it already owns or claims a fresh activation, so the
+documented behavior and the implemented behavior agree.

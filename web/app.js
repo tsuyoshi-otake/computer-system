@@ -521,7 +521,7 @@ if (
   void reconnectWithCode(queryCode);
 } else if (!/^[A-Za-z0-9_-]{20,}$/u.test(token)) {
   showHandoffPrompt(
-    "Enter this Computer's permanent four-digit number from Minecraft. Each activation lasts two minutes.",
+    "Enter this Computer's permanent four-digit number from Minecraft. It reconnects a terminal that number already owns, or claims a fresh activation, which lasts two minutes.",
   );
 } else {
   void bootstrap();
@@ -2214,14 +2214,7 @@ async function connectWithCode(
       body: JSON.stringify({ code }),
       cache: "no-store",
     });
-    if (!response.ok) {
-      const body = await response.json().catch(() => ({}));
-      throw new Error(
-        typeof body.error === "string"
-          ? body.error
-          : `Connection failed (${String(response.status)}).`,
-      );
-    }
+    if (!response.ok) throw await responseError(response);
     const body = await response.json();
     const discarded = acceptConnection(body.token, body.code ?? code);
     elements.errorDialog.close();
@@ -2233,6 +2226,14 @@ async function connectWithCode(
       );
     }
   } catch (error) {
+    // The four-digit number is permanent, so it names both an unconsumed
+    // activation and an already-established session. Only the activation is
+    // spent here, so an unauthorized or gone activation still has to reach the
+    // bounded reconnect exchange instead of dead-ending on this dialog.
+    if (error?.status === 401 || error?.status === 410) {
+      void reconnectWithCode(code);
+      return;
+    }
     showHandoffPrompt(errorMessage(error));
     elements.handoffCode.select();
   } finally {

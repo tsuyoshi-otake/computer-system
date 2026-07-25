@@ -1882,6 +1882,56 @@ describe("Web companion HTTP server", () => {
     ).toBe(409);
   });
 
+  it("still reconnects an in-range code whose activation was already spent", async () => {
+    const bds = new FakeBds();
+    const server = newTestWebCompanionServer({ bds, port: 0 });
+    servers.push(server);
+    const status = await server.start();
+    bds.log(
+      'CS_WEB_SESSION_REQUEST {"requestId":"r1-1","playerId":"player-1","computerId":"c-000001"}',
+    );
+    await until(() => bds.commands.length === 1);
+    const connected = await consumeResponse(bds.commands[0]);
+    await publishShellTerminal(server, bds, connected.token);
+    const session = server.store.activeSessions()[0];
+    expect(session.access).toBe("in_range");
+
+    // A browser holding no token types the permanent four-digit number. The
+    // activation is already spent, so the one-use exchange has nothing left to
+    // give, but the session that number owns is still in range and reconnectable.
+    const spent = await fetch(`${status.origin}/api/handoff`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Origin: status.origin },
+      body: JSON.stringify({ code: "0001" }),
+    });
+    expect(spent.status).toBe(401);
+    expect(await spent.json()).toMatchObject({ code: "unauthorized" });
+
+    const reconnected = await fetch(`${status.origin}/api/reconnect`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Origin: status.origin },
+      body: JSON.stringify({ code: "0001" }),
+    });
+    expect(reconnected.status).toBe(200);
+    const replacement = await reconnected.json();
+    expect(replacement.token).not.toBe(connected.token);
+    expect(replacement.session).toMatchObject({
+      access: "in_range",
+      connectionCode: "0001",
+      sessionId: session.sessionId,
+    });
+    expect(
+      (
+        await fetch(`${status.origin}/api/session`, {
+          headers: {
+            Authorization: `Bearer ${connected.token}`,
+            "x-computer-system-interaction-schema": "2",
+          },
+        })
+      ).status,
+    ).toBe(401);
+  });
+
   it("reconnects a remembered code only after proximity resumes", async () => {
     const bds = new FakeBds();
     const server = newTestWebCompanionServer({ bds, port: 0 });

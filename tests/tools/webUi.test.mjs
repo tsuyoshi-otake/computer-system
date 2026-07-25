@@ -27,6 +27,23 @@ describe("Web terminal UI", () => {
     expect(script).toContain("const maximumAttempts = 64");
   });
 
+  it("falls back from a spent activation to the bounded reconnect exchange", async () => {
+    const script = await source("web/app.js");
+
+    // The typed four-digit number is permanent, so the dialog must not treat a
+    // spent activation as a dead end while the session that number owns is
+    // still reconnectable.
+    expect(script).toMatch(
+      /if \(error\?\.status === 401 \|\| error\?\.status === 410\) \{\s*void reconnectWithCode\(code\);\s*return;\s*\}/u,
+    );
+    expect(script).toContain(
+      "if (!response.ok) throw await responseError(response);",
+    );
+    expect(script).toContain(
+      "It reconnects a terminal that number already owns, or claims a fresh activation",
+    );
+  });
+
   it("masks secret input and paints full-height terminal cell backgrounds", async () => {
     const [css, script] = await Promise.all([
       source("web/styles.css"),
