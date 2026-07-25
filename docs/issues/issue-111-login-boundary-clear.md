@@ -122,16 +122,85 @@ running a build without this fix; migration reached `complete`; `state` is
 was preserved through `resetWorld: false` and a pre-restart copy was kept
 outside the repository.
 
-Verify: Real managed BDS/Web Terminal session. Let a session reach a
-`terminal_closed` finalization, reattach, and type.
+Verify on 2026-07-25 on real BDS, in the isolated password-free acceptance world
+through an MCP-owned Web Terminal session: run `reboot` from the guest shell,
+wait for the CSBIOS POST surface, wait for the boundary surface, then type
+`echo after-reboot-ok` on the same session.
 
-Expect: A cleared screen with `/etc/issue` and the login prompt, and login
-succeeds without a Computer power cycle.
+Expect: The terminal is released by the power cycle, the boundary surface
+carries no POST rows, and the same session accepts input again without a manual
+reattach.
 
-Status: open. Host tests and a deployment digest are not evidence of Web
-Terminal behavior. The fixed build is now the live managed build, so this item
-only needs a session on it; record its date, engine selection, and observed
-result before the Issue closes.
+Result: PASS. The POST surface reported `lifecycle: "booting"` with rows
+`CSBIOS Revision 1.1`, `CPU            : CS486DX2 at 66 MHz`, and
+`Memory Test    : 1024 KB`. The next boundary surface contained only
+`Computer System Linux 1.0`, the welcome and `man cs-linux` lines,
+`Last login: … on tty1 (disconnect)`, and the prompt — no `CSBIOS` or
+`Memory Test` row survived the boundary. `bds_send_tui_input` returned
+`accepted` and the surface then showed the typed command followed by
+`after-reboot-ok` and a fresh prompt, so Defect 2 does not reproduce on real
+BDS.
+
+Verify on 2026-07-25 on real BDS: read the cursor descriptor of the POST
+surface.
+
+Expect: No cursor is presented while CSBIOS owns the screen.
+
+Result: PASS. The POST surface reported `cursor { blink: false, x: 1, y: 25 }`.
+`renderTerminalRows` and `renderPlainTerminalRows` draw the cursor cell only
+while `terminal.cursorBlink` is true, and the Web client hides its overlay
+whenever `interaction.context === "unavailable"`, so neither surface presents a
+cursor during POST.
+
+Verify on 2026-07-25 on real BDS: open a second MCP Web Terminal session for the
+same Computer while the first one is the writer, then type on the second one.
+
+Expect: The new session becomes the writer, the previous session is demoted
+rather than closed, and the shared Computer terminal is not finalized.
+
+Result: PASS. Both session identifiers kept receiving `CS_WEB_TERMINAL`
+snapshots after the handoff, `bds_verify_tui_screen` reported `verified: true`
+with `exactDebugWriter: true` for the new session, and the typed command and its
+output appeared in order. This is the writer-demotion path from
+`src/application/terminal/CLAUDE.md`, not a `terminal_closed` finalization.
+
+Verify: Real managed BDS/Web Terminal session on a Computer that requires a
+CS-Linux password. Let a session reach a `terminal_closed` finalization,
+reattach, and log in.
+
+Expect: A cleared screen with `/etc/issue` and the `<computer-id> login:`
+prompt, and login succeeds without a Computer power cycle.
+
+Status: open for the authenticated boundary only. The acceptance world builds
+with `requireLinuxLogin: false`, so it has no `login:` prompt to clear and
+cannot carry this item; the real-BDS results above therefore cover the tty clear
+at the OS boundary, the released-terminal input latch, and the POST cursor, but
+not the password prompt itself. Entering a password is an operator action, so
+this item stays with the user on the live world; record its date, engine
+selection, and observed result before the Issue closes.
+
+## Gap found by the real-BDS run, 2026-07-25
+
+`setCursorBlink(false)` is called by the CSBIOS POST and halt renderers and by
+the power boundary in `computerRuntime.ts`, and no OS path ever sets it back to
+true. Only the guest `term.set_cursor_blink` syscall and the CS-ABI `applyFrame`
+present path (which passes `blink: true`) can re-enable it.
+
+- The Web Terminal is unaffected: `web/app.js` decides cursor visibility from
+  `interaction.context === "unavailable"` and uses `blink` only to drive the CSS
+  blink animation, so a freshly booted shell still shows a steady cell cursor.
+- The in-world Bedrock display draws its cursor cell only while `cursorBlink` is
+  true, so after a boot the in-world CS-Linux prompt presents no cursor until a
+  CS-ABI program enables one. Observed on real BDS: the post-reboot prompt
+  reported `blink: false` and stayed there across a completed command, while the
+  same Computer reported `blink: true` at its prompt earlier in the session,
+  after a CS-ABI foreground had exited.
+
+This is not a regression of the reported symptom — `cursorBlinkValue` already
+starts false, so a fresh Computer never presented an in-world cursor — but the
+change does now reset the flag on every POST and power boundary. Deciding
+whether the OS should assert cursor visibility when it takes an interactive
+terminal is open and is not implemented here.
 
 Partially blocked on 2026-07-25 by #112. The Computer that produced the original
 report is now `crashed` with a full OS runtime journal and cannot boot at all,

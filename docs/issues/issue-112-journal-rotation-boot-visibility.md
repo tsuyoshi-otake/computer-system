@@ -537,14 +537,88 @@ Host verification does not substitute for the readback, and the readback is also
 what unblocks the remaining #111 real-session acceptance item on the affected
 Computer. Never restart the interactive world with `resetWorld: true`.
 
+Narrowed later the same day with MCP connected. The interactive world was
+restarted again on the fixed build with `resetWorld: false` and the two backups
+kept, and it reported `state running`, `cpuEngine "wasm-rust"`, two ready
+compute workers, `diagnostics 0`, `lastError null`, no emergency deferrals, and
+`CS_STORAGE_MIGRATION {"state":"complete","migratedComputers":1,"missingComputers":0,"skippedComputers":3,"totalComputers":4}`.
+An MCP command against the affected Computer then returned `status: "ignored"`,
+`error: "not_running"`, so it is still powered off after the restart. The
+remaining blocker is precise now: MCP exposes no power-on and no `safe_boot`
+tool, that relay is scoped to a Web client session, and the debug workflow must
+not drive a browser, so the power-on itself is an operator action in game or
+from the Web client. The MCP readback path that was missing before is available,
+so once the Computer is powered on the journal-truncation readback can be taken
+with `bds_execute_computer_command` running `dmesg` plus
+`bds_verify_tui_screen`.
+
 Verify: Real Web Terminal session in a browser on the fixed build.
 
 Expect: The halt screen is readable without a power cycle, no cursor is drawn
 while the machine is halted or in POST, and the recovered Computer accepts
 input.
 
-Result: open. The published-fault-reason half of this item was removed with the
-frame-metadata decision under change B.
+Result: partially observed on 2026-07-25 on real BDS; the halt-screen half stays
+open. Verified in the acceptance world below: no cursor is presented during
+POST, and a recovered Computer accepts input. Not verified: a halt screen
+readable without a power cycle. The acceptance fixture provisions a healthy
+Computer and exposes no fault-injection surface, and a production build rejects
+the fixture bridge outright, so no deliberate boot failure can be induced
+through MCP on real BDS. Inducing one would need either a fault-injection
+surface that does not exist or a deliberately corrupted persisted world, so this
+half stays open with the `csBios` halt-screen suite above as its only coverage.
+The published-fault-reason half of this item was removed with the frame-metadata
+decision under change B.
+
+## Real-BDS acceptance run, 2026-07-25
+
+Environment: real BDS, the isolated password-free acceptance world in its own
+dedicated work directory, one fixture Computer reporting
+`cs486dx2 66000000 Hz; memory 8388608 bytes`, an MCP-owned Web Terminal session,
+and the default `typescript` CPU engine. The interactive world was stopped and
+preserved first, with backups taken before and after the stop; it was never
+reset.
+
+Verify: run `dmesg` in the guest on a freshly booted Computer through
+`bds_execute_computer_command`.
+
+Expect: the bounded boot journal renders as guest-readable text.
+
+Result: PASS. Exit code 0, 19 records, 64 modeled CPU cycles, from
+`CS-Linux 1.0 kernel start` and `CPU cs486dx2 66000000 Hz; memory 8388608 bytes`
+through the mounted filesystems, the discovered devices, the syslog, cron and
+cs-login services, the verified account-database migration, and `boot complete`.
+
+Verify: reboot the Computer repeatedly from the guest shell, waiting for the
+CSBIOS POST surface and then the shell prompt each time, and read `dmesg` after
+every boot until the 256-entry journal cap is passed.
+
+Expect: the journal rotates oldest-first with a counted dropped-record notice
+instead of failing the boot, and the Computer keeps reaching a shell prompt
+after the cap is passed.
+
+Result: PASS. Boot-channel records grew 35 → 52 → 69 → 86 → 103 → 120 over five
+reboots and then stopped growing, and the sixth boot rendered
+`-- 30 earlier record(s) dropped by journal rotation --` as the first line. Two
+further reboots reached the prompt with the notice reporting 68 dropped records,
+120 rendered records, `dmesg` exit code 0, `diagnostics` 0, and `lastError` null
+after 23,560 completed ticks. Before this change the same condition threw
+`OsRuntimeStateCapacityError` during the `native shell initialization` boot
+phase and left the Computer permanently unbootable, so this is the first
+real-BDS evidence for the rotation path.
+
+Verify: read the cursor descriptor of the CSBIOS POST surface, then the boundary
+surface, then type on the same session.
+
+Expect: no cursor during POST, no POST rows surviving the boundary, and input
+accepted afterwards without a manual reattach.
+
+Result: PASS. The POST surface reported `lifecycle: "booting"` with
+`cursor { blink: false, x: 1, y: 25 }`; the boundary surface contained only the
+CS-Linux banner, the welcome and `man cs-linux` lines, the `Last login:` line
+and the prompt; and `bds_send_tui_input` returned `accepted` with the typed
+command and its output on the next surface. The matching #111 record carries the
+same evidence and the cursor-visibility gap it exposed.
 
 ## Exclusions
 

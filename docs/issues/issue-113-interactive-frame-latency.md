@@ -173,13 +173,73 @@ Result: PASS. 311 test files / 2,591 tests, the 12 hosted-C payload checks, the
 current guest NetHack executable check, the production Bedrock pack, and all 16
 Pages chapters.
 
+## Real-BDS measurement, 2026-07-25
+
+Environment: real BDS, isolated acceptance world on its own dedicated work
+directory, `typescript` CPU engine (`cpuEngine` null, no wasm engine and no
+compute workers), one Computer running an interactive CS-ABI foreground driven
+by a real browser Web Terminal session. The acceptance fixture Computer reports
+`cs486dx2 66000000 Hz; memory 8388608 bytes` in its own boot journal, so its
+per-tick budget is 3,300,000 modeled cycles and a dispatch divides into ten
+330,000-cycle sub-slices, not the five of the 33 MHz baseline above. Two
+`bds_status` samples 3,260 ticks apart, 9,320 completed ticks in total, 0
+diagnostics across 3,536 captured log lines.
+
+Verify: run an interactive CS-ABI foreground on real BDS through a Web Terminal
+session, then read the `guest_cpu` lane of `bds_status`.
+
+Expect: an observed largest atomic `guest_cpu` host operation, comparable
+against the 77,156 µs measured on the workstation before this change and against
+the documented 2,000 µs `maximumAtomicHostMicroseconds`.
+
+Result:
+
+| Measurement                                | Value                     |
+| ------------------------------------------ | ------------------------- |
+| Largest atomic `guest_cpu` host operation  | 1,428,000 µs              |
+| `guest_cpu` admitted / deferred / overruns | 681 / 193 / 659           |
+| Largest atomic `terminal` host operation   | 735,000 µs                |
+| `terminal` admitted / deferred / overruns  | 288 / 252 / 271           |
+| Tick host µs p50 / p95 / p99               | 125 / 24,000 / 24,001     |
+| Emergency / soft limit deferrals           | 896 / 66 over 9,320 ticks |
+
+Both maxima are warm-up atoms rather than steady state. No new maximum appeared
+during the 3,260-tick (163 s) interval between the two samples, and in that
+interval the `guest_cpu` lane spent 3.005 s of host time across 57 admitted
+operations while the `terminal` lane spent 133 ms across 38 presents.
+
+**What this resolves.** The largest atomic `guest_cpu` host operation on real
+BDS is now measured. Sub-slicing did divide the dispatch: every operation is at
+most `maximumAtomicCpuCycles` (330,000) modeled cycles instead of this
+Computer's whole 3,300,000-cycle tick budget, and no diagnostic, refusal, or
+lost process accompanied it.
+
+**What it does not resolve, and why.** The atomic bound is denominated in guest
+cycles, so it does not bound host microseconds. Real BDS pays far more host time
+per modeled cycle than the workstation the 77,156 µs figure came from, and the
+documented 2,000 µs `maximumAtomicHostMicroseconds` for `guest_cpu` was exceeded
+by roughly 714× at the largest atom, with 659 of 681 admitted operations
+overrunning. A cycle-denominated atomic bound therefore cannot enforce that
+lane's documented host-time cap on real hardware. Closing that gap is a separate
+decision — either a host-time-aware sub-slice that measures the previous
+sub-slice and shrinks the next one, or a restatement of the lane's documented
+cap to what a cycle bound can deliver. Neither is implemented, and neither is
+claimed here.
+
+**D1 on real BDS.** The same session accepted continuous key batches from the
+browser client; `event_delivery` admitted 14,019 units across 9,320 ticks, more
+than one event per tick, so batches did arrive together within single ticks. The
+CS-ABI process remained the foreground throughout, past 236 guest turns, and the
+session reported no terminated process. Before D1 two batches arriving in one
+tick ended the process. This is a real-BDS signal for D1, not a replacement for
+its host test.
+
 ## Open verification
 
-- **Real-BDS atomic host operation.** Measure the largest single `guest_cpu`
-  atomic host operation on real BDS during an interactive CS-ABI foreground and
-  compare it against the 77,156 µs measured before this change and against the
-  documented 2,000 µs `maximumAtomicHostMicroseconds`. Host microsecond bounds
-  can only be measured on real hardware, so this is not claimed here.
+- **A host-time bound for the `guest_cpu` lane.** The measurement above shows
+  the cycle-denominated atomic bound does not keep a real-BDS `guest_cpu`
+  operation inside the lane's documented 2,000 µs. Deciding between a
+  host-time-aware sub-slice and a restated cap remains open.
 - **#106 real-BDS p95 tick comparison** between the `wasm-rust` and `typescript`
   engines remains open. The wasm engine stays opt-in and `typescript` stays the
   default.
@@ -202,7 +262,11 @@ Pages chapters.
   implementation and are untouched here.
 - **The #106 wasm engine and compute workers do not apply.** An interactive
   CS-ABI foreground is pinned to the Bedrock VM and is one serial chain, so its
-  parallel speedup is 1.00×.
+  parallel speedup is 1.00×. The real-BDS measurement above does not change
+  that: it says the binding constraint is host throughput per modeled cycle, not
+  parallelism. Whether an interactive foreground could be relocated to a faster
+  host while keeping its terminal round trip inside one tick is an unanswered
+  design question, not a result, and it is not in scope here.
 - **`>` producing no frame is not a defect.** During measurement the descend key
   produced no terminal change, identically before and after this change.
   Descending is guarded by the player standing on the down staircase, so the
