@@ -117,20 +117,184 @@ a precise, bounded reason.
   wasm batch executor, so no `Cs486Process`-versus-wasm equivalence obligation
   applies.
 
+## Logic order review
+
+The ordering below was walked call site by call site before writing any code.
+Two of the diagrams changed the planned design, and one exposed a second
+unbootable state that the first design pass had missed.
+
+### How fast the cap is actually reached
+
+Counted from the append call sites, not measured at runtime. A warm CS-Linux
+desktop boot with no floppy appends 17 records: kernel start, the CPU/memory
+line, four mounts, six device discoveries, two rc.d services, the `cs-login`
+line, the account-database line, and `boot complete`. Active mounts and
+`available` device states are volatile, so `clearVolatileState` drops them on
+every cold restore and those ten records repeat on every boot. A graceful
+shutdown appends 17 more: the stop request, the signal phase, work finalized,
+block I/O drained, the data-sync result, four unmounts, six device stops, and
+the two final-sync precommit records. Logins add auth records on top.
+
+One power cycle therefore costs roughly 35 of the 256 records, so the entry cap
+is reached in about seven power cycles, and it binds long before the 32 KiB byte
+cap. That is why a world in ordinary use reached the limit within days rather
+than after a long life.
+
+### Boot order today
+
+```mermaid
+sequenceDiagram
+  participant R as ComputerRuntime.boot
+  participant OS as OsRuntimeState
+  participant B as CsBiosBootSequence
+  participant T as TerminalBuffer
+  participant D as DisplayDevice
+  participant W as Web Terminal
+  R->>OS: prepareOsRuntimeBoot - reset, begin_boot, PID 1
+  R->>D: power_off then enter_post
+  R->>B: startCsBiosBootSequence
+  B->>T: clear to a blank 80x25 screen
+  B->>D: blank VRAM frame
+  Note over R,B: paced POST frames start only after pendingCsBiosEntries.add
+  R->>OS: native shell initialization - 17 journal appends
+  OS-->>R: OsRuntimeStateCapacityError journal_entries 256
+  R->>B: cancel
+  R->>OS: fault
+  R->>D: fault - releases VRAM, clears the dirty queue
+  Note over T,W: terminal still holds 25 blank rows
+  W->>W: blank screen, context unavailable, no reason
+```
+
+The failure is ordered strictly between the blank screen and the first paced
+frame, which is exactly why nothing is ever rendered. The reason exists only in
+the returned `RuntimeCommandResult`.
+
+### Stop order today
+
+```mermaid
+sequenceDiagram
+  participant R as ComputerRuntime
+  participant OS as OsRuntimeState
+  participant P as persistenceSyncer
+  R->>OS: beginOsRuntimeStop
+  R->>R: stopIntent, stopState, stoppingEntries.add
+  R->>OS: append "shutdown requested" - outside any try
+  Note over R,OS: a capacity failure here leaves the machine in stopping
+  loop each stop phase
+    R->>OS: mutate - unmount or setDeviceState
+    R->>OS: append the record for that mutation
+    Note over R,OS: mutation precedes its own append, so an append failure
+    Note over R,OS: leaves half the mounts or devices already changed
+  end
+  R->>OS: append two sync_final precommit records
+  R->>P: performPersistenceSync final
+  P-->>R: failure
+  R->>OS: rollbackJournalEntries of the two precommit records
+  R->>R: failStopState - crash, display fault, powerOff shutdown_failed
+```
+
+`failStopState` swallows its own `critical` append, so the record explaining the
+failure is lost precisely when the journal is full.
+
+### Planned order
+
+```mermaid
+sequenceDiagram
+  participant R as ComputerRuntime.boot
+  participant OS as OsRuntimeState
+  participant H as renderCsBiosHalt
+  participant T as TerminalBuffer
+  participant D as DisplayDevice
+  participant W as Web Terminal
+  R->>OS: native shell initialization
+  OS->>OS: append evicts the oldest record, journalDropped += 1
+  OS-->>R: ok
+  Note over R,OS: capacity is no longer a failure source
+  R->>R: any other boot failure
+  R->>H: render POST rows plus phase, reason, profile-aware halt line
+  H->>T: write 80x25 halt screen
+  R->>OS: fault
+  R->>D: fault - VRAM stays released by design
+  R->>W: publish lifecycle, displayState, bounded fault reason
+  W->>W: halt screen is readable without a power cycle
+```
+
+### Gaps the ordering review exposed
+
+1. **A sequence gap is not observable to the guest.** `renderJournalEntries`
+   prints `[tick] channel.severity: message` and never the sequence number, so
+   the first design's "observable as a sequence gap" claim was wrong for
+   `dmesg`, `/var/log/messages`, and `/var/log/auth.log`. Rotation therefore
+   needs an explicit bounded `journalDropped` counter in the state, rendered as
+   one leading notice line in the journal views, carried in both snapshots,
+   accepted as absent by older snapshots, and added to the snapshot key
+   allowlist. Silent loss is not acceptable for a security-relevant log.
+2. **Eviction interacts with the `sync_final` precommit rollback.**
+   `rollbackJournalEntries` throws `entry does not belong to this journal` when
+   a requested entry is missing, and it rejects byte underflow. Once appends can
+   evict, a precommit record can already be gone, and the rollback error would
+   then mask the real persistence failure through the
+   `final precommit rollback failed` wrapper. Rollback must skip entries that
+   are no longer present, adjust accounting only for what it actually removed,
+   and keep the original failure authoritative.
+3. **Truncating restore must not break the snapshot's own integrity checks.**
+   `restoreJournal` compares the persisted `journalBytes` against the recomputed
+   sum and rejects a mismatch, and the following `nextJournalSequence` check is
+   bounded below by the last retained sequence. The correct order is: parse and
+   validate every entry, validate the persisted byte total against the full sum,
+   then drop oldest-first, then set the live byte count from the retained
+   records. Dropping the newest records instead would invalidate
+   `nextJournalSequence`, which is a second reason eviction must be
+   oldest-first.
+4. **There are four display-fault sites, and only three should show a halt
+   screen.** `boot()`'s catch, the CSBIOS handoff catch, and `failStopState` all
+   end with an uninformative screen and must share one halt-screen renderer. The
+   guest-crash path must not: the guest has already written its own error
+   output, and overwriting it would destroy the better diagnostic.
+5. **The CSBIOS handoff failure leaves a second unbootable state.** That catch
+   faults the display and crashes the Computer but never calls `faultOsRuntime`,
+   so the OS runtime stays `running`. The next power-on or safe boot reaches
+   `prepareOsRuntimeBoot`, which throws `OS runtime cannot boot while running`,
+   and the machine crashes again with the same blank screen. Unlike the journal
+   defect this one is session scoped, because `persistentSnapshot` writes the
+   cold lifecycle as `off`, so a reload clears it. It belongs to this Issue
+   because it is the same "unbootable with no explanation" surface.
+6. **Mutation must not precede its own record.** The `unmount` and
+   `stop_devices` phases mutate state and then append the record describing it,
+   so an append failure leaves a partially unmounted machine. Rotation removes
+   capacity as a failure source for those appends, which is what makes the
+   remaining order safe; the ordering rule still needs to be written down so a
+   later append is not added after a mutation again.
+
 ## Planned change
 
 ### A. Bounded rotating journal and last-login history
 
 - `appendJournal` evicts oldest-first instead of throwing, for both the entry
   cap and the byte cap, in O(1) amortized with exact byte accounting.
-- `nextJournalSequenceValue` stays strictly increasing, so an eviction is
-  observable as a sequence gap in `dmesg` and `/var/log/messages` rather than
-  silent data loss.
+  `nextJournalSequenceValue` keeps advancing monotonically, so retained
+  sequences stay strictly increasing.
+- Eviction is counted, not inferred. A bounded `journalDropped` counter lives in
+  the state, is carried by both `snapshot()` and `persistentSnapshot()`, is
+  added to the snapshot key allowlist, and defaults to 0 when an older snapshot
+  omits it. `renderJournalEntries` prints `[tick] channel.severity: message` and
+  no sequence number, so a sequence gap is invisible to `dmesg`,
+  `/var/log/messages`, and `/var/log/auth.log`; the counter is surfaced as one
+  leading notice line in those views instead. Silent loss is not acceptable for
+  a log that carries authentication records.
 - `restoreJournal` drops oldest records until the snapshot fits both caps
   instead of throwing. This is what recovers an already-affected Computer, and
-  it must be restart idempotent.
+  it must be restart idempotent. The order matters: validate every entry, then
+  validate the persisted `journalBytes` against the sum of all parsed entries,
+  then drop oldest-first, then set the live byte count from the retained
+  records. Dropping oldest also keeps the last retained sequence intact, which
+  the `nextJournalSequence` range check depends on.
 - Transaction rollback restores records evicted inside that transaction, so a
-  failed transaction still observes the pre-transaction journal.
+  failed transaction still observes the pre-transaction journal. Rollback must
+  also tolerate a requested entry the ring has already evicted: skip it, adjust
+  accounting only for what was actually removed, and never turn that into an
+  error, because `advanceStopState` wraps a rollback failure into
+  `final precommit rollback failed` and would mask the real persistence failure.
 - `last_logins` rotates the same way instead of failing the 65th distinct
   username.
 - Structural cold state keeps failing explicitly: services, mounts, devices,
@@ -141,9 +305,15 @@ a precise, bounded reason.
 
 - Render a CSBIOS-style halt screen into `TerminalBuffer` before the display
   `fault` transition. The fixed-cell terminal is the text source of truth for
-  both the Web Terminal and the in-game CRT, and `openComputerTerminal` shows
-  `record.terminal` even while `crashed`, so one write covers both surfaces.
-  VRAM is deliberately not written because `fault` releases it.
+  the opened terminal view, which is both the Web Terminal and the in-game
+  terminal form, and that view renders `record.terminal` even while `crashed`,
+  so one write covers both. VRAM is deliberately not written and the block-face
+  display stays dark, because `fault` releases VRAM by design.
+- Exactly one renderer owns that screen, and three call sites share it: the
+  `boot()` catch, the CSBIOS handoff catch, and `failStopState`. The guest-crash
+  path is deliberately excluded: the guest has already written its own error
+  output to the terminal, and overwriting it would destroy the better
+  diagnostic.
 - Reuse the factual `postScreen` rows for the part of POST the machine actually
   reached, then add the failing phase, the reason wrapped into at most two
   80-column lines, and a halt line. No fabricated hardware and no invented
@@ -159,17 +329,39 @@ a precise, bounded reason.
 - Apply the same profile-aware wording to the in-game crashed chat line.
 - Move `requestStop`'s journal append so a capacity or validation failure cannot
   leave a machine in `stopping`, and keep `failStopState` authoritative about
-  the original phase failure.
+  the original phase failure. Record the ordering rule that a phase must not
+  mutate state before appending the record that describes that mutation.
+
+### C. The CSBIOS handoff must fault the OS runtime it started
+
+The handoff catch cancels the sequence, faults the display, and crashes the
+Computer, but it never calls `faultOsRuntime`, so the OS runtime stays `running`
+after the presence initialization that ran just before it. The next power-on
+reaches `prepareOsRuntimeBoot`, which accepts only `faulted` or `off` and throws
+`OS runtime cannot boot while running`, so the machine crashes again to the same
+blank screen. This is a second unbootable state with no explanation, which is
+why it belongs here; it is session scoped rather than persistent, because
+`persistentSnapshot()` writes the cold lifecycle as `off` and a world or chunk
+reload therefore clears it. The fix is to fault the OS runtime on that path like
+every other terminal failure path already does.
 
 ## Acceptance
 
 Verify: `npm exec vitest run tests/os/osRuntimeState.test.ts`.
 
 Expect: Appending at the entry cap and at the byte cap keeps the newest record,
-drops the oldest, leaves byte accounting exact, keeps journal sequences strictly
-increasing across the gap, and restores evicted records on rollback. A 65th
-distinct username rotates `last_logins` instead of throwing. Service, mount,
-device, process, job, and PID capacities still fail explicitly.
+drops the oldest, leaves byte accounting exact, keeps retained sequences
+strictly increasing, and increments `journalDropped` by the number of records
+actually evicted. Rendering the journal after an eviction shows the
+dropped-record notice. Rolling back a transaction whose entries are still
+present restores them; rolling back a transaction whose oldest entry was already
+evicted succeeds, removes only what is present, and does not throw. Restoring a
+snapshot whose journal exceeds either cap truncates oldest-first, accepts the
+snapshot's own full byte total, reports the retained byte total afterwards, and
+restoring the truncated snapshot again produces an identical state. A snapshot
+without `journalDropped` restores with 0. A 65th distinct username rotates
+`last_logins` instead of throwing. Service, mount, device, process, job, and PID
+capacities still fail explicitly.
 
 Verify: `npm exec vitest run tests/computer tests/os`.
 
@@ -184,7 +376,16 @@ Verify: focused boot-failure tests over the terminal snapshot.
 Expect: A failed boot leaves POST rows, the failing phase, and the bounded
 reason readable in the terminal buffer. The Portable CS386SX case shows
 `CS386SX`, `Cache : None`, the portable panel row, and no `/startup.py` recovery
-claim; the desktop CS-Linux case does show it.
+claim; the desktop CS-Linux case does show it. A CSBIOS handoff failure and a
+failed shutdown produce the same halt screen, while a guest VM crash leaves the
+guest's own error output on screen untouched.
+
+Verify: focused tests over a failed CSBIOS handoff followed by a second power-on
+in the same session.
+
+Expect: The handoff failure leaves the OS runtime `faulted`, and the next
+power-on boots to `running` instead of failing with
+`OS runtime cannot boot while running`.
 
 Verify: `npm run validate`.
 
@@ -221,8 +422,8 @@ power cycle, and the recovered Computer accepts input.
 ## Documentation to update with the implementation
 
 - `web/manual.js` 4.10 states that the journal defaults to 256 records and 32
-  KiB total; it must describe oldest-first rotation and the observable sequence
-  gap.
+  KiB total; it must describe oldest-first rotation and the dropped-record
+  notice that `dmesg` and `/var/log/messages` show once eviction has happened.
 - `web/manual.js` 4.11, 9.6, and the chapter 15 troubleshooting row describe
   safe boot only in `/startup.py` terms; they must state what safe boot does on
   a Portable CS386SX/CS-DOS machine and mention the halt screen as the first
