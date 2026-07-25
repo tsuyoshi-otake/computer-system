@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import { ComputerRuntime } from "../../src/application/computer/computerRuntime.js";
+import {
+  ComputerWorkMonitor,
+  defaultComputerWorkMonitorLimits,
+} from "../../src/application/runtime/computerWorkMonitor.js";
 import { compileCs486Source } from "../../src/application/toolchain/highLevelCompilers.js";
 import { ComputerRecord } from "../../src/domain/computer/computer.js";
 
@@ -310,6 +314,74 @@ describe("ComputerRuntime CS ABI ownership", (): void => {
       tick += 1
     )
       runtime.runTick();
+    expect(
+      runtime.executeDebugShellCommand(record.computerId, "echo $?"),
+    ).toMatchObject({ outcome: "completed", stdout: "0\n" });
+  });
+  it("delivers every hosted stdout line while the terminal lane keeps deferring", (): void => {
+    const runtime = new ComputerRuntime();
+    const record = new ComputerRecord("c-006309", "standard");
+    runtime.register(record);
+    runtime.powerOn(record.computerId);
+    completeBoot(runtime, record);
+    const lineCount = 12;
+    record.filesystem.writeFile(
+      "/tmp/lines.c",
+      "#include <stdio.h>\n" +
+        "int main() { int i = 0; " +
+        `for (i = 0; i < ${String(lineCount)}; i++) printf("cs-line-%d\\n", i); ` +
+        "return 0; }\n",
+    );
+    let compiled = false;
+    runtime.enqueueDebugShellCommand(
+      record.computerId,
+      "cc /tmp/lines.c -o /tmp/lines",
+      (result) => {
+        compiled = result.outcome === "completed" && result.exitCode === 0;
+      },
+    );
+    for (let tick = 0; tick < 20 && !compiled; tick += 1) runtime.runTick();
+    expect(compiled).toBe(true);
+    runtime.executeDebugShellCommand(record.computerId, "clear");
+    runtime.queueEvent(record.computerId, "terminal_line", "run /tmp/lines");
+
+    /**
+     * One terminal admission per tick is the tightest budget the monitor
+     * accepts, so most of these writes are refused when the guest issues them.
+     * Issue #118: the refused text used to be discarded behind a fabricated
+     * `EAGAIN`, and guest libc never retried it.
+     */
+    let clock = 0;
+    const monitor = new ComputerWorkMonitor(
+      { nowMicroseconds: (): number => ++clock },
+      {
+        ...defaultComputerWorkMonitorLimits,
+        laneUnitsPerTick: {
+          ...defaultComputerWorkMonitorLimits.laneUnitsPerTick,
+          terminal: 1,
+        },
+      },
+    );
+    let started = false;
+    for (let tick = 1; tick <= 400; tick += 1) {
+      const scope = monitor.beginTick(tick);
+      runtime.runTick(scope);
+      scope.finish();
+      if (runtime.terminalInteraction(record.computerId).context === "cs-abi") {
+        started = true;
+      } else if (started) {
+        break;
+      }
+    }
+
+    expect(started).toBe(true);
+    expect(monitor.snapshot().lanes.terminal.deferred).toBeGreaterThan(0);
+    const screen = Array.from({ length: record.terminal.height }, (_, row) =>
+      record.terminal.line(row + 1).trimEnd(),
+    );
+    for (let index = 0; index < lineCount; index += 1) {
+      expect(screen).toContain(`cs-line-${String(index)}`);
+    }
     expect(
       runtime.executeDebugShellCommand(record.computerId, "echo $?"),
     ).toMatchObject({ outcome: "completed", stdout: "0\n" });

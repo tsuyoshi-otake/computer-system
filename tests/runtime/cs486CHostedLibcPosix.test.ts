@@ -4,6 +4,7 @@ import { unrestrictedGuestFilesystem } from "../../src/application/os/guestFiles
 import { initialUserCredentials } from "../../src/application/os/linuxCredentials.js";
 import { linuxFilesystemImage } from "../../src/application/os/osFilesystemImages.js";
 import {
+  csAbiTerminalWriteEvent,
   CsAbiRuntime,
   prepareCsAbiStartup,
 } from "../../src/application/runtime/csAbi.js";
@@ -155,6 +156,45 @@ describe("CS-Linux hosted libc/POSIX profile", (): void => {
     expect(terminalText(run.terminal)).toContain("callback");
   });
 
+  it("keeps guest libc output whole when a terminal admission is refused", (): void => {
+    const application = compileApplication(
+      "/tmp/deferred-output.c",
+      [
+        "#include <stdio.h>",
+        "int main(void){",
+        '  int a = printf("AAA\\n");',
+        '  int b = printf("BBB\\n");',
+        '  int c = printf("CCC\\n");',
+        "  int f = fflush(stdout);",
+        "  int e = ferror(stdout);",
+        "  return (a == 4 ? 0 : 1) + (b == 4 ? 0 : 2) + (c == 4 ? 0 : 4)",
+        "       + (f == 0 ? 0 : 8) + (e == 0 ? 0 : 16);",
+        "}",
+      ].join("\n"),
+    );
+    const executable = linkCs486Objects([application, libc], { entry: "main" });
+    /**
+     * Issue #118's own reproduction. Guest libc reads a short or negative
+     * `cs_write` as a sticky stream error and never retries, so a `terminal`
+     * lane that refuses one admission used to cost the guest the text it had
+     * already handed over. The refused write is now retained and the process
+     * suspends until the lane admits it.
+     */
+    const run = runHostedWithRefusedTerminalAdmission(
+      executable,
+      ["/tmp/deferred-output"],
+      (call) => call === 2,
+    );
+
+    expect(run.state).toEqual({ kind: "completed", value: 0 });
+    expect(run.suspensions).toBe(1);
+    expect(terminalText(run.terminal).split("\n").slice(0, 3)).toEqual([
+      "AAA".padEnd(80),
+      "BBB".padEnd(80),
+      "CCC".padEnd(80),
+    ]);
+  });
+
   function compileImageSource(path: string): Cs486Object {
     return compileCs486Object("c", imageFiles.get(path)!, {
       include,
@@ -226,6 +266,69 @@ function runHosted(
   const state = process.runCpuSlice(200_000_000, 2_000_000).state;
   runtime.finalize();
   return { state, terminal };
+}
+
+/**
+ * Drives a hosted program whose `terminal` admissions are selectively refused,
+ * standing in for the one wakeup owner `ComputerRuntime.runTick` provides in
+ * production: retry the retained write under a fresh admission, and wake the
+ * process only once its words are really on the terminal.
+ */
+function runHostedWithRefusedTerminalAdmission(
+  executable: Cs486Executable,
+  argv: readonly string[],
+  refuseAdmission: (terminalCall: number) => boolean,
+): {
+  readonly state: ReturnType<Cs486Process["runCpuSlice"]>["state"];
+  readonly suspensions: number;
+  readonly terminal: TerminalBuffer;
+} {
+  const startup = prepareCsAbiStartup(
+    executable,
+    { argv, cwd: "/", environment: [["HOME", "/home/cs"]] },
+    initialUserCredentials,
+  );
+  const requirements = cs486ExecutableMemoryRequirements(executable);
+  if (requirements.kind !== "declared")
+    throw new Error("declared memory required");
+  const terminal = new TerminalBuffer(80, 25);
+  let terminalCalls = 0;
+  const runtime = new CsAbiRuntime({
+    computerId: "posix-test",
+    credentials: initialUserCredentials,
+    currentTick: (): number => 123,
+    currentWallTimeMilliseconds: (): number => Date.UTC(2026, 6, 20),
+    cwd: "/",
+    filesystem: unrestrictedGuestFilesystem(new InMemoryFilesystem()),
+    heapBaseBytes: startup.heapBaseBytes,
+    heapWords: startup.heapWords,
+    runHostWork: (lane, _units, action): boolean => {
+      if (lane === "terminal") {
+        terminalCalls += 1;
+        if (refuseAdmission(terminalCalls)) return false;
+      }
+      action();
+      return true;
+    },
+    startupAddress: startup.startupAddress,
+    terminal,
+  });
+  const process = new Cs486Process(executable, {
+    memoryBytes: requirements.linearAddressSpaceBytes,
+    syscallHandler: runtime.syscallHandler,
+  });
+  process.initializeProcessImage(startup.image);
+  let state = process.runCpuSlice(200_000_000, 2_000_000).state;
+  let suspensions = 0;
+  while (runtime.hasPendingTerminalWrite) {
+    suspensions += 1;
+    if (suspensions > 64) throw new Error("terminal write never admitted");
+    if (!runtime.flushPendingTerminalWrite()) continue;
+    process.deliverEvent(csAbiTerminalWriteEvent);
+    state = process.runCpuSlice(200_000_000, 2_000_000).state;
+  }
+  runtime.finalize();
+  return { state, suspensions, terminal };
 }
 
 function terminalText(terminal: TerminalBuffer): string {

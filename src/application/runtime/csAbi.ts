@@ -411,6 +411,20 @@ function prepareByteCsAbiStartup(
   });
 }
 
+/**
+ * Event a hosted process waits on while a terminal write it already handed over
+ * is waiting for host admission. Only the runtime's wakeup owner delivers it,
+ * and only after the words are on the terminal.
+ */
+export const csAbiTerminalWriteEvent = "csabi_term_write";
+
+/** One terminal-backed write, retained whole while the lane defers it. */
+interface PendingTerminalWrite {
+  readonly count: number;
+  readonly descriptor: 1 | 2;
+  readonly text: string;
+}
+
 export class CsAbiRuntime {
   private closed = false;
   private cwd: string;
@@ -418,6 +432,7 @@ export class CsAbiRuntime {
   private readonly directories = new Map<number, OpenDirectory>();
   private readonly keys: number[] = [];
   private outputWords = 0;
+  private pendingTerminalWrite: PendingTerminalWrite | undefined;
   private presentedRawFrame = false;
   private stdoutBuffer = "";
   private standardInputCursor = 0;
@@ -429,6 +444,33 @@ export class CsAbiRuntime {
 
   get usedRawFramePresentation(): boolean {
     return this.presentedRawFrame;
+  }
+
+  /**
+   * True while a terminal write the host lane deferred is still holding guest
+   * words. Its process is suspended on `csAbiTerminalWriteEvent` until the
+   * wakeup owner drains it.
+   */
+  get hasPendingTerminalWrite(): boolean {
+    return this.pendingTerminalWrite !== undefined;
+  }
+
+  /**
+   * Retry the deferred terminal write under the same `terminal` admission it
+   * was refused by. Returns `true` only when the words actually reached the
+   * terminal, which is the one moment the suspended process may be woken with
+   * `csAbiTerminalWriteEvent`. Retrying costs one lane unit and no guest time,
+   * so host admission still cannot rewrite guest timing.
+   */
+  flushPendingTerminalWrite(): boolean {
+    const pending = this.pendingTerminalWrite;
+    if (pending === undefined) return false;
+    const ran = this.options.runHostWork("terminal", 1, () => {
+      this.emitTerminalWrite(pending);
+    });
+    if (!ran) return false;
+    this.pendingTerminalWrite = undefined;
+    return true;
   }
 
   readonly syscallHandler: Cs486SyscallHandler = (
@@ -482,6 +524,19 @@ export class CsAbiRuntime {
   finalize(): void {
     if (this.closed) return;
     this.closed = true;
+    /**
+     * One finalization owner for the suspended write. Completion, termination,
+     * cancellation, terminal detach, and scheduler disposal all arrive here, and
+     * a process that dies while its write waits for admission must still emit
+     * the words it already handed over. Finalization is past admission, so the
+     * emit is unconditional rather than another `runHostWork` attempt that
+     * could defer with nobody left to retry it.
+     */
+    const pending = this.pendingTerminalWrite;
+    if (pending !== undefined) {
+      this.pendingTerminalWrite = undefined;
+      this.emitTerminalWrite(pending);
+    }
     this.flushStdout();
     this.descriptors.clear();
     this.directories.clear();
@@ -837,19 +892,28 @@ export class CsAbiRuntime {
       if (count === 0 && this.stdoutBuffer.length === 0) {
         return completeSuccess(context, 0);
       }
+      const pending: PendingTerminalWrite = { count, descriptor, text };
       const ran = this.options.runHostWork("terminal", 1, () => {
-        if (descriptor === 2) {
-          this.emitOutput(2, text);
-        } else if (count === 0) {
-          this.flushStdout();
-        } else {
-          this.writeStdout(text);
-        }
-        this.outputWords += count;
+        this.emitTerminalWrite(pending);
       });
-      return ran
-        ? completeSuccess(context, count)
-        : completeErrno(context, csAbiErrno.eagain);
+      if (ran) return completeSuccess(context, count);
+      /**
+       * The guest already handed these words over, so a deferred terminal lane
+       * must not answer with a fabricated `EAGAIN` and drop them: guest libc
+       * treats a short write as progress and never retries the lost tail
+       * (Issue #118). The runtime keeps the write and suspends the process
+       * instead, exactly as `writeStandardIo` does on the pipeline path. At
+       * most one write can be pending, because the process that owns it is
+       * parked until the wakeup owner emits it.
+       */
+      this.pendingTerminalWrite = pending;
+      return {
+        filter: csAbiTerminalWriteEvent,
+        kind: "wait_event",
+        resume: (): void => {
+          context.writeRegister("eax", count);
+        },
+      };
     }
     const file = this.descriptors.get(descriptor);
     if (file === undefined || !file.writable) {
@@ -1302,6 +1366,17 @@ export class CsAbiRuntime {
         if (!attempt()) context.writeRegister("eax", -csAbiErrno.eagain);
       },
     };
+  }
+
+  private emitTerminalWrite(pending: PendingTerminalWrite): void {
+    if (pending.descriptor === 2) {
+      this.emitOutput(2, pending.text);
+    } else if (pending.count === 0) {
+      this.flushStdout();
+    } else {
+      this.writeStdout(pending.text);
+    }
+    this.outputWords += pending.count;
   }
 
   private emitOutput(descriptor: 1 | 2, text: string): void {

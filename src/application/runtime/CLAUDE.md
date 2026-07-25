@@ -16,6 +16,8 @@
   host granularity only, never the cycles a guest receives per tick. A process
   whose host operation is only that dispatch declares
   `dispatchesWorkAsynchronously` and keeps one operation.
+- A deferral is transient and must never consume guest data: a refused terminal
+  write is retained whole and suspends on `wait_event` until the lane admits it.
 - Keep runnable-only bookkeeping O(runnable), dedupe in-flight work, cap queues
   and concurrency, and finalize cancellation, timeout, process exit, machine
   shutdown, and scheduler disposal exactly once.
@@ -178,14 +180,12 @@
   or rejection once; add no event loop or second scheduler.
 - Exception groups use one bounded managed tree. `except*` splits in source
   order, preserves bare-reraised identity, and merges unmatched/new faults
-  before the existing finalizer. Keep predicates, suspension state, and
-  subgroups in CS486 calls/slices and reachable heap; never add another
-  exception interpreter.
+  before the existing finalizer. Keep predicates, suspension, and subgroups in
+  CS486 calls/slices and reachable heap; add no second interpreter.
 - The native `shell` module belongs only to empty `/startup.py`; reject access
   from user startup, foreground, filesystem-extension, and MCP Python.
 - Carry the immutable process credential snapshot into every Python guest
-  filesystem operation; no import, extension, syscall, wait, or resume may widen
-  it.
+  filesystem call; no import, extension, syscall, wait, or resume widens it.
 
 ## Modeled statistics
 

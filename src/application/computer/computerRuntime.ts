@@ -147,6 +147,7 @@ import {
   CsAbiRuntime,
   createAttachableCsAbiBatchSyscallHandler,
   csAbiErrno,
+  csAbiTerminalWriteEvent,
   isCsAbiBatchSyscallHandler,
   prepareCsAbiStartup,
   writeTerminalText,
@@ -784,6 +785,23 @@ export class ComputerRuntime {
                 Math.floor(modeledCpuCycles / Math.max(1, pids.length)),
               );
             }
+          }
+          /**
+           * The one wakeup owner for a terminal write the host lane deferred
+           * (Issue #118). The CS ABI runtime keeps the guest's words and parks
+           * the process instead of discarding them behind a fabricated
+           * `EAGAIN`; retrying here under the same `terminal` admission is what
+           * turns that suspension back into progress, and the process is woken
+           * only once the words are really on the terminal. The process cannot
+           * queue a second write while it is parked, so this stays one pending
+           * write per foreground process.
+           */
+          const pendingWriteOwner = foreground.csAbi;
+          if (
+            pendingWriteOwner?.hasPendingTerminalWrite === true &&
+            pendingWriteOwner.flushPendingTerminalWrite()
+          ) {
+            foreground.process.deliverEvent(csAbiTerminalWriteEvent);
           }
           if (
             foreground.instructionLimit !== undefined &&

@@ -38,6 +38,12 @@
   queueing another `terminal_keys` wakeup: the guest drains the whole key FIFO
   from the first wakeup, so a surplus one resumes a wait with nothing to
   deliver.
+- `runTick` is also the one wakeup owner for a terminal write the host lane
+  deferred. Retry the write the CS ABI runtime retained under a fresh `terminal`
+  admission and deliver `csabi_term_write` only after the words are really on
+  the terminal. `finalizeForegroundResources` owns a write that outlives its
+  process, so completion, terminal disconnect, the shutdown deadline, and
+  cancellation each emit it exactly once.
 - OS process accounting receives the uncapped cumulative modeled total. A cap
   belongs to a reported field only; capping the cumulative counter freezes the
   per-tick delta `accountLiveOsProcess` derives from it.

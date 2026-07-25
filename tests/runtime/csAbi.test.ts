@@ -7,6 +7,7 @@ import {
   csAbiLimits,
   csAbiSelectors,
   csAbiStartupMagic,
+  csAbiTerminalWriteEvent,
   prepareCsAbiStartup,
 } from "../../src/application/runtime/csAbi.js";
 import { unrestrictedGuestFilesystem } from "../../src/application/os/guestFilesystem.js";
@@ -847,14 +848,20 @@ describe("CS ABI 1.0", (): void => {
 
     harness.context.writeRegister("esi", 0);
     harness.defer = true;
-    harness.runtime.syscallHandler("cs", harness.context);
-    expect(harness.context.readRegister("eax")).toBe(-csAbiErrno.eagain);
+    const parked = harness.runtime.syscallHandler("cs", harness.context);
+    expect(parked).toMatchObject({
+      filter: csAbiTerminalWriteEvent,
+      kind: "wait_event",
+    });
     expect(harness.terminal.line(1)).not.toContain("out");
 
     harness.defer = false;
-    harness.runtime.syscallHandler("cs", harness.context);
-    expect(harness.context.readRegister("eax")).toBe(0);
+    expect(harness.runtime.flushPendingTerminalWrite()).toBe(true);
     expect(harness.terminal.line(1)).toContain("out");
+    if (parked.kind !== "wait_event" || parked.resume === undefined)
+      throw new Error("expected a parked write");
+    parked.resume({ kind: "tuple", values: [csAbiTerminalWriteEvent] });
+    expect(harness.context.readRegister("eax")).toBe(0);
 
     harness.memory.fill(65, 0, csAbiLimits.ioWords);
     harness.context.writeRegister("ecx", 2);
@@ -874,6 +881,71 @@ describe("CS ABI 1.0", (): void => {
 
     harness.runtime.finalize();
     harness.runtime.finalize();
+  });
+
+  it("suspends a deferred terminal write instead of discarding the guest's words", (): void => {
+    const harness = createHarness();
+    writeWords(harness.memory, 0, [104, 105, 10]);
+    harness.context.writeRegister("ebx", csAbiSelectors.fsWrite);
+    harness.context.writeRegister("ecx", 1);
+    harness.context.writeRegister("edx", 0);
+    harness.context.writeRegister("esi", 3);
+    harness.defer = true;
+    const parked = harness.runtime.syscallHandler("cs", harness.context);
+
+    // The defect this replaces answered a deferred lane with EAGAIN and threw
+    // the text away; guest libc reads that as progress and never retries.
+    expect(harness.context.readRegister("eax")).not.toBe(-csAbiErrno.eagain);
+    expect(parked).toMatchObject({
+      filter: csAbiTerminalWriteEvent,
+      kind: "wait_event",
+    });
+    expect(harness.runtime.hasPendingTerminalWrite).toBe(true);
+    expect(harness.terminal.line(1)).not.toContain("hi");
+    expect(harness.work).toEqual([]);
+
+    // A retry that the lane refuses again keeps the write and does not wake the
+    // process: only an admitted emit may report progress.
+    expect(harness.runtime.flushPendingTerminalWrite()).toBe(false);
+    expect(harness.runtime.hasPendingTerminalWrite).toBe(true);
+    expect(harness.terminal.line(1)).not.toContain("hi");
+
+    harness.defer = false;
+    expect(harness.runtime.flushPendingTerminalWrite()).toBe(true);
+    expect(harness.runtime.hasPendingTerminalWrite).toBe(false);
+    expect(harness.terminal.line(1)).toContain("hi");
+    expect(harness.work).toEqual(["terminal"]);
+    expect(harness.runtime.flushPendingTerminalWrite()).toBe(false);
+
+    if (parked.kind !== "wait_event" || parked.resume === undefined)
+      throw new Error("expected a parked write");
+    parked.resume({ kind: "tuple", values: [csAbiTerminalWriteEvent] });
+    expect(harness.context.readRegister("eax")).toBe(3);
+  });
+
+  it("emits a terminal write still waiting for admission when its process dies", (): void => {
+    const harness = createHarness();
+    writeWords(harness.memory, 0, [98, 121, 101]);
+    harness.context.writeRegister("ebx", csAbiSelectors.fsWrite);
+    harness.context.writeRegister("ecx", 2);
+    harness.context.writeRegister("edx", 0);
+    harness.context.writeRegister("esi", 3);
+    harness.defer = true;
+    expect(harness.runtime.syscallHandler("cs", harness.context)).toMatchObject(
+      {
+        filter: csAbiTerminalWriteEvent,
+        kind: "wait_event",
+      },
+    );
+    expect(harness.terminal.line(1)).not.toContain("bye");
+
+    // Termination, cancellation, and terminal detach all reach `finalize`, and
+    // it is the suspended write's single finalization owner.
+    harness.runtime.finalize();
+    expect(harness.terminal.line(1)).toContain("bye");
+    expect(harness.runtime.hasPendingTerminalWrite).toBe(false);
+    harness.runtime.finalize();
+    expect(harness.terminal.line(1)).toContain("bye");
   });
 
   it("provides bounded cwd, directory snapshots, extended stat, time, and exclusive create", (): void => {
