@@ -315,6 +315,20 @@ describe("Bedrock terminal adapters", () => {
     expect(coordinator).not.toContain("openSelectedComputerTerminal");
   });
 
+  it("tells a crashed machine's operator only the recovery its profile really has", async () => {
+    const coordinator = await source("src/bedrock/computerTerminal.ts");
+
+    expect(coordinator).toContain("safeBootBypassesStartupProgram(record)");
+    expect(coordinator).toContain("Read the halt screen");
+    expect(coordinator).toContain("safe boot without bootable floppy media.");
+    expect(coordinator).toContain("Bootable floppy media was skipped once.");
+    // The `/startup.py` promise must stay behind the capability check instead of
+    // being the single unconditional message a Portable CS386SX also receives.
+    expect(coordinator).not.toMatch(
+      /player\.sendMessage\(\s*"Computer is crashed\./u,
+    );
+  });
+
   it("guards a broken Computer coordinate until residual block cleanup finishes", async () => {
     const computer = await source("src/bedrock/computerComponent.ts");
 

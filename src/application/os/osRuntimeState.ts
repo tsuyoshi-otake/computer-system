@@ -10,6 +10,12 @@ const maximumReasonBytes = 256;
 const maximumNameBytes = 64;
 const maximumPathBytes = 512;
 const maximumMountOptions = 16;
+/**
+ * How far past `maximumJournalEntries` a restored journal may still be
+ * truncated instead of rejected. Rotation only ever writes within the cap, and
+ * a reduced limit or an older build stays inside this multiple.
+ */
+const maximumRestoredJournalOvershoot = 4;
 
 export type OsLifecyclePhase =
   "off" | "booting" | "running" | "stopping" | "rebooting" | "faulted";
@@ -365,6 +371,7 @@ export interface OsRuntimeStateSnapshotV1 {
   readonly jobs: readonly OsJobRecord[];
   readonly journal: readonly OsJournalEntry[];
   readonly journalBytes: number;
+  readonly journalDropped: number;
   readonly lastLogins: readonly OsLastLoginRecord[];
   readonly lifecycle: OsLifecycleState;
   readonly loginSessions: readonly OsLoginSessionRecord[];
@@ -414,6 +421,7 @@ export class OsRuntimeState {
   private currentRunlevelValue?: string;
   private previousRunlevelValue?: string;
   private journalBytesValue = 0;
+  private journalDroppedValue = 0;
   private nextPidValue = 2;
   private nextJobIdValue = 1;
   private nextJournalSequenceValue = 1;
@@ -831,13 +839,12 @@ export class OsRuntimeState {
     const previous = this.lastLoginRecords.get(input.username);
     if (
       previous === undefined &&
-      !this.lastLoginRecords.has(input.username) &&
       this.lastLoginRecords.size >= this.limits.maximumLastLogins
     ) {
-      throw new OsRuntimeStateCapacityError(
-        "last_logins",
-        this.limits.maximumLastLogins,
-      );
+      // Bounded login history is a record, not an admission gate. Refusing the
+      // 65th distinct account would deny a valid login, so the oldest record
+      // rotates out instead.
+      this.evictOldestLastLogin();
     }
     const session: OsLoginSessionRecord = Object.freeze({
       gid: input.gid,
@@ -866,6 +873,27 @@ export class OsRuntimeState {
       ...(previous === undefined ? {} : { previous }),
       session,
     });
+  }
+
+  /**
+   * Removes the least recent login record over a bounded table.
+   *
+   * The oldest `loginTick` wins, ties break on the username, so the choice is
+   * deterministic and survives restore in the same order.
+   */
+  private evictOldestLastLogin(): void {
+    let oldest: OsLastLoginRecord | undefined;
+    for (const record of this.lastLoginRecords.values()) {
+      if (
+        oldest === undefined ||
+        record.loginTick < oldest.loginTick ||
+        (record.loginTick === oldest.loginTick &&
+          record.username < oldest.username)
+      ) {
+        oldest = record;
+      }
+    }
+    if (oldest !== undefined) this.lastLoginRecords.delete(oldest.username);
   }
 
   touchLoginSession(sessionId: string, tick: number): OsLoginSessionRecord {
@@ -1272,19 +1300,7 @@ export class OsRuntimeState {
     if (/\r|\n/u.test(message)) {
       throw new RangeError("journal message must contain exactly one line");
     }
-    if (this.journalRecords.length >= this.limits.maximumJournalEntries) {
-      throw new OsRuntimeStateCapacityError(
-        "journal_entries",
-        this.limits.maximumJournalEntries,
-      );
-    }
     const bytes = utf8ByteLength(message);
-    if (this.journalBytesValue + bytes > this.limits.maximumJournalBytes) {
-      throw new OsRuntimeStateCapacityError(
-        "journal_bytes",
-        this.limits.maximumJournalBytes,
-      );
-    }
     if (
       !Number.isSafeInteger(this.nextJournalSequenceValue) ||
       this.nextJournalSequenceValue === Number.MAX_SAFE_INTEGER
@@ -1294,6 +1310,7 @@ export class OsRuntimeState {
         "sequence counter overflow",
       );
     }
+    this.evictOldestJournalRecords(bytes);
     const entry: OsJournalEntry = Object.freeze({
       bytes,
       channel: input.channel,
@@ -1307,6 +1324,48 @@ export class OsRuntimeState {
     this.nextJournalSequenceValue += 1;
     this.bumpRevision();
     return entry;
+  }
+
+  /**
+   * Number of records this journal has dropped to stay inside its caps.
+   *
+   * Rotation must never be silent: the journal carries authentication records,
+   * so the count is persisted and rendered as one leading notice line.
+   */
+  journalDropped(): number {
+    return this.journalDroppedValue;
+  }
+
+  /**
+   * Rotates oldest-first until one more record of `incomingBytes` fits.
+   *
+   * A diagnostic log reaching its documented cap must not fail the operation
+   * that reported the event, so both the entry cap and the byte cap evict
+   * instead of throwing. `normalizeLimits` keeps `maximumJournalEntryBytes`
+   * within `maximumJournalBytes`, so a validated message always fits and this
+   * loop always terminates. Eviction is oldest-first in one bounded splice,
+   * which also keeps `nextJournalSequence` above every retained sequence.
+   */
+  private evictOldestJournalRecords(incomingBytes: number): void {
+    let dropped = 0;
+    let droppedBytes = 0;
+    while (
+      dropped < this.journalRecords.length &&
+      (this.journalRecords.length - dropped >=
+        this.limits.maximumJournalEntries ||
+        this.journalBytesValue - droppedBytes + incomingBytes >
+          this.limits.maximumJournalBytes)
+    ) {
+      droppedBytes += this.journalRecords[dropped]?.bytes ?? 0;
+      dropped += 1;
+    }
+    if (dropped === 0) return;
+    this.journalRecords.splice(0, dropped);
+    this.journalBytesValue -= droppedBytes;
+    this.journalDroppedValue = saturatingCount(
+      this.journalDroppedValue,
+      dropped,
+    );
   }
 
   appendBootJournal(
@@ -1346,6 +1405,10 @@ export class OsRuntimeState {
    * Final-persistence precommit records use this bounded rollback when the
    * persistence callback fails. Identity matching preserves unrelated records
    * that a synchronous callback may have appended after the provisional ones.
+   *
+   * An entry rotation already evicted is skipped rather than rejected. Refusing
+   * it would replace the caller's real failure with a rollback error and hide
+   * the reason the transaction was abandoned.
    */
   rollbackJournalEntries(entries: readonly OsJournalEntry[]): void {
     if (entries.length === 0) return;
@@ -1373,12 +1436,7 @@ export class OsRuntimeState {
       firstRemovedSequence = Math.min(firstRemovedSequence, entry.sequence);
       lastRemovedSequence = Math.max(lastRemovedSequence, entry.sequence);
     }
-    if (found !== requested.size) {
-      throw new OsRuntimeStateTransitionError(
-        "journal rollback",
-        "entry does not belong to this journal",
-      );
-    }
+    if (found === 0) return;
     if (bytes > this.journalBytesValue) {
       throw new OsRuntimeStateTransitionError(
         "journal rollback",
@@ -1398,7 +1456,7 @@ export class OsRuntimeState {
     if (
       finalSequence < firstRemovedSequence &&
       lastRemovedSequence + 1 === this.nextJournalSequenceValue &&
-      lastRemovedSequence - firstRemovedSequence + 1 === requested.size
+      lastRemovedSequence - firstRemovedSequence + 1 === found
     ) {
       this.nextJournalSequenceValue = firstRemovedSequence;
     }
@@ -1406,17 +1464,24 @@ export class OsRuntimeState {
   }
 
   renderJournal(channel?: OsJournalChannel): string {
-    return renderJournalEntries(this.journalEntries(channel));
+    return renderJournalEntries(
+      this.journalEntries(channel),
+      this.journalDroppedValue,
+    );
   }
 
   renderMessagesLog(): string {
     return renderJournalEntries(
       this.journalRecords.filter(({ channel }) => channel !== "auth"),
+      this.journalDroppedValue,
     );
   }
 
   renderAuthLog(): string {
-    return renderJournalEntries(this.journalEntries("auth"));
+    return renderJournalEntries(
+      this.journalEntries("auth"),
+      this.journalDroppedValue,
+    );
   }
 
   procDevicePaths(): readonly string[] {
@@ -1552,6 +1617,7 @@ export class OsRuntimeState {
       jobs: Object.freeze([...this.jobs()]),
       journal: Object.freeze([...this.journalRecords]),
       journalBytes: this.journalBytesValue,
+      journalDropped: this.journalDroppedValue,
       lastLogins: Object.freeze(sortedStringValues(this.lastLoginRecords)),
       lifecycle: this.lifecycleValue,
       loginSessions: Object.freeze([...this.loginSessions()]),
@@ -1596,6 +1662,7 @@ export class OsRuntimeState {
       jobs: Object.freeze([]),
       journal: Object.freeze([...this.journalRecords]),
       journalBytes: this.journalBytesValue,
+      journalDropped: this.journalDroppedValue,
       lastLogins: Object.freeze(sortedStringValues(this.lastLoginRecords)),
       lifecycle: lifecycleState("off", 0),
       loginSessions: Object.freeze([]),
@@ -1647,6 +1714,7 @@ export class OsRuntimeState {
         "devices",
         "journal",
         "journalBytes",
+        "journalDropped",
         "nextPid",
         "nextJobId",
         "nextJournalSequence",
@@ -1786,7 +1854,7 @@ export class OsRuntimeState {
       () =>
         new OsRuntimeStateCapacityError("devices", this.limits.maximumDevices),
     );
-    this.restoreJournal(root.journal, root.journalBytes);
+    this.restoreJournal(root.journal, root.journalBytes, root.journalDropped);
 
     this.nextPidValue =
       root.nextPid === undefined
@@ -1823,18 +1891,40 @@ export class OsRuntimeState {
     this.validateRestoredRelations();
   }
 
-  private restoreJournal(value: unknown, byteCount: unknown): void {
-    const entries =
+  /**
+   * Restores the journal, truncating oldest-first when a snapshot exceeds a
+   * cap. A snapshot written before rotation existed, or under a larger limit,
+   * must not make its Computer unbootable.
+   *
+   * The order is load bearing. Every entry is validated first, then the
+   * persisted byte total is checked against the full parsed sum, and only then
+   * are the oldest records dropped and the retained byte count assigned.
+   * Dropping newest instead would invalidate the `nextJournalSequence` lower
+   * bound taken from the last retained record.
+   */
+  private restoreJournal(
+    value: unknown,
+    byteCount: unknown,
+    droppedCount: unknown,
+  ): void {
+    const candidates =
       value === undefined ? [] : requireSnapshotArray(value, "journal");
-    if (entries.length > this.limits.maximumJournalEntries) {
+    // Truncation recovers a legitimately over-cap snapshot; input this far out
+    // of range is malformed rather than rotated, and stays an explicit failure
+    // so the parser itself remains bounded.
+    if (
+      candidates.length >
+      this.limits.maximumJournalEntries * maximumRestoredJournalOvershoot
+    ) {
       throw new OsRuntimeStateCapacityError(
         "journal_entries",
         this.limits.maximumJournalEntries,
       );
     }
+    const parsed: OsJournalEntry[] = [];
     let bytes = 0;
     let lastSequence = 0;
-    for (const candidate of entries) {
+    for (const candidate of candidates) {
       const entry = parseJournalEntry(
         candidate,
         this.limits.maximumJournalEntryBytes,
@@ -1846,13 +1936,7 @@ export class OsRuntimeState {
       }
       lastSequence = entry.sequence;
       bytes += entry.bytes;
-      if (bytes > this.limits.maximumJournalBytes) {
-        throw new OsRuntimeStateCapacityError(
-          "journal_bytes",
-          this.limits.maximumJournalBytes,
-        );
-      }
-      this.journalRecords.push(entry);
+      parsed.push(entry);
     }
     if (
       byteCount !== undefined &&
@@ -1862,7 +1946,26 @@ export class OsRuntimeState {
         "journal byte count does not match",
       );
     }
+    let dropped =
+      droppedCount === undefined
+        ? 0
+        : requireNonNegativeSafeInteger(droppedCount, "journal dropped count");
+    let retained = 0;
+    while (
+      retained < parsed.length &&
+      (parsed.length - retained > this.limits.maximumJournalEntries ||
+        bytes > this.limits.maximumJournalBytes)
+    ) {
+      bytes -= parsed[retained]?.bytes ?? 0;
+      retained += 1;
+      dropped = saturatingCount(dropped, 1);
+    }
+    for (let index = retained; index < parsed.length; index += 1) {
+      const entry = parsed[index];
+      if (entry !== undefined) this.journalRecords.push(entry);
+    }
     this.journalBytesValue = bytes;
+    this.journalDroppedValue = dropped;
   }
 
   private validateRestoredRelations(): void {
@@ -2190,13 +2293,35 @@ export class OsRuntimeState {
   }
 }
 
-function renderJournalEntries(entries: readonly OsJournalEntry[]): string {
-  return entries
-    .map(
-      ({ channel, message, severity, tick }) =>
-        `[${String(tick).padStart(10)}] ${channel}.${severity}: ${message}\n`,
-    )
-    .join("");
+/**
+ * Renders journal lines, preceded by the rotation notice when records were
+ * dropped. A rendered line carries no sequence number, so the count is the
+ * only way a reader can tell that earlier records existed.
+ */
+function renderJournalEntries(
+  entries: readonly OsJournalEntry[],
+  dropped: number,
+): string {
+  const notice =
+    dropped > 0
+      ? `-- ${String(dropped)} earlier record(s) dropped by journal rotation --\n`
+      : "";
+  return (
+    notice +
+    entries
+      .map(
+        ({ channel, message, severity, tick }) =>
+          `[${String(tick).padStart(10)}] ${channel}.${severity}: ${message}\n`,
+      )
+      .join("")
+  );
+}
+
+/** Adds bounded counts without ever reporting an unsafe integer. */
+function saturatingCount(current: number, added: number): number {
+  return current > Number.MAX_SAFE_INTEGER - added
+    ? Number.MAX_SAFE_INTEGER
+    : current + added;
 }
 
 function normalizeLimits(

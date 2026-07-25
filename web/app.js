@@ -1194,9 +1194,14 @@ function renderTerminalCursor(terminal, activePalette, cursorX, cursorY) {
     activePalette,
   );
   const shape = terminalInteraction?.cursorShape ?? "underline";
+  // CSBIOS POST, a halted machine, and any other input-less context accept no
+  // typing, so an idle cursor would misreport the screen as a prompt. The
+  // descriptor keeps its real shape; only this overlay stops being drawn.
+  const hidden = terminalInteraction?.context === "unavailable";
   elements.terminalCursor.className =
     `terminal-cell-cursor terminal-cell-cursor--${shape}` +
-    (terminal.cursor?.blink === true ? " terminal-cell-cursor--blink" : "");
+    (terminal.cursor?.blink === true ? " terminal-cell-cursor--blink" : "") +
+    (hidden ? " terminal-cell-cursor--hidden" : "");
   elements.terminalCursor.style.setProperty(
     "--cursor-cell-left",
     `${String(x)}ch`,

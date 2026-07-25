@@ -136,7 +136,11 @@ authoritative OS-presence aggregates.
 - `/proc/devices`, `/proc/services`, `/proc/loadavg`, `/proc/mounts`,
   `/proc/<pid>/{cmdline,stat,status}`, and `/proc/self/*` are dynamic state
   views. `/var/log/messages`, `/var/log/auth.log`, and `dmesg` use the bounded
-  journal (256 entries / 32 KiB by default).
+  journal (256 entries / 32 KiB / 1 KiB per entry by default).
+- History rotates; structural tables stay fatal. The journal and `last_logins`
+  evict oldest-first on append and cold restore; bounded `journalDropped` rides
+  both snapshots, defaults to 0, and renders one leading notice line. Rollback
+  skips an already evicted entry. Every other capacity stays fatal.
 - `/dev/null`, `/dev/zero`, `/dev/tty`, `/dev/console`, `/dev/tty1`, `/dev/hda`,
   and absent-media `/dev/fd0` share the device registry and do not imply host
   devices.

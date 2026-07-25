@@ -201,7 +201,7 @@ describe("OS runtime state", (): void => {
     });
   });
 
-  it("enforces journal entry and UTF-8 byte limits without partial writes", (): void => {
+  it("rotates the journal at the UTF-8 byte limit and keeps single-line validation fatal", (): void => {
     const state = new OsRuntimeState("c-journal", {
       maximumJournalBytes: 5,
       maximumJournalEntries: 3,
@@ -210,16 +210,183 @@ describe("OS runtime state", (): void => {
     state.appendBootJournal(0, "éé");
     state.appendAuthJournal(1, "a", "notice");
     expect(state.journalBytes).toBe(5);
-    const before = state.snapshot();
+    expect(state.journalDropped()).toBe(0);
 
-    expect(() => state.appendSystemJournal(2, "b")).toThrowError(
-      expect.objectContaining({ resource: "journal_bytes" }),
-    );
-    expect(state.snapshot()).toEqual(before);
-    expect(() => state.appendSystemJournal(2, "abcde")).toThrow(RangeError);
+    // The byte cap evicts oldest-first: "éé" leaves, "a" and "b" fit in 2.
+    state.appendSystemJournal(2, "b");
+    expect(state.journalBytes).toBe(2);
+    expect(state.journalDropped()).toBe(1);
+    expect(state.journalEntries().map(({ message }) => message)).toEqual([
+      "a",
+      "b",
+    ]);
     expect(state.renderJournal()).toBe(
-      "[         0] boot.info: éé\n[         1] auth.notice: a\n",
+      "-- 1 earlier record(s) dropped by journal rotation --\n" +
+        "[         1] auth.notice: a\n[         2] system.info: b\n",
     );
+
+    const before = state.snapshot();
+    expect(() => state.appendSystemJournal(3, "abcde")).toThrow(RangeError);
+    expect(() => state.appendSystemJournal(3, "a\nb")).toThrow(RangeError);
+    expect(state.snapshot()).toEqual(before);
+  });
+
+  it("rotates the journal at the entry limit and carries the dropped count through restore", (): void => {
+    const state = new OsRuntimeState("c-journal-ring", {
+      maximumJournalBytes: 64,
+      maximumJournalEntries: 3,
+      maximumJournalEntryBytes: 8,
+    });
+    for (const index of [0, 1, 2, 3, 4]) {
+      state.appendSystemJournal(index, `m${String(index)}`);
+    }
+    expect(state.journalEntries().map(({ message }) => message)).toEqual([
+      "m2",
+      "m3",
+      "m4",
+    ]);
+    expect(state.journalEntries().map(({ sequence }) => sequence)).toEqual([
+      3, 4, 5,
+    ]);
+    expect(state.journalBytes).toBe(6);
+    expect(state.journalDropped()).toBe(2);
+
+    const snapshot = state.snapshot();
+    expect(snapshot.journalDropped).toBe(2);
+    const restored = OsRuntimeState.restore("c-journal-ring", snapshot, {
+      maximumJournalBytes: 64,
+      maximumJournalEntries: 3,
+      maximumJournalEntryBytes: 8,
+    });
+    expect(restored.journalDropped()).toBe(2);
+    expect(restored.snapshot()).toEqual(snapshot);
+    restored.appendSystemJournal(5, "m5");
+    expect(restored.journalDropped()).toBe(3);
+    expect(restored.journalEntries().map(({ sequence }) => sequence)).toEqual([
+      4, 5, 6,
+    ]);
+  });
+
+  it("truncates an over-cap persisted journal oldest-first and restores idempotently", (): void => {
+    const limits = {
+      maximumJournalBytes: 64,
+      maximumJournalEntries: 9,
+      maximumJournalEntryBytes: 8,
+    };
+    const large = new OsRuntimeState("c-journal-truncate", limits);
+    for (const index of [0, 1, 2, 3, 4, 5, 6, 7, 8]) {
+      large.appendSystemJournal(index, `m${String(index)}`);
+    }
+    const oversized = large.snapshot();
+    expect(oversized.journal).toHaveLength(9);
+    expect(oversized.journalDropped).toBe(0);
+
+    const narrow = { ...limits, maximumJournalEntries: 4 };
+    const restored = OsRuntimeState.restore(
+      "c-journal-truncate",
+      oversized,
+      narrow,
+    );
+    expect(restored.journalEntries().map(({ message }) => message)).toEqual([
+      "m5",
+      "m6",
+      "m7",
+      "m8",
+    ]);
+    expect(restored.journalBytes).toBe(8);
+    expect(restored.journalDropped()).toBe(5);
+    expect(restored.renderMessagesLog()).toContain(
+      "-- 5 earlier record(s) dropped by journal rotation --",
+    );
+
+    const truncated = restored.snapshot();
+    const again = OsRuntimeState.restore(
+      "c-journal-truncate",
+      truncated,
+      narrow,
+    );
+    expect(again.snapshot()).toEqual(truncated);
+    expect(again.journalDropped()).toBe(5);
+
+    // A snapshot far outside the cap is malformed input, not a rotated one.
+    expect(() =>
+      OsRuntimeState.restore("c-journal-truncate", oversized, {
+        ...limits,
+        maximumJournalEntries: 2,
+      }),
+    ).toThrowError(
+      expect.objectContaining({ maximum: 2, resource: "journal_entries" }),
+    );
+  });
+
+  it("skips already-rotated entries during a precommit rollback", (): void => {
+    const state = new OsRuntimeState("c-journal-rollback", {
+      maximumJournalBytes: 64,
+      maximumJournalEntries: 3,
+      maximumJournalEntryBytes: 8,
+    });
+    state.appendSystemJournal(0, "m0");
+    const first = state.appendSystemJournal(1, "m1");
+    const second = state.appendSystemJournal(2, "m2");
+    state.appendSystemJournal(3, "m3");
+    expect(state.journalEntries().map(({ message }) => message)).toEqual([
+      "m1",
+      "m2",
+      "m3",
+    ]);
+
+    state.appendSystemJournal(4, "m4");
+    expect(state.journalDropped()).toBe(2);
+    // `first` is gone, `second` is still present: rollback removes what it can.
+    state.rollbackJournalEntries([first, second]);
+    expect(state.journalEntries().map(({ message }) => message)).toEqual([
+      "m3",
+      "m4",
+    ]);
+    expect(state.journalBytes).toBe(4);
+
+    // Every entry already rotated away leaves the journal untouched.
+    const before = state.snapshot();
+    state.rollbackJournalEntries([first]);
+    expect(state.snapshot()).toEqual(before);
+  });
+
+  it("rotates bounded login history instead of refusing a valid login", (): void => {
+    const state = runningState({
+      maximumLastLogins: 2,
+      maximumLoginSessions: 4,
+    });
+    const login = (
+      username: string,
+      tick: number,
+      uid: number,
+      wallMilliseconds: number,
+    ): void => {
+      state.openLoginSession({
+        gid: uid,
+        sessionId: `s-${username}`,
+        terminal: "tty1",
+        tick,
+        uid,
+        username,
+        wallMilliseconds,
+      });
+    };
+    login("cs", 3, 1000, 1_752_912_550_000);
+    login("alice", 4, 1001, 1_752_912_551_000);
+    expect(state.snapshot().lastLogins.map(({ username }) => username)).toEqual(
+      ["alice", "cs"],
+    );
+
+    login("bob", 5, 1002, 1_752_912_552_000);
+    expect(state.snapshot().lastLogins.map(({ username }) => username)).toEqual(
+      ["alice", "bob"],
+    );
+    expect(state.lastLogin("cs")).toBeUndefined();
+    expect(state.lastLogin("bob")).toMatchObject({
+      loginTick: 5,
+      loginWallMilliseconds: 1_752_912_552_000,
+    });
   });
 
   it("rejects every aggregate capacity plus one without partial mutations", (): void => {
@@ -301,39 +468,6 @@ describe("OS runtime state", (): void => {
     );
     expect(sessions.snapshot()).toEqual(sessionSnapshot);
 
-    const lastLogins = runningState({
-      maximumLastLogins: 1,
-      maximumLoginSessions: 2,
-    });
-    lastLogins.openLoginSession({
-      gid: 1000,
-      wallMilliseconds: 1_752_912_550_000,
-      sessionId: "first",
-      terminal: "tty1",
-      tick: 3,
-      uid: 1000,
-      username: "cs",
-    });
-    lastLogins.closeLoginSession("first", 4, "logout", 1_752_912_555_000);
-    const lastLoginSnapshot = lastLogins.snapshot();
-    expect(lastLoginSnapshot.lastLogins[0]).toMatchObject({
-      loginWallMilliseconds: 1_752_912_550_000,
-      logoutWallMilliseconds: 1_752_912_555_000,
-    });
-    expect(() =>
-      lastLogins.openLoginSession({
-        gid: 1001,
-        sessionId: "overflow",
-        terminal: "tty2",
-        tick: 5,
-        uid: 1001,
-        username: "alice",
-      }),
-    ).toThrowError(
-      expect.objectContaining({ maximum: 1, resource: "last_logins" }),
-    );
-    expect(lastLogins.snapshot()).toEqual(lastLoginSnapshot);
-
     const wallValidation = runningState();
     const beforeInvalidOpen = wallValidation.snapshot();
     expect(() =>
@@ -362,18 +496,6 @@ describe("OS runtime state", (): void => {
       wallValidation.closeLoginSession("valid-wall", 4, "logout", Number.NaN),
     ).toThrow(/logout wall time/u);
     expect(wallValidation.snapshot()).toEqual(beforeInvalidClose);
-
-    const journal = runningState({
-      maximumJournalBytes: 16,
-      maximumJournalEntries: 1,
-      maximumJournalEntryBytes: 16,
-    });
-    journal.appendSystemJournal(3, "first");
-    const journalSnapshot = journal.snapshot();
-    expect(() => journal.appendSystemJournal(4, "overflow")).toThrowError(
-      expect.objectContaining({ maximum: 1, resource: "journal_entries" }),
-    );
-    expect(journal.snapshot()).toEqual(journalSnapshot);
 
     const services = runningState({ maximumServices: 1 });
     services.registerService({ enabled: true, name: "first", tick: 3 });

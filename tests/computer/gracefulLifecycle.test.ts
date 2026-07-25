@@ -281,7 +281,7 @@ describe("graceful Computer lifecycle", (): void => {
     expect(count(messages, "persistence callback diagnostic survives")).toBe(1);
   });
 
-  it("rolls back a partial final marker append when journal capacity rejects the second marker", (): void => {
+  it("completes the final boundary on a full journal by rotating the oldest records", (): void => {
     const runtime = new ComputerRuntime();
     const record = new ComputerRecord("c-000872", "standard");
     let syncCount = 0;
@@ -305,37 +305,36 @@ describe("graceful Computer lifecycle", (): void => {
       runtime,
       () => currentStopPhase(runtime, record.computerId) === "sync_final",
     );
-    while (state.journalEntries().length < 255) {
+    while (state.journalEntries().length < 256) {
       state.appendSystemJournal(
         10_000,
         `capacity filler ${String(state.journalEntries().length)}`,
       );
     }
+    expect(state.journalEntries()).toHaveLength(256);
+    expect(state.journalDropped()).toBe(0);
     runtime.runTick();
 
-    expect(syncCount).toBe(1);
-    expect(record.lifecycle.state).toEqual({
-      kind: "crashed",
-      message:
-        "sync_final failed: OS runtime journal_entries capacity 256 exceeded",
-    });
+    expect(syncCount).toBe(2);
+    expect(state.journalEntries()).toHaveLength(256);
+    expect(state.journalDropped()).toBe(2);
     const messages = state
       .journalEntries("system")
       .map(({ message }) => message);
-    expect(count(messages, "final sync requested")).toBe(0);
+    expect(count(messages, "final sync requested")).toBe(1);
     expect(
       count(messages, "shutdown phases prepared for final persistence"),
-    ).toBe(0);
-    expect(
-      count(
-        messages,
-        "sync_final failed: OS runtime journal_entries capacity 256 exceeded",
-      ),
     ).toBe(1);
+    expect(state.renderMessagesLog()).toContain(
+      "-- 2 earlier record(s) dropped by journal rotation --",
+    );
+
+    runRuntimeUntil(runtime, () => record.lifecycle.state.kind === "off");
+    expect(record.lifecycle.state.kind).toBe("off");
     expect(runtime.isStopping(record.computerId)).toBe(false);
   });
 
-  it("reports a secondary final-marker rollback failure without hiding the persistence error", (): void => {
+  it("keeps the persistence failure authoritative when rollback finds the precommit records gone", (): void => {
     const runtime = new ComputerRuntime();
     const record = new ComputerRecord("c-000873", "standard");
     runtime.register(record);
@@ -374,19 +373,19 @@ describe("graceful Computer lifecycle", (): void => {
 
     expect(record.lifecycle.state.kind).toBe("crashed");
     if (record.lifecycle.state.kind !== "crashed") {
-      throw new Error("secondary rollback failure did not crash the Computer");
+      throw new Error("the persistence failure did not crash the Computer");
     }
-    expect(record.lifecycle.state.message).toContain(
+    expect(record.lifecycle.state.message).toBe(
       "sync_final failed: primary persistence failure",
     );
-    expect(record.lifecycle.state.message).toContain(
-      "final precommit rollback failed: journal rollback:",
+    expect(record.lifecycle.state.message).not.toContain(
+      "final precommit rollback failed",
     );
     expect(state.lifecycle.reason).toContain(
       "sync_final failed: primary persistence failure",
     );
-    expect(state.renderMessagesLog()).toContain(
-      "final precommit rollback failed: journal rollback:",
+    expect(state.renderMessagesLog()).not.toContain(
+      "final precommit rollback failed",
     );
     expect(state.renderMessagesLog()).not.toContain("final sync requested");
     expect(runtime.isStopping(record.computerId)).toBe(false);
@@ -495,6 +494,50 @@ describe("graceful Computer lifecycle", (): void => {
     ).toContain("safe boot selected; /startup.py preserved and bypassed");
   });
 
+  it("records only the safe-boot effect a Portable CS386SX really has", (): void => {
+    const record = new ComputerRecord("c-000845", "advanced", {
+      displayProfileId: "portable-vga-256k",
+      hardware: {
+        clockHz: 16_000_000,
+        cpuModel: "cs386sx",
+        memoryBytes: 2_097_152,
+      },
+      osProfile: "dos",
+    });
+    const runtime = new ComputerRuntime();
+    runtime.register(record);
+    const internals = runtime as unknown as {
+      prepareOsRuntimeBoot: (...arguments_: unknown[]) => unknown;
+    };
+    const prepare = internals.prepareOsRuntimeBoot.bind(runtime);
+    let failNextBoot = true;
+    internals.prepareOsRuntimeBoot = (...arguments_): unknown => {
+      if (failNextBoot) {
+        failNextBoot = false;
+        throw new Error("injected runtime preparation failure");
+      }
+      return prepare(...arguments_);
+    };
+
+    expect(runtime.powerOn(record.computerId).outcome).toBe("failed");
+    expect(record.lifecycle.state.kind).toBe("crashed");
+    expect(runtime.safeBoot(record.computerId).outcome).toBe("accepted");
+    runRuntimeUntil(runtime, () =>
+      shellAcceptsInput(runtime, record.computerId),
+    );
+
+    // `supportsMicroPython` is false on cs386sx, so the only real effect is
+    // skipping bootable floppy media. Claiming a `/startup.py` bypass would be a
+    // record of something that never happened.
+    const journal = liveOsState(runtime, record.computerId).renderJournal(
+      "boot",
+    );
+    expect(journal).toContain(
+      "safe boot selected; bootable floppy media skipped",
+    );
+    expect(journal).not.toContain("/startup.py");
+  });
+
   it.each([
     "signal",
     "drain_work",
@@ -547,10 +590,66 @@ describe("graceful Computer lifecycle", (): void => {
       expect(lifecycle.message).toContain(`${phase} failed: injected ${phase}`);
       expect(record.display.state).toMatchObject({ kind: "faulted" });
       expect(runtime.isStopping(record.computerId)).toBe(false);
+      // The block-face display released VRAM, so the opened terminal view is
+      // where the operator reads why the stop failed.
+      const screen = record.terminal.snapshot().rows.join("\n");
+      expect(screen).toContain(`Halt failed during ${phase}.`);
+      expect(screen).toContain(`Reason: injected ${phase}`);
+      expect(screen).toContain("System halted. Safe boot to retry.");
+      expect(record.terminal.snapshot().cursor.blink).toBe(false);
       expect(() => host.runTick()).not.toThrow();
       expect(record.lifecycle.state.kind).toBe("crashed");
     },
   );
+
+  it("faults through the stop-failure owner when the stop request cannot be recorded", (): void => {
+    const repository = new MemoryRepository();
+    const runtime = new ComputerRuntime();
+    const host = new ComputerHost(
+      runtime,
+      new ComputerPersistenceService(repository),
+    );
+    const record = new ComputerRecord("c-000858", "standard");
+    host.register(record);
+    runtime.powerOn(record.computerId);
+    runHostUntil(host, () => shellAcceptsInput(runtime, record.computerId));
+    const state = liveOsState(runtime, record.computerId);
+
+    const internals = state as unknown as {
+      appendSystemJournal: (
+        tick: number,
+        message: string,
+        severity?: string,
+      ) => unknown;
+    };
+    const append = internals.appendSystemJournal.bind(state);
+    internals.appendSystemJournal = (tick, message, severity): unknown => {
+      if (message.startsWith("shutdown requested")) {
+        throw new Error("injected stop record");
+      }
+      return append(tick, message, severity);
+    };
+
+    // The stop already owns the entry by then, so the failure must reach the
+    // shared owner instead of escaping to the caller.
+    expect(
+      runtime.shutdown(record.computerId, "stop record failure injection"),
+    ).toMatchObject({ outcome: "accepted", state: "crashed" });
+
+    expect(runtime.isStopping(record.computerId)).toBe(false);
+    expect(state.lifecycle.phase).toBe("faulted");
+    expect(state.lifecycle.reason).toContain(
+      "signal failed: injected stop record",
+    );
+    expect(record.display.state).toMatchObject({ kind: "faulted" });
+    const screen = record.terminal.snapshot().rows.join("\n");
+    expect(screen).toContain("Halt failed during signal.");
+    expect(screen).toContain("Reason: injected stop record");
+    expect(screen).toContain("System halted. Safe boot to retry.");
+    expect(record.terminal.snapshot().cursor.blink).toBe(false);
+    expect(() => host.runTick()).not.toThrow();
+    expect(record.lifecycle.state.kind).toBe("crashed");
+  });
 });
 
 type InjectedStopPhase =

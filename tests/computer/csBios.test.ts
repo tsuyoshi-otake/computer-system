@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { renderCsBiosPost } from "../../src/application/computer/csBios.js";
+import {
+  renderCsBiosHaltScreen,
+  renderCsBiosPost,
+} from "../../src/application/computer/csBios.js";
 import { ComputerRuntime } from "../../src/application/computer/computerRuntime.js";
+import type { OsRuntimeState } from "../../src/application/os/osRuntimeState.js";
 import { ComputerRecord } from "../../src/domain/computer/computer.js";
 
 describe("CSBIOS POST", (): void => {
@@ -232,8 +236,159 @@ describe("CSBIOS POST", (): void => {
     }
     expect(record.lifecycle.state.kind).toBe("crashed");
     expect(runtime.guestMemoryStatus(record.computerId)).toBeUndefined();
+
+    const halt = terminalText(record);
+    expect(halt).toContain("CSBIOS Revision 1.1");
+    expect(halt).toContain("CPU            : CS486DX at 999 Hz");
+    expect(halt).toContain("Boot Error     : native shell initialization");
+    expect(halt).toMatch(
+      /Reason {9}: CS-Linux requires at least \d+ bytes for kernel/u,
+    );
+    expect(record.terminal.line(25).trimEnd()).toBe(
+      "System halted. Safe boot to retry; /startup.py is preserved and bypassed.",
+    );
+    expect(record.terminal.snapshot().cursor.blink).toBe(false);
+    // The paced POST never ran, so the halt screen must not claim a completed
+    // memory test, a device list, or a boot selection.
+    expect(halt).toContain("Memory Test    : 0 KB");
+    expect(halt).not.toContain("OK");
+    expect(halt).not.toContain("Cache          :");
+    expect(halt).not.toContain("Boot Source    :");
+  });
+
+  it("names only the recovery a CS386SX Portable actually has", (): void => {
+    const record = new ComputerRecord("computer-89", "advanced", {
+      displayProfileId: "portable-vga-256k",
+      hardware: {
+        clockHz: 16_000_000,
+        cpuModel: "cs386sx",
+        memoryBytes: 2_097_152,
+      },
+      osProfile: "dos",
+    });
+    const runtime = new ComputerRuntime();
+    runtime.register(record);
+    (
+      runtime as unknown as { prepareOsRuntimeBoot: () => never }
+    ).prepareOsRuntimeBoot = (): never => {
+      throw new Error("injected runtime preparation failure");
+    };
+
+    expect(runtime.powerOn(record.computerId)).toMatchObject({
+      outcome: "failed",
+    });
+
+    const halt = terminalText(record);
+    expect(halt).toContain("CPU            : CS386SX at 16 MHz");
+    expect(halt).toContain("Boot Error     : runtime preparation");
+    expect(halt).toContain(
+      "Reason         : injected runtime preparation failure",
+    );
+    expect(record.terminal.line(25).trimEnd()).toBe(
+      "System halted. Safe boot to retry.",
+    );
+    expect(halt).not.toContain("/startup.py");
+  });
+
+  it("faults the OS runtime and renders the halt screen when the handoff fails", (): void => {
+    const record = new ComputerRecord("computer-90", "standard");
+    const runtime = new ComputerRuntime();
+    runtime.register(record);
+    expect(runtime.powerOn(record.computerId).outcome).toBe("accepted");
+    const state = liveOsState(runtime, record.computerId);
+    rejectFirstBootComplete(record);
+
+    runUntil(runtime, () => record.lifecycle.state.kind === "crashed");
+
+    expect(record.lifecycle.state.kind).toBe("crashed");
+    // Without the fault the detach owner would record a clean
+    // runtime_detached shutdown over a failed handoff.
+    expect(state.lifecycle.phase).toBe("faulted");
+    expect(state.lifecycle.reason).toBe("CSBIOS Computer handoff was rejected");
+    expect(state.renderMessagesLog()).not.toContain("runtime_detached");
+
+    const halt = terminalText(record);
+    expect(halt).toContain("Boot Error     : CSBIOS OS handoff");
+    expect(halt).toContain(
+      "Reason         : CSBIOS Computer handoff was rejected",
+    );
+    // POST completed here, so the halt screen keeps its factual device rows.
+    expect(halt).toContain("Memory Test    : ");
+    expect(halt).toContain("Boot Source    : Fixed Disk C:");
+    expect(record.terminal.line(25).trimEnd()).toBe(
+      "System halted. Safe boot to retry; /startup.py is preserved and bypassed.",
+    );
+    expect(record.terminal.snapshot().cursor.blink).toBe(false);
+
+    // A halted handoff must stay recoverable without a reload.
+    expect(runtime.safeBoot(record.computerId)).toMatchObject({
+      outcome: "accepted",
+    });
+    expect(state.lifecycle.phase).toBe("running");
+  });
+
+  it("keeps an over-long halt reason bounded to two visible rows", (): void => {
+    const record = new ComputerRecord("computer-91", "standard");
+    expect(record.display.transition({ kind: "enter_post" }).outcome).toBe(
+      "changed",
+    );
+    renderCsBiosHaltScreen(record, {
+      bootPhase: "startup source selection",
+      bootProfile: "dos",
+      bootSource: "floppy",
+      floppyPresent: true,
+      postCompleted: true,
+      reason: `first line detail\nsecond\tline detail ${"pad ".repeat(60)}tail`,
+      startupBypassAvailable: false,
+    });
+
+    expect(record.terminal.line(23).startsWith("Reason         : first")).toBe(
+      true,
+    );
+    // The control characters became spaces; the terminal buffer rejects them.
+    expect(record.terminal.line(23)).toContain("first line detail second line");
+    expect(record.terminal.line(24).slice(0, 17).trim()).toBe("");
+    expect(record.terminal.line(24).trimEnd().endsWith("...")).toBe(true);
+    expect(record.terminal.line(24)).not.toContain("tail");
+    expect(record.terminal.line(25).trimEnd()).toBe(
+      "System halted. Safe boot to retry without the disk in Floppy Drive A:.",
+    );
+    expect(record.terminal.line(22)).toContain(
+      "Boot Error     : startup source selection",
+    );
   });
 });
+
+function rejectFirstBootComplete(record: ComputerRecord): void {
+  const lifecycle = record.lifecycle as unknown as {
+    transition: (event: { readonly kind: string }) => unknown;
+  };
+  const original = lifecycle.transition.bind(record.lifecycle);
+  let rejected = false;
+  lifecycle.transition = (event: { readonly kind: string }): unknown => {
+    if (event.kind === "boot_complete" && !rejected) {
+      rejected = true;
+      return { outcome: "rejected", reason: "injected handoff rejection" };
+    }
+    return original(event);
+  };
+}
+
+function liveOsState(
+  runtime: ComputerRuntime,
+  computerId: string,
+): OsRuntimeState {
+  const state = (
+    runtime as unknown as {
+      readonly entries: ReadonlyMap<
+        string,
+        { readonly osRuntimeState: OsRuntimeState }
+      >;
+    }
+  ).entries.get(computerId)?.osRuntimeState;
+  if (state === undefined) throw new Error("missing OS runtime state");
+  return state;
+}
 
 function terminalText(record: ComputerRecord): string {
   return record.terminal.snapshot().rows.join("\n");

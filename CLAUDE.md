@@ -108,17 +108,15 @@ synchronized.
 ## Issue map
 
 - #4: Phase 2 Bedrock Computer vertical slice.
-- #5: Redstone and local peripherals.
-- #6: Networking and Portable Computer Systems.
+- #5/#6: Redstone, peripherals, networking, and Portable Computer Systems.
 - #12: CS-Linux/CS-DOS, virtual disks, toolchain, Web Terminal, and manual.
 - #13: Python-to-CS486 compilation, filesystem imports, and C/C++ extensions.
 - #14: Portable CS386SX 16 MHz / 2 MiB hardware profile.
-- #15: Full-screen DOS `EDIT`.
+- #15/#19: Full-screen DOS `EDIT` and CS486 C/C++ frontend hardening.
 - #16: Tick-sliced guest/MCP execution and multi-user load evidence.
 - #17: CS-Linux accounts, superuser security, DAC, and `computer`-to-`cs`
   migration.
 - #18: Assembler v2, structured relocations, frontend parity, and stack safety.
-- #19: CS486 C/C++ frontend hardening.
 - #20: State-backed OS Presence and lifecycle fidelity.
 - #21: Static GitHub Pages landing page and 16-chapter field manual.
 - #22: Scoped `CLAUDE.md` responsibility split.
@@ -169,10 +167,9 @@ synchronized.
 - #88-#92: Bounded Python 3.14 deferred annotations, annotation scopes,
   callable/sentinel iteration, type parameters, lazy type aliases, generic
   aliases, runtime subscription, and the typing runtime core.
-- #93: Bounded Python 3.14 coroutines and async protocols.
-- #94: Bounded Python 3.14 async generators and comprehensions.
-- #95: Bounded Python exception groups and `except*`.
-- #96: Bounded Python 3.14 template strings and `string.templatelib`.
+- #93-#96: Bounded Python 3.14 coroutines, async protocols, async generators and
+  comprehensions, exception groups with `except*`, template strings, and
+  `string.templatelib`.
 - #97/#98/#100/#101/#102: Bounded Python descriptors, attribute customization,
   deletion, C3 inheritance, `super`/class cells, and `__new__` construction.
 - #33: Compile RAM lease finalization across completion, disconnect, and detach.

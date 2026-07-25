@@ -491,6 +491,13 @@ describe("Web terminal UI", () => {
     expect(css).toContain(".terminal-cell-cursor");
     expect(css).toContain("steps(1, end)");
     expect(css).toContain("prefers-reduced-motion: reduce");
+    // CSBIOS POST and a halted machine accept no input, so the overlay is not
+    // drawn at all rather than left blinking at a screen that is not a prompt.
+    expect(css).toMatch(
+      /\.terminal-cell-cursor--hidden\s*\{[^}]*display: none;/su,
+    );
+    expect(script).toContain('terminalInteraction?.context === "unavailable"');
+    expect(script).toContain('hidden ? " terminal-cell-cursor--hidden" : ""');
     expect(script).toContain("function fitTerminal(columns, rows)");
     expect(script).toContain("function terminalContentSize()");
     expect(script).toContain("function ensureHardwareTextMode()");

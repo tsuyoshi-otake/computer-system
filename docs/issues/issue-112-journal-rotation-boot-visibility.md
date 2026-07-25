@@ -2,12 +2,18 @@
 
 GitHub Issue: https://github.com/tsuyoshi-otake/computer-system/issues/112
 
-Status: planned. Root cause and every path below are confirmed by reading the
-current `main` sources and by one observed live managed-BDS occurrence; no code
-change has been made yet. Related: #111 (implemented, its remaining real-session
-acceptance item is blocked by this defect on the affected Computer), #108
-(different root cause, keeps its own scope), #20 (OS presence lifecycle), #39
-(login text and last-login history).
+Status: implemented and host-verified 2026-07-25. Changes A, B, and C below are
+in `main`'s working tree with focused tests; the real managed-BDS recovery
+evidence and the real-browser check are the only acceptance items still open,
+and they are marked as such. Root cause and every path below were confirmed by
+reading the sources and by one observed live managed-BDS occurrence before any
+code changed. Two claims from the planning pass were wrong and are corrected in
+place below (the Planned change C premise, and the Web frame-metadata item in
+B); the original wording is kept alongside the correction rather than silently
+replaced. Related: #111 (implemented, its remaining real-session acceptance item
+was blocked by this defect on the affected Computer), #108 (different root
+cause, keeps its own scope), #20 (OS presence lifecycle), #39 (login text and
+last-login history).
 
 ## Reported symptom
 
@@ -120,8 +126,9 @@ a precise, bounded reason.
 ## Logic order review
 
 The ordering below was walked call site by call site before writing any code.
-Two of the diagrams changed the planned design, and one exposed a second
-unbootable state that the first design pass had missed.
+Two of the diagrams changed the planned design, and one exposed the misrecorded
+handoff shutdown that the first design pass had missed. Two conclusions of the
+review were themselves wrong and are corrected in gaps 5 and 6.
 
 ### How fast the cap is actually reached
 
@@ -196,13 +203,13 @@ sequenceDiagram
 `failStopState` swallows its own `critical` append, so the record explaining the
 failure is lost precisely when the journal is full.
 
-### Planned order
+### Implemented order
 
 ```mermaid
 sequenceDiagram
   participant R as ComputerRuntime.boot
   participant OS as OsRuntimeState
-  participant H as renderCsBiosHalt
+  participant H as renderCsBiosHaltScreen
   participant T as TerminalBuffer
   participant D as DisplayDevice
   participant W as Web Terminal
@@ -212,12 +219,15 @@ sequenceDiagram
   Note over R,OS: capacity is no longer a failure source
   R->>R: any other boot failure
   R->>H: render POST rows plus phase, reason, profile-aware halt line
-  H->>T: write 80x25 halt screen
-  R->>OS: fault
+  H->>T: write 80x25 halt screen, then stop the cursor blinking
+  R->>OS: faultOsRuntime
   R->>D: fault - VRAM stays released by design
-  R->>W: publish lifecycle, displayState, bounded fault reason
-  W->>W: halt screen is readable without a power cycle
+  R->>W: publish lifecycle, displayState, context unavailable
+  W->>W: renders record.terminal and draws no cursor
 ```
+
+The final publish step carries no separate fault-reason field. The planning pass
+called for one; see the correction under change B below.
 
 ### Gaps the ordering review exposed
 
@@ -251,22 +261,34 @@ sequenceDiagram
    end with an uninformative screen and must share one halt-screen renderer. The
    guest-crash path must not: the guest has already written its own error
    output, and overwriting it would destroy the better diagnostic.
-5. **The CSBIOS handoff failure leaves a second unbootable state.** That catch
-   faults the display and crashes the Computer but never calls `faultOsRuntime`,
-   so the OS runtime stays `running`. The next power-on or safe boot reaches
-   `prepareOsRuntimeBoot`, which throws `OS runtime cannot boot while running`,
-   and the machine crashes again with the same blank screen. Unlike the journal
-   defect this one is session scoped, because `persistentSnapshot` writes the
-   cold lifecycle as `off`, so a reload clears it. It belongs to this Issue
-   because it is the same "unbootable with no explanation" surface.
-6. **Mutation must not precede its own record.** The `unmount` and
-   `stop_devices` phases mutate state and then append the record describing it,
-   so an append failure leaves a partially unmounted machine. Rotation removes
-   capacity as a failure source for those appends, which is what makes the
-   remaining order safe; the ordering rule still needs to be written down so a
-   later append is not added after a mutation again.
+5. **The CSBIOS handoff failure records a clean shutdown over a failed
+   handoff.** The original wording of this item, and of the GitHub comment that
+   quoted it, claimed the catch leaves the OS runtime `running` so the next
+   power-on throws `OS runtime cannot boot while running`. **That claim is
+   wrong.** The catch calls `this.detach(entry)`, and `completeOsRuntimeDetach`
+   drives a `running` or `booting` runtime to `off` through
+   `begin_shutdown("runtime_detached")` and `shutdown_complete`. The machine
+   therefore reboots fine. The real defect is that a failed handoff is recorded
+   as a normal operator-initiated detach: the journal never carries the failure
+   reason, the phase never reflects a fault, and the persisted cold projection
+   looks like a clean power-off. The fix is unchanged — fault the OS runtime on
+   that path — but its justification is diagnostic fidelity, not a second
+   unbootable state. `completeOsRuntimeDetach` leaves an already `faulted` phase
+   untouched, which is what makes fault-before-detach the correct order.
+6. **The stop phases append after mutating, and that order must stay.** The
+   `unmount` and `stop_devices` phases mutate state and then append the record
+   describing it. The first draft of this item said the reverse order was
+   required; that would contradict the code and buy nothing, because the append
+   is the only step that could still fail. The real invariant is that no append
+   following a committed mutation may be able to fail: rotation removes capacity
+   as a failure source, so the existing order is safe, and no validating or
+   capacity-bearing append may be introduced after a mutation later.
 
-## Planned change
+## Implemented change
+
+All three changes are implemented and host-verified. Each item below states what
+shipped; where the plan and the implementation differ, the difference is called
+out rather than the plan quietly rewritten.
 
 ### A. Bounded rotating journal and last-login history
 
@@ -301,6 +323,19 @@ sequenceDiagram
   processes, jobs, and PID space are fixed tables, and their capacity errors are
   the correct response to malformed or over-cap persisted input.
 
+Implemented in `src/application/os/osRuntimeState.ts`. The rendered notice line
+is exactly:
+
+```text
+-- <n> earlier record(s) dropped by journal rotation --
+```
+
+It is one leading line in `dmesg`, `/var/log/messages`, and `/var/log/auth.log`,
+emitted only while `journalDropped > 0`. `restoreJournal` accepts a bounded
+overshoot of 4 records above the entry cap before treating a snapshot as
+malformed, so a truncating restore stays deterministic instead of silently
+absorbing arbitrarily large input.
+
 ### B. Visible boot failure
 
 - Render a CSBIOS-style halt screen into `TerminalBuffer` before the display
@@ -309,43 +344,81 @@ sequenceDiagram
   terminal form, and that view renders `record.terminal` even while `crashed`,
   so one write covers both. VRAM is deliberately not written and the block-face
   display stays dark, because `fault` releases VRAM by design.
-- Exactly one renderer owns that screen, and three call sites share it: the
-  `boot()` catch, the CSBIOS handoff catch, and `failStopState`. The guest-crash
-  path is deliberately excluded: the guest has already written its own error
-  output to the terminal, and overwriting it would destroy the better
-  diagnostic.
+- One module owns the text — `src/application/computer/csBios.ts` — and it
+  exports the halt facts in the two shapes the call sites actually need. The
+  plan said "exactly one renderer, three call sites"; the implemented split is
+  `renderCsBiosHaltScreen` (a full 80x25 screen) for `boot()`'s catch and the
+  CSBIOS handoff catch, whose screen is blank or a stale POST frame, and
+  `csBiosHaltNoticeLines` (the same facts as four appended lines) for
+  `failStopState`, where the guest's own shutdown output must survive above the
+  reason. The guest-crash path uses neither: the guest has already written a
+  better diagnostic and overwriting it would destroy it.
 - Reuse the factual `postScreen` rows for the part of POST the machine actually
-  reached, then add the failing phase, the reason wrapped into at most two
-  80-column lines, and a halt line. No fabricated hardware and no invented
-  progress.
-- The recovery line is CPU/profile aware: the `/startup.py` sentence only when
-  `supportsMicroPython && profile === "linux"`, the floppy-skip sentence when a
-  bootable floppy is present, otherwise a halt line with no recovery claim.
-- Publish the bounded fault reason in the Web frame metadata. The companion
-  stores and re-emits the published payload verbatim and
-  `requirePublishedTerminalInteraction` validates only the `interaction`
-  sub-object, so no interaction-schema bump and no companion change are needed;
-  a test must lock that the added field does not trip the validator.
-- Apply the same profile-aware wording to the in-game crashed chat line.
-- Move `requestStop`'s journal append so a capacity or validation failure cannot
-  leave a machine in `stopping`, and keep `failStopState` authoritative about
-  the original phase failure. Record the ordering rule that a phase must not
-  mutate state before appending the record that describes that mutation.
+  reached, then add the failing phase on row 23, the reason wrapped into at most
+  two rows (rows 24 and 25 of the label field, 63 columns each, `...` truncation
+  past 126 characters), and one recovery row. No fabricated hardware and no
+  invented progress.
+- The recovery row names only the recovery that exists. `crashed` accepts only
+  `reset`, which both the sneaking Bedrock interaction and the Web Terminal
+  power control expose as safe boot, so no row promises a power cycle. Floppy
+  boot: `System halted. Safe boot to retry without the disk in Floppy Drive A:.`
+  MicroPython-capable CS-Linux:
+  `System halted. Safe boot to retry; /startup.py is preserved and bypassed.`
+  Everything else, including a Portable CS386SX:
+  `System halted. Safe boot to retry.`
+- **Publishing a separate bounded fault reason in the Web frame metadata was
+  planned and deliberately dropped.** Once the terminal carries the phase, the
+  reason, and the recovery line, and the opened terminal view renders
+  `record.terminal` while `crashed`, a parallel `faultReason` field would be a
+  second copy of the same text with its own truncation rule and its own
+  staleness window — a parallel presentation truth the Web guidance forbids. The
+  frame keeps publishing `lifecycle`, `displayState`, and the interaction
+  descriptor only, so no schema field, validator change, or companion change was
+  needed after all.
+- A halted machine shows no cursor on either surface. The terminal path calls
+  `setCursorBlink(false)` and parks the cursor on the last row; the Web overlay
+  is hidden whenever the published interaction `context === "unavailable"`,
+  which also covers CSBIOS POST. The hide is a client-side class
+  (`.terminal-cell-cursor--hidden { display: none }`) rather than a new
+  `cursorShape` value, because `web/app.js` treats any shape other than
+  `underline` plus `d` as Ctrl+D and would close the session.
+- The in-game crashed chat line is profile aware through the shared
+  `safeBootBypassesStartupProgram(record)` predicate, and so is the safe-boot
+  boot-journal record: a Portable CS386SX is told, and records, that bootable
+  floppy media was skipped, never that `/startup.py` was preserved and bypassed.
+- `requestStop`'s journal append and `syncOsRuntimeState` are wrapped so a
+  failure there routes to `failStopState` instead of throwing to the caller with
+  the machine left in `stopping`; the stop already owns the entry, and the
+  original phase failure stays authoritative. The ordering rule recorded in
+  `src/application/computer/CLAUDE.md` is the corrected one from gap 6 above.
 
 ### C. The CSBIOS handoff must fault the OS runtime it started
 
-The handoff catch cancels the sequence, faults the display, and crashes the
-Computer, but it never calls `faultOsRuntime`, so the OS runtime stays `running`
-after the presence initialization that ran just before it. The next power-on
-reaches `prepareOsRuntimeBoot`, which accepts only `faulted` or `off` and throws
-`OS runtime cannot boot while running`, so the machine crashes again to the same
-blank screen. This is a second unbootable state with no explanation, which is
-why it belongs here; it is session scoped rather than persistent, because
-`persistentSnapshot()` writes the cold lifecycle as `off` and a world or chunk
-reload therefore clears it. The fix is to fault the OS runtime on that path like
-every other terminal failure path already does.
+**Corrected premise.** The planning pass — this document and the GitHub comment
+that quoted it — claimed the handoff catch leaves the OS runtime `running`, so
+the next power-on throws `OS runtime cannot boot while running` and the machine
+is unbootable for the rest of the session. That is wrong. The catch calls
+`this.detach(entry)`, and `completeOsRuntimeDetach` drives a `running` or
+`booting` runtime to `off` via `begin_shutdown("runtime_detached")` and
+`shutdown_complete`. Nothing blocks the next power-on.
+
+The real defect is diagnostic: a failed handoff is recorded exactly like an
+operator-initiated detach. The journal's last words are a clean
+`runtime_detached` shutdown, the phase never reflects a fault, and the persisted
+cold projection looks like a normal power-off, so the one durable record of why
+the machine crashed says the opposite of what happened.
+
+The fix is the one that was planned, for a different reason: call
+`faultOsRuntime` with the handoff reason **before** `detach`, because
+`completeOsRuntimeDetach` leaves an already `faulted` phase untouched, and
+render the halt screen **after** detach, so its shell-disconnect output cannot
+scroll the reason off the screen. The halt facts are captured before detach,
+which clears `activeOsProfile` and `activeBootSource`.
 
 ## Acceptance
+
+Host results below were observed on 2026-07-25 against the working tree
+described in this document. Items still open are labelled open.
 
 Verify: `npm exec vitest run tests/os/osRuntimeState.test.ts`.
 
@@ -363,7 +436,7 @@ without `journalDropped` restores with 0. A 65th distinct username rotates
 `last_logins` instead of throwing. Service, mount, device, process, job, and PID
 capacities still fail explicitly.
 
-Verify: `npm exec vitest run tests/computer tests/os`.
+Verify: `npm exec vitest run tests/computer tests/os tests/bedrock`.
 
 Expect: A Computer restored from a full or over-cap journal snapshot boots to
 `running` on CS486DX/CS486DX2 and on CS386SX + CS-Linux; restoring the truncated
@@ -371,26 +444,70 @@ snapshot again is idempotent; the CS-DOS and floppy-boot paths keep their
 current behavior; a stop request on a full journal either completes or fails
 without leaving the machine in `stopping`.
 
-Verify: focused boot-failure tests over the terminal snapshot.
+Result: `PASS (730) FAIL (0)`. `npx tsc --noEmit` is clean.
+
+Verify: `npm exec vitest run tests/computer/csBios.test.ts`.
 
 Expect: A failed boot leaves POST rows, the failing phase, and the bounded
-reason readable in the terminal buffer. The Portable CS386SX case shows
-`CS386SX`, `Cache : None`, the portable panel row, and no `/startup.py` recovery
-claim; the desktop CS-Linux case does show it. A CSBIOS handoff failure and a
-failed shutdown produce the same halt screen, while a guest VM crash leaves the
-guest's own error output on screen untouched.
+reason readable in the terminal buffer, with the cursor not blinking. The
+Portable CS386SX case shows `CS386SX`, `Cache : None`, the portable panel row,
+and the recovery row without a `/startup.py` claim; the desktop CS-Linux case
+does show it. An over-long reason occupies both reason rows and truncates with a
+visible `...`.
+
+Result: `PASS (10) FAIL (0)`, covering the RAM-shortfall boot failure, the
+CS386SX recovery wording, the handoff fault plus safe-boot recovery, and the
+two-row bounded reason.
+
+Verify: `npm exec vitest run tests/computer/gracefulLifecycle.test.ts`.
+
+Expect: Every injected stop-phase failure leaves `Halt failed during <phase>.`,
+`Reason: injected <phase>`, and `System halted. Safe boot to retry.` on the
+terminal with `cursor.blink === false`, while the display is faulted. A stop
+request that cannot be recorded ends `crashed` and `faulted` through
+`failStopState` with `signal failed: ...` as the reason, `isStopping === false`,
+and a following host tick that does not throw. Safe boot on a Portable CS386SX
+records `safe boot selected; bootable floppy media skipped` and never names
+`/startup.py`. A guest VM crash leaves the guest's own error output untouched.
+
+Result: `PASS (22) FAIL (0)`.
 
 Verify: focused tests over a failed CSBIOS handoff followed by a second power-on
-in the same session.
+in the same session (`tests/computer/csBios.test.ts`).
 
-Expect: The handoff failure leaves the OS runtime `faulted`, and the next
-power-on boots to `running` instead of failing with
-`OS runtime cannot boot while running`.
+Expect: The handoff failure records the reason in the OS journal and leaves the
+phase reflecting the fault rather than a clean `runtime_detached` shutdown, and
+the following safe boot reaches `running`.
+
+Result: Covered by the handoff test in the `csBios` suite above. Note the
+corrected premise: the pre-fix behavior was a clean detach, not an unbootable
+`running` runtime, so this item is diagnostic fidelity rather than a recovery
+path.
+
+Verify:
+`npm exec vitest run tests/bedrock/terminalAdapters.test.mjs tests/tools/webUi.test.mjs tests/tools/webManual.test.mjs tests/tools/pages.test.mjs tests/tools/claudeGuidance.test.mjs`.
+
+Expect: The in-game crashed line goes through `safeBootBypassesStartupProgram`
+and tells the operator to read the halt screen; the Web client hides the cursor
+overlay while `context === "unavailable"` and the stylesheet defines
+`.terminal-cell-cursor--hidden`; the manual states rotation, the exact
+dropped-record notice, the no-cursor halt screen, and the Portable safe-boot
+difference; every `CLAUDE.md` stays within 200 lines.
+
+Result: `PASS (15)`, `PASS (12)`, `PASS (16)` for the manual/Pages pair, and
+`PASS (5)`. The guidance suite also fixed a pre-existing 202-line regression in
+the root `CLAUDE.md` introduced by commit `c138b0d`; it is 199 lines now, as are
+`src/application/os/CLAUDE.md` (199) and `src/application/computer/CLAUDE.md`
+(140).
 
 Verify: `npm run validate`.
 
 Expect: Formatting, lint, TypeScript, all host tests, the Bedrock pack build,
 and the 16-chapter Pages build pass.
+
+Result: passed on 2026-07-25. `vitest run` reported
+`Test Files 310 passed (310)` and `Tests 2575 passed (2575)`; the Bedrock pack
+and the 16-chapter Pages site both built.
 
 Verify: Managed BDS. Restart the companion on the fixed build with the preserved
 world (`resetWorld: false`), power on the affected Computer, then read the
@@ -403,10 +520,18 @@ newest records; a failed boot shows the halt screen instead of a blank display.
 Record the date, engine selection, and observed result here before the Issue
 closes.
 
+Result: open. Host verification does not substitute for it, and it is also what
+unblocks the remaining #111 real-session acceptance item on the affected
+Computer. Never restart the interactive world with `resetWorld: true`.
+
 Verify: Real Web Terminal session in a browser on the fixed build.
 
-Expect: The halt screen and the published fault reason are visible without a
-power cycle, and the recovered Computer accepts input.
+Expect: The halt screen is readable without a power cycle, no cursor is drawn
+while the machine is halted or in POST, and the recovered Computer accepts
+input.
+
+Result: open. The published-fault-reason half of this item was removed with the
+frame-metadata decision under change B.
 
 ## Exclusions
 
@@ -419,15 +544,23 @@ power cycle, and the recovered Computer accepts input.
 - The `wasm-rust` compute engine stays opt-in with `typescript` as the default;
   nothing here is p95 tick or #16 multi-user load evidence.
 
-## Documentation to update with the implementation
+## Documentation updated with the implementation
 
-- `web/manual.js` 4.10 states that the journal defaults to 256 records and 32
-  KiB total; it must describe oldest-first rotation and the dropped-record
-  notice that `dmesg` and `/var/log/messages` show once eviction has happened.
-- `web/manual.js` 4.11, 9.6, and the chapter 15 troubleshooting row describe
-  safe boot only in `/startup.py` terms; they must state what safe boot does on
-  a Portable CS386SX/CS-DOS machine and mention the halt screen as the first
-  thing to read after a failed boot.
-- `src/application/os/` and `src/application/computer/` scoped guidance must
-  record which capacities rotate and which stay fatal, so the distinction is not
-  rediscovered per change.
+- `web/manual.js` 4.10 now describes the journal as a rotating log rather than a
+  fixed table, gives the exact dropped-record notice, states that order is
+  preserved and that a cold restore truncates oldest-first. 16.3 reports
+  `256 records, 32 KiB total, 1 KiB each; oldest-first rotation` and
+  `8 active / 64 retained, oldest-first rotation`.
+- `web/manual.js` 4.11 gained the halt-screen paragraph, including that a halted
+  machine accepts no input and therefore shows no cursor, and that the block
+  face stays dark because a fault releases VRAM. Safe-boot semantics are split
+  between the Desktop `/startup.py` bypass and the Portable CS386SX case, which
+  "only retries without bootable floppy media". 9.6 tells the reader to read the
+  halt screen first and repeats the Portable difference, and 15.1 gained a
+  "Machine is crashed with an unreadable screen" row.
+- `src/application/os/CLAUDE.md` records which capacities rotate and which stay
+  fatal; `src/application/computer/CLAUDE.md` records halt-screen ownership, the
+  recovery-honesty rule, the corrected stop-phase append ordering, and the
+  fault-before-detach rule for a failed handoff.
+- `tests/tools/webManual.test.mjs` locks the new literals so the manual cannot
+  drift back to the fixed-table description.

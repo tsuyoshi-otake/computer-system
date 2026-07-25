@@ -659,6 +659,11 @@ h1 {
   animation: terminal-cursor-blink 1.06s steps(1, end) infinite;
 }
 
+/* An input-less context (CSBIOS POST, halted machine) draws no cursor at all. */
+.terminal-cell-cursor--hidden {
+  display: none;
+}
+
 @keyframes terminal-cursor-blink {
   0%,
   49% {

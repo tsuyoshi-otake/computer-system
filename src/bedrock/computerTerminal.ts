@@ -1,5 +1,6 @@
 import type { Player } from "@minecraft/server";
 
+import { safeBootBypassesStartupProgram } from "../application/computer/csBios.js";
 import { TerminalTargetRegistry } from "../application/terminal/targetRegistry.js";
 import type { ComputerRecord } from "../domain/computer/computer.js";
 import { computerHost } from "./computerHost.js";
@@ -15,16 +16,24 @@ export async function openComputerTerminal(
   if (record.lifecycle.state.kind === "off") {
     computerHost.runtime.powerOn(record.computerId);
   } else if (record.lifecycle.state.kind === "crashed") {
+    // Safe boot bypasses `/startup.py` only on a MicroPython-capable CS-Linux
+    // machine. A Portable CS386SX only skips bootable floppy media, so the chat
+    // line must not promise a bypass that machine cannot perform.
+    const bypassesStartup = safeBootBypassesStartupProgram(record);
     if (player.isSneaking) {
       const recovered = computerHost.runtime.safeBoot(record.computerId);
       player.sendMessage(
         recovered.outcome === "accepted"
-          ? "Safe boot selected. /startup.py was preserved and bypassed once."
+          ? bypassesStartup
+            ? "Safe boot selected. /startup.py was preserved and bypassed once."
+            : "Safe boot selected. Bootable floppy media was skipped once."
           : `Safe boot failed: ${recovered.outcome === "failed" ? recovered.error.message : recovered.outcome}`,
       );
     } else {
       player.sendMessage(
-        "Computer is crashed. Sneak while opening it to safe boot without changing /startup.py.",
+        bypassesStartup
+          ? "Computer is crashed. Read the halt screen, then sneak while opening it to safe boot without changing /startup.py."
+          : "Computer is crashed. Read the halt screen, then sneak while opening it to safe boot without bootable floppy media.",
       );
     }
   }

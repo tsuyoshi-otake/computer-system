@@ -53,19 +53,54 @@
   renders `[FAIL]` instead.
 - Syntax/runtime failure terminates display state as `faulted`. Shutdown and
   reboot release VRAM explicitly.
+- A failed lifecycle transition must leave its reason on the terminal.
+  `csBios.ts` owns that text: `renderCsBiosHaltScreen` writes a full 80x25 halt
+  screen (the POST rows actually reached, the failing phase, the reason wrapped
+  into at most two rows, and one recovery row) and `csBiosHaltNoticeLines`
+  appends the same facts as a few lines. `boot()`'s catch and the CSBIOS handoff
+  catch use the full screen because their screen is blank or a stale POST frame;
+  `failStopState` appends, because the guest's own shutdown output must survive.
+  The guest-crash path uses neither: the guest already wrote a better
+  diagnostic. Write only `TerminalBuffer`, never VRAM — every caller faults the
+  display immediately after and `fault` releases VRAM by design — and stop the
+  cursor blinking, because a halted machine accepts no input and an idle cursor
+  reads as a prompt. Capture the halt facts before `detach`, which clears the
+  active boot selection, and render after it, so its shell-disconnect output
+  cannot scroll the screen.
+- State only the recovery the machine really has. `crashed` accepts only
+  `reset`, and both the sneaking Bedrock action and the Web Terminal power
+  control expose that as safe boot, so halt text must name safe boot rather than
+  a power cycle. The `/startup.py` bypass exists only when
+  `supportsMicroPython && profile === "linux"`; elsewhere safe boot only skips
+  bootable floppy media, and the halt row, the in-game crashed line, and the
+  boot journal must all say that instead.
 - Graceful stop is bounded and observable: stop admission, signal owned work,
   drain admitted work and block I/O, sync, unmount, stop services/devices, save
   final state, then terminate or reboot. Each phase has a 200-tick deadline and
   no more than 16 stopping Computers advance per host tick.
 - `sync` must invoke a real persistence boundary. A deadline or durability
   failure faults; never report a clean stop without durable evidence.
+- The stop phases append each journal record after performing the mutation it
+  describes, so no append that follows a committed mutation may be able to fail;
+  oldest-first journal rotation is what makes that order safe. Do not add a
+  validating or capacity-bearing append after a mutation, and keep the original
+  phase failure authoritative when the precommit rollback finds nothing to
+  remove, because `advanceStopState` wraps a rollback failure and would
+  otherwise mask the real persistence failure. Route a stop-request failure to
+  `failStopState` rather than to the caller; the stop already owns the entry.
 - Before the single final-save callback, append only truthful
   `final sync requested` and intent-prepared records. Do not append an unsaved
   post-callback success line. On marker/callback failure, remove only that
   attempt's provisional markers before shared fault finalization.
 - Safe boot is a one-shot bypass of a broken `/startup.py`, available only while
   `crashed`. It preserves the file. Do not expose a guest or MCP safe-boot
-  command, and do not reset, rename, delete, or rewrite the startup file.
+  command, and do not reset, rename, delete, or rewrite the startup file. It
+  also skips bootable floppy media, which is its only real effect on a machine
+  without the `/startup.py` bypass.
+- A failed CSBIOS handoff must fault the OS runtime it started before detaching.
+  `completeOsRuntimeDetach` otherwise records a clean
+  `begin_shutdown("runtime_detached")` over a failed handoff, so the journal
+  never carries the reason and the phase never reflects the fault.
 
 ## Snapshot and startup migration orchestration
 

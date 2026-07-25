@@ -71,8 +71,12 @@ import { cpuModelSpecification } from "../../domain/cpu/models.js";
 import { cpuCyclesToMicroseconds } from "../../domain/cpu/timing.js";
 import {
   clearCsBiosForOs,
+  csBiosHaltNoticeLines,
+  renderCsBiosHaltScreen,
   startCsBiosBootSequence,
   type CsBiosBootSequence,
+  type CsBiosBootSource,
+  type CsBiosHaltScreenOptions,
 } from "./csBios.js";
 import { renderLinuxRcBootChatter } from "./linuxRcBootSequence.js";
 import { SerialLinkBroker } from "../io/serialLinkBroker.js";
@@ -1926,6 +1930,7 @@ export class ComputerRuntime {
         ? "dos"
         : entry.record.osProfile;
       entry.activeOsProfile = activeProfile;
+      entry.activeBootSource = floppyBoot ? "floppy" : "fixed_disk";
       entry.guestRamLedger = new GuestRamLedger(
         entry.record.hardware.memoryBytes,
       );
@@ -2087,9 +2092,14 @@ export class ComputerRuntime {
         }
       }
       if (safeBoot) {
+        // The `/startup.py` bypass is real only on a MicroPython-capable
+        // CS-Linux machine. Elsewhere safe boot only skips bootable floppy
+        // media, so the record must not claim a bypass that never happened.
         entry.osRuntimeState.appendBootJournal(
           this.scheduler.tickNumber,
-          "safe boot selected; /startup.py preserved and bypassed",
+          supportsMicroPython && activeProfile === "linux"
+            ? "safe boot selected; /startup.py preserved and bypassed"
+            : "safe boot selected; bootable floppy media skipped",
           "notice",
         );
       }
@@ -2149,13 +2159,21 @@ export class ComputerRuntime {
     } catch (error: unknown) {
       const normalized =
         error instanceof Error ? error : new Error(String(error));
-      normalized.message = `${normalized.message} [boot phase: ${bootPhase}]`;
+      const reason = normalized.message;
+      normalized.message = `${reason} [boot phase: ${bootPhase}]`;
       entry.csBiosSequence?.cancel();
       entry.csBiosSequence = undefined;
       this.pendingCsBiosEntries.delete(entry);
       this.unschedule(entry.runtimeId);
       entry.vm = undefined;
       entry.shell = undefined;
+      // The paced POST frames are rendered from later host ticks, so this
+      // failure would otherwise leave the operator with the blank screen the
+      // CSBIOS renderer wrote when the sequence started.
+      renderCsBiosHaltScreen(
+        entry.record,
+        this.bootHaltScreenOptions(entry, bootPhase, reason, false),
+      );
       this.faultOsRuntime(entry, normalized.message);
       entry.record.lifecycle.transition({
         kind: "crash",
@@ -4169,12 +4187,19 @@ export class ComputerRuntime {
       reason,
     };
     this.stoppingEntries.add(entry);
-    entry.osRuntimeState.appendSystemJournal(
-      this.scheduler.tickNumber,
-      `${intent === "reboot" ? "reboot" : "shutdown"} requested: ${reason}`,
-      "notice",
-    );
-    this.syncOsRuntimeState(entry);
+    // The stop already owns this entry, so a journal or sync failure here must
+    // reach the shared stop-failure owner instead of escaping to the caller and
+    // leaving the Computer stopping with nothing to advance it.
+    try {
+      entry.osRuntimeState.appendSystemJournal(
+        this.scheduler.tickNumber,
+        `${intent === "reboot" ? "reboot" : "shutdown"} requested: ${reason}`,
+        "notice",
+      );
+      this.syncOsRuntimeState(entry);
+    } catch (error: unknown) {
+      this.failStopState(entry, "signal", error);
+    }
   }
 
   private advanceStoppingEntries(): void {
@@ -4433,6 +4458,15 @@ export class ComputerRuntime {
       ),
     );
     finalize(() => this.faultOsRuntime(entry, detail));
+    // A failed stop leaves the guest's own shutdown output on screen, so the
+    // reason is appended under it instead of replacing it.
+    finalize(() => {
+      writeTerminalLines(
+        entry.record.terminal,
+        csBiosHaltNoticeLines(phase, normalized.message),
+      );
+      entry.record.terminal.setCursorBlink(false);
+    });
     finalize(() => {
       entry.record.lifecycle.transition({ kind: "crash", message: detail });
     });
@@ -4622,6 +4656,32 @@ export class ComputerRuntime {
       });
     }
     this.syncOsRuntimeState(entry);
+  }
+
+  /**
+   * Facts the CSBIOS halt screen may state about this entry's current boot. It
+   * reports only what the boot actually selected, so a failure before the boot
+   * source was resolved cannot claim a floppy or a `/startup.py` bypass.
+   */
+  private bootHaltScreenOptions(
+    entry: RuntimeEntry,
+    bootPhase: string,
+    reason: string,
+    postCompleted: boolean,
+  ): CsBiosHaltScreenOptions {
+    const bootProfile = entry.activeOsProfile ?? entry.record.osProfile;
+    return {
+      bootPhase,
+      bootProfile,
+      bootSource: entry.activeBootSource ?? "fixed_disk",
+      floppyPresent: entry.floppyDrive.media !== undefined,
+      postCompleted,
+      reason,
+      startupBypassAvailable:
+        bootProfile === "linux" &&
+        cpuModelSpecification(entry.record.hardware.cpuModel)
+          .supportsMicroPython,
+    };
   }
 
   private faultOsRuntime(entry: RuntimeEntry, reason: string): void {
@@ -4942,6 +5002,7 @@ export class ComputerRuntime {
     entry.csBiosSequence?.cancel();
     entry.csBiosSequence = undefined;
     this.pendingCsBiosEntries.delete(entry);
+    entry.activeBootSource = undefined;
     entry.activeOsProfile = undefined;
     entry.activeFilesystem = undefined;
     entry.osRuntimeState = entry.installedOsRuntimeState;
@@ -5018,6 +5079,18 @@ export class ComputerRuntime {
             error instanceof Error ? error : new Error(String(error));
           entry.csBiosSequence?.cancel();
           entry.csBiosSequence = undefined;
+          // POST really did complete before the handoff, and the halt facts are
+          // captured now because detach clears the active boot selection.
+          const halt = this.bootHaltScreenOptions(
+            entry,
+            "CSBIOS OS handoff",
+            normalized.message,
+            true,
+          );
+          // Fault the OS runtime before detaching. completeOsRuntimeDetach
+          // would otherwise record a clean runtime_detached shutdown over a
+          // failed handoff and the journal would never carry the reason.
+          this.faultOsRuntime(entry, normalized.message);
           entry.record.display.transition({
             kind: "fault",
             message:
@@ -5028,6 +5101,9 @@ export class ComputerRuntime {
             message: normalized.message,
           });
           this.detach(entry);
+          // Rendered after detach so its shell disconnect output cannot scroll
+          // the halt screen away.
+          renderCsBiosHaltScreen(entry.record, halt);
         }
       };
       if (scope === undefined) {
@@ -5085,6 +5161,7 @@ interface RuntimeEntry {
   linuxGuestMemoryManager?: LinuxGuestMemoryManager;
   vmMemoryGrant?: GuestProcessMemoryGrant;
   activeFilesystem?: InMemoryFilesystem;
+  activeBootSource?: CsBiosBootSource;
   activeOsProfile?: ComputerOsProfile;
   transientDosRuntimeState?: DosRuntimeState;
   syncedOsRuntimeRevision?: number;

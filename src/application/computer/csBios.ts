@@ -13,6 +13,10 @@ const terminalForeground = 0;
 const terminalBackground = 15;
 const textAttribute = 0x07;
 const memoryTestUpdates = 8;
+/** Width of the `Label          : ` field every CSBIOS row shares. */
+const biosLabelWidth = 17;
+const haltReasonRow = 23;
+const haltReasonRows = 2;
 
 export const csBiosPhases = [
   "power_on_black",
@@ -37,6 +41,23 @@ export interface CsBiosBootSequenceOptions {
   readonly floppyPresent: boolean;
   readonly startTick: number;
   readonly ticksPerSecond: number;
+}
+
+type CsBiosPostOptions = Pick<
+  CsBiosBootSequenceOptions,
+  "bootProfile" | "bootSource" | "floppyPresent"
+>;
+
+/**
+ * What the halt screen may state as fact. `postCompleted` is the caller's
+ * evidence that the paced POST really finished, so the halt screen never claims
+ * a memory test, device list, or boot selection that did not run.
+ */
+export interface CsBiosHaltScreenOptions extends CsBiosPostOptions {
+  readonly bootPhase: string;
+  readonly postCompleted: boolean;
+  readonly reason: string;
+  readonly startupBypassAvailable: boolean;
 }
 
 export type CsBiosAdvanceOutcome =
@@ -232,6 +253,68 @@ export function renderCsBiosPost(
   );
 }
 
+/**
+ * Renders the CSBIOS halt screen for a boot that never reached the guest OS.
+ *
+ * Terminal only, on purpose. Every caller faults the display immediately after,
+ * and `fault` releases VRAM, so a VRAM write here would be discarded. The
+ * opened terminal view keeps rendering `record.terminal` while the Computer is
+ * `crashed`, which is where the operator actually reads the failure.
+ */
+export function renderCsBiosHaltScreen(
+  record: ComputerRecord,
+  options: CsBiosHaltScreenOptions,
+): void {
+  const terminal = record.terminal;
+  terminal.resize(biosColumns, biosRows);
+  terminal.setTextColor(terminalForeground);
+  terminal.setBackgroundColor(terminalBackground);
+  terminal.clear();
+  const lines = haltScreen(record, options);
+  for (let row = 1; row <= biosRows; row += 1) {
+    writeTerminalLine(terminal, row, lines[row - 1] ?? "");
+  }
+  // A halted machine accepts no input, so an idle cursor would misreport the
+  // screen as a prompt.
+  terminal.setCursorPosition(1, biosRows);
+  terminal.setCursorBlink(false);
+}
+
+/**
+ * Bounded halt notice for a failure that happens after the guest already owns
+ * the screen. It is appended rather than rendered full screen so the shutdown
+ * output the operator was reading stays visible above the reason.
+ */
+export function csBiosHaltNoticeLines(
+  phase: string,
+  reason: string,
+): readonly string[] {
+  const reasonLines = wrapHaltReason(reason);
+  return [
+    "",
+    `Halt failed during ${printableSingleLine(phase)}.`,
+    ...reasonLines.map((line, index) =>
+      index === 0 ? `Reason: ${line}` : `        ${line}`,
+    ),
+    haltRecoveryNotice,
+  ];
+}
+
+/**
+ * Whether safe boot bypasses `/startup.py` on this machine. The bypass exists
+ * only where the CPU profile runs user MicroPython under CS-Linux, so a Portable
+ * CS386SX must never be told its startup program was preserved and bypassed; its
+ * only real safe-boot effect is skipping bootable floppy media.
+ */
+export function safeBootBypassesStartupProgram(
+  record: ComputerRecord,
+): boolean {
+  return (
+    record.osProfile === "linux" &&
+    cpuModelSpecification(record.hardware.cpuModel).supportsMicroPython
+  );
+}
+
 export function clearCsBiosForOs(
   terminal: TerminalBuffer,
   display: DisplayDevice,
@@ -316,14 +399,23 @@ function videoBiosScreen(record: ComputerRecord): readonly string[] {
 
 function postScreen(
   record: ComputerRecord,
-  options: Pick<
-    CsBiosBootSequenceOptions,
-    "bootProfile" | "bootSource" | "floppyPresent"
-  >,
+  options: CsBiosPostOptions,
   testedMemoryKiB: number,
   includeDevices: boolean,
   includeBoot: boolean,
 ): readonly string[] {
+  return screen(
+    postRows(record, options, testedMemoryKiB, includeDevices, includeBoot),
+  );
+}
+
+function postRows(
+  record: ComputerRecord,
+  options: CsBiosPostOptions,
+  testedMemoryKiB: number,
+  includeDevices: boolean,
+  includeBoot: boolean,
+): Record<number, string> {
   const cpu = cpuModelSpecification(record.hardware.cpuModel);
   const profile = record.display.profile;
   const totalMemoryKiB = memoryKiB(record);
@@ -350,7 +442,7 @@ function postScreen(
     rows[19] = `Boot Source    : ${options.bootSource === "floppy" ? "Floppy A:" : "Fixed Disk C:"}`;
     rows[20] = `Boot Target    : ${formatOsIdentity(getOsIdentity(options.bootProfile))}`;
   }
-  return screen(rows);
+  return rows;
 }
 
 function startingOsScreen(profile: ComputerOsProfile): readonly string[] {
@@ -358,6 +450,94 @@ function startingOsScreen(profile: ComputerOsProfile): readonly string[] {
     1: `Starting ${formatOsIdentity(getOsIdentity(profile))}...`,
   });
 }
+
+function haltScreen(
+  record: ComputerRecord,
+  options: CsBiosHaltScreenOptions,
+): readonly string[] {
+  const rows = options.postCompleted
+    ? postRows(record, options, memoryKiB(record), true, true)
+    : postRows(record, options, 0, false, false);
+  rows[haltReasonRow - 1] = `${biosLabel("Boot Error")}${options.bootPhase}`;
+  const reason = wrapHaltReason(options.reason);
+  for (let index = 0; index < reason.length; index += 1) {
+    rows[haltReasonRow + index] =
+      index === 0
+        ? `${biosLabel("Reason")}${reason[index]!}`
+        : `${"".padEnd(biosLabelWidth)}${reason[index]!}`;
+  }
+  rows[biosRows] = haltRecoveryLine(options);
+  return screen(rows);
+}
+
+/** Renders the shared `Label          : ` field of a CSBIOS row. */
+function biosLabel(label: string): string {
+  return `${label.padEnd(biosLabelWidth - 2)}: `;
+}
+
+/**
+ * Fits a host failure message into the reason rows. Control characters become
+ * spaces because `TerminalBuffer.write` rejects line breaks, and an over-long
+ * message is truncated visibly rather than silently; the complete text stays in
+ * the lifecycle crash message and the OS runtime journal.
+ */
+function wrapHaltReason(reason: string): readonly string[] {
+  const width = biosColumns - biosLabelWidth;
+  let rest = printableSingleLine(reason);
+  if (rest.length === 0) return ["Unspecified CSBIOS boot failure"];
+  const lines: string[] = [];
+  while (rest.length > 0 && lines.length < haltReasonRows) {
+    if (rest.length <= width) {
+      lines.push(rest);
+      break;
+    }
+    if (lines.length === haltReasonRows - 1) {
+      lines.push(`${rest.slice(0, width - 3)}...`);
+      break;
+    }
+    const spaceAt = rest.lastIndexOf(" ", width);
+    const cut = spaceAt > 0 ? spaceAt : width;
+    lines.push(rest.slice(0, cut));
+    rest = rest.slice(cut).trimStart();
+  }
+  return lines;
+}
+
+/** Collapses a message to printable single-spaced text on one line. */
+function printableSingleLine(value: string): string {
+  let result = "";
+  let pendingSpace = false;
+  for (const character of value) {
+    const code = character.codePointAt(0) ?? 0;
+    if (character === " " || code < 0x20 || code === 0x7f) {
+      pendingSpace = result.length > 0;
+      continue;
+    }
+    if (pendingSpace) {
+      result += " ";
+      pendingSpace = false;
+    }
+    result += character;
+  }
+  return result;
+}
+
+/**
+ * Names the recovery the operator actually has. A crashed Computer accepts only
+ * safe boot, both from the sneaking Bedrock interaction and from the Web
+ * Terminal power control, so the halt line must not promise a plain power-on.
+ */
+function haltRecoveryLine(options: CsBiosHaltScreenOptions): string {
+  if (options.bootSource === "floppy") {
+    return "System halted. Safe boot to retry without the disk in Floppy Drive A:.";
+  }
+  if (options.startupBypassAvailable) {
+    return "System halted. Safe boot to retry; /startup.py is preserved and bypassed.";
+  }
+  return haltRecoveryNotice;
+}
+
+const haltRecoveryNotice = "System halted. Safe boot to retry.";
 
 function blankScreen(): readonly string[] {
   return Array.from({ length: biosRows }, () => "".padEnd(biosColumns));
