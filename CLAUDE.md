@@ -123,12 +123,9 @@ synchronized.
   range-state stability.
 - #25: Complete CS-DOS 1.0 EDIT, Program Lists, C/C++ preprocessing, ABI help,
   and QBASIC source-run development workflow.
-- #26: Configurable `vi` options, bounded vimrc loading, and guest-shell
-  commands.
-- #27: Lightweight `vi` syntax lexers, completion, symbol indexing, and
-  definition navigation.
-- #28: Shared DOS editor options, lightweight language services, navigation, and
-  guest-shell command integration.
+- #26/#27/#28: Configurable `vi` options, bounded vimrc loading, lightweight
+  syntax lexers, completion, symbol indexing, definition navigation, shared DOS
+  editor options, and guest-shell command integration.
 - #29: EDIT and Web Terminal responsiveness, bounded input admission, and
   multi-session frame scaling.
 - #31: Structural guest disk-capacity, HDD-time, and RAM accounting.
@@ -179,6 +176,8 @@ synchronized.
 - #112: Bounded rotating OS runtime journal and visible CSBIOS boot failure.
 - #113: One `terminal_keys` wakeup owner, bounded atomic CPU sub-slices, and
   unsaturated cumulative CPU accounting.
+- #118: Deferred terminal writes must suspend instead of discarding hosted
+  stdout and answering the guest with a fabricated `EAGAIN`.
 
 Use English commit messages with useful detail and reference every applicable
 Issue. Issue #4 remains relevant while Phase 2 work is in scope.
