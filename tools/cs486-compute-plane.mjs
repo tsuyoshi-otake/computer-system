@@ -37,11 +37,10 @@ export async function startCs486ComputePlane(options = {}) {
     throw new Error("Runtime worker token generator did not return 256 bits.");
   }
 
-  // A wasm engine reads its batch-executor artifact here. A missing or
-  // malformed build rejects pool creation, which fails managed startup; no
-  // entry point ever falls back to the TypeScript engine behind the operator's
-  // back, because the guest results would then come from an engine nobody
-  // selected.
+  // Pool creation is the fail-loud point for the selected engine: an engine
+  // this build cannot run rejects here, which fails managed startup. No entry
+  // point ever substitutes another engine behind the operator's back, because
+  // the guest results would then come from an engine nobody selected.
   const pool = await createPool({ cpuEngine, workerCount });
   let compute;
   try {

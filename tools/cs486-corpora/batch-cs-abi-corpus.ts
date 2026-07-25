@@ -11,23 +11,33 @@ import type {
   Cs486Register,
 } from "../../src/domain/cpu/cs486.js";
 import { cs486Word32DataModel } from "../../src/domain/cpu/cs486Compatibility.js";
-import type { Cs486FuzzProgram } from "./cs486-fuzz-generator.js";
 
 /**
- * Batch CS ABI corpus for the Issue #106/#114 differential-equivalence harness.
+ * Batch CS ABI corpus for Issue #114.
  *
- * An ordinary worker process refuses every syscall, so the fuzz corpus can only
- * prove the two engines agree on instruction execution. `run --batch` is the
- * one production path where a worker actually services a CS ABI operation, and
- * those operations read and write guest memory through the syscall context.
- * That context charges cache cycles per access, so a bridge that reads the same
- * bytes in a different order still diverges on `run --stats` numbers.
+ * `run --batch` is the one production path where a compute worker services a
+ * CS ABI operation instead of refusing it, and those operations read and write
+ * guest memory through the syscall context. These programs exercise the whole
+ * isolated subset - the startup image, `heapInfo` pointer writes, ordered
+ * fd 1/fd 2 writes, the errno paths, and both rejection faults - so a change
+ * that narrows or widens the subset shows up as a changed outcome here rather
+ * than only in a guest session.
  *
- * These programs therefore exercise the whole isolated subset - the startup
- * image, `heapInfo` pointer writes, ordered fd 1/fd 2 writes, the errno paths,
- * and both rejection faults - so the harness compares registers, guest RAM,
- * cycles, and fault identity across every one of them.
+ * Issue #115 removed the second CS486 implementation this corpus was also used
+ * to differentially compare against; the programs stay because they are the
+ * executable statement of what a batch process may reach.
  */
+export interface Cs486BatchCsAbiProgram {
+  /** Heap placement of an admitted `run --batch` process. */
+  readonly csAbi: CsAbiBatchHeapLayout;
+  readonly executable: Cs486Executable;
+  readonly memoryBytes: number;
+  readonly name: string;
+  /** Startup image installed before the first instruction. */
+  readonly processImage: Cs486ProcessImageInitialization;
+  /** Per-slice instruction budget a runner should use. */
+  readonly recommendedSliceInstructions: number;
+}
 const heapBytes = 16_384;
 const stackBytes = 16_384;
 
@@ -100,7 +110,7 @@ const batchProcessImage: Cs486ProcessImageInitialization = Object.freeze({
 function batchProgram(
   name: string,
   instructions: readonly Cs486Instruction[],
-): Cs486FuzzProgram {
+): Cs486BatchCsAbiProgram {
   return {
     csAbi: cs486BatchCsAbiLayout,
     executable: batchExecutable(instructions),
@@ -111,7 +121,7 @@ function batchProgram(
   };
 }
 
-export function cs486BatchCsAbiForcedCases(): readonly Cs486FuzzProgram[] {
+export function cs486BatchCsAbiForcedCases(): readonly Cs486BatchCsAbiProgram[] {
   return [
     // Reports the create-time placement into registers and guest memory, writes
     // fd 1 and fd 2 into the one ordered stream, then exits with a status the

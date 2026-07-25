@@ -30,9 +30,9 @@ const adminOptions = resolveWebCompanionAdminOptions(
 );
 // MCP debugging keeps the in-engine CS486 CPU by default, so an ordinary
 // session starts no worker threads. `BDS_MCP_RUNTIME_WORKERS` opts in to the
-// same compute plane `dev:bds:web` owns, which is the only way an engine
-// selection such as `wasm-rust` reaches guest execution through MCP. A missing
-// wasm artifact fails startup here instead of silently running another engine.
+// same compute plane `dev:bds:web` owns, which is the only way a non-default
+// engine selection reaches guest execution through MCP. An engine this build
+// cannot run fails startup here instead of silently running another one.
 const computePlane = await startMcpComputePlane();
 const session = new BdsDebugSession(
   computePlane === undefined

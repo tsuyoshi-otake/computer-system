@@ -50,9 +50,6 @@ const acceptanceFixtureBuild = parseAcceptanceFixtureBuild(
 const managedBdsBuild = parseManagedBdsBuild(
   process.env.COMPUTER_SYSTEM_MANAGED_BDS,
 );
-const wasmProbeBuild = parseWasmProbeBuild(
-  process.env.COMPUTER_SYSTEM_WASM_PROBE,
-);
 const behaviorPackConfig = parseBehaviorPackConfig(
   JSON.parse(
     await readFile(
@@ -205,7 +202,6 @@ await build({
     __CS_GUEST_REALTIME_DIVISOR__: JSON.stringify(
       behaviorPackConfig.guestRealtimeDivisor,
     ),
-    __CS_WASM_PROBE__: JSON.stringify(wasmProbeBuild),
   },
   entryPoints: [
     path.join(
@@ -228,29 +224,6 @@ await build({
   logLevel: "info",
   outfile: path.join(behaviorOutput, "scripts", "main.js"),
   platform: "neutral",
-  // Probe-free builds swap the wasm probe module for an inert stub so no
-  // probe code or diagnostic string ships; esbuild keeps `if (false)`
-  // branches without minification, so a define alone cannot guarantee that.
-  plugins: wasmProbeBuild
-    ? []
-    : [
-        {
-          name: "cs-wasm-probe-stub",
-          setup(pluginBuild) {
-            pluginBuild.onResolve(
-              { filter: /probes[\\/]wasmProbe\.js$/ },
-              () => ({ namespace: "cs-wasm-probe-stub", path: "stub" }),
-            );
-            pluginBuild.onLoad(
-              { filter: /^stub$/, namespace: "cs-wasm-probe-stub" },
-              () => ({
-                contents: "export function startWasmProbe() {}",
-                loader: "js",
-              }),
-            );
-          },
-        },
-      ],
   sourcemap: true,
   target: "es2022",
 });
@@ -294,12 +267,6 @@ function parseManagedBdsBuild(value) {
   if (value === undefined || value === "0") return false;
   if (value === "1") return true;
   throw new Error("COMPUTER_SYSTEM_MANAGED_BDS must be 0 or 1.");
-}
-
-function parseWasmProbeBuild(value) {
-  if (value === undefined || value === "0") return false;
-  if (value === "1") return true;
-  throw new Error("COMPUTER_SYSTEM_WASM_PROBE must be 0 or 1.");
 }
 
 async function addManagedBdsDependencies(manifestPath) {

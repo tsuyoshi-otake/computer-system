@@ -157,10 +157,10 @@ the isolated server. Never point it at the interactive world.
   Validate correlation and ownership before dispatch, and reject malformed,
   over-capacity, failed, or closing work without blocking unrelated workers.
 - A worker refuses every syscall except for a CS-Linux `run --batch` process.
-  Validate its startup process image and CS ABI heap placement at the create
-  boundary and require both together. The serviced subset, engine selection,
-  worker start-up, the artifact, and dual maintenance belong to
-  [`wasm/CLAUDE.md`](../wasm/CLAUDE.md).
+  Validate its startup process image and CS ABI heap placement together at the
+  create boundary; [`src/domain/cpu/CLAUDE.md`](../src/domain/cpu/CLAUDE.md)
+  owns the serviced subset. An unknown `WEB_COMPANION_CPU_ENGINE` or
+  `--cpu-engine` value is rejected at configuration time, never substituted.
 
 ## Pages and asset builders
 

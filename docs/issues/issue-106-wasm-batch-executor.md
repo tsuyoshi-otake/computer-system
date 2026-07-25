@@ -9,6 +9,16 @@ prototype is **not integrated** into the production `Cs486Process` path, the
 scheduler, the managed runtime-worker pool, or any release pack; production
 integration remains a separate decision to be made from this evidence.
 
+Status on 2026-07-26: **removed**. The Rust wasm executor, its build scripts,
+its equivalence harness, and the `wasm-rust` engine value were deleted by
+[Issue #115](issue-115-remove-wasm-executor.md). Everything below remains a
+correct record of what was measured and shipped while it existed; nothing here
+has been rewritten. What replaced it is not a slower path: the real-BDS
+`run --batch` speedup measured for [Issue #114](issue-114-run-batch-cs-abi.md)
+was produced by the TypeScript interpreter on a compute worker, so the
+throughput this Issue set out to win survives without a second CS486
+implementation.
+
 Status on 2026-07-25: acting on that evidence, the Rust variant became an
 **opt-in** compute-worker engine in the managed Web companion. See
 [Phase 5: opt-in compute-worker integration](#phase-5-opt-in-compute-worker-integration)

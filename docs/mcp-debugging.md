@@ -33,7 +33,7 @@ variables:
 | `WEB_COMPANION_PUBLIC_ORIGIN`      | unset                                               | Complete HTTPS origin advertised behind a reverse proxy         |
 | `WEB_COMPANION_CONFIG_FILE`        | system-wide platform path                           | Persistent administrator configuration file                     |
 | `WEB_COMPANION_RUNTIME_WORKERS`    | `2`                                                 | Managed `dev:bds:web` worker threads; integer from 1 through 16 |
-| `WEB_COMPANION_CPU_ENGINE`         | `typescript`                                        | Compute-worker CS486 engine; `typescript` or `wasm-rust`        |
+| `WEB_COMPANION_CPU_ENGINE`         | `typescript`                                        | Compute-worker CS486 engine; `typescript` is the only value     |
 | `WEB_COMPANION_ALLOWED_ORIGINS`    | unset                                               | Extra origins, or `*` to accept every request Origin            |
 | `WEB_COMPANION_AUTO_OPEN`          | `1`                                                 | `0` disables and `1` enables host-browser opening               |
 | `WEB_COMPANION_DEBUG_IGNORE_RANGE` | `0`                                                 | Debug only: skip the placed-machine range and dimension check   |
@@ -69,15 +69,12 @@ is displayed as `http://host` and `https://host:443` is displayed as
 terminates HTTPS; the Node companion does not turn into an HTTPS server merely
 by listening on TCP 443.
 
-`--cpu-engine` selects which CS486 implementation the compute workers run:
-`typescript` (the default production interpreter) or `wasm-rust` (the Issue #106
-Rust batch executor). `wasm-rust` requires `npm run build:cs486-wasm` output; a
-missing or malformed artifact fails managed startup explicitly rather than
-falling back to the interpreter, so the reported engine is always the engine
-that produced the guest results. `--clear-cpu-engine` restores `typescript`, and
-`WEB_COMPANION_CPU_ENGINE` overrides the file for one process. The choice
-affects host cost only; guest clocks, cycle accounting, and program results are
-identical on both engines.
+`--cpu-engine` selects which CS486 implementation the compute workers run. Issue
+#115 removed the Rust batch executor on 2026-07-26, so `typescript` is the only
+accepted value; an unknown name fails managed startup explicitly rather than
+being substituted, and the reported engine is always the engine that produced
+the guest results. `--clear-cpu-engine` restores `typescript`, and
+`WEB_COMPANION_CPU_ENGINE` overrides the file for one process.
 
 ### Managed compute workers in an MCP session
 
@@ -89,7 +86,7 @@ plane `npm run dev:bds:web` owns:
 
 ```powershell
 $env:BDS_MCP_RUNTIME_WORKERS = "2"
-$env:WEB_COMPANION_CPU_ENGINE = "wasm-rust"
+$env:WEB_COMPANION_CPU_ENGINE = "typescript"
 ```
 
 With workers enabled the companion starts the pool and the authenticated
@@ -103,10 +100,12 @@ report that no operator-selected engine executed anything.
 Two failures are explicit and happen before any world is touched:
 
 - Selecting a non-default engine while the workers stay disabled is rejected at
-  startup. The companion exits non-zero rather than running `typescript` under a
-  `wasm-rust` label.
-- `wasm-rust` with a missing or malformed `npm run build:cs486-wasm` artifact
-  fails pool creation, which fails MCP startup. There is no silent fallback.
+  startup. The companion exits non-zero rather than running `typescript` under
+  another engine's label. Issue #115 left one engine name, so nothing can select
+  a second one today; the rule stays because it is about the shape of the
+  session, not about which engines exist.
+- An unknown `WEB_COMPANION_CPU_ENGINE` value fails pool creation, which fails
+  MCP startup. There is no silent substitution.
 
 The managed pack requires the irreversible Beta APIs experiment. Enable workers
 only against a world that already has it, and never with `resetWorld: true` on a

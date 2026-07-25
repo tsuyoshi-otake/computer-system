@@ -7,7 +7,7 @@ import type { CpuModel } from "../src/domain/cpu/models.js";
 import {
   cs486AluBranchCorpusExecutable,
   cs486AluBranchCorpusMemoryBytes,
-} from "./wasm-corpora/alu-branch-corpus.js";
+} from "./cs486-corpora/alu-branch-corpus.js";
 
 const guestMemoryInspectionChunkBytes = 4_096;
 
@@ -53,9 +53,9 @@ export function measureCs486InterpreterSample(
 }
 
 /**
- * Corpus-parameterized variant of `measureCs486InterpreterSample` used by the
- * Issue #106 wasm A/B harness so every engine adapter measures an identical
- * executable and RAM admission.
+ * Corpus-parameterized variant of `measureCs486InterpreterSample` so every
+ * benchmark corpus is measured against an identical executable and RAM
+ * admission.
  */
 export function measureCs486ExecutableSample(
   executable: Cs486Executable,

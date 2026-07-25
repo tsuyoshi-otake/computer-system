@@ -213,13 +213,16 @@ describe("BDS MCP stdio server", () => {
     expect(JSON.stringify(result)).not.toMatch(/Bearer/u);
   }, 60_000);
 
-  it("refuses a selected engine the in-engine session could never run", async () => {
+  it("refuses an engine this build does not have", async () => {
+    // Issue #115 removed `wasm-rust`. A workstation that still exports it must
+    // fail startup instead of quietly running the interpreter, which would
+    // attribute the resulting evidence to an engine that no longer exists.
     const { code, stderr } = await runServerToExit({
       WEB_COMPANION_CPU_ENGINE: "wasm-rust",
     });
     expect(code).toBe(1);
-    expect(stderr).toContain("BDS_MCP_RUNTIME_WORKERS");
     expect(stderr).toContain("wasm-rust");
+    expect(stderr).toContain("typescript");
   });
 
   it("rejects a malformed managed worker count", async () => {

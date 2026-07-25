@@ -31,7 +31,7 @@ describe("MCP runtime worker selection", () => {
       expect(
         resolveMcpRuntimeWorkerCount(
           { BDS_MCP_RUNTIME_WORKERS: configured },
-          { cpuEngine: "wasm-rust" },
+          { cpuEngine: "future-engine" },
         ),
       ).toBe(expected);
     }
@@ -65,11 +65,15 @@ describe("MCP runtime worker selection", () => {
       { BDS_MCP_RUNTIME_WORKERS: "0" },
     ]) {
       expect(() =>
-        resolveMcpRuntimeWorkerCount(environment, { cpuEngine: "wasm-rust" }),
+        resolveMcpRuntimeWorkerCount(environment, {
+          cpuEngine: "future-engine",
+        }),
       ).toThrow(/BDS_MCP_RUNTIME_WORKERS/u);
       expect(() =>
-        resolveMcpRuntimeWorkerCount(environment, { cpuEngine: "wasm-rust" }),
-      ).toThrow(/wasm-rust/u);
+        resolveMcpRuntimeWorkerCount(environment, {
+          cpuEngine: "future-engine",
+        }),
+      ).toThrow(/future-engine/u);
     }
   });
 });

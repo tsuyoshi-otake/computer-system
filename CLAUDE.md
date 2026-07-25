@@ -38,7 +38,6 @@ weaken a repository-wide safety rule.
 | [`docs/`](docs/CLAUDE.md)                                                 | Maintainer/operator documentation, verification records, and issue evidence     |
 | [`.github/`](.github/CLAUDE.md)                                           | GitHub automation and its workflow-specific rules                               |
 | [`vendor/bedrock-core-ui-0.9.2/`](vendor/bedrock-core-ui-0.9.2/CLAUDE.md) | Pinned upstream UI source, compiled mirror, and RP protocol assets              |
-| [`wasm/`](wasm/CLAUDE.md)                                                 | Issue #106 Rust wasm batch executor and its opt-in compute-worker engine        |
 
 Keep a scoped rule in the narrowest directory that owns it. Do not copy the same
 rule into several files. If a change crosses scopes, read each applicable
@@ -65,11 +64,11 @@ rule into several files. If a change crosses scopes, read each applicable
 - Keep guest timing independent from host admission and wall-clock delay. Host
   elapsed time may control admission and observability but must never rewrite
   guest CPU, disk, memory, or wire timing.
-- The CS486 contract has two production implementations: `Cs486Process` and the
-  Rust wasm batch executor the managed companion can run in its compute workers.
-  A change to a responsibility they share must land in both in the same change.
-  [`src/domain/cpu/CLAUDE.md`](src/domain/cpu/CLAUDE.md) owns that list and the
-  required equivalence evidence.
+- The CS486 contract has exactly one production implementation, `Cs486Process`.
+  Issue #115 removed the second one. Where the process runs is operator
+  configuration; what it computes is not. Do not add a second CS486 interpreter,
+  transpiler, or native executor without an accepted Issue that also owns the
+  equivalence evidence such a split would require.
 - Unsupported Bedrock or guest-OS behavior must fail explicitly. Never silently
   approximate an incompatible feature or imply support that does not exist.
 - Preserve unrelated working-tree changes. Do not commit generated `dist/`
@@ -173,8 +172,8 @@ synchronized.
 - #33: Compile RAM lease finalization across completion, disconnect, and detach.
 - #34: DOS memory architecture v2, atomic CONFIG, address allocation, MEM
   snapshots, and declared process grants.
-- #106/#114: CS486 throughput, the opt-in Rust wasm compute-worker engine, and
-  `run --batch` with its isolated CS ABI worker subset.
+- #106/#114/#115: CS486 throughput, `run --batch` with its isolated CS ABI
+  worker subset, and the removal of the Rust wasm compute-worker engine.
 - #111: CS-Linux login-boundary tty clear and released-terminal input.
 - #112: Bounded rotating OS runtime journal and visible CSBIOS boot failure.
 - #113: One `terminal_keys` wakeup owner, bounded atomic CPU sub-slices, and

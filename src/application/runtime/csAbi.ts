@@ -1443,7 +1443,7 @@ export interface AttachableCsAbiBatchSyscallHandler {
  *
  * Every host that runs a batch process - the shell session, MCP, the local
  * runtime path, and both compute-worker engines - has to build the handler
- * before the process or wasm session that accumulates output, so the sink
+ * before the process that accumulates output, so the sink
  * cannot be a construction argument. `attach` runs immediately after that
  * construction and strictly before any slice, which makes an unattached sink a
  * host defect rather than a state a guest can reach.

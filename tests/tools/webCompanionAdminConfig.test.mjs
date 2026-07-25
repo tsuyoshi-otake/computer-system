@@ -61,7 +61,7 @@ describe("persistent Web companion administrator configuration", () => {
       publicOrigin: "http://terminal.example.test",
     });
     await saveWebCompanionAdminConfig(configPath, {
-      cpuEngine: "wasm-rust",
+      cpuEngine: "typescript",
       port: 8_080,
       publicOrigin: "https://terminal.example.test",
       runtimeWorkerCount: 4,
@@ -69,14 +69,14 @@ describe("persistent Web companion administrator configuration", () => {
 
     expect(await loadWebCompanionAdminConfig(configPath)).toEqual({
       version: 3,
-      cpuEngine: "wasm-rust",
+      cpuEngine: "typescript",
       port: 8_080,
       publicOrigin: "https://terminal.example.test",
       runtimeWorkerCount: 4,
     });
     expect(JSON.parse(await readFile(configPath, "utf8"))).toEqual({
       version: 3,
-      cpuEngine: "wasm-rust",
+      cpuEngine: "typescript",
       port: 8_080,
       publicOrigin: "https://terminal.example.test",
       runtimeWorkerCount: 4,
@@ -116,15 +116,15 @@ describe("persistent Web companion administrator configuration", () => {
     expect(() =>
       validateWebCompanionAdminConfig({
         version: 2,
-        cpuEngine: "wasm-rust",
+        cpuEngine: "typescript",
       }),
     ).toThrow(/version 2 cannot declare cpuEngine/u);
     expect(() =>
       validateWebCompanionAdminConfig({
         version: 3,
-        cpuEngine: "wasm-unknown",
+        cpuEngine: "wasm-rust",
       }),
-    ).toThrow(/must be one of: typescript, wasm-rust/u);
+    ).toThrow(/must be one of: typescript/u);
     expect(() => validateWebCompanionAdminConfig({ version: 4 })).toThrow(
       /must be one of: 1, 2, 3/u,
     );
@@ -158,9 +158,9 @@ describe("persistent Web companion administrator configuration", () => {
     expect(
       resolveWebCompanionAdminOptions(
         {},
-        { version: 3, cpuEngine: "wasm-rust" },
+        { version: 3, cpuEngine: "typescript" },
       ).cpuEngine,
-    ).toBe("wasm-rust");
+    ).toBe("typescript");
     expect(
       resolveWebCompanionAdminOptions(
         {
@@ -171,7 +171,7 @@ describe("persistent Web companion administrator configuration", () => {
         },
         {
           version: 3,
-          cpuEngine: "wasm-rust",
+          cpuEngine: "typescript",
           port: 80,
           publicOrigin: "https://persisted.example.test",
           runtimeWorkerCount: 4,
@@ -185,7 +185,7 @@ describe("persistent Web companion administrator configuration", () => {
     });
     expect(() =>
       resolveWebCompanionAdminOptions({ WEB_COMPANION_CPU_ENGINE: "rust" }, {}),
-    ).toThrow(/CS486 compute engine must be one of: typescript, wasm-rust/u);
+    ).toThrow(/CS486 compute engine must be one of: typescript/u);
   });
 
   it("supports set, show, and reset through the administrator CLI", async () => {
@@ -200,7 +200,7 @@ describe("persistent Web companion administrator configuration", () => {
       "--runtime-workers",
       "2",
       "--cpu-engine",
-      "wasm-rust",
+      "typescript",
       "--config-file",
       configPath,
     ]);
@@ -209,7 +209,7 @@ describe("persistent Web companion administrator configuration", () => {
       path: configPath,
       configuration: {
         version: 3,
-        cpuEngine: "wasm-rust",
+        cpuEngine: "typescript",
         port: 80,
         publicOrigin: "http://10.255.10.90",
         runtimeWorkerCount: 2,
@@ -229,11 +229,9 @@ describe("persistent Web companion administrator configuration", () => {
       configPath,
     ]);
     expect(rejectedResult.status).toBe(1);
-    expect(rejectedResult.stderr).toMatch(
-      /must be one of: typescript, wasm-rust/u,
-    );
+    expect(rejectedResult.stderr).toMatch(/must be one of: typescript/u);
     expect((await loadWebCompanionAdminConfig(configPath)).cpuEngine).toBe(
-      "wasm-rust",
+      "typescript",
     );
 
     const clearResult = runCli([

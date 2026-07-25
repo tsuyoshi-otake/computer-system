@@ -15,13 +15,11 @@ import {
 import { VmRuntimeError } from "../src/domain/runtime/errors.js";
 import {
   createCs486TypeScriptComputeEngine,
-  createCs486WasmComputeEngine,
   isCs486ComputeEngineName,
   type Cs486ComputeCpuEngine,
   type Cs486ComputeEngineName,
   type Cs486ComputeProcess,
 } from "./cs486-compute-worker-cpu-engine.js";
-import { compileCs486WasmModule } from "./wasm-engines/wasm-instantiation.js";
 
 const protocolVersion = 1;
 const maximumProcessesPerWorker = 128;
@@ -51,8 +49,6 @@ type CommandName = "create" | "dispose" | "fail" | "slice" | "terminate";
 interface WorkerConfiguration {
   readonly cpuEngine: Cs486ComputeEngineName;
   readonly protocolVersion: 1;
-  /** Batch-executor artifact bytes; required by, and only by, a wasm engine. */
-  readonly wasmModuleBytes?: Uint8Array;
   readonly workerCount: number;
   readonly workerIndex: number;
 }
@@ -129,10 +125,10 @@ const port = parentPort;
 if (port === null)
   throw new Error("CS486 compute worker requires a parent port");
 
-// Built before the ready message so a missing, stale, or malformed wasm
-// artifact fails this worker at startup instead of at the first slice. There is
-// no fallback to the TypeScript engine: the operator selected an engine and a
-// silent substitution would misreport which one produced the guest results.
+// Built before the ready message so an unusable engine fails this worker at
+// startup instead of at the first slice. There is no substitution for the
+// engine the operator selected: a silent one would misreport which
+// implementation produced the guest results.
 const engine = createConfiguredEngine(configuration);
 const processes = new Map<string, OwnedProcess>();
 
@@ -654,17 +650,14 @@ function parseProcessImage(value: unknown): Cs486ProcessImageInitialization {
 function createConfiguredEngine(
   worker: WorkerConfiguration,
 ): Cs486ComputeCpuEngine {
-  if (worker.cpuEngine === "typescript")
-    return createCs486TypeScriptComputeEngine();
-  const bytes = worker.wasmModuleBytes;
-  if (bytes === undefined)
-    throw new Error(
-      `CS486 compute engine ${worker.cpuEngine} requires batch-executor artifact bytes; run "npm run build:cs486-wasm" first`,
-    );
-  return createCs486WasmComputeEngine(
-    compileCs486WasmModule(bytes),
-    worker.cpuEngine,
-  );
+  // Issue #115 left one entry. The table stays because a missing factory must
+  // be a compile error rather than a silent substitution of whichever engine
+  // happens to be linked. It is built here, not at module scope, because the
+  // engine is constructed during module evaluation.
+  const factories: Readonly<
+    Record<Cs486ComputeEngineName, () => Cs486ComputeCpuEngine>
+  > = { typescript: createCs486TypeScriptComputeEngine };
+  return factories[worker.cpuEngine]();
 }
 
 function parseWorkerConfiguration(value: unknown): WorkerConfiguration {
@@ -673,9 +666,7 @@ function parseWorkerConfiguration(value: unknown): WorkerConfiguration {
     value.protocolVersion !== protocolVersion ||
     !isCs486ComputeEngineName(value.cpuEngine) ||
     !isSafeIntegerInRange(value.workerCount, 1, 16) ||
-    !isSafeIntegerInRange(value.workerIndex, 1, value.workerCount) ||
-    (value.wasmModuleBytes !== undefined &&
-      !(value.wasmModuleBytes instanceof Uint8Array))
+    !isSafeIntegerInRange(value.workerIndex, 1, value.workerCount)
   )
     throw new Error("invalid CS486 compute worker configuration");
   return value as unknown as WorkerConfiguration;

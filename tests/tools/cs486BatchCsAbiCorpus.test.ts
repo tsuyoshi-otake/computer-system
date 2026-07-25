@@ -9,14 +9,13 @@ import type { CpuProcessState } from "../../src/domain/runtime/cpuProcess.js";
 import {
   cs486BatchCsAbiForcedCases,
   cs486BatchCsAbiLayout,
-} from "../../tools/wasm-corpora/batch-cs-abi-corpus.js";
+} from "../../tools/cs486-corpora/batch-cs-abi-corpus.js";
 
 /**
- * The differential harness reports zero divergences when both engines agree,
- * including when both agree on doing nothing. These expectations pin what each
- * corpus program actually reaches on the reference implementation, so a program
- * that stops exercising the isolated CS ABI subset fails here instead of
- * quietly turning `verify:cs486-wasm-equivalence` into vacuous evidence.
+ * These expectations pin what each corpus program actually reaches on the
+ * production `Cs486Process` implementation, so a program that stops exercising
+ * the isolated CS ABI subset fails here instead of quietly turning the corpus
+ * into vacuous evidence.
  */
 interface CorpusOutcome {
   readonly output: string;

@@ -13,10 +13,9 @@ import {
 } from "./mem-stack-corpus.js";
 
 /**
- * Engine-independent benchmark corpus registry for the Issue #106 wasm
- * batch-executor A/B harness. Every engine adapter (TS reference and Rust
- * wasm) resolves corpora through this single map so the A/B comparison always
- * measures the identical executable and RAM admission.
+ * Benchmark corpus registry. Every benchmark entry resolves corpora through
+ * this single map so any two runs always measure the identical executable and
+ * RAM admission.
  */
 export type Cs486BenchmarkCorpusName =
   "alu-branch" | "hosted-c-mid" | "mem-stack";

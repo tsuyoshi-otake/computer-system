@@ -1,43 +1,36 @@
 # CPU domain guidance
 
-## Two implementations of one CPU
+## One implementation of one CPU
 
-`Cs486Process` in `cs486.ts` is the reference implementation and the only engine
-the shipped Bedrock pack runs. The managed Web companion can additionally be
-configured to run the Rust wasm batch executor (`wasm/cs486-batch-executor-rs/`
-plus its host bridge under `tools/`) in its compute workers. Both are production
-paths, so **the CS486 contract now has two implementations that must agree**.
+`Cs486Process` in `cs486.ts` is **the single production CS486 implementation**.
+The shipped Bedrock pack runs it in the Script API engine, and the managed Web
+companion runs the same class inside its compute workers. Issue #115 removed the
+Rust wasm batch executor, so a change to instruction semantics, cycle costs, or
+syscall policy now has exactly one place to land.
 
-- A change to executable admission and validation, guest RAM accounting and
-  layout, instruction semantics, cycle costs, the cache/bus model, slice budget
-  contracts, syscall policy, fault identity and message text, or terminal-state
-  semantics must land in `cs486.ts` **and** in the wasm executor in the same
-  change. Shipping one side alone makes the same guest program produce different
-  observable results depending on operator configuration.
-- The wasm executor deliberately shares no code with `src/` (see
-  [`wasm/CLAUDE.md`](../../../wasm/CLAUDE.md)); agreement is proven by the
-  differential equivalence harness, not by a compiler. Treat
-  `npm run verify:cs486-wasm-equivalence` as part of the definition of done for
-  any change in this list, and extend its forced cases when a change introduces
-  a new divergence risk.
-- Process-image initialization (`initializeProcessImage`) and the isolated batch
-  CS ABI subset are on that list. `run --batch` gives a worker process a startup
-  image and lets it reach `exit`, `heapInfo`, and `fsWrite` on fd 1 and fd 2
-  through `createCsAbiBatchSyscallHandler`; both engines service them, and both
-  charge the same syscall-context memory accesses in the same order, so a bridge
-  that reads the same bytes differently still diverges on `run --stats`. The
-  handler itself lives once in `src/application/runtime/csAbi.ts` and is shared
-  by the in-session, TypeScript-worker, and wasm-worker paths; only the guest
-  memory and register access underneath it is per engine. Extend
-  `tools/wasm-corpora/batch-cs-abi-corpus.ts` when that subset changes, and keep
-  `tests/tools/cs486BatchCsAbiCorpus.test.ts` pinning what each corpus program
-  reaches on `Cs486Process` so zero divergences cannot mean zero coverage.
-- Where wasm genuinely cannot reproduce a behaviour, the engine boundary must
-  refuse the work explicitly at create time rather than approximate it.
-  `tools/cs486-compute-worker-cpu-engine.ts` owns those refusals; deterministic
-  floating point is the standing example and stays in TypeScript.
-- The engine is never selected implicitly. Nothing may fall back from wasm to
-  TypeScript, or the other way, on failure.
+- Where a process runs is operator configuration; what it computes is not. A
+  compute worker changes admission, scheduling, and host wall time. It must
+  never change guest output, exit status, modeled cycles, or microarchitecture
+  statistics.
+- Do not reintroduce a second CS486 interpreter, transpiler, or native executor
+  without an accepted Issue that also owns the differential equivalence
+  evidence. The removed engine cost a permanent dual-maintenance tax on every
+  item above; `docs/issues/issue-115-remove-wasm-executor.md` records why it was
+  not worth paying.
+- The compute worker still has no guest filesystem, terminal, scheduler, or DAC
+  credentials, so it refuses every syscall except the isolated batch CS ABI
+  subset. `run --batch` gives a worker process a startup image and lets it reach
+  `exit`, `heapInfo`, and `fsWrite` on fd 1 and fd 2; everything else raises
+  `Cs486Fault("UnsupportedOperationError", ...)` rather than being approximated.
+  `tools/cs486-compute-worker-cpu-engine.ts` owns those refusals.
+- The batch handler lives once in `src/application/runtime/csAbi.ts` and is
+  shared by the in-session and worker paths, so the subset cannot drift between
+  them. Extend `tools/cs486-corpora/batch-cs-abi-corpus.ts` when that subset
+  changes, and keep `tests/tools/cs486BatchCsAbiCorpus.test.ts` pinning what
+  each corpus program reaches on `Cs486Process`.
+- The engine is never selected implicitly, and nothing falls back to a different
+  engine on failure. That rule is about the shape of operator configuration, not
+  about how many engines happen to exist.
 
 ## Shared process and ABI
 

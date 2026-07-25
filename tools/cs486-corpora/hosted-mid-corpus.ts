@@ -2,8 +2,8 @@ import { compileCs486Source } from "../../src/application/toolchain/highLevelCom
 import type { Cs486Executable } from "../../src/domain/cpu/cs486.js";
 
 /**
- * Hosted mid-size benchmark corpus for the Issue #106 wasm batch-executor
- * A/B harness: a small C program built by the real guest C frontend and
+ * Hosted mid-size benchmark corpus for the Issue #106 CS486 throughput
+ * harness: a small C program built by the real guest C frontend and
  * linker, so the measured instruction stream carries the production call
  * ABI (push/call/ret frames), global-array addressing, and data-dependent
  * branches instead of a hand-shaped synthetic loop.
@@ -11,7 +11,7 @@ import type { Cs486Executable } from "../../src/domain/cpu/cs486.js";
  * The program fills a global array from a fixed-seed LCG, insertion-sorts
  * it, prints one checksum line, then keeps re-filling and re-sorting
  * forever; the benchmark instruction budget bounds execution. One print
- * keeps the cold-exit bridge on the measured path a bounded number of
+ * keeps the syscall exit on the measured path a bounded number of
  * times without turning the corpus into an output benchmark.
  *
  * The guest linker declares cs-flat32 metadata with a 256 KiB heap and a

@@ -23,7 +23,7 @@ runtime-worker service is a separate operator boundary described below.
 | Pitched notes and registered sounds   | supported_with_constraint | BDS accepted two registered-sound calls at pitches 0.5 and 2.0                                                                                                                               | Keep registered sounds; human audibility and timing remain manual                                                                                    |
 | Arbitrary PCM or DFPWM audio          | not_supported             | Stable sound APIs select registered sound identifiers and expose only pitch/volume                                                                                                           | Do not promise arbitrary streaming; ship a bounded registered sound palette                                                                          |
 | Managed runtime-worker transport      | supported_with_constraint | Host tests, deterministic two-worker benchmarks, and a disposable real-BDS roundtrip prove Computer-affine CS386SX/CS486 execution over an authenticated bounded loopback channel            | Keep release packs Beta-free; require backup and explicit consent before enabling the irreversible Beta APIs experiment on a preserved managed world |
-| WebAssembly runtime inside Script API | not_supported             | A `COMPUTER_SYSTEM_WASM_PROBE=1` managed-BDS build logged `CS_WASM_PROBE result={"available":false,"runtimeType":"undefined"}` at Script API startup on 2026-07-24                           | Keep the Issue #106 wasm batch-executor prototype host-side (Node managed runtime workers); do not plan in-engine wasm execution                     |
+| WebAssembly runtime inside Script API | not_supported             | A `COMPUTER_SYSTEM_WASM_PROBE=1` managed-BDS build logged `CS_WASM_PROBE result={"available":false,"runtimeType":"undefined"}` at Script API startup on 2026-07-24                           | Do not plan in-engine wasm execution. The host-side wasm executor this row scoped was itself removed by Issue #115 on 2026-07-26                     |
 
 Statuses are `supported`, `supported_with_constraint`, `not_supported`, or
 `pending`. Every non-green capability must have a documented fallback before a
@@ -38,15 +38,15 @@ Beta server-admin/server-net modules; it never silently enables experiments on a
 preserved world. The visible resource and logical computer identity remain
 shared.
 
-The WebAssembly probe is compile-time gated: `COMPUTER_SYSTEM_WASM_PROBE=1`
-defines the flag and emits one bounded `CS_WASM_PROBE result={…}` warning that
-reports the type of the `WebAssembly` global and, when present, an instantiation
-attempt against the eight-byte empty module. Ordinary builds swap the probe
-module for an inert stub, so release bundles contain no probe code. The
-2026-07-24 observation ran against a dedicated isolated managed workdir; the
-Bedrock script engine exposes no `WebAssembly` global, so any CS486 wasm
-executor benefit is scoped to the Node-side managed runtime-worker pool (see
-`docs/issues/issue-106-wasm-batch-executor.md`).
+The WebAssembly row is dated historical evidence. The compile-time-gated probe
+that produced it (`COMPUTER_SYSTEM_WASM_PROBE=1`, one bounded
+`CS_WASM_PROBE result={…}` warning reporting the type of the `WebAssembly`
+global) was removed with the executor it existed to scope; Issue #115 deleted
+both on 2026-07-26. The 2026-07-24 observation ran against a dedicated isolated
+managed workdir and still stands: the Bedrock script engine exposes no
+`WebAssembly` global. Restoring the probe is the prerequisite for reopening this
+row, not an assumption that the result has changed (see
+`docs/issues/issue-115-remove-wasm-executor.md`).
 
 The GDK DDUI probe was verified at 1280x1024. Observable updates advanced while
 the form remained open, but rapid label replacement occasionally produced a

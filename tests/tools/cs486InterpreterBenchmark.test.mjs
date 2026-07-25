@@ -123,32 +123,18 @@ describe("CS486 interpreter host-throughput benchmark", () => {
     );
   });
 
-  it("parses the wasm A/B engine and corpus selections", () => {
-    expect(
-      parseBenchmarkArguments([
-        "--engine",
-        "wasm-rust",
-        "--corpus",
-        "mem-stack",
-      ]),
-    ).toMatchObject({
-      corpus: "mem-stack",
-      engine: "wasm-rust",
-    });
-    expect(
-      parseBenchmarkArguments([
-        "--engine",
-        "wasm-rust",
-        "--corpus",
-        "hosted-c-mid",
-      ]),
-    ).toMatchObject({
-      corpus: "hosted-c-mid",
-      engine: "wasm-rust",
-    });
-    expect(() => parseBenchmarkArguments(["--engine", "unknown"])).toThrow(
-      /engine must be one of ts, wasm-rust/u,
-    );
+  it("parses the engine and corpus selections", () => {
+    for (const corpus of ["mem-stack", "hosted-c-mid"])
+      expect(
+        parseBenchmarkArguments(["--engine", "ts", "--corpus", corpus]),
+      ).toMatchObject({ corpus, engine: "ts" });
+    // Issue #115 removed the second engine, so the name it used must be
+    // rejected like any other unknown value rather than silently measured on
+    // the interpreter and reported under the wrong label.
+    for (const engine of ["wasm-rust", "unknown"])
+      expect(() => parseBenchmarkArguments(["--engine", engine])).toThrow(
+        /engine must be one of ts/u,
+      );
     expect(() => parseBenchmarkArguments(["--corpus", "unknown"])).toThrow(
       /corpus must be one of alu-branch, mem-stack, hosted-c-mid/u,
     );

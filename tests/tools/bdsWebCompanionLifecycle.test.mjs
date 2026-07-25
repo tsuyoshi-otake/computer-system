@@ -107,7 +107,7 @@ describe("BDS Web companion lifecycle", () => {
     const events = [];
     let poolOptions;
     const lifecycle = createLifecycle({
-      environment: { WEB_COMPANION_CPU_ENGINE: "wasm-rust" },
+      environment: { WEB_COMPANION_CPU_ENGINE: "typescript" },
       events,
       onPoolOptions: (value) => {
         poolOptions = value;
@@ -116,10 +116,10 @@ describe("BDS Web companion lifecycle", () => {
 
     const status = await lifecycle.start();
     expect(poolOptions).toEqual({
-      cpuEngine: "wasm-rust",
+      cpuEngine: "typescript",
       workerCount: 2,
     });
-    expect(status).toMatchObject({ cpuEngine: "wasm-rust" });
+    expect(status).toMatchObject({ cpuEngine: "typescript" });
     expect(status.webConfiguration.environmentOverrides).toMatchObject({
       cpuEngine: true,
     });
@@ -130,21 +130,19 @@ describe("BDS Web companion lifecycle", () => {
   it("fails managed startup when the selected engine cannot load, never falling back", async () => {
     const events = [];
     const lifecycle = createLifecycle({
-      environment: { WEB_COMPANION_CPU_ENGINE: "wasm-rust" },
+      environment: { WEB_COMPANION_CPU_ENGINE: "typescript" },
       events,
-      poolCreateError: new Error(
-        'missing cs486 wasm artifact; run "npm run build:cs486-wasm" first',
-      ),
+      poolCreateError: new Error("CS486 compute worker 1 failed"),
     });
 
     await expect(lifecycle.start()).rejects.toThrow(
-      /missing cs486 wasm artifact/u,
+      /CS486 compute worker 1 failed/u,
     );
     // Nothing after the pool was admitted, and no second pool was created with a
     // substituted engine.
     expect(events).toEqual(["pool:create:2"]);
     expect(lifecycle.status()).toMatchObject({
-      cpuEngine: "wasm-rust",
+      cpuEngine: "typescript",
       running: false,
       state: "failed",
     });

@@ -137,11 +137,10 @@ export class BdsWebCompanionLifecycle {
     );
     this.#assertStillStarting();
 
-    // The plane owns the fail-loud engine rule: a wasm engine whose artifact is
-    // missing or malformed rejects pool creation, which fails managed startup.
-    // The companion never falls back to the TypeScript engine behind the
-    // operator's back, because the guest results would then come from an engine
-    // nobody selected.
+    // The plane owns the fail-loud engine rule: an engine this build cannot run
+    // rejects pool creation, which fails managed startup. The companion never
+    // substitutes another engine behind the operator's back, because the guest
+    // results would then come from an engine nobody selected.
     this.#plane = await this.#createPlane({
       assertActive: () => this.#assertStillStarting(),
       cpuEngine: this.#adminOptions.cpuEngine,

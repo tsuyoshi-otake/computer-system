@@ -10,13 +10,15 @@ export const mcpRuntimeWorkerCountVariable = "BDS_MCP_RUNTIME_WORKERS";
  * MCP debugging defaults to the in-engine `Cs486Process`, so an ordinary
  * session starts no worker threads and no loopback listener. Setting
  * `BDS_MCP_RUNTIME_WORKERS` opts in to the same compute plane `dev:bds:web`
- * uses, which is what makes an engine selection such as `wasm-rust` reach guest
+ * uses, which is what makes a non-default engine selection reach guest
  * execution at all.
  *
  * Selecting a non-default engine while the workers stay disabled is rejected
  * here rather than quietly ignored: the operator asked for an engine this shape
  * of session cannot run, and silently interpreting guest work with a different
- * engine would turn the resulting evidence into a lie.
+ * engine would turn the resulting evidence into a lie. Issue #115 left one
+ * engine name, so nothing can select a second one today; the rule stays because
+ * it is about the shape of the session, not about which engines exist.
  *
  * @returns the validated worker count, or `undefined` when the session keeps
  * the in-engine CPU.

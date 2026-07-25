@@ -2,7 +2,7 @@ import { assembleCs486 } from "../../src/application/toolchain/cs486Assembler.js
 import type { Cs486Executable } from "../../src/domain/cpu/cs486.js";
 
 /**
- * Memory/stack benchmark corpus for the Issue #106 wasm batch-executor A/B
+ * Memory/stack benchmark corpus for the Issue #106 CS486 throughput
  * harness. It deliberately lives on the paths the issue-16 evidence marked as
  * un-accelerated by the TS hot burst: push/pop, call/ret, and strided
  * load/store traffic.

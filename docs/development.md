@@ -832,35 +832,24 @@ managed loopback transport and worker cleanup path; production-world adoption
 still requires the Issue #16 concurrent MCP/tick evidence and capacity-plus-one
 checks.
 
-The Issue #106 wasm batch executor is optional tooling; `npm run validate` never
-requires it, and the Bedrock pack never runs it. Building the artifact needs
-Rust with the `wasm32-unknown-unknown` target
-(`rustup target add wasm32-unknown-unknown`). `npm run build:cs486-wasm`
-compiles the crate into an untracked `wasm/dist/cs486-batch-executor.rust.wasm`
-with a `SHA256SUMS.txt`, and `npm run build:cs486-wasm:check` rebuilds into a
-temporary path and fails on any digest drift.
-`npm run verify:cs486-wasm-equivalence` differentially executes seeded fuzz
-programs plus forced edge cases across all three CPU profiles and exits non-zero
-on the first divergence or missing artifact; the matching vitest wrapper skips
-when the artifact is absent so the host gate stays cargo-free.
-`npm run benchmark:cs486:wasm-ab` runs the full engine/corpus/profile/
-instrumentation matrix with rotated warm samples and aborts on any cross-engine
-guest-evidence mismatch. The AssemblyScript comparison variant failed the
-adoption gate and its sources were deleted on 2026-07-25. Adoption-gate
-evidence, including that comparison, lives in
-`docs/issues/issue-106-wasm-batch-executor.md`.
+The Issue #106 Rust wasm batch executor was removed on 2026-07-26. There is no
+Rust toolchain requirement, no `npm run build:cs486-wasm` artifact, and no
+equivalence harness to run: `Cs486Process` is the single CS486 implementation,
+so a compute worker and the Bedrock pack execute the same code. The measured
+`run --batch` speedup came from moving work onto a compute worker with the
+TypeScript interpreter, not from wasm;
+`docs/issues/issue-115-remove-wasm-executor.md` records the measurement and the
+decision, and `docs/issues/issue-106-wasm-batch-executor.md` keeps the original
+prototype evidence as history.
 
-That artifact is required, not optional, when the managed companion runs with
-`--cpu-engine wasm-rust` (or `WEB_COMPANION_CPU_ENGINE=wasm-rust`): the compute
-worker pool reads it before spawning any worker and fails managed startup
-explicitly when it is missing rather than falling back to the TypeScript
-interpreter.
-
-An engine selection only takes effect in a session that runs the compute
-workers. `npm run dev:bds:web` always does; the MCP debug companion does so only
-when `BDS_MCP_RUNTIME_WORKERS` is set to 1 through 16, and otherwise refuses a
-non-default engine at startup instead of running the interpreter under the
-selected engine's name. `docs/mcp-debugging.md` owns that workflow.
+`--cpu-engine` (and `WEB_COMPANION_CPU_ENGINE`) therefore accepts only
+`typescript`. Any other value is rejected at configuration time; nothing is
+substituted silently. The selection still only takes effect in a session that
+runs the compute workers. `npm run dev:bds:web` always does; the MCP debug
+companion does so only when `BDS_MCP_RUNTIME_WORKERS` is set to 1 through 16,
+and otherwise refuses a non-default engine at startup instead of running the
+interpreter under another engine's name. `docs/mcp-debugging.md` owns that
+workflow.
 
 `npm run dev:bds:web` turns that boundary into a persistent managed-BDS service.
 It loads `runtimeWorkerCount` from Web companion configuration (default 2, range

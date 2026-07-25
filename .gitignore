@@ -8,10 +8,6 @@ coverage/
 *.mcpack
 *.mcaddon
 
-# Issue #106 wasm batch-executor build output (dist/ above already covers
-# wasm/dist/)
-wasm/cs486-batch-executor-rs/target/
-
 # Local environments and secrets
 .env
 .env.*

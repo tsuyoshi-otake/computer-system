@@ -5,10 +5,8 @@ import { build } from "esbuild";
 
 import {
   assertCs486ComputeEngine,
-  cs486ComputeEngineWasmVariant,
   defaultCs486ComputeEngine,
 } from "./cs486-compute-engine.mjs";
-import { readCs486WasmArtifactBytes } from "./cs486-wasm-batch-executor-loader.mjs";
 
 const protocolVersion = 1;
 const minimumWorkerCount = 1;
@@ -94,11 +92,6 @@ export class Cs486ComputeWorkerPool {
         ? defaultCs486ComputeEngine
         : (options.cpuEngine ?? defaultCs486ComputeEngine),
     );
-    // Tests inject artifact bytes directly so they never depend on a built
-    // `wasm/dist/`; production leaves this undefined and `initialize` reads the
-    // required build, failing startup when it is missing.
-    this.injectedWasmModuleBytes =
-      typeof options === "number" ? undefined : options.wasmModuleBytes;
     this.workers = [];
     this.processes = new Map();
     this.nextConvenienceRequestId = 1;
@@ -226,10 +219,7 @@ export class Cs486ComputeWorkerPool {
 
   async initialize() {
     try {
-      const [source, wasmModuleBytes] = await Promise.all([
-        buildWorkerSource(),
-        this.resolveWasmModuleBytes(),
-      ]);
+      const source = await buildWorkerSource();
       if (this.closeRequested)
         throw poolError(
           "POOL_CLOSED",
@@ -243,7 +233,6 @@ export class Cs486ComputeWorkerPool {
             index + 1,
             this.configuredWorkerCount,
             this.cpuEngine,
-            wasmModuleBytes,
           ),
       );
       await Promise.all(this.workers.map((worker) => worker.ready));
@@ -261,19 +250,6 @@ export class Cs486ComputeWorkerPool {
       await Promise.allSettled(this.workers.map((worker) => worker.close()));
       throw error;
     }
-  }
-
-  /**
-   * Batch-executor bytes for the selected engine, or `undefined` for the
-   * TypeScript interpreter. A selected wasm engine whose artifact is missing
-   * rejects here, which fails pool creation and therefore managed startup;
-   * falling back to the interpreter would silently misreport which engine
-   * produced the guest results.
-   */
-  async resolveWasmModuleBytes() {
-    const variant = cs486ComputeEngineWasmVariant(this.cpuEngine);
-    if (variant === null) return undefined;
-    return this.injectedWasmModuleBytes ?? readCs486WasmArtifactBytes(variant);
   }
 
   async requestCreate(command) {
@@ -396,7 +372,7 @@ export class Cs486ComputeWorkerPool {
 }
 
 class ComputeWorkerEndpoint {
-  constructor(source, workerIndex, workerCount, cpuEngine, wasmModuleBytes) {
+  constructor(source, workerIndex, workerCount, cpuEngine) {
     this.workerIndex = workerIndex;
     this.workerCount = workerCount;
     this.requestedCpuEngine = cpuEngine;
@@ -413,11 +389,6 @@ class ComputeWorkerEndpoint {
       workerData: {
         cpuEngine,
         protocolVersion,
-        // Structured-cloned per worker, so each thread compiles the artifact
-        // once and every guest process instantiates its own linear memory.
-        ...(wasmModuleBytes === undefined
-          ? {}
-          : { wasmModuleBytes: new Uint8Array(wasmModuleBytes) }),
         workerCount,
         workerIndex,
       },

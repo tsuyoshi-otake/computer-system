@@ -9,7 +9,7 @@ describe("CS486 compute plane", () => {
     const events = [];
     const plane = await startCs486ComputePlane(createOptions({ events }));
 
-    expect(events).toEqual(["pool:create:2:wasm-rust", "listener:start"]);
+    expect(events).toEqual(["pool:create:2:typescript", "listener:start"]);
     expect(plane.count).toBe(2);
     expect(plane.endpoint).toBe("ws://127.0.0.1:29481/internal/cs486/v1");
     expect(plane.token).toBe(token);
@@ -21,7 +21,7 @@ describe("CS486 compute plane", () => {
 
     await plane.stop();
     expect(events).toEqual([
-      "pool:create:2:wasm-rust",
+      "pool:create:2:typescript",
       "listener:start",
       "listener:stop",
       "pool:close",
@@ -57,13 +57,13 @@ describe("CS486 compute plane", () => {
         createOptions({
           events,
           poolCreateError: new Error(
-            'missing cs486 wasm artifact; run "npm run build:cs486-wasm" first',
+            "unknown CS486 compute engine wasm-rust; expected one of: typescript",
           ),
         }),
       ),
-    ).rejects.toThrow(/missing cs486 wasm artifact/u);
+    ).rejects.toThrow(/unknown CS486 compute engine wasm-rust/u);
     // No listener, and no second pool created with a substituted engine.
-    expect(events).toEqual(["pool:create:2:wasm-rust"]);
+    expect(events).toEqual(["pool:create:2:typescript"]);
   });
 
   it("closes the pool when the listener fails to start", async () => {
@@ -77,7 +77,7 @@ describe("CS486 compute plane", () => {
       ),
     ).rejects.toThrow("EADDRINUSE");
     expect(events).toEqual([
-      "pool:create:2:wasm-rust",
+      "pool:create:2:typescript",
       "listener:start",
       "listener:stop",
       "pool:close",
@@ -116,7 +116,7 @@ describe("CS486 compute plane", () => {
         startCs486ComputePlane(createOptions({ events, listenerStatus })),
       ).rejects.toThrow("CS486 compute listener returned an invalid status.");
       expect(events).toEqual([
-        "pool:create:2:wasm-rust",
+        "pool:create:2:typescript",
         "listener:start",
         "listener:stop",
         "pool:close",
@@ -149,7 +149,7 @@ describe("CS486 compute plane", () => {
         }),
       ),
     ).rejects.toThrow("startup was cancelled");
-    expect(events).toEqual(["pool:create:2:wasm-rust", "pool:close"]);
+    expect(events).toEqual(["pool:create:2:typescript", "pool:close"]);
   });
 });
 
@@ -164,7 +164,7 @@ function createOptions(options) {
   };
   return {
     assertActive: options.assertActive,
-    cpuEngine: "wasm-rust",
+    cpuEngine: "typescript",
     workerCount: 2,
     randomToken: options.randomToken ?? (() => token),
     createPool: async ({ cpuEngine, workerCount }) => {

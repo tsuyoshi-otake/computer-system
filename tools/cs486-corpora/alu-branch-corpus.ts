@@ -1,7 +1,7 @@
 import type { Cs486Executable } from "../../src/domain/cpu/cs486.js";
 
 /**
- * ALU/branch benchmark corpus for the Issue #106 wasm batch-executor A/B
+ * ALU/branch benchmark corpus for the Issue #106 CS486 throughput
  * harness. This is the exact eight-instruction infinite loop the CS486
  * host-throughput benchmark has always used (extracted unchanged from
  * `tools/cs486-interpreter-benchmark-entry.ts`), so existing issue-16

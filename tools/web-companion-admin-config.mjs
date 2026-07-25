@@ -202,10 +202,18 @@ function validateCpuEngine(value, label) {
   try {
     return assertCs486ComputeEngine(value);
   } catch {
+    // Name the rejected value, bounded. Issue #115 left one accepted engine, so
+    // a message that only lists the allowed set stopped telling an operator
+    // which name their file, environment, or flag actually supplied.
     throw new RangeError(
-      `${label} must be one of: ${cs486ComputeEngineNames.join(", ")}.`,
+      `${label} must be one of: ${cs486ComputeEngineNames.join(", ")}. Received ${describeRejectedCpuEngine(value)}.`,
     );
   }
+}
+
+function describeRejectedCpuEngine(value) {
+  const text = typeof value === "string" ? value : typeof value;
+  return text.length > 40 ? `${text.slice(0, 40)}...` : text;
 }
 
 function validateRuntimeWorkerCount(value, label) {

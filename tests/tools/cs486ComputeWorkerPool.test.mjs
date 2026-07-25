@@ -1,10 +1,7 @@
-import { existsSync } from "node:fs";
-
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
   cs486ComputeEngineNames,
-  cs486ComputeEngineWasmVariant,
   defaultCs486ComputeEngine,
 } from "../../tools/cs486-compute-engine.mjs";
 import {
@@ -17,16 +14,6 @@ import {
   cs486ComputeEngineNames as typedCs486ComputeEngineNames,
   defaultCs486ComputeEngineName,
 } from "../../tools/cs486-compute-worker-cpu-engine.js";
-import {
-  readCs486WasmArtifactBytes,
-  resolveCs486WasmArtifactPath,
-} from "../../tools/cs486-wasm-batch-executor-loader.mjs";
-
-// The Rust artifact is a gated Issue #106 build output. `npm run validate` must
-// stay green without cargo, so the engine-parity suite skips when it is absent;
-// every fail-loud assertion below runs unconditionally.
-const rustArtifactPresent = existsSync(resolveCs486WasmArtifactPath("rust"));
-
 const loopingExecutable = Object.freeze({
   dataBytes: 0,
   format: "cs486-executable",
@@ -664,11 +651,6 @@ describe("CS486 compute engine selection", () => {
       ...typedCs486ComputeEngineNames,
     ]);
     expect(defaultCs486ComputeEngine).toBe(defaultCs486ComputeEngineName);
-    expect(cs486ComputeEngineWasmVariant("typescript")).toBeNull();
-    expect(cs486ComputeEngineWasmVariant("wasm-rust")).toBe("rust");
-    expect(() => cs486ComputeEngineWasmVariant("wasm-unknown")).toThrow(
-      /unknown CS486 compute engine wasm-unknown/u,
-    );
   });
 
   it("defaults to the TypeScript engine and reports the engine each worker loaded", async () => {
@@ -681,107 +663,14 @@ describe("CS486 compute engine selection", () => {
   });
 
   it("rejects an unknown engine before any worker thread is spawned", async () => {
-    await expect(
-      createCs486ComputeWorkerPool({
-        cpuEngine: "wasm-unknown",
-        workerCount: 1,
-      }),
-    ).rejects.toThrow(/unknown CS486 compute engine wasm-unknown/u);
-  });
-
-  it("fails pool creation when a wasm engine artifact will not compile", async () => {
-    // Fail-loud is the whole contract: the operator asked for wasm, so a broken
-    // artifact must take the pool - and therefore managed startup - down rather
-    // than quietly serving guest results from the TypeScript interpreter.
-    const pool = createCs486ComputeWorkerPool({
-      cpuEngine: "wasm-rust",
-      wasmModuleBytes: new Uint8Array([0, 1, 2, 3]),
-      workerCount: 1,
-    });
-    await expect(pool).rejects.toThrow();
+    // Issue #115 removed `wasm-rust`, so a persisted configuration naming it
+    // must fail pool creation - and therefore managed startup - rather than
+    // quietly serving guest results from an engine nobody selected.
+    for (const cpuEngine of ["wasm-rust", "wasm-unknown"])
+      await expect(
+        createCs486ComputeWorkerPool({ cpuEngine, workerCount: 1 }),
+      ).rejects.toThrow(
+        new RegExp(`unknown CS486 compute engine ${cpuEngine}`, "u"),
+      );
   });
 });
-
-describe.skipIf(!rustArtifactPresent)(
-  "CS486 wasm-rust compute engine (requires the built Rust artifact)",
-  () => {
-    it("produces the same slice results as the TypeScript engine", async () => {
-      const wasmModuleBytes = await readCs486WasmArtifactBytes("rust");
-      const typescriptPool = await createPool(1);
-      const wasmPool = await createPool(1, {
-        cpuEngine: "wasm-rust",
-        wasmModuleBytes,
-      });
-      expect(wasmPool.status()).toMatchObject({
-        cpuEngine: "wasm-rust",
-        state: "ready",
-        workers: [{ cpuEngine: "wasm-rust" }],
-      });
-
-      for (const pool of [typescriptPool, wasmPool])
-        await pool.createProcess(
-          createCommand({
-            computerId: "computer-engine",
-            processId: "process-engine",
-            requestId: "create-engine",
-          }),
-        );
-      for (let tick = 1; tick <= 3; tick += 1) {
-        const typescriptSlice = await typescriptPool.runSlice(
-          sliceCommand({
-            computerId: "computer-engine",
-            processId: "process-engine",
-            requestId: `ts-${String(tick)}`,
-            tick,
-          }),
-        );
-        const wasmSlice = await wasmPool.runSlice(
-          sliceCommand({
-            computerId: "computer-engine",
-            processId: "process-engine",
-            requestId: `wasm-${String(tick)}`,
-            tick,
-          }),
-        );
-        expect(comparableResponse(wasmSlice)).toEqual(
-          comparableResponse(typescriptSlice),
-        );
-      }
-    });
-
-    it("reports the identical syscall rejection through the wire protocol", async () => {
-      const pool = await createPool(1, {
-        cpuEngine: "wasm-rust",
-        wasmModuleBytes: await readCs486WasmArtifactBytes("rust"),
-      });
-      await pool.createProcess(
-        createCommand({
-          computerId: "computer-wasm-syscall",
-          executable: {
-            dataBytes: 0,
-            format: "cs486-executable",
-            instructions: [{ name: "host.exec", op: "syscall" }],
-            version: 2,
-          },
-          processId: "process-wasm-syscall",
-          requestId: "create-wasm-syscall",
-        }),
-      );
-      const response = await pool.runSlice(
-        sliceCommand({
-          computerId: "computer-wasm-syscall",
-          processId: "process-wasm-syscall",
-          requestId: "slice-wasm-syscall",
-          tick: 1,
-        }),
-      );
-      expect(response.view.state).toEqual({
-        error: {
-          message: "CS486 compute worker rejects syscall host.exec",
-          typeName: "UnsupportedOperationError",
-        },
-        kind: "crashed",
-      });
-    });
-  },
-);

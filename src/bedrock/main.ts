@@ -25,7 +25,6 @@ import { startComputerStorageBreakGuard } from "./computerRegistry.js";
 import { startFloppyComponent } from "./floppyComponent.js";
 import { handleDebugWebSessionRequest } from "./debugWebSessionBridge.js";
 import { startHeadlessProbeSuite } from "./probes/headlessProbe.js";
-import { startWasmProbe } from "./probes/wasmProbe.js";
 import { registerRedstoneProbeComponent } from "./probes/redstoneProbeComponent.js";
 import { startRuntimeProbe } from "./probes/runtimeProbe.js";
 import { executeSpeakerProbe } from "./probes/speakerProbe.js";
@@ -56,7 +55,6 @@ system.beforeEvents.startup.subscribe(
 );
 
 system.run((): void => {
-  startWasmProbe();
   startAlwaysDayController();
   startComputerStorageBreakGuard();
   startComputerHost();

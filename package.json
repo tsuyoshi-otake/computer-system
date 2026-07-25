@@ -11,9 +11,6 @@
     "build:vendor-ui": "tsc -p vendor/bedrock-core-ui-0.9.2/tsconfig.build.json",
     "benchmark:cs486": "node tools/benchmark-cs486-interpreter.mjs",
     "benchmark:cs486:concurrency": "node tools/benchmark-cs486-concurrency.mjs",
-    "benchmark:cs486:wasm-ab": "node tools/benchmark-cs486-wasm-ab.mjs",
-    "build:cs486-wasm": "node tools/build-cs486-wasm.mjs",
-    "build:cs486-wasm:check": "node tools/build-cs486-wasm.mjs --check",
     "check:hosted-c": "node tools/generate-hosted-c-archives.mjs --check",
     "check:guest-nethack": "node tools/generate-guest-nethack.mjs --check",
     "deploy": "node tools/deploy.mjs",
@@ -36,7 +33,6 @@
     "test:web": "vitest run tests/tools/webSessionStore.test.mjs tests/tools/webCompanionServer.test.mjs tests/tools/webCompanionAdminConfig.test.mjs tests/tools/webUi.test.mjs tests/tools/terminalDisplayPower.test.mjs tests/tools/terminalLayout.test.mjs tests/tools/terminalPresentation.test.mjs tests/tools/crtCurvatureMap.test.mjs",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
-    "verify:cs486-wasm-equivalence": "node tools/verify-cs486-wasm-equivalence.mjs",
     "validate": "npm run format:check && npm run lint && npm run typecheck && npm run test && npm run build && npm run build:pages"
   },
   "devDependencies": {

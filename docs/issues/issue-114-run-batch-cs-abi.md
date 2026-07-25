@@ -6,6 +6,14 @@ GitHub Issue:
 Depends on [Issue #106](issue-106-wasm-batch-executor.md) (the opt-in Rust wasm
 compute-worker engine) and [Issue #63](../../README.md) (CS ABI 1.0).
 
+Status on 2026-07-26 (later the same day): the Rust wasm engine this document
+refers to was removed by [Issue #115](issue-115-remove-wasm-executor.md).
+`run --batch` itself is unaffected and stays: it declares that a process uses no
+OS service, not that it runs in wasm. The item 8 A/B below was already recorded
+with `WEB_COMPANION_CPU_ENGINE=typescript`, so it measures the compute-worker
+offload that survives, and it is what justified the removal. Nothing below has
+been rewritten; read every "wasm engine" reference as historical.
+
 Status on 2026-07-26: stage 1 implemented, host-verified, and verified on a real
 BDS acceptance fixture (item 8). Automatic migration of a running process to a
 compute worker (stage 2) is **not implemented** and remains a separate decision
@@ -126,6 +134,9 @@ the wasm engine produce the same ordered output, exit status, memory limit, and
 memory usage for the same batch program, and both reject a syscall when the
 process was created without a batch layout.
 
+Superseded on 2026-07-26 by [Issue #115](issue-115-remove-wasm-executor.md): the
+suite now covers the one remaining engine, so the count above is historical.
+
 ### 5. Differential equivalence
 
 Verify: `npm run verify:cs486-wasm-equivalence`
@@ -134,6 +145,13 @@ Expect: `divergenceCount: 0` with the batch CS ABI corpus
 (`tools/wasm-corpora/batch-cs-abi-corpus.ts`) included. Observed on 2026-07-26:
 `divergenceCount: 0`, `comparisons: 363092`, `configurations: 576`,
 `programs: 48`, engine `rust`.
+
+Superseded on 2026-07-26 by [Issue #115](issue-115-remove-wasm-executor.md).
+That script and the second engine no longer exist, so this item is no longer
+executable; the observation above stands as a record of what was true while both
+engines shipped. The corpus survives at
+`tools/cs486-corpora/batch-cs-abi-corpus.ts` and is still pinned by the test
+below, which is now the whole of this item.
 
 Zero divergences is only evidence if the corpus reaches something. Verify:
 `npx vitest run tests/tools/cs486BatchCsAbiCorpus.test.ts`
@@ -182,6 +200,14 @@ throughput, and the modeled guest cost is identical, so the guest sees the same
 amortize. This is a real but bounded win for compute-bound programs; it is not
 an argument for stage 2 on its own, because stage 2 would have to pay snapshot
 transfer cost to obtain the same 2.3x.
+
+Superseded on 2026-07-26 by [Issue #115](issue-115-remove-wasm-executor.md).
+`npm run benchmark:cs486:wasm-ab` and the `wasm-rust` column no longer exist.
+The numbers above remain a correct record, and item 8 below is what reframed
+them: measured on real BDS, moving the same program to a compute worker running
+the **TypeScript** engine cut host wall time from 2332 ms to 498 ms, a larger
+win than the 2.3x this table attributes to wasm. The engine was removed because
+the offload, not the engine, was carrying the result.
 
 ### 8. Real BDS
 

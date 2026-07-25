@@ -2,11 +2,6 @@ import { build } from "esbuild";
 import { isDeepStrictEqual } from "node:util";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import {
-  instantiateCs486WasmBatchExecutor,
-  readCs486WasmArtifactBytes,
-} from "./cs486-wasm-batch-executor-loader.mjs";
-
 const cpuModels = Object.freeze(["cs386sx", "cs486dx", "cs486dx2"]);
 const defaultInstructionCount = 2_000_000;
 const defaultSamples = 7;
@@ -18,7 +13,7 @@ const executionModes = Object.freeze(["cpu-slice", "instruction-slice"]);
 const instrumentationModes = Object.freeze(["enabled", "disabled"]);
 const defaultEngine = "ts";
 const defaultCorpus = "alu-branch";
-export const benchmarkEngines = Object.freeze(["ts", "wasm-rust"]);
+export const benchmarkEngines = Object.freeze(["ts"]);
 export const benchmarkCorpora = Object.freeze([
   "alu-branch",
   "mem-stack",
@@ -280,8 +275,9 @@ function enumValue(raw, values, label) {
 
 /**
  * Resolves the sample-measuring function for an engine/corpus pair. The
- * default pair reproduces the legacy entry byte-for-byte; wasm engines
- * require `npm run build:cs486-wasm` artifacts and fail loudly otherwise.
+ * default pair reproduces the legacy entry byte-for-byte; every other corpus
+ * goes through the shared corpus entry so all samples measure the same shape
+ * of work.
  */
 export async function loadCs486BenchmarkEngine(
   engine = defaultEngine,
@@ -289,27 +285,14 @@ export async function loadCs486BenchmarkEngine(
 ) {
   enumValue(engine, benchmarkEngines, "engine");
   enumValue(corpus, benchmarkCorpora, "corpus");
-  if (engine === "ts") {
-    if (corpus === defaultCorpus) {
-      const module = await bundleBenchmarkModule(
-        "cs486-interpreter-benchmark-entry.ts",
-      );
-      return module.measureCs486InterpreterSample;
-    }
+  if (corpus === defaultCorpus) {
     const module = await bundleBenchmarkModule(
-      "wasm-engines/ts-engine-entry.ts",
+      "cs486-interpreter-benchmark-entry.ts",
     );
-    return module.createCs486BenchmarkMeasure(corpus);
+    return module.measureCs486InterpreterSample;
   }
-  const module = await bundleBenchmarkModule(
-    "wasm-engines/rust-engine-entry.ts",
-  );
-  const artifactBytes = await readCs486WasmArtifactBytes("rust");
-  const { exports, memory } = await instantiateCs486WasmBatchExecutor(
-    artifactBytes,
-    module.cs486WasmRequiredExports,
-  );
-  return module.createCs486WasmBenchmarkMeasure(exports, memory, corpus);
+  const module = await bundleBenchmarkModule("cs486-corpus-benchmark-entry.ts");
+  return module.createCs486BenchmarkMeasure(corpus);
 }
 
 async function bundleBenchmarkModule(relativeEntryPath) {
