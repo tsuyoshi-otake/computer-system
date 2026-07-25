@@ -913,11 +913,26 @@ export class Cs486Process implements CpuProcess {
   }
 
   /**
-   * Executes the common register/ALU/control-transfer subset in one tight host
-   * loop. The caller retains finalization ownership for every cold instruction,
-   * while this loop remains bounded by both scheduler budgets. Modeled cache,
-   * branch, cycle-debt, and original instruction-count semantics are preserved
-   * per guest instruction.
+   * Executes the register, ALU, control-transfer, memory, and stack subset in
+   * one tight host loop. The caller retains finalization ownership for every
+   * cold instruction, while this loop remains bounded by both scheduler
+   * budgets. Modeled cache, branch, cycle-debt, and original instruction-count
+   * semantics are preserved per guest instruction.
+   *
+   * Each instruction takes its side effects in the order `executeNext` takes
+   * them -- instruction fetch, control transfer, then the operation -- because
+   * the instruction and data streams share one cache, so their order decides
+   * hit/miss classification and replacement. Every instruction that could fault
+   * is refused before its first side effect, which leaves the modeled machine
+   * exactly as the cold path expects to find it and keeps every fault and its
+   * wording owned by `executeNext`.
+   *
+   * The lane switch is what makes those checks affordable. A register or ALU
+   * instruction cannot fault, cannot transfer control, and has no address to
+   * admit, so it must not be charged for testing any of that; a load pays
+   * address admission and a branch pays its condition, and neither pays for the
+   * other. Dispatch is therefore two levels, lane then opcode, rather than one
+   * flat opcode switch guarded by every check the widest instruction needs.
    */
   private runHotCpuBurst(
     cpuCycleBudget: number,
@@ -926,156 +941,271 @@ export class Cs486Process implements CpuProcess {
     const instructionOpcodes = this.instructionOpcodes;
     const instructionOperandA = this.instructionOperandA;
     const instructionOperandB = this.instructionOperandB;
-    const instructionExecutionFlags = this.instructionExecutionFlags;
     const instructionBaseCycles = this.instructionBaseCycles;
     const instructionBranchCycleDeltas = this.instructionBranchCycleDeltas;
     const registerValues = this.registerValues;
     const memoryHierarchy = this.memoryHierarchy;
+    const memory = this.memory;
+    const memoryBytes = this.memoryBytes;
+    const stackFloorBytes = this.stackFloorBytes;
+    const instructionCount = instructionOpcodes.length;
     let instructionPointer = this.instructionPointer;
     let compared = this.compared;
     let cpuCycles = 0;
     let executedInstructions = 0;
+    let stoppedOnColdInstruction = false;
 
     while (
       cpuCycles < cpuCycleBudget &&
       executedInstructions < instructionBudget
     ) {
-      if (
-        instructionPointer < 0 ||
-        instructionPointer >= instructionOpcodes.length
-      ) {
-        this.instructionPointer = instructionPointer;
-        this.compared = compared;
-        return {
-          cpuCycles,
-          executedInstructions,
-          stoppedOnColdInstruction: true,
-        };
+      if (instructionPointer < 0 || instructionPointer >= instructionCount) {
+        stoppedOnColdInstruction = true;
+        break;
       }
       const instructionIndex = instructionPointer;
       const opcode = instructionOpcodes[instructionIndex]!;
+      const lane = preparedHotOpcodeLanes[opcode]!;
+      if (lane === hotLane.cold) {
+        stoppedOnColdInstruction = true;
+        break;
+      }
       const operandA = instructionOperandA[instructionIndex]!;
-      const operandB = instructionOperandB[instructionIndex]!;
-      let branchTaken = false;
+      let cycles = instructionBaseCycles[instructionIndex]!;
 
-      switch (opcode) {
-        case preparedOpcode.movImmediate:
-          registerValues[operandA] = operandB;
+      if (lane === hotLane.pure) {
+        cycles += memoryHierarchy.fetchInstruction(instructionIndex);
+        memoryHierarchy.recordControlTransfer(false);
+        instructionPointer = instructionIndex + 1;
+        const operandB = instructionOperandB[instructionIndex]!;
+        switch (opcode) {
+          case preparedOpcode.movImmediate:
+            registerValues[operandA] = operandB;
+            break;
+          case preparedOpcode.movRegister:
+            registerValues[operandA] = registerValues[operandB]!;
+            break;
+          case preparedOpcode.addImmediate:
+            registerValues[operandA] = registerValues[operandA]! + operandB;
+            break;
+          case preparedOpcode.addRegister:
+            registerValues[operandA] =
+              registerValues[operandA]! + registerValues[operandB]!;
+            break;
+          case preparedOpcode.subtractImmediate:
+            registerValues[operandA] = registerValues[operandA]! - operandB;
+            break;
+          case preparedOpcode.subtractRegister:
+            registerValues[operandA] =
+              registerValues[operandA]! - registerValues[operandB]!;
+            break;
+          case preparedOpcode.andImmediate:
+            registerValues[operandA] = registerValues[operandA]! & operandB;
+            break;
+          case preparedOpcode.andRegister:
+            registerValues[operandA] =
+              registerValues[operandA]! & registerValues[operandB]!;
+            break;
+          case preparedOpcode.orImmediate:
+            registerValues[operandA] = registerValues[operandA]! | operandB;
+            break;
+          case preparedOpcode.orRegister:
+            registerValues[operandA] =
+              registerValues[operandA]! | registerValues[operandB]!;
+            break;
+          case preparedOpcode.xorImmediate:
+            registerValues[operandA] = registerValues[operandA]! ^ operandB;
+            break;
+          case preparedOpcode.xorRegister:
+            registerValues[operandA] =
+              registerValues[operandA]! ^ registerValues[operandB]!;
+            break;
+          case preparedOpcode.shiftLeftImmediate:
+            registerValues[operandA] =
+              registerValues[operandA]! << (operandB & 31);
+            break;
+          case preparedOpcode.shiftLeftRegister:
+            registerValues[operandA] =
+              registerValues[operandA]! << (registerValues[operandB]! & 31);
+            break;
+          case preparedOpcode.shiftRightImmediate:
+            registerValues[operandA] =
+              registerValues[operandA]! >> (operandB & 31);
+            break;
+          case preparedOpcode.shiftRightRegister:
+            registerValues[operandA] =
+              registerValues[operandA]! >> (registerValues[operandB]! & 31);
+            break;
+          case preparedOpcode.unsignedShiftRightImmediate:
+            registerValues[operandA] =
+              registerValues[operandA]! >>> (operandB & 31);
+            break;
+          case preparedOpcode.unsignedShiftRightRegister:
+            registerValues[operandA] =
+              registerValues[operandA]! >>> (registerValues[operandB]! & 31);
+            break;
+          case preparedOpcode.compareImmediate:
+            compared = registerValues[operandA]! - operandB;
+            break;
+          default:
+            compared = registerValues[operandA]! - registerValues[operandB]!;
+            break;
+        }
+      } else if (lane === hotLane.conditionalBranch) {
+        let branchTaken = false;
+        switch (opcode) {
+          case preparedOpcode.branchEqual:
+            branchTaken = compared === 0;
+            break;
+          case preparedOpcode.branchNotEqual:
+            branchTaken = compared !== 0;
+            break;
+          case preparedOpcode.branchLess:
+            branchTaken = compared < 0;
+            break;
+          case preparedOpcode.branchLessOrEqual:
+            branchTaken = compared <= 0;
+            break;
+          case preparedOpcode.branchGreater:
+            branchTaken = compared > 0;
+            break;
+          default:
+            branchTaken = compared >= 0;
+            break;
+        }
+        if (branchTaken)
+          cycles += instructionBranchCycleDeltas[instructionIndex]!;
+        cycles += memoryHierarchy.fetchInstruction(instructionIndex);
+        memoryHierarchy.recordControlTransfer(branchTaken);
+        instructionPointer = branchTaken ? operandA : instructionIndex + 1;
+      } else if (lane === hotLane.memory) {
+        // `checkedAddress` would reject exactly these addresses. Register and
+        // operand storage is Int32Array-backed, so its integrality test cannot
+        // fail here; only range and alignment can, and both are refused before
+        // the fetch that would otherwise leave the cache warmed for a cold
+        // instruction the process is about to re-execute.
+        const operandB = instructionOperandB[instructionIndex]!;
+        const addressOperand =
+          opcode >= preparedOpcode.storeImmediate ? operandA : operandB;
+        const address =
+          (opcode & 1) === 1 ? addressOperand : registerValues[addressOperand]!;
+        if (
+          address < 0 ||
+          address > memoryBytes - preparedMemoryAccessWidth[opcode]! ||
+          (address & preparedMemoryAccessAlignmentMask[opcode]!) !== 0
+        ) {
+          stoppedOnColdInstruction = true;
           break;
-        case preparedOpcode.movRegister:
-          registerValues[operandA] = registerValues[operandB]!;
+        }
+        cycles += memoryHierarchy.fetchInstruction(instructionIndex);
+        memoryHierarchy.recordControlTransfer(false);
+        instructionPointer = instructionIndex + 1;
+        switch (opcode) {
+          case preparedOpcode.loadImmediate:
+          case preparedOpcode.loadRegister:
+            cycles += memoryHierarchy.accessData(address, "read");
+            registerValues[operandA] = memory.getInt32(address, true);
+            break;
+          case preparedOpcode.load8SignedImmediate:
+          case preparedOpcode.load8SignedRegister:
+            cycles += memoryHierarchy.accessData(address, "read");
+            registerValues[operandA] = memory.getInt8(address);
+            break;
+          case preparedOpcode.load8UnsignedImmediate:
+          case preparedOpcode.load8UnsignedRegister:
+            cycles += memoryHierarchy.accessData(address, "read");
+            registerValues[operandA] = memory.getUint8(address);
+            break;
+          case preparedOpcode.load16SignedImmediate:
+          case preparedOpcode.load16SignedRegister:
+            cycles += memoryHierarchy.accessData(address, "read");
+            registerValues[operandA] = memory.getInt16(address, true);
+            break;
+          case preparedOpcode.load16UnsignedImmediate:
+          case preparedOpcode.load16UnsignedRegister:
+            cycles += memoryHierarchy.accessData(address, "read");
+            registerValues[operandA] = memory.getUint16(address, true);
+            break;
+          case preparedOpcode.storeImmediate:
+          case preparedOpcode.storeRegister:
+            cycles += memoryHierarchy.accessData(address, "write");
+            memory.setInt32(address, registerValues[operandB]!, true);
+            break;
+          case preparedOpcode.store8Immediate:
+          case preparedOpcode.store8Register:
+            cycles += memoryHierarchy.accessData(address, "write");
+            memory.setUint8(address, registerValues[operandB]! & 0xff);
+            break;
+          default:
+            cycles += memoryHierarchy.accessData(address, "write");
+            memory.setUint16(address, registerValues[operandB]! & 0xffff, true);
+            break;
+        }
+      } else if (lane === hotLane.jump) {
+        cycles += memoryHierarchy.fetchInstruction(instructionIndex);
+        memoryHierarchy.recordControlTransfer(true);
+        instructionPointer = operandA;
+      } else {
+        // Stack lane. `push`, `pop`, and `checkedInstructionTarget` would reject
+        // exactly these stack pointers and return targets. Reading the return
+        // target out of guest RAM here is a plain host load: it takes no modeled
+        // cycle and touches no cache, so a refused return stays unobserved.
+        const stackPointer = registerValues[espRegisterIndex]!;
+        const pops =
+          opcode === preparedOpcode.pop || opcode === preparedOpcode.return;
+        if (pops) {
+          if (
+            stackPointer < stackFloorBytes ||
+            stackPointer + 4 > memoryBytes
+          ) {
+            stoppedOnColdInstruction = true;
+            break;
+          }
+          if (opcode === preparedOpcode.return) {
+            const target = memory.getInt32(stackPointer, true);
+            if (target < 0 || target >= instructionCount) {
+              stoppedOnColdInstruction = true;
+              break;
+            }
+          }
+        } else if (
+          stackPointer - 4 < stackFloorBytes ||
+          stackPointer > memoryBytes
+        ) {
+          stoppedOnColdInstruction = true;
           break;
-        case preparedOpcode.addImmediate:
-          registerValues[operandA] = registerValues[operandA]! + operandB;
-          break;
-        case preparedOpcode.addRegister:
-          registerValues[operandA] =
-            registerValues[operandA]! + registerValues[operandB]!;
-          break;
-        case preparedOpcode.subtractImmediate:
-          registerValues[operandA] = registerValues[operandA]! - operandB;
-          break;
-        case preparedOpcode.subtractRegister:
-          registerValues[operandA] =
-            registerValues[operandA]! - registerValues[operandB]!;
-          break;
-        case preparedOpcode.andImmediate:
-          registerValues[operandA] = registerValues[operandA]! & operandB;
-          break;
-        case preparedOpcode.andRegister:
-          registerValues[operandA] =
-            registerValues[operandA]! & registerValues[operandB]!;
-          break;
-        case preparedOpcode.orImmediate:
-          registerValues[operandA] = registerValues[operandA]! | operandB;
-          break;
-        case preparedOpcode.orRegister:
-          registerValues[operandA] =
-            registerValues[operandA]! | registerValues[operandB]!;
-          break;
-        case preparedOpcode.xorImmediate:
-          registerValues[operandA] = registerValues[operandA]! ^ operandB;
-          break;
-        case preparedOpcode.xorRegister:
-          registerValues[operandA] =
-            registerValues[operandA]! ^ registerValues[operandB]!;
-          break;
-        case preparedOpcode.shiftLeftImmediate:
-          registerValues[operandA] =
-            registerValues[operandA]! << (operandB & 31);
-          break;
-        case preparedOpcode.shiftLeftRegister:
-          registerValues[operandA] =
-            registerValues[operandA]! << (registerValues[operandB]! & 31);
-          break;
-        case preparedOpcode.shiftRightImmediate:
-          registerValues[operandA] =
-            registerValues[operandA]! >> (operandB & 31);
-          break;
-        case preparedOpcode.shiftRightRegister:
-          registerValues[operandA] =
-            registerValues[operandA]! >> (registerValues[operandB]! & 31);
-          break;
-        case preparedOpcode.unsignedShiftRightImmediate:
-          registerValues[operandA] =
-            registerValues[operandA]! >>> (operandB & 31);
-          break;
-        case preparedOpcode.unsignedShiftRightRegister:
-          registerValues[operandA] =
-            registerValues[operandA]! >>> (registerValues[operandB]! & 31);
-          break;
-        case preparedOpcode.compareImmediate:
-          compared = registerValues[operandA]! - operandB;
-          break;
-        case preparedOpcode.compareRegister:
-          compared = registerValues[operandA]! - registerValues[operandB]!;
-          break;
-        case preparedOpcode.branchEqual:
-          branchTaken = compared === 0;
-          break;
-        case preparedOpcode.branchNotEqual:
-          branchTaken = compared !== 0;
-          break;
-        case preparedOpcode.branchLess:
-          branchTaken = compared < 0;
-          break;
-        case preparedOpcode.branchLessOrEqual:
-          branchTaken = compared <= 0;
-          break;
-        case preparedOpcode.branchGreater:
-          branchTaken = compared > 0;
-          break;
-        case preparedOpcode.branchGreaterOrEqual:
-          branchTaken = compared >= 0;
-          break;
-        case preparedOpcode.jump:
-          branchTaken = true;
-          break;
-        default:
-          this.instructionPointer = instructionPointer;
-          this.compared = compared;
-          return {
-            cpuCycles,
-            executedInstructions,
-            stoppedOnColdInstruction: true,
-          };
+        }
+        const transfers =
+          opcode === preparedOpcode.call || opcode === preparedOpcode.return;
+        cycles += memoryHierarchy.fetchInstruction(instructionIndex);
+        memoryHierarchy.recordControlTransfer(transfers);
+        instructionPointer = instructionIndex + 1;
+        switch (opcode) {
+          case preparedOpcode.pushImmediate:
+            cycles += this.push(operandA);
+            break;
+          case preparedOpcode.pushRegister:
+            cycles += this.push(registerValues[operandA]!);
+            break;
+          case preparedOpcode.pop: {
+            const popped = this.pop();
+            cycles += popped.cycles;
+            registerValues[operandA] = popped.value;
+            break;
+          }
+          case preparedOpcode.call:
+            cycles += this.push(instructionPointer);
+            instructionPointer = operandA;
+            break;
+          default: {
+            const popped = this.pop();
+            cycles += popped.cycles;
+            instructionPointer = popped.value;
+            break;
+          }
+        }
       }
 
-      const executionFlags = instructionExecutionFlags[instructionIndex]!;
-      let cycles =
-        instructionBaseCycles[instructionIndex]! +
-        (branchTaken ? instructionBranchCycleDeltas[instructionIndex]! : 0) +
-        memoryHierarchy.fetchInstruction(instructionIndex);
-      const controlTransfer =
-        branchTaken ||
-        (executionFlags & unconditionalControlTransferInstructionFlag) !== 0;
-      memoryHierarchy.recordControlTransfer(controlTransfer);
-      instructionPointer =
-        controlTransfer &&
-        ((executionFlags & conditionalBranchInstructionFlag) !== 0 ||
-          opcode === preparedOpcode.jump)
-          ? operandA
-          : instructionIndex + 1;
       executedInstructions += 1;
       const paid = Math.min(cycles, cpuCycleBudget - cpuCycles);
       cpuCycles += paid;
@@ -1088,11 +1218,7 @@ export class Cs486Process implements CpuProcess {
 
     this.instructionPointer = instructionPointer;
     this.compared = compared;
-    return {
-      cpuCycles,
-      executedInstructions,
-      stoppedOnColdInstruction: false,
-    };
+    return { cpuCycles, executedInstructions, stoppedOnColdInstruction };
   }
 
   advanceTick(tick: number): CpuProcessState {
@@ -2013,25 +2139,29 @@ export class Cs486Process implements CpuProcess {
     }
   }
 
+  // ESP is addressed by its constant index rather than through readRegister and
+  // write, whose Cs486Register switch runs on every push and pop. The stored
+  // value is unchanged: the register file is Int32Array-backed, so the
+  // truncation write applied is the same one.
   private push(value: number): number {
-    const next = this.readRegister("esp") - 4;
+    const next = this.registerValues[espRegisterIndex]! - 4;
     if (next < this.stackFloorBytes || next + 4 > this.memoryBytes)
       throw new Cs486Fault("StackOverflowError", "stack overflow");
     const cycles = this.memoryHierarchy.accessData(next, "write");
     this.memory.setInt32(next, value, true);
-    this.write("esp", next);
+    this.registerValues[espRegisterIndex] = next;
     return cycles;
   }
 
   private pop(): { readonly cycles: number; readonly value: number } {
-    const current = this.readRegister("esp");
+    const current = this.registerValues[espRegisterIndex]!;
     if (current < this.stackFloorBytes)
       throw new Cs486Fault("StackOverflowError", "stack overflow");
     if (current + 4 > this.memoryBytes)
       throw new Cs486Fault("StackUnderflowError", "stack underflow");
     const cycles = this.memoryHierarchy.accessData(current, "read");
     const value = this.memory.getInt32(current, true);
-    this.write("esp", current + 4);
+    this.registerValues[espRegisterIndex] = current + 4;
     return { cycles, value };
   }
 
@@ -2573,6 +2703,7 @@ function indexOf(register: Cs486Register): number {
 }
 
 const eaxRegisterIndex = 0;
+const espRegisterIndex = 6;
 
 const preparedOpcode = {
   movImmediate: 1,
@@ -2642,14 +2773,105 @@ const preparedOpcode = {
   halt: 65,
 } as const;
 
+/**
+ * How `runHotCpuBurst` reaches an instruction. Instructions differ in which
+ * pre-execution checks they need and whether they transfer control, so each
+ * lane pays only its own: a register or ALU instruction must not be charged for
+ * the address admission a load needs, or for the flag test a branch needs.
+ */
+const hotLane = {
+  cold: 0,
+  pure: 1,
+  memory: 2,
+  stack: 3,
+  conditionalBranch: 4,
+  jump: 5,
+} as const;
+
+/**
+ * The lane of every prepared opcode, or `hotLane.cold` for opcodes the burst
+ * does not implement. An opcode is admitted only where the burst can prove,
+ * before its first modeled side effect, that the instruction cannot fault.
+ *
+ * Multiply, divide, and modulo stay out because CS386SX prices them from the
+ * runtime multiplier and divide-by-zero is a value-dependent fault; indirect
+ * calls stay out because they need signature admission; syscall, print, and
+ * halt stay out because they reach process-level state. Those keep exactly one
+ * implementation, in `executeNext`.
+ */
+const preparedHotOpcodeLanes = createPreparedHotOpcodeLaneTable();
+
+/**
+ * Access width, and the alignment mask `checkedAddress` would enforce, of every
+ * prepared load and store. The burst reads them to refuse an address before it
+ * fetches, so `checkedAddress` remains the only place that raises the fault and
+ * words its message.
+ */
+const preparedMemoryAccessWidth = createPreparedMemoryAccessTable("width");
+const preparedMemoryAccessAlignmentMask =
+  createPreparedMemoryAccessTable("alignmentMask");
+
+function createPreparedHotOpcodeLaneTable(): Uint8Array {
+  const table = new Uint8Array(preparedOpcode.halt + 1);
+  const ranges: readonly (readonly [number, number, number])[] = [
+    [preparedOpcode.movImmediate, preparedOpcode.movRegister, hotLane.pure],
+    [
+      preparedOpcode.loadImmediate,
+      preparedOpcode.store16Register,
+      hotLane.memory,
+    ],
+    [
+      preparedOpcode.addImmediate,
+      preparedOpcode.subtractRegister,
+      hotLane.pure,
+    ],
+    [preparedOpcode.andImmediate, preparedOpcode.compareRegister, hotLane.pure],
+    [
+      preparedOpcode.branchEqual,
+      preparedOpcode.branchGreaterOrEqual,
+      hotLane.conditionalBranch,
+    ],
+    [preparedOpcode.jump, preparedOpcode.jump, hotLane.jump],
+    [preparedOpcode.pushImmediate, preparedOpcode.call, hotLane.stack],
+    [preparedOpcode.return, preparedOpcode.return, hotLane.stack],
+  ];
+  for (const [first, last, lane] of ranges)
+    for (let opcode = first; opcode <= last; opcode += 1) table[opcode] = lane;
+  return table;
+}
+
+function createPreparedMemoryAccessTable(
+  field: "alignmentMask" | "width",
+): Uint8Array {
+  const table = new Uint8Array(preparedOpcode.halt + 1);
+  const widths: readonly (readonly [number, number, number])[] = [
+    [preparedOpcode.loadImmediate, preparedOpcode.loadRegister, 4],
+    [
+      preparedOpcode.load8SignedImmediate,
+      preparedOpcode.load8UnsignedRegister,
+      1,
+    ],
+    [
+      preparedOpcode.load16SignedImmediate,
+      preparedOpcode.load16UnsignedRegister,
+      2,
+    ],
+    [preparedOpcode.storeImmediate, preparedOpcode.storeRegister, 4],
+    [preparedOpcode.store8Immediate, preparedOpcode.store8Register, 1],
+    [preparedOpcode.store16Immediate, preparedOpcode.store16Register, 2],
+  ];
+  for (const [first, last, width] of widths)
+    for (let opcode = first; opcode <= last; opcode += 1) {
+      // Only 16-bit accesses are alignment-checked. Byte and dword accesses are
+      // admitted at any address and pay the modeled unaligned penalty instead.
+      table[opcode] = field === "width" ? width : width === 2 ? 1 : 0;
+    }
+  return table;
+}
+
 function isPreparedHotOpcode(opcode: number | undefined): boolean {
   return (
-    opcode !== undefined &&
-    ((opcode >= preparedOpcode.movImmediate &&
-      opcode <= preparedOpcode.movRegister) ||
-      (opcode >= preparedOpcode.addImmediate &&
-        opcode <= preparedOpcode.subtractRegister) ||
-      (opcode >= preparedOpcode.andImmediate && opcode <= preparedOpcode.jump))
+    opcode !== undefined && preparedHotOpcodeLanes[opcode] !== hotLane.cold
   );
 }
 
@@ -3122,7 +3344,13 @@ function prepareCs486HotBurstEntries(
     for (let index = 0; index < opcodes.length; index += 1) {
       if (!isPreparedHotOpcode(opcodes[index])) continue;
       const flags = executionFlags[index]!;
-      if ((flags & conditionalBranchInstructionFlag) !== 0) {
+      if (opcodes[index] === preparedOpcode.return) {
+        // A return's successor is whatever the stack holds, so no depth beyond
+        // the return itself can be guaranteed here. Its `operandA` is left at
+        // zero by preparation and must not be read as a target. The burst still
+        // executes a return it reaches; it just never starts at one.
+        currentDepth[index] = 0;
+      } else if ((flags & conditionalBranchInstructionFlag) !== 0) {
         currentDepth[index] =
           previousDepth[index + 1] === 1 &&
           previousDepth[operandA[index]!] === 1
