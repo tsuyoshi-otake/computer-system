@@ -133,6 +133,14 @@ Terminal behavior. The fixed build is now the live managed build, so this item
 only needs a session on it; record its date, engine selection, and observed
 result before the Issue closes.
 
+Partially blocked on 2026-07-25 by #112. The Computer that produced the original
+report is now `crashed` with a full OS runtime journal and cannot boot at all,
+so this item cannot be re-run on that specific machine until the rotating
+journal lands. It can still be exercised on any bootable Computer, because the
+cleared login boundary and the re-armed terminal are not machine specific. The
+two defects are unrelated: #111 is the login-boundary clear and the interaction
+latch, #112 is a capacity error in the persisted journal.
+
 ## Operating note: stopping a managed companion on Windows
 
 Recorded 2026-07-25. A companion started outside an interactive console cannot

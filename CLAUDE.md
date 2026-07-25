@@ -179,6 +179,8 @@ synchronized.
 - #34: DOS memory architecture v2, atomic CONFIG, address allocation, MEM
   snapshots, and declared process grants.
 - #106: CS486 throughput and the opt-in Rust wasm compute-worker engine.
+- #111: CS-Linux login-boundary tty clear and released-terminal input.
+- #112: Bounded rotating OS runtime journal and visible CSBIOS boot failure.
 
 Use English commit messages with useful detail and reference every applicable
 Issue. Issue #4 remains relevant while Phase 2 work is in scope.
