@@ -374,10 +374,7 @@ function createShellModule(
         renderTerminalScreen(context.terminal, completed.terminalScreen);
       } else {
         if (completed.action === "clear" || completed.resetTerminal) {
-          context.terminal.setTextColor(0);
-          context.terminal.setBackgroundColor(15);
-          context.terminal.clear();
-          context.terminal.setCursorPosition(1, 1);
+          resetTerminalScreen(context.terminal);
         }
         writeTerminalLines(context.terminal, completed.lines);
       }
@@ -387,10 +384,7 @@ function createShellModule(
   };
   const banner = fn("banner", (positional, keywords) => {
     requireArity(positional, keywords, 0, 0);
-    context.terminal.setTextColor(0);
-    context.terminal.setBackgroundColor(15);
-    context.terminal.clear();
-    context.terminal.setCursorPosition(1, 1);
+    resetTerminalScreen(context.terminal);
     const osProfile = context.osProfile ?? "linux";
     writeTerminalLines(
       context.terminal,
@@ -410,6 +404,10 @@ function createShellModule(
   });
   const prompt = fn("prompt", (positional, keywords) => {
     requireArity(positional, keywords, 0, 0);
+    // Drawing a prompt is the guest event loop re-arming the tty: a terminal
+    // released by a disconnect finalization becomes interactive again here, so
+    // the next session can log in without a Computer power cycle.
+    shell.armTerminalSession();
     context.terminal.setTextColor(0);
     writeTerminalPrompt(context.terminal, shell.prompt());
     return null;
@@ -473,6 +471,14 @@ export function renderTerminalScreen(
     0,
     15,
   );
+}
+
+/** Clears the tty to its default colors and homes the cursor. */
+export function resetTerminalScreen(terminal: TerminalBuffer): void {
+  terminal.setTextColor(0);
+  terminal.setBackgroundColor(15);
+  terminal.clear();
+  terminal.setCursorPosition(1, 1);
 }
 
 export function writeTerminalLines(

@@ -701,6 +701,27 @@ export class ShellSession {
     return this.terminalInteraction().secretInput;
   }
 
+  /**
+   * Re-arms the tty released by {@link disconnect}. The guest event loop calls
+   * this immediately before drawing its next prompt, which is the observable
+   * point where the terminal becomes interactive again for the next session.
+   * The logout itself stays latched, so finalization never runs twice.
+   */
+  armTerminalSession(): void {
+    this.disconnected = false;
+  }
+
+  /**
+   * Lines the post-logout getty renders on the cleared tty, or `undefined` when
+   * this session has no login boundary to return to. A login-disabled
+   * development session and CS-DOS have none, so their screens are preserved.
+   */
+  loginBoundaryScreen(): readonly string[] | undefined {
+    if (this.authentication?.enabled !== true) return undefined;
+    if (this.authentication.isAuthenticated()) return undefined;
+    return this.readIssue() ?? [];
+  }
+
   isAuthenticated(): boolean {
     return this.authentication?.isAuthenticated() ?? true;
   }
@@ -812,7 +833,7 @@ export class ShellSession {
   }
 
   submit(line: string): ShellResult {
-    this.disconnected = false;
+    this.armTerminalSession();
     this.cpuCyclesValue = 0;
     this.commands.beginFilesystemIo();
     let result: ShellResult;
@@ -925,7 +946,7 @@ export class ShellSession {
   }
 
   submitDebugCommand(line: string): ShellResult {
-    this.disconnected = false;
+    this.armTerminalSession();
     if (!this.isAuthenticated()) {
       return resultFromStreams(
         "",
@@ -1003,7 +1024,7 @@ export class ShellSession {
   }
 
   admitDebugInlinePython(command: "micropython" | "python"): ShellResult {
-    this.disconnected = false;
+    this.armTerminalSession();
     if (!this.isAuthenticated())
       return resultFromStreams(
         "",
@@ -1203,7 +1224,7 @@ export class ShellSession {
   }
 
   keys(keys: readonly string[]): ShellResult {
-    this.disconnected = false;
+    this.armTerminalSession();
     this.cpuCyclesValue = keys.length;
     if (!this.isAuthenticated())
       return this.withCpuCycles(resultFromStreams("", "", 0));
@@ -1257,7 +1278,7 @@ export class ShellSession {
   }
 
   mouse(encoded: string): ShellResult {
-    this.disconnected = false;
+    this.armTerminalSession();
     this.cpuCyclesValue = 1;
     if (!this.isAuthenticated() || this.editor === undefined) {
       return this.withCpuCycles(resultFromStreams("", "", 0));
@@ -3461,9 +3482,14 @@ export class ShellSession {
     if (this.authentication?.enabled !== true) return undefined;
     const warnings = this.logoutAuthenticatedSession();
     const issue = this.readIssue() ?? [];
-    return commandSuccess(
-      ["logout", ...warnings, ...issue].map((line) => `${line}\n`).join(""),
-    );
+    return {
+      ...commandSuccess(
+        ["logout", ...warnings, ...issue].map((line) => `${line}\n`).join(""),
+      ),
+      // getty clears the tty before it writes /etc/issue and the login prompt,
+      // so the authenticated session's output cannot outlive its logout.
+      resetTerminal: true,
+    };
   }
 
   private executeLogin(

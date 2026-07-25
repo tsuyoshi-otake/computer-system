@@ -1,6 +1,7 @@
 import {
   createAccountedNativeEnvironment,
   renderTerminalScreen,
+  resetTerminalScreen,
   writeTerminalLines,
   writeTerminalPrompt,
   type BackgroundProcessStartResult,
@@ -650,10 +651,7 @@ export class ComputerRuntime {
       if (result?.terminalScreen !== undefined) {
         renderTerminalScreen(entry.record.terminal, result.terminalScreen);
       } else if (result?.resetTerminal) {
-        entry.record.terminal.setTextColor(0);
-        entry.record.terminal.setBackgroundColor(15);
-        entry.record.terminal.clear();
-        entry.record.terminal.setCursorPosition(1, 1);
+        resetTerminalScreen(entry.record.terminal);
       }
       return { outcome: "accepted", state: entry.record.lifecycle.state.kind };
     }
@@ -4018,8 +4016,13 @@ export class ComputerRuntime {
     let systemResumeQueued = false;
     try {
       const disconnectLines = entry.shell?.disconnect() ?? [];
-      if (disconnectLines.length > 0)
-        writeTerminalLines(entry.record.terminal, disconnectLines);
+      // A session that returns to a login prompt gets the getty treatment: the
+      // tty is cleared before /etc/issue and the prompt, so the authenticated
+      // session's commands and output cannot be read by whoever arrives next.
+      const loginScreen = entry.shell?.loginBoundaryScreen();
+      if (loginScreen !== undefined) resetTerminalScreen(entry.record.terminal);
+      const lines = [...disconnectLines, ...(loginScreen ?? [])];
+      if (lines.length > 0) writeTerminalLines(entry.record.terminal, lines);
     } catch (error: unknown) {
       failures.push(error);
       unsafeFinalization = true;

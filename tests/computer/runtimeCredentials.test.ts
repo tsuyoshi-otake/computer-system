@@ -580,22 +580,116 @@ describe("ComputerRuntime process credentials", (): void => {
     ).toMatchObject({ exitCode: 2, outcome: "completed" });
   });
 
-  it("starts the post-disconnect login prompt on a fresh row instead of the stale shell prompt's row", (): void => {
+  it("clears the authenticated session off the tty before the post-disconnect login prompt", (): void => {
     const record = new ComputerRecord("c-000218", "standard");
     const runtime = authenticatedRuntime(record);
-
-    const staleRow = record.terminal.cursorY;
+    runtime.queueEvent(
+      record.computerId,
+      "terminal_line",
+      "echo SECRET-PAYROLL-2026",
+    );
+    runTicks(runtime, 2);
+    expect(screenText(record)).toContain("SECRET-PAYROLL-2026");
     expect(record.terminal.cursorX).toBeGreaterThan(1);
-    const staleRowTextBefore = record.terminal.snapshot().rows[staleRow - 1];
 
     expect(
       runtime.queueEvent(record.computerId, "terminal_closed").outcome,
     ).toBe("accepted");
     runtime.runTick();
 
+    const screen = screenText(record);
+    expect(screen).not.toContain("SECRET-PAYROLL-2026");
+    expect(screen).not.toContain("echo");
+    expect(screen).not.toContain("cs@");
     const rows = record.terminal.snapshot().rows;
-    expect(rows[staleRow - 1]).toBe(staleRowTextBefore);
-    expect(rows[staleRow]).toContain("login:");
+    expect(rows[0]?.trimEnd()).toBe("CS-Linux 1.0 console tty1");
+    expect(rows[1]?.trimEnd()).toBe(`${record.computerId} login:`);
+  });
+
+  it("accepts the next login on the terminal a disconnect finalization released", (): void => {
+    const record = new ComputerRecord("c-000219", "standard");
+    const runtime = authenticatedRuntime(record);
+    expect(
+      runtime.queueEvent(record.computerId, "terminal_closed").outcome,
+    ).toBe("accepted");
+    expect(runtime.terminalInteraction(record.computerId)).toMatchObject({
+      context: "unavailable",
+      inputMode: "none",
+    });
+    runtime.runTick();
+
+    expect(runtime.terminalInteraction(record.computerId)).toMatchObject({
+      context: "login",
+      ctrlCAction: "cancel",
+      inputMode: "line",
+      secretInput: false,
+    });
+    runtime.queueEvent(record.computerId, "terminal_line", "cs");
+    runtime.runTick();
+    expect(screenText(record)).toContain("Password:");
+    expect(runtime.terminalInteraction(record.computerId)).toMatchObject({
+      context: "secret",
+      inputMode: "line",
+      secretInput: true,
+    });
+    runtime.queueEvent(record.computerId, "terminal_line", "correct-horse");
+    runtime.runTick();
+
+    expect(
+      runtime.executeDebugShellCommand(record.computerId, "whoami"),
+    ).toMatchObject({ exitCode: 0, outcome: "completed", stdout: "cs\n" });
+  });
+
+  it("clears the tty when the guest logs out with exit", (): void => {
+    const record = new ComputerRecord("c-000220", "standard");
+    const runtime = authenticatedRuntime(record);
+    runtime.queueEvent(
+      record.computerId,
+      "terminal_line",
+      "echo SECRET-PAYROLL-2026",
+    );
+    runTicks(runtime, 2);
+    expect(screenText(record)).toContain("SECRET-PAYROLL-2026");
+
+    runtime.queueEvent(record.computerId, "terminal_line", "exit");
+    runTicks(runtime, 2);
+
+    const screen = screenText(record);
+    expect(screen).not.toContain("SECRET-PAYROLL-2026");
+    expect(screen).not.toContain("cs@");
+    const rows = record.terminal.snapshot().rows;
+    expect(rows[0]?.trimEnd()).toBe("logout");
+    expect(rows[1]?.trimEnd()).toBe("CS-Linux 1.0 console tty1");
+    expect(rows[2]?.trimEnd()).toBe(`${record.computerId} login:`);
+    expect(
+      runtime.executeDebugShellCommand(record.computerId, "whoami"),
+    ).toMatchObject({ exitCode: 2, outcome: "completed" });
+  });
+
+  it("preserves the tty of a login-disabled session on the final terminal close", (): void => {
+    const record = new ComputerRecord("c-000221", "standard");
+    const runtime = registeredRuntime(record, false);
+    expect(runtime.powerOn(record.computerId).outcome).toBe("accepted");
+    completeBoot(runtime, record);
+    runtime.queueEvent(
+      record.computerId,
+      "terminal_line",
+      "echo DEVELOPMENT-SESSION",
+    );
+    runTicks(runtime, 2);
+
+    expect(
+      runtime.queueEvent(record.computerId, "terminal_closed").outcome,
+    ).toBe("accepted");
+    runtime.runTick();
+
+    const screen = screenText(record);
+    expect(screen).toContain("DEVELOPMENT-SESSION");
+    expect(screen).not.toContain("login:");
+    expect(runtime.terminalInteraction(record.computerId)).toMatchObject({
+      context: "shell",
+      inputMode: "line",
+    });
   });
 
   it("does not leave a phantom debug job when scheduler admission fails", (): void => {
@@ -704,6 +798,13 @@ function authenticatedRuntime(record: ComputerRecord): ComputerRuntime {
   runtime.queueEvent(record.computerId, "terminal_line", "correct-horse");
   runtime.runTick();
   return runtime;
+}
+
+function screenText(record: ComputerRecord): string {
+  return record.terminal
+    .snapshot()
+    .rows.map((row) => row.trimEnd())
+    .join("\n");
 }
 
 function runTicks(runtime: ComputerRuntime, count: number): void {
