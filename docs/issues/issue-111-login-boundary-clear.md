@@ -103,12 +103,49 @@ and the 16-chapter Pages build pass.
 Result on 2026-07-25: exit code 0. 310 test files and 2,565 tests passed in
 49.96s; the Bedrock pack and 16-chapter Pages builds completed.
 
+Verify: Restart the managed companion on the fixed build with the preserved
+world, then compare the deployed world pack against the freshly built one:
+`md5sum <world>/behavior_packs/computer_system_phase_0/scripts/main.js dist/behavior_pack/scripts/main.js`
+plus `grep -c armTerminalSession` on the deployed pack and on a copy taken
+before the restart.
+
+Expect: Equal digests, the new symbols present only after the restart, the
+preserved world reaching `CS_STORAGE_MIGRATION {"state":"complete"}`, and the
+operator-selected engine reported by the pool and every compute worker.
+
+Result on 2026-07-25 15:05 JST with `WEB_COMPANION_CPU_ENGINE=wasm-rust` and BDS
+1.26.33: digests identical; the deployed pack contains `armTerminalSession` 7
+times, `loginBoundaryScreen` twice, and `resetTerminalScreen` 5 times against 0
+occurrences in the pre-restart copy, so the reported session had indeed been
+running a build without this fix; migration reached `complete`; `state` is
+`running` with `cpuEngine: "wasm-rust"` for the pool and both workers. The world
+was preserved through `resetWorld: false` and a pre-restart copy was kept
+outside the repository.
+
 Verify: Real managed BDS/Web Terminal session. Let a session reach a
 `terminal_closed` finalization, reattach, and type.
 
 Expect: A cleared screen with `/etc/issue` and the login prompt, and login
 succeeds without a Computer power cycle.
 
-Status: open. Host tests are not evidence of Web Terminal behavior; this item
-must be recorded with its date, engine selection, and observed result before the
-Issue closes.
+Status: open. Host tests and a deployment digest are not evidence of Web
+Terminal behavior. The fixed build is now the live managed build, so this item
+only needs a session on it; record its date, engine selection, and observed
+result before the Issue closes.
+
+## Operating note: stopping a managed companion on Windows
+
+Recorded 2026-07-25. A companion started outside an interactive console cannot
+be asked to shut down gracefully from another process on Windows.
+`GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0)` reports success after
+`AttachConsole`, but the companion keeps running because it does not share the
+sending process group, and `Stop-Process`/`uv_kill` is `TerminateProcess`, not a
+deliverable `SIGINT`. The companion exposes no shutdown endpoint, which is
+correct: `/api/*` is the session surface, not an administration surface.
+
+What worked without risking the world: copy the world directory aside, terminate
+only the companion process, and let BDS observe the closed stdin. BDS exited on
+its own within three seconds and both ports were free afterwards, and the
+preserved world reloaded and migrated cleanly on the next start. Prefer an
+interactive console for a companion you expect to stop again; keep the copy
+until the restarted world is verified.
