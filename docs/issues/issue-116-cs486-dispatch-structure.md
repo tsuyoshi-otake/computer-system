@@ -95,8 +95,8 @@ the residual lane-lookup cost on the one instruction shape that needs nothing
 else. It is recorded rather than averaged away.
 
 Verify on 2026-07-26: repeat the same A/B against the Prettier-formatted source
-that is actually committed, so the evidence matches the shipped bytes rather than
-a pre-format draft.
+that is actually committed, so the evidence matches the shipped bytes rather
+than a pre-format draft.
 
 Expect: the same complete equivalence across all three profiles.
 
