@@ -8,6 +8,7 @@ export interface RuntimeEvent {
 
 export class BoundedEventQueue {
   private readonly queued: RuntimeEvent[] = [];
+  private readonly queuedByName = new Map<string, number>();
 
   constructor(readonly capacity: number) {
     requirePositiveInteger(capacity, "event capacity");
@@ -22,15 +23,36 @@ export class BoundedEventQueue {
       throw new VmRuntimeError("ValueError", "Event name cannot be empty");
     if (this.queued.length >= this.capacity) throw new VmLimitError("event");
     this.queued.push({ name, arguments: arguments_ });
+    this.queuedByName.set(name, (this.queuedByName.get(name) ?? 0) + 1);
+  }
+
+  /**
+   * O(1) query for an already queued name. A producer that only needs to wake a
+   * waiting process uses this to keep one outstanding wakeup instead of queueing
+   * a second event the process cannot consume.
+   */
+  hasQueued(name: string): boolean {
+    return (this.queuedByName.get(name) ?? 0) > 0;
   }
 
   take(filter?: string): RuntimeEvent | undefined {
-    if (filter === undefined) return this.queued.shift();
+    if (filter === undefined) {
+      const event = this.queued.shift();
+      if (event !== undefined) this.releaseName(event.name);
+      return event;
+    }
     while (this.queued.length > 0) {
       const event = this.queued.shift()!;
+      this.releaseName(event.name);
       if (event.name === filter) return event;
     }
     return undefined;
+  }
+
+  private releaseName(name: string): void {
+    const queued = this.queuedByName.get(name) ?? 0;
+    if (queued <= 1) this.queuedByName.delete(name);
+    else this.queuedByName.set(name, queued - 1);
   }
 }
 

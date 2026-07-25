@@ -12,10 +12,15 @@
   transition publishes one observable state/result; wait, resume, interrupt,
   fault, exit, and cancellation ownership must be unambiguous.
 - `BoundedEventQueue` requires a positive injected capacity and nonempty event
-  names. `take(filter)` deliberately discards earlier nonmatching events. Timer
-  queues also require positive injected capacity and nonnegative delay;
-  `takeDue` is capacity-bounded O(N log N) and sorts by due tick then ID. It
-  does not currently validate the starting tick or safe due-time overflow.
+  names. `take(filter)` deliberately discards earlier nonmatching events, so the
+  queue itself is the only authority for whether a wakeup is still pending:
+  `hasQueued(name)` answers that, and both `take` paths release the name.
+  Callers that pair a queued event with separately buffered payload use it to
+  keep one pending wakeup per name, because a surplus wakeup would resume a wait
+  whose payload another wakeup already consumed. Timer queues also require
+  positive injected capacity and nonnegative delay; `takeDue` is
+  capacity-bounded O(N log N) and sorts by due tick then ID. It does not
+  currently validate the starting tick or safe due-time overflow.
 
 ## Transaction quarantine
 

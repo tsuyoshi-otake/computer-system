@@ -681,6 +681,15 @@ export class ComputerRuntime {
           state: entry.record.lifecycle.state.kind,
         };
       }
+      // The FIFO carries the keys; the event only wakes a parked process, so one
+      // outstanding wakeup is enough. A second event would resume a wait whose
+      // FIFO the first wakeup already drained.
+      if (this.scheduler.hasQueuedEvent(foreground.runtimeId, name)) {
+        return {
+          outcome: "accepted",
+          state: entry.record.lifecycle.state.kind,
+        };
+      }
       try {
         this.scheduler.queueEvent(foreground.runtimeId, name, ...arguments_);
         return {
@@ -723,6 +732,13 @@ export class ComputerRuntime {
                 computerId,
                 operation,
               ): CpuProcessSliceResult | undefined => {
+                /**
+                 * Every offer is one bounded sub-slice, so the soft limit inside
+                 * `tryRun` is the only throttle guest CPU work needs. Reserving
+                 * host budget here for the frame this work produces was measured
+                 * and rejected: the frame cannot exist before the guest computes
+                 * it, so withholding CPU time only delays it.
+                 */
                 const attempt = scope.tryRun(
                   {
                     lane: this.runtimeLanes.get(computerId) ?? "guest_cpu",
@@ -749,17 +765,19 @@ export class ComputerRuntime {
         if (foreground !== undefined) {
           const measured = scheduled.get(foreground.runtimeId);
           if (measured !== undefined) {
-            foreground.cpuCycles = Math.min(
-              1_000_000,
-              foreground.compileCycles + measured.cpuCycles,
-            );
+            const modeledCpuCycles =
+              foreground.compileCycles + measured.cpuCycles;
+            foreground.cpuCycles = Math.min(1_000_000, modeledCpuCycles);
             foreground.executedInstructions = measured.executedInstructions;
             const pids = foreground.osPids ?? [foreground.osPid];
             for (const pid of pids) {
+              // Account the uncapped modeled total. `cpuCycles` carries the
+              // reported presentation bound, and a cumulative delta taken from
+              // that bound stops advancing once the process passes it.
               this.accountLiveOsProcess(
                 entry,
                 pid,
-                Math.floor(foreground.cpuCycles / Math.max(1, pids.length)),
+                Math.floor(modeledCpuCycles / Math.max(1, pids.length)),
               );
             }
           }
@@ -797,15 +815,14 @@ export class ComputerRuntime {
         for (const background of [...entry.backgroundJobs.values()]) {
           const measured = scheduled.get(background.runtimeId);
           if (measured !== undefined) {
-            background.cpuCycles = Math.min(
-              1_000_000,
-              background.compileCycles + measured.cpuCycles,
-            );
+            const modeledCpuCycles =
+              background.compileCycles + measured.cpuCycles;
+            background.cpuCycles = Math.min(1_000_000, modeledCpuCycles);
             background.executedInstructions = measured.executedInstructions;
             this.accountLiveOsProcess(
               entry,
               background.osPid,
-              background.cpuCycles,
+              modeledCpuCycles,
             );
           }
           if (

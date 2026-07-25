@@ -32,6 +32,26 @@ external observation boundary. It rejects an atom larger than the lane limit and
 measures redstone and topology work without changing device state or guest
 timing.
 
+Admission runs before the atom, so `maximumAtomicHostMicroseconds` can only
+report an overrun after the fact. Keeping an atom genuinely bounded is therefore
+the caller's job. Issue #113 made the scheduler divide a CPU dispatch larger
+than `maximumAtomicCpuCycles` (default 330,000, one fifth of the per-tick cycle
+budget) into that many separately admitted sub-slices. This changes host
+granularity only: `Cs486Process` pays at most the cycles offered and carries the
+remainder as cycle debt, so N sub-slices summing to B run exactly the work one
+slice of B would, and the guest still receives `cpuCyclesPerTick` per tick. A
+process whose host operation is a dispatch rather than the execution itself,
+such as the Issue #106 remote CS486 process, declares
+`dispatchesWorkAsynchronously` and is offered its whole budget in one atom.
+
+Two alternatives were measured and rejected under Issue #113. Lowering
+`cpuCyclesPerTick` bounds host time by rewriting the guest's clock rate, which
+is not permitted. Reserving part of the tick's soft host budget so a long CPU
+atom cannot starve the present of the frame it is computing made the measured
+symptom about three times worse, because the frame cannot exist before the guest
+computes it. Do not withhold one lane's budget to protect another lane's later
+work.
+
 ## Bounded execution paths
 
 - The shared scheduler inspects at most 64 processes per tick by default. Event

@@ -20,6 +20,14 @@
 - Competing forms, cancellation, disconnect, runtime failure, shutdown, reboot,
   and adapter disposal each need one observable finalization owner. Never leave
   a shell or elevated credential live after its terminal disappears.
+- An event that only wakes a process whose payload is buffered elsewhere keeps
+  one pending wakeup at a time. Ask the event queue with `hasQueued` before
+  queueing another `terminal_keys` wakeup: the guest drains the whole key FIFO
+  from the first wakeup, so a surplus one resumes a wait with nothing to
+  deliver.
+- OS process accounting receives the uncapped cumulative modeled total. A cap
+  belongs to a reported field only; capping the cumulative counter freezes the
+  per-tick delta `accountLiveOsProcess` derives from it.
 
 ## Boot, shutdown, and recovery
 

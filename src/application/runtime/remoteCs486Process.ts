@@ -150,6 +150,8 @@ export class RemoteCs486ProcessFactory {
 }
 
 export class RemoteCs486Process implements ObservableCs486Process {
+  /** One slice call reserves a batch the worker thread runs after it returns. */
+  readonly dispatchesWorkAsynchronously = true;
   readonly executionLocation: CpuProcessExecutionLocation;
   readonly schedulerResourceId: string;
   private stateValue: CpuProcessState = { kind: "ready" };

@@ -11,6 +11,7 @@ import { InMemoryFilesystem } from "../../src/domain/filesystem/inMemoryFilesyst
 import { TerminalBuffer } from "../../src/domain/terminal/terminalBuffer.js";
 import type {
   CpuProcess,
+  CpuProcessSliceResult,
   CpuProcessState,
 } from "../../src/domain/runtime/cpuProcess.js";
 import { PythonCs486Harness } from "./pythonCs486Harness.js";
@@ -303,6 +304,7 @@ describe("round-robin scheduler", (): void => {
         id,
         {
           ...process,
+          dispatchesWorkAsynchronously: true,
           schedulerResourceId: "cs486-worker-1",
           runCpuSlice: (cpuCycleBudget, instructionBudget = 1) => {
             offers.push({ cpuCycleBudget, instructionBudget });
@@ -333,6 +335,242 @@ describe("round-robin scheduler", (): void => {
       cpuCycles: 0,
       executedInstructions: 0,
     });
+  });
+
+  it("divides one dispatch into bounded atomic sub-slices", (): void => {
+    const scheduler = new RoundRobinScheduler({
+      ...limits,
+      cpuCyclesPerComputer: 1_000_000,
+      cpuCyclesPerTick: 1_000_000,
+      instructionsPerComputer: 1_000_000,
+      instructionsPerTick: 1_000_000,
+      maximumAtomicCpuCycles: 300_000,
+    });
+    const offers: number[] = [];
+    scheduler.add(1, saturatingProcess(offers), 1_000_000);
+
+    const result = scheduler.runTick();
+
+    expect(offers).toEqual([300_000, 300_000, 300_000, 100_000]);
+    expect(result).toMatchObject({
+      admittedCpuCycles: 1_000_000,
+      cpuCycles: 1_000_000,
+      executedInstructions: 1_000_000,
+    });
+  });
+
+  it("offers an asynchronous executor its whole dispatch in one operation", (): void => {
+    const scheduler = new RoundRobinScheduler({
+      ...limits,
+      cpuCyclesPerComputer: 1_000_000,
+      cpuCyclesPerTick: 1_000_000,
+      instructionsPerComputer: 1_000_000,
+      instructionsPerTick: 1_000_000,
+      maximumAtomicCpuCycles: 300_000,
+    });
+    const offers: number[] = [];
+    const process = saturatingProcess(offers);
+    scheduler.add(
+      1,
+      { ...process, dispatchesWorkAsynchronously: true },
+      1_000_000,
+    );
+
+    scheduler.runTick();
+
+    expect(offers).toEqual([1_000_000]);
+  });
+
+  it("runs the same guest work whether or not the dispatch is divided", (): void => {
+    const source = "while True:\n    pass\n";
+    const base: SchedulerLimits = {
+      ...limits,
+      cpuCyclesPerComputer: 100_000,
+      cpuCyclesPerTick: 100_000,
+      instructionsPerComputer: 1_650_000,
+      instructionsPerTick: 1_650_000,
+    };
+    const undividedProcess = vm(source);
+    const dividedProcess = vm(source);
+    const undivided = new RoundRobinScheduler({
+      ...base,
+      maximumAtomicCpuCycles: 100_000,
+    });
+    const divided = new RoundRobinScheduler({
+      ...base,
+      maximumAtomicCpuCycles: 7_000,
+    });
+    undivided.add(1, undividedProcess);
+    divided.add(1, dividedProcess);
+
+    const undividedResult = undivided.runTick();
+    const dividedResult = divided.runTick();
+
+    expect(undividedResult.cpuCycles).toBe(100_000);
+    expect(dividedResult.cpuCycles).toBe(undividedResult.cpuCycles);
+    expect(dividedResult.executedInstructions).toBe(
+      undividedResult.executedInstructions,
+    );
+    expect(dividedResult.admittedCpuCycles).toBe(
+      undividedResult.admittedCpuCycles,
+    );
+    expect(dividedProcess.hasPendingCpuCycles).toBe(
+      undividedProcess.hasPendingCpuCycles,
+    );
+    expect(dividedProcess.state).toEqual(undividedProcess.state);
+  });
+
+  it("keeps the divided cycle total identical across a program that completes", (): void => {
+    const source =
+      "total = 0\nfor index in range(512):\n    total = total + index\n";
+    const base: SchedulerLimits = {
+      ...limits,
+      cpuCyclesPerComputer: 1_650_000,
+      cpuCyclesPerTick: 1_650_000,
+      instructionsPerComputer: 1_650_000,
+      instructionsPerTick: 1_650_000,
+    };
+    const undividedProcess = vm(source);
+    const dividedProcess = vm(source);
+    const undivided = new RoundRobinScheduler({
+      ...base,
+      maximumAtomicCpuCycles: 1_650_000,
+    });
+    const divided = new RoundRobinScheduler({
+      ...base,
+      maximumAtomicCpuCycles: 3_000,
+    });
+    undivided.add(1, undividedProcess);
+    divided.add(1, dividedProcess);
+
+    const undividedResult = undivided.runTick();
+    const dividedResult = divided.runTick();
+
+    expect(undividedProcess.state.kind).toBe("completed");
+    expect(dividedProcess.state.kind).toBe("completed");
+    expect(dividedResult.cpuCycles).toBe(undividedResult.cpuCycles);
+    expect(dividedResult.executedInstructions).toBe(
+      undividedResult.executedInstructions,
+    );
+    expect(dividedProcess.globals.get("total")).toEqual(
+      undividedProcess.globals.get("total"),
+    );
+  });
+
+  it("stops dividing a dispatch once the process stops for its own reason", (): void => {
+    const scheduler = new RoundRobinScheduler({
+      ...limits,
+      cpuCyclesPerComputer: 1_000_000,
+      cpuCyclesPerTick: 1_000_000,
+      instructionsPerComputer: 1_000_000,
+      instructionsPerTick: 1_000_000,
+      maximumAtomicCpuCycles: 300_000,
+    });
+    const process = alwaysReadyProcess();
+    let calls = 0;
+    scheduler.add(
+      1,
+      {
+        ...process,
+        runCpuSlice: (cpuCycleBudget, instructionBudget = 1) => {
+          calls += 1;
+          return {
+            cpuCycles: Math.min(1_000, cpuCycleBudget),
+            executedInstructions: Math.min(4, instructionBudget),
+            state: process.state,
+          };
+        },
+      },
+      1_000_000,
+    );
+
+    const result = scheduler.runTick();
+
+    expect(calls).toBe(1);
+    expect(result).toMatchObject({
+      cpuCycles: 1_000,
+      executedInstructions: 4,
+    });
+  });
+
+  it("keeps the work a refused sub-slice follows and stops that dispatch", (): void => {
+    const scheduler = new RoundRobinScheduler({
+      ...limits,
+      cpuCyclesPerComputer: 1_000_000,
+      cpuCyclesPerTick: 1_000_000,
+      instructionsPerComputer: 1_000_000,
+      instructionsPerTick: 1_000_000,
+      maximumAtomicCpuCycles: 300_000,
+    });
+    const offers: number[] = [];
+    scheduler.add(1, saturatingProcess(offers), 1_000_000);
+    let admitted = 0;
+
+    const result = scheduler.runTick({
+      prepare: (_id, operation): boolean => {
+        operation();
+        return true;
+      },
+      runCpuSlice: (_id, operation) => {
+        admitted += 1;
+        return admitted > 2 ? undefined : operation();
+      },
+    });
+
+    expect(offers).toEqual([300_000, 300_000]);
+    expect(result).toMatchObject({
+      admittedCpuCycles: 600_000,
+      cpuCycles: 600_000,
+      executedInstructions: 600_000,
+    });
+  });
+
+  it("rejects a non-positive atomic cycle bound", (): void => {
+    expect(
+      () => new RoundRobinScheduler({ ...limits, maximumAtomicCpuCycles: 0 }),
+    ).toThrow(RangeError);
+    expect(
+      () => new RoundRobinScheduler({ ...limits, maximumAtomicCpuCycles: 1.5 }),
+    ).toThrow(RangeError);
+  });
+
+  it("reports a queued event name until the waiting process consumes it", (): void => {
+    const scheduler = new RoundRobinScheduler(limits);
+    scheduler.add(7, waitingForKeyMachine());
+
+    scheduler.runTick();
+    expect(scheduler.state(7).kind).toBe("waiting_event");
+    expect(scheduler.hasQueuedEvent(7, "key")).toBe(false);
+
+    scheduler.queueEvent(7, "key", 42);
+    expect(scheduler.hasQueuedEvent(7, "key")).toBe(true);
+    expect(scheduler.hasQueuedEvent(7, "mouse")).toBe(false);
+
+    scheduler.runTick();
+
+    expect(scheduler.state(7).kind).toBe("completed");
+    expect(scheduler.hasQueuedEvent(7, "key")).toBe(false);
+  });
+
+  it("stops reporting a name the resuming filter discarded", (): void => {
+    const scheduler = new RoundRobinScheduler(limits);
+    scheduler.add(7, waitingForKeyMachine());
+
+    scheduler.runTick();
+    scheduler.queueEvent(7, "mouse", 1);
+    scheduler.queueEvent(7, "key", 42);
+    expect(scheduler.hasQueuedEvent(7, "mouse")).toBe(true);
+
+    scheduler.runTick();
+
+    expect(scheduler.hasQueuedEvent(7, "mouse")).toBe(false);
+    expect(scheduler.hasQueuedEvent(7, "key")).toBe(false);
+  });
+
+  it("rejects a queued-event query for an unscheduled Computer", (): void => {
+    const scheduler = new RoundRobinScheduler(limits);
+
+    expect(() => scheduler.hasQueuedEvent(7, "terminal_keys")).toThrow(Error);
   });
 
   it("disposes a removed process exactly once", (): void => {
@@ -374,6 +612,38 @@ function alwaysReadyProcess(): CpuProcess {
     terminate: (reason = "terminated"): CpuProcessState => {
       state = { kind: "terminated", reason };
       return state;
+    },
+  };
+}
+
+/** Parks on one filtered event wait, as a guest blocked on a keystroke does. */
+function waitingForKeyMachine(): PythonCs486Harness {
+  return vm("event = wait_key()\n", {
+    wait_key: nativeFunction("wait_key", () => ({
+      kind: "wait_event",
+      filter: "key",
+    })),
+  });
+}
+
+/**
+ * Consumes every offered cycle and instruction, so each recorded offer is the
+ * budget one host operation was asked to carry.
+ */
+function saturatingProcess(offers: number[]): CpuProcess {
+  const process = alwaysReadyProcess();
+  return {
+    ...process,
+    runCpuSlice: (
+      cpuCycleBudget,
+      instructionBudget = 1,
+    ): CpuProcessSliceResult => {
+      offers.push(cpuCycleBudget);
+      return {
+        cpuCycles: cpuCycleBudget,
+        executedInstructions: Math.min(cpuCycleBudget, instructionBudget),
+        state: process.state,
+      };
     },
   };
 }

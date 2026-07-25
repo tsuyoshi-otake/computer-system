@@ -494,6 +494,41 @@ describe("CS ABI 1.0", (): void => {
     expect(harness.runtime.enqueueKeyBatch('["overflow"]')).toBeUndefined();
   });
 
+  it("resumes a spurious key wait with the no-key value instead of an errno", (): void => {
+    const harness = createHarness();
+    harness.context.writeRegister("ebx", csAbiSelectors.keyWait);
+    const waiting = harness.runtime.syscallHandler("cs", harness.context);
+    expect(waiting).toMatchObject({
+      filter: "terminal_keys",
+      kind: "wait_event",
+    });
+    if (waiting.kind !== "wait_event") throw new Error("expected key wait");
+
+    waiting.resume?.(null);
+
+    // The same value `keyPoll` reports for an empty FIFO, so a guest that
+    // treats a negative result as fatal simply waits again.
+    expect(harness.context.readRegister("eax")).toBe(0);
+    harness.context.writeRegister("ebx", csAbiSelectors.keyPoll);
+    harness.runtime.syscallHandler("cs", harness.context);
+    expect(harness.context.readRegister("eax")).toBe(0);
+  });
+
+  it("rejects a NUL key code so zero stays unambiguously no key", (): void => {
+    const harness = createHarness();
+
+    expect(harness.runtime.enqueueKeyBatch('["\\u0000"]')).toBeUndefined();
+    expect(harness.runtime.enqueueKeyBatch('["a","\\u0000"]')).toBeUndefined();
+
+    // A rejected batch must leave nothing behind for the next poll.
+    harness.context.writeRegister("ebx", csAbiSelectors.keyPoll);
+    harness.runtime.syscallHandler("cs", harness.context);
+    expect(harness.context.readRegister("eax")).toBe(0);
+    expect(harness.runtime.enqueueKeyBatch('["a"]')).toBe(1);
+    harness.runtime.syscallHandler("cs", harness.context);
+    expect(harness.context.readRegister("eax")).toBe(97);
+  });
+
   it("blocks standard input without CPU retry and validates descriptor limits", (): void => {
     const harness = createHarness();
     harness.context.writeRegister("ebx", csAbiSelectors.fsRead);

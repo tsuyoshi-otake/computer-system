@@ -47,6 +47,13 @@ export interface CpuProcess {
   readonly schedulerResourceId?: string;
   /** Host execution placement exposed only for truthful operator telemetry. */
   readonly executionLocation?: CpuProcessExecutionLocation;
+  /**
+   * True when one `runCpuSlice` call dispatches work that does not run inside
+   * that call. Such a process must be offered its whole slice budget at once:
+   * dividing the budget would only shrink the dispatched batch, because the
+   * calling host operation was never where the work happened.
+   */
+  readonly dispatchesWorkAsynchronously?: boolean;
   readonly hasPendingCpuCycles: boolean;
   readonly memoryLimitBytes: number;
   readonly memoryUsageBytes: number;

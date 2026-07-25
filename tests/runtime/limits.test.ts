@@ -173,6 +173,34 @@ describe("runtime resource limits", (): void => {
     expect(events.take()).toBeUndefined();
   });
 
+  it("reports an undelivered name so a producer keeps one outstanding wakeup", (): void => {
+    const events = new BoundedEventQueue(4);
+    expect(events.hasQueued("terminal_keys")).toBe(false);
+
+    events.enqueue("terminal_keys", 65);
+    expect(events.hasQueued("terminal_keys")).toBe(true);
+    events.enqueue("terminal_keys", 66);
+    expect(events.hasQueued("terminal_keys")).toBe(true);
+
+    expect(events.take()).toEqual({ name: "terminal_keys", arguments: [65] });
+    expect(events.hasQueued("terminal_keys")).toBe(true);
+    expect(events.take()).toEqual({ name: "terminal_keys", arguments: [66] });
+    expect(events.hasQueued("terminal_keys")).toBe(false);
+  });
+
+  it("stops reporting a name a filtered pull discarded", (): void => {
+    const events = new BoundedEventQueue(3);
+    events.enqueue("terminal_keys", 65);
+    events.enqueue("csabi_fd0", 1);
+
+    expect(events.take("csabi_fd0")).toEqual({
+      name: "csabi_fd0",
+      arguments: [1],
+    });
+    expect(events.hasQueued("terminal_keys")).toBe(false);
+    expect(events.size).toBe(0);
+  });
+
   it("bounds timers and emits accepted timers once in deterministic order", (): void => {
     const timers = new BoundedTimerQueue(2);
     const late = timers.start(10, 3);

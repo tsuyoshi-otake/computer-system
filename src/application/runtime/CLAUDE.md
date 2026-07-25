@@ -2,17 +2,20 @@
 
 ## Scheduler and host admission
 
-- Guest CPU/device time is deterministic modeled time. Host elapsed time is only
-  for admission/observability; never convert it into guest or wire timing.
-- `ComputerWorkMonitor` owns one host-time scope per BDS tick and fixed bounded
-  CPU, compile, MCP, I/O, bus, redstone, topology, terminal, and persistence
-  lanes.
-- Normal `run`, MCP CS486, and Python execution are resumable scheduler jobs
-  with fixed machine-instruction ceilings. A timeout, status 124, yielded job,
-  or incomplete process is not a language-performance result.
-- Admit native shell/terminal work before it executes. Do not apply a budget
-  check after side effects and turn success into an uncaught host-budget
-  failure.
+- Guest CPU/device time is modeled; host elapsed time only gates admission and
+  observability, never guest or wire timing. `ComputerWorkMonitor` owns one
+  host-time scope per BDS tick and fixed bounded CPU, compile, MCP, I/O, bus,
+  redstone, topology, terminal, and persistence lanes.
+- Resumable `run`, MCP CS486, and Python jobs have fixed machine-instruction
+  ceilings, so a timeout, status 124, yielded job, or incomplete process is not
+  a language-performance result.
+- Admit native shell/terminal work before it executes; a budget check applied
+  after side effects turns success into an uncaught host-budget failure. Every
+  `tryRun` caller submits an already bounded atomic operation: a dispatch above
+  `maximumAtomicCpuCycles` becomes that many admitted sub-slices, which changes
+  host granularity only, never the cycles a guest receives per tick. A process
+  whose host operation is only that dispatch declares
+  `dispatchesWorkAsynchronously` and keeps one operation.
 - Keep runnable-only bookkeeping O(runnable), dedupe in-flight work, cap queues
   and concurrency, and finalize cancellation, timeout, process exit, machine
   shutdown, and scheduler disposal exactly once.
@@ -42,14 +45,12 @@
   They do not introduce a separate expression evaluator or binding path.
 - Assertions use an ordinary CS486 success branch. Evaluate the optional message
   only on failure, then raise `AssertionError` through the existing exception
-  and finalizer owner. The current profile has no optimization mode that removes
-  it.
+  and finalizer owner. This profile has no optimization mode that removes them.
 - Eager list/set/dictionary comprehensions compile as managed functions.
   Evaluate the leftmost iterable in the enclosing scope, keep targets and later
   clauses in the implicit scope, and route `:=` stores to the containing
   non-comprehension binding. Set growth uses bounded canonical primitive/tuple
-  keys and O(1) average lookup without promising Python-portable iteration
-  order.
+  keys and O(1) average lookup, but not Python-portable iteration order.
 - Class suites use dedicated managed frames and publish only after success. Keep
   class locals out of method closures, pass enclosing cells through, retain one
   canonical C3 MRO, and cap it at 64 including `object` so lookup stays O(M).
@@ -163,8 +164,7 @@
 - Generic subscription stays type-erased in one process-local bounded cache.
   Account origins, arguments, parameters, defaults, `ParamSpec` tuples, and
   substitutions. Parameterized construction uses ordinary CS486 calls; reject
-  aliases in runtime class checks and never add enforcement or another
-  evaluator.
+  aliases in runtime class checks and never add enforcement or an evaluator.
 - Keep the bounded `typing` core intrinsic so core, production, and MCP share
   one sandboxed namespace without host Python. Reserve it before guest lookup so
   `/typing.py` cannot shadow it. Reflection is read-only where Python requires;

@@ -460,7 +460,9 @@ export class CsAbiRuntime {
     }
     const codes = decoded.map((value) => keycode(value as string));
     if (
-      codes.some((code) => code === undefined) ||
+      // Zero is the ABI's "no key available" value for poll and for a spurious
+      // wait resume, so a NUL code point is malformed transport input here.
+      codes.some((code) => code === undefined || code === 0) ||
       this.keys.length + codes.length > csAbiLimits.keyFifo
     ) {
       return undefined;
@@ -646,7 +648,11 @@ export class CsAbiRuntime {
       filter: "terminal_keys",
       kind: "wait_event",
       resume: (): void => {
-        context.writeRegister("eax", this.keys.shift() ?? -csAbiErrno.eagain);
+        // A blocking key wait must never hand the guest a fabricated errno: a
+        // guest that treats a negative result as fatal would exit on a wakeup it
+        // never asked for. An empty FIFO here is the ABI's "no key" value, the
+        // same one poll returns, so the guest simply waits again.
+        context.writeRegister("eax", this.keys.shift() ?? 0);
       },
     };
   }

@@ -20,7 +20,25 @@ export interface SchedulerLimits {
   readonly instructionsPerTick?: number;
   /** Maximum number of Computer records inspected by one host tick. */
   readonly computersPerTick?: number;
+  /**
+   * Largest modeled cycle budget offered to one `runCpuSlice` call. A dispatch
+   * larger than this is divided into consecutive sub-slices so a
+   * `SchedulerWorkObserver` can admit, defer, or stop between them. This bounds
+   * how much guest work one host operation carries; it does not change how many
+   * cycles a Computer receives per tick, so modeled guest timing is untouched.
+   */
+  readonly maximumAtomicCpuCycles?: number;
 }
+
+/**
+ * One fifth of a 33 MHz Computer's per-tick budget. Measured host throughput for
+ * the CS486 interpreter is 37-66 guest instructions per host microsecond at a
+ * modeled CPI of 2.1-3.8, so a sub-slice of this size costs roughly 2 ms of host
+ * time — the order of `ComputerWorkMonitor`'s per-operation atomic bound. Host
+ * time cannot be bounded by a cycle count on every machine; this makes the
+ * number of admission decisions per tick proportional to the work offered.
+ */
+const defaultMaximumAtomicCpuCycles = 330_000;
 
 export const defaultSchedulerLimits: SchedulerLimits = {
   eventCapacity: 256,
@@ -30,6 +48,7 @@ export const defaultSchedulerLimits: SchedulerLimits = {
   instructionsPerComputer: 1_650_000,
   instructionsPerTick: 1_650_000,
   computersPerTick: 64,
+  maximumAtomicCpuCycles: defaultMaximumAtomicCpuCycles,
 };
 
 export interface SchedulerWorkObserver {
@@ -68,6 +87,7 @@ export class RoundRobinScheduler {
   private readonly instructionsPerComputer: number;
   private readonly instructionsPerTick: number;
   private readonly computersPerTick: number;
+  private readonly maximumAtomicCpuCycles: number;
 
   constructor(
     private readonly limits: SchedulerLimits = defaultSchedulerLimits,
@@ -82,12 +102,18 @@ export class RoundRobinScheduler {
       limits.instructionsPerTick ?? Number.MAX_SAFE_INTEGER;
     this.computersPerTick =
       limits.computersPerTick ?? defaultSchedulerLimits.computersPerTick!;
+    this.maximumAtomicCpuCycles =
+      limits.maximumAtomicCpuCycles ?? defaultMaximumAtomicCpuCycles;
     requirePositiveInteger(
       this.instructionsPerComputer,
       "instructionsPerComputer",
     );
     requirePositiveInteger(this.instructionsPerTick, "instructionsPerTick");
     requirePositiveInteger(this.computersPerTick, "computersPerTick");
+    requirePositiveInteger(
+      this.maximumAtomicCpuCycles,
+      "maximumAtomicCpuCycles",
+    );
   }
 
   get tickNumber(): number {
@@ -166,6 +192,15 @@ export class RoundRobinScheduler {
     ...arguments_: readonly RuntimeValue[]
   ): void {
     this.requireComputer(id).events.enqueue(name, ...arguments_);
+  }
+
+  /**
+   * True when this Computer already has an undelivered event of that name. The
+   * queue is the authority, so a discarded or delivered event is reflected
+   * immediately and no producer has to mirror the pending state.
+   */
+  hasQueuedEvent(id: number, name: string): boolean {
+    return this.requireComputer(id).events.hasQueued(name);
   }
 
   startTimer(id: number, delayTicks: number): number {
@@ -308,40 +343,90 @@ export class RoundRobinScheduler {
         remaining.instructions,
         budget,
       );
-      const operation = (): CpuProcessSliceResult =>
-        computer.process.runCpuSlice(budget, instructionBudget);
-      const result =
-        observer === undefined
-          ? operation()
-          : observer.runCpuSlice(computer.id, operation);
-      if (result === undefined) break;
-      dispatch.dispatched = true;
-      const admittedCpuCycles = result.admittedCpuCycles ?? result.cpuCycles;
-      const admittedInstructions =
-        result.admittedInstructions ?? result.executedInstructions;
-      requireSliceAmount(result.cpuCycles, "cpuCycles");
-      requireSliceAmount(result.executedInstructions, "executedInstructions");
-      requireSliceAmount(admittedCpuCycles, "admittedCpuCycles");
-      requireSliceAmount(admittedInstructions, "admittedInstructions");
-      if (admittedCpuCycles > budget) {
-        throw new RangeError(
-          "CPU process admitted more cycles than the offered slice budget",
+      /**
+       * A dispatch runs as consecutive sub-slices so the observer decides
+       * between them instead of only before the whole budget. `Cs486Process`
+       * carries its cycle debt and instruction pointer in its own state, so the
+       * divided totals equal one undivided slice of the same budget.
+       */
+      const atomicBudget = computer.process.dispatchesWorkAsynchronously
+        ? budget
+        : Math.min(this.maximumAtomicCpuCycles, budget);
+      const subSlicesPerDispatch = Math.ceil(budget / atomicBudget);
+      let dispatchedCpuCycles = 0;
+      let dispatchedInstructions = 0;
+      let refused = false;
+      for (
+        let subSlice = 0;
+        subSlice < subSlicesPerDispatch &&
+        dispatchedCpuCycles < budget &&
+        dispatchedInstructions < instructionBudget;
+        subSlice += 1
+      ) {
+        const subSliceCpuCycles = Math.min(
+          atomicBudget,
+          budget - dispatchedCpuCycles,
         );
-      }
-      if (admittedInstructions > instructionBudget) {
-        throw new RangeError(
-          "CPU process admitted more instructions than the offered slice budget",
+        const subSliceInstructions = Math.min(
+          subSliceCpuCycles,
+          instructionBudget - dispatchedInstructions,
         );
+        const operation = (): CpuProcessSliceResult =>
+          computer.process.runCpuSlice(subSliceCpuCycles, subSliceInstructions);
+        const result =
+          observer === undefined
+            ? operation()
+            : observer.runCpuSlice(computer.id, operation);
+        if (result === undefined) {
+          refused = true;
+          break;
+        }
+        dispatch.dispatched = true;
+        const admittedCpuCycles = result.admittedCpuCycles ?? result.cpuCycles;
+        const admittedInstructions =
+          result.admittedInstructions ?? result.executedInstructions;
+        requireSliceAmount(result.cpuCycles, "cpuCycles");
+        requireSliceAmount(result.executedInstructions, "executedInstructions");
+        requireSliceAmount(admittedCpuCycles, "admittedCpuCycles");
+        requireSliceAmount(admittedInstructions, "admittedInstructions");
+        if (admittedCpuCycles > subSliceCpuCycles) {
+          throw new RangeError(
+            "CPU process admitted more cycles than the offered slice budget",
+          );
+        }
+        if (admittedInstructions > subSliceInstructions) {
+          throw new RangeError(
+            "CPU process admitted more instructions than the offered slice budget",
+          );
+        }
+        computer.cpuCycles += result.cpuCycles;
+        computer.executedInstructions += result.executedInstructions;
+        cpuCursorAdvance = slot.visitedOffset + 1;
+        cpuCycles += result.cpuCycles;
+        executedInstructions += result.executedInstructions;
+        totalAdmittedCpuCycles += admittedCpuCycles;
+        totalAdmittedInstructions += admittedInstructions;
+        remaining.cpuCycles -= admittedCpuCycles;
+        remaining.instructions -= admittedInstructions;
+        dispatchedCpuCycles += admittedCpuCycles;
+        dispatchedInstructions += admittedInstructions;
+        // Only a process the sub-slice budget actually bound has more to run in
+        // this dispatch. Anything else stopped for its own reason, so another
+        // sub-slice would spend an admission on no work.
+        if (
+          result.cpuCycles < subSliceCpuCycles &&
+          result.executedInstructions < subSliceInstructions
+        ) {
+          break;
+        }
+        if (
+          computer.process.state.kind !== "ready" &&
+          !computer.process.hasPendingCpuCycles
+        ) {
+          break;
+        }
       }
-      computer.cpuCycles += result.cpuCycles;
-      computer.executedInstructions += result.executedInstructions;
-      cpuCursorAdvance = slot.visitedOffset + 1;
-      cpuCycles += result.cpuCycles;
-      executedInstructions += result.executedInstructions;
-      totalAdmittedCpuCycles += admittedCpuCycles;
-      totalAdmittedInstructions += admittedInstructions;
-      remaining.cpuCycles -= admittedCpuCycles;
-      remaining.instructions -= admittedInstructions;
+      if (refused) break;
     }
     for (const [resourceId, dispatch] of dispatchByResource) {
       if (!dispatch.dispatched) continue;

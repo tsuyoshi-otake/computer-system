@@ -149,9 +149,8 @@ synchronized.
 - #58/#61/#62: CS C 2.0, global objects, and large-program capacity.
 - #59: bounded Python slicing and list slice assignment.
 - #60: bounded CS-Linux Git-like VCS architecture; #63 owns CS ABI 1.0.
-- #64: Preserved reduced NetHack prototype. It is frozen unless the user
-  explicitly reauthorizes game implementation and is excluded from current
-  completion percentages.
+- #64: Preserved reduced NetHack prototype, frozen unless the user explicitly
+  reauthorizes game implementation and excluded from completion percentages.
 - #65-#68: VCS tracking plus Python assignment expressions, assertions, sets,
   comprehensions, scopes, and evaluation order.
 - #69-#73: hosted C/libc, archives/Make, byte8, and deterministic floating
@@ -178,6 +177,8 @@ synchronized.
 - #106: CS486 throughput and the opt-in Rust wasm compute-worker engine.
 - #111: CS-Linux login-boundary tty clear and released-terminal input.
 - #112: Bounded rotating OS runtime journal and visible CSBIOS boot failure.
+- #113: One `terminal_keys` wakeup owner, bounded atomic CPU sub-slices, and
+  unsaturated cumulative CPU accounting.
 
 Use English commit messages with useful detail and reference every applicable
 Issue. Issue #4 remains relevant while Phase 2 work is in scope.

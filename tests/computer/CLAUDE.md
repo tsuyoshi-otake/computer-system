@@ -19,6 +19,13 @@
   state.
 - Broker tests prove one destructive display drain, identical fan-out, late
   keyframes, epoch replacement, and final detach release.
+- Interactive latency is counted in modeled scheduler ticks with no work scope
+  and no host clock. Assert that dividing a dispatch into bounded atomic
+  sub-slices leaves those counts identical, and that a presented frame is
+  identified by guest-drawn content rather than by any terminal change, which a
+  shell screen clear also produces. A stepping host clock is not admissible
+  evidence: `tryRun` reads the clock a fixed number of times per operation, so
+  it charges per operation instead of per unit of work.
 
 ## Focused verification
 
