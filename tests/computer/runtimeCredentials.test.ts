@@ -604,6 +604,14 @@ describe("ComputerRuntime process credentials", (): void => {
     const rows = record.terminal.snapshot().rows;
     expect(rows[0]?.trimEnd()).toBe("CS-Linux 1.0 console tty1");
     expect(rows[1]?.trimEnd()).toBe(`${record.computerId} login:`);
+    // The released tty is still an interactive prompt, and the in-world display
+    // draws its cursor cell only while cursorBlink is set, so the re-armed getty
+    // must present one in the cell its input will land in.
+    expect(record.terminal.snapshot().cursor).toEqual({
+      blink: true,
+      x: `${record.computerId} login: `.length + 1,
+      y: 2,
+    });
   });
 
   it("accepts the next login on the terminal a disconnect finalization released", (): void => {
@@ -632,6 +640,13 @@ describe("ComputerRuntime process credentials", (): void => {
       inputMode: "line",
       secretInput: true,
     });
+    // Masked input still shows where it lands.
+    expect(
+      record.terminal
+        .line(record.terminal.cursorY)
+        .slice(0, record.terminal.cursorX - 1),
+    ).toBe("Password: ");
+    expect(record.terminal.snapshot().cursor.blink).toBe(true);
     runtime.queueEvent(record.computerId, "terminal_line", "correct-horse");
     runtime.runTick();
 

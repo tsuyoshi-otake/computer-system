@@ -255,14 +255,28 @@ output = redstone.get_output("right")
     expect(terminal.line(1).startsWith(expectedPrompt)).toBe(true);
   });
 
+  it("shows the cursor at an interactive prompt a boot boundary stopped", (): void => {
+    const terminal = new TerminalBuffer(20, 4);
+    // CSBIOS POST, the halt screens, and the power boundary all stop the cursor.
+    // Presenting a prompt is the only place the OS takes it back.
+    terminal.setCursorBlink(false);
+
+    writeTerminalPrompt(terminal, "C:\\>");
+
+    expect(terminal.snapshot().cursor.blink).toBe(true);
+  });
+
   it("does not move a TUI cursor when the shell prompt is empty", (): void => {
     const terminal = new TerminalBuffer(20, 4);
     terminal.setCursorPosition(7, 3);
+    terminal.setCursorBlink(false);
 
     writeTerminalPrompt(terminal, "");
 
     expect(terminal.cursorX).toBe(7);
     expect(terminal.cursorY).toBe(3);
+    // A full-screen program owns cursor visibility while it holds the screen.
+    expect(terminal.snapshot().cursor.blink).toBe(false);
   });
 });
 

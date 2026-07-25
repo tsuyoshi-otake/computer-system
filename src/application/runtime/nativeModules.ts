@@ -506,6 +506,11 @@ function advanceTerminalLine(terminal: TerminalBuffer): void {
   } else terminal.setCursorPosition(1, terminal.cursorY + 1);
 }
 
+/**
+ * Writes one interactive OS prompt and takes cursor visibility back with it. An
+ * empty prompt means a full-screen program owns the screen, so its own cursor
+ * ownership is left alone.
+ */
 export function writeTerminalPrompt(
   terminal: TerminalBuffer,
   promptText: string,
@@ -513,6 +518,11 @@ export function writeTerminalPrompt(
   if (promptText.length === 0) return;
   if (terminal.cursorX !== 1) advanceTerminalLine(terminal);
   terminal.write(promptText);
+  // CSBIOS POST, the halt screens, and the power boundary each stop the cursor
+  // because those screens accept no input, and a guest may have hidden it too.
+  // The in-world display draws its cursor cell only while cursorBlink is set,
+  // so this is the one place the OS asserts an input-ready prompt again.
+  terminal.setCursorBlink(true);
 }
 
 function createRedstoneModule(context: NativeModuleContext): RuntimeNamespace {

@@ -200,7 +200,68 @@ This is not a regression of the reported symptom — `cursorBlinkValue` already
 starts false, so a fresh Computer never presented an in-world cursor — but the
 change does now reset the flag on every POST and power boundary. Deciding
 whether the OS should assert cursor visibility when it takes an interactive
-terminal is open and is not implemented here.
+terminal was left open by that run; it is resolved by the section below.
+
+## Gap closed, 2026-07-25: the OS owns the prompt cursor
+
+Implemented and host-verified on the same day the gap was found. Cursor
+visibility now has exactly two owners and no third one:
+
+- CSBIOS POST, `clearCsBiosForOs`, both halt screens, and `failStopState` stop
+  the cursor, because those screens accept no input.
+- `writeTerminalPrompt` in `src/application/runtime/nativeModules.ts` takes it
+  back. It is the only writer of an interactive OS prompt, shared by the native
+  `shell.prompt()` event-loop op and by `abortLine`, `completeShellInput`, and
+  `cancelTerminalInteraction` in `computerRuntime.ts`, and it already treats an
+  empty `ShellSession.prompt()` as "a full-screen program owns the screen", so
+  `vi`, the DOS editor, the pagers, and CS-ABI frames keep owning their own
+  cursor through `term.set_cursor_blink` and `applyFrame`.
+
+`Verify:`
+`npx vitest run tests/computer/csBios.test.ts tests/runtime/nativeModules.test.ts`
+
+`Expect:` a Computer powered on through the full CSBIOS sequence reports
+`cursor.blink === false` at power-on and while `CSBIOS Revision 1.1` is on
+screen, then `cursor.blink === true` once the guest waits for input with a shell
+or `login:` prompt ending at the cursor cell; `writeTerminalPrompt` turns a
+stopped cursor back on for a non-empty prompt and leaves it stopped for an empty
+one.
+
+`Result:` both assertions failed before the change (`expected false to be true`
+at the two prompt cases) and pass after it.
+`npm test -- tests/computer tests/os tests/runtime/nativeModules.test.ts tests/terminal`
+reported 755 passed, including the three existing POST/halt `blink === false`
+cases in `tests/computer/csBios.test.ts` and the two post-run halt cases in
+`tests/computer/gracefulLifecycle.test.ts`, which now prove the halt path stops
+a cursor that a prompt had really turned on.
+
+`Verify:` `npx vitest run tests/computer/runtimeCredentials.test.ts`
+
+`Expect:` the authenticated boundary keeps the cursor where its input lands.
+`c-000218` reports `cursor { blink: true, x: <login prompt length + 1>, y: 2 }`
+on the cleared post-disconnect tty, and `c-000219` reports the cursor
+immediately after `Password: ` with `blink === true` while the descriptor is in
+`secret` context.
+
+`Result on 2026-07-25:` 22 tests passed. The re-armed getty writes its own
+prompt through the same owner as the shell prompt, so the cleared boundary
+presents one correctly placed cursor rather than a stale or misplaced one, and
+masked input still shows where it lands.
+
+Two side effects, both intended:
+
+- A guest that hides the cursor with `term.set_cursor_blink(False)` and exits no
+  longer leaves it hidden for the shell; the next prompt restores it.
+- In the Web Terminal the prompt cursor now animates instead of standing steady,
+  because `web/app.js` maps `blink` onto the `terminal-cell-cursor--blink` CSS
+  class. That is what the existing stylesheet was written for, it stays disabled
+  under `prefers-reduced-motion`, and cursor presence there is still decided by
+  `interaction.context`, not by `blink`.
+
+Not verified yet: the in-world Bedrock CRT. This needs one real-BDS or GDK check
+that a booted Computer shows a cursor cell at its CS-Linux prompt on the block
+face or integrated display. Host tests and the Web Terminal are not evidence for
+the in-world renderer.
 
 Partially blocked on 2026-07-25 by #112. The Computer that produced the original
 report is now `crashed` with a full OS runtime journal and cannot boot at all,

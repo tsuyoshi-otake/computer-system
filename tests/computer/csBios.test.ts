@@ -89,6 +89,30 @@ describe("CSBIOS POST", (): void => {
     expect(record.terminal.line(1).trimEnd()).toBe("Computer System Linux 1.0");
   });
 
+  it("returns the cursor to the OS prompt POST stopped it for", (): void => {
+    const record = new ComputerRecord("computer-92", "standard");
+    const runtime = new ComputerRuntime();
+    runtime.register(record);
+
+    expect(runtime.powerOn(record.computerId).outcome).toBe("accepted");
+    // CSBIOS owns the cursor while the machine accepts no input at all.
+    expect(record.terminal.snapshot().cursor.blink).toBe(false);
+    runTicks(runtime, 30);
+    expect(terminalText(record)).toContain("CSBIOS Revision 1.1");
+    expect(record.terminal.snapshot().cursor.blink).toBe(false);
+
+    runUntil(runtime, () => shellAcceptsInput(runtime, record.computerId));
+
+    // The in-world display draws its cursor cell only while cursorBlink is set,
+    // so an interactive prompt must take the cursor back from the boot path.
+    expect(record.lifecycle.state.kind).toBe("waiting_event");
+    expect(record.terminal.snapshot().cursor.blink).toBe(true);
+    const promptRow = record.terminal.line(record.terminal.cursorY);
+    expect(promptRow.slice(0, record.terminal.cursorX - 1)).toMatch(
+      /(\$|#|login:) $/u,
+    );
+  });
+
   it("renders only real Portable DOS hardware and an explicit floppy source", (): void => {
     const record = new ComputerRecord("computer-83", "advanced", {
       displayProfileId: "portable-vga-256k",
@@ -396,6 +420,14 @@ function terminalText(record: ComputerRecord): string {
 
 function runTicks(runtime: ComputerRuntime, count: number): void {
   for (let tick = 0; tick < count; tick += 1) runtime.runTick();
+}
+
+function shellAcceptsInput(
+  runtime: ComputerRuntime,
+  computerId: string,
+): boolean {
+  const state = runtime.vmState(computerId);
+  return state?.kind === "waiting_event" && state.filter === undefined;
 }
 
 function runUntil(

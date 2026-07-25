@@ -75,6 +75,14 @@
   reads as a prompt. Capture the halt facts before `detach`, which clears the
   active boot selection, and render after it, so its shell-disconnect output
   cannot scroll the screen.
+- Cursor visibility has exactly two owners, because the in-world display draws
+  its cursor cell only while `cursorBlink` is set. POST, `clearCsBiosForOs`, the
+  halt screens, and `failStopState` stop it; `writeTerminalPrompt` in
+  `runtime/nativeModules.ts` takes it back whenever the OS presents a non-empty
+  interactive prompt, so the boot boundary, a halt, and a guest that hid the
+  cursor all recover at the next prompt. An empty `ShellSession.prompt()` means
+  a full-screen program owns the screen, and that program owns its own cursor
+  through `term.set_cursor_blink` or the CS-ABI frame. Do not add a third owner.
 - State only the recovery the machine really has. `crashed` accepts only
   `reset`, and both the sneaking Bedrock action and the Web Terminal power
   control expose that as safe boot, so halt text must name safe boot rather than
