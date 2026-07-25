@@ -271,6 +271,43 @@ cleared login boundary and the re-armed terminal are not machine specific. The
 two defects are unrelated: #111 is the login-boundary clear and the interaction
 latch, #112 is a capacity error in the persisted journal.
 
+## Real-BDS cursor measurement, 2026-07-25
+
+Recorded after redeploying the cursor-ownership change into the preserved
+managed world with `bds_stop` followed by `bds_start({ resetWorld: false })`.
+The restart rebuilt and reinstalled the packs, `CS_STORAGE_MIGRATION` reported
+`state: "complete"` with zero migrated and zero missing Computers, and
+`bds_status` reported `diagnostics: 0`.
+
+- Verify: register the MCP debug writer for one placed Computer with
+  `bds_open_web_terminal`, then read `bds_get_tui_screen` while its CS-Linux
+  getty is at the login prompt.
+- Expect: the validated text surface reports `cursor.blink === true` with the
+  cursor in the cell immediately after `<computer-id> login: `.
+- Result: passed. The surface reported `kind: "text"`, `width: 80`,
+  `height: 25`, and `cursor: { blink: true, x: 17, y: 4 }`. The MCP surface
+  cursor is 1-based, so row 4 is the `<computer-id> login: ` row and column 17
+  is the cell right after its trailing space. The same read on the previous
+  build reported `blink: false`.
+
+This measures the snapshot the deployed Behavior Pack publishes inside a real
+BDS world, which is the exact value the in-world viewport requires before it
+draws a cursor cell. It is not evidence that the Minecraft client paints that
+cell: the block face and integrated display are rendered by the client, so the
+remaining item below still needs one human look in GDK.
+
+## Operating note: gracefully restarting the managed MCP companion
+
+Recorded 2026-07-25, and preferred over the termination procedure below. The
+managed MCP companion owns BDS through its own stdio, so the supported way to
+redeploy packs into the preserved interactive world is the MCP surface itself:
+call `bds_stop`, which stops BDS gracefully and waits for finalization, then
+`bds_start({ resetWorld: false })`, which rebuilds the packs, reinstalls them
+into the existing world, and restarts. The companion process stays alive, so its
+listener port, published origin, CPU-engine selection, and runtime-worker pool
+survive the restart. On a preserved-world restart, wait for the
+`CS_STORAGE_MIGRATION` record with `state: "complete"` before any probe.
+
 ## Operating note: stopping a managed companion on Windows
 
 Recorded 2026-07-25. A companion started outside an interactive console cannot
