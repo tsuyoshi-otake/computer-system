@@ -172,14 +172,13 @@ synchronized.
 - #33: Compile RAM lease finalization across completion, disconnect, and detach.
 - #34: DOS memory architecture v2, atomic CONFIG, address allocation, MEM
   snapshots, and declared process grants.
-- #106/#114/#115: CS486 throughput, `run --batch` with its isolated CS ABI
-  worker subset, and the removal of the Rust wasm compute-worker engine.
+- #106/#114/#115/#116: CS486 throughput, `run --batch` with its isolated CS ABI
+  worker subset, the removal of the Rust wasm compute-worker engine, and the
+  lane-split hot execution burst with its three-profile equivalence evidence.
 - #111: CS-Linux login-boundary tty clear and released-terminal input.
 - #112: Bounded rotating OS runtime journal and visible CSBIOS boot failure.
 - #113: One `terminal_keys` wakeup owner, bounded atomic CPU sub-slices, and
   unsaturated cumulative CPU accounting.
-- #116: CS486 dispatch structure, the lane-split hot execution burst, and its
-  three-profile equivalence evidence.
 
 Use English commit messages with useful detail and reference every applicable
 Issue. Issue #4 remains relevant while Phase 2 work is in scope.
