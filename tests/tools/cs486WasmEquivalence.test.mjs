@@ -10,10 +10,10 @@ import {
   runCs486WasmEquivalence,
 } from "../../tools/verify-cs486-wasm-equivalence.mjs";
 
-// The wasm artifacts are gated prototype outputs built with
-// `npm run build:cs486-wasm`; `npm run validate` must stay green without
-// cargo/asc, so the differential suite skips when they are absent instead
-// of failing. The standalone CLI remains the loud full-evidence path.
+// The wasm artifact is built with `npm run build:cs486-wasm`;
+// `npm run validate` must stay green without cargo, so the differential suite
+// skips when it is absent instead of failing. The standalone CLI remains the
+// loud full-evidence path.
 const artifactsPresent = cs486WasmVariantNames.every((variant) =>
   existsSync(resolveCs486WasmArtifactPath(variant)),
 );
@@ -56,7 +56,10 @@ describe("CS486 wasm equivalence CLI argument contract", () => {
       /cpu must list values from cs386sx, cs486dx, cs486dx2/u,
     );
     expect(() => parseEquivalenceArguments(["--engines"])).toThrow(
-      /engines must list values from rust, as/u,
+      /engines must list values from rust/u,
+    );
+    expect(() => parseEquivalenceArguments(["--engines", "as"])).toThrow(
+      /engines must list values from rust/u,
     );
   });
 });
@@ -65,7 +68,7 @@ describe.skipIf(!artifactsPresent)(
   "CS486 wasm differential equivalence (requires built wasm artifacts)",
   () => {
     it(
-      "reports zero divergences for both variants on a bounded fuzz sweep",
+      "reports zero divergences for every variant on a bounded fuzz sweep",
       { timeout: 300_000 },
       async () => {
         const { divergenceCount, reports } = await runCs486WasmEquivalence({
@@ -75,7 +78,7 @@ describe.skipIf(!artifactsPresent)(
           instrumentationModes: ["enabled", "disabled"],
           seedCount: 4,
         });
-        expect(reports).toHaveLength(2);
+        expect(reports).toHaveLength(cs486WasmVariantNames.length);
         for (const report of reports) {
           // Every configuration ran: (11 forced + 4 seeds) x 3 CPUs x 2
           // modes x 2 instrumentation settings, with real field comparisons.

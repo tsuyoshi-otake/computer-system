@@ -1,16 +1,26 @@
 import { parentPort, workerData } from "node:worker_threads";
 
 import {
-  Cs486Fault,
-  Cs486Process,
   defaultCs486StackBytes,
   maximumCs486LinearAddressSpaceBytes,
   type Cs486Executable,
   type Cs486ProcessImageInitialization,
 } from "../src/domain/cpu/cs486.js";
 import { isCpuModel, type CpuModel } from "../src/domain/cpu/models.js";
-import { isTerminalCpuProcessState } from "../src/domain/runtime/cpuProcess.js";
+import {
+  isTerminalCpuProcessState,
+  type CpuProcessState,
+} from "../src/domain/runtime/cpuProcess.js";
 import { VmRuntimeError } from "../src/domain/runtime/errors.js";
+import {
+  createCs486TypeScriptComputeEngine,
+  createCs486WasmComputeEngine,
+  isCs486ComputeEngineName,
+  type Cs486ComputeCpuEngine,
+  type Cs486ComputeEngineName,
+  type Cs486ComputeProcess,
+} from "./cs486-compute-worker-cpu-engine.js";
+import { compileCs486WasmModule } from "./wasm-engines/wasm-instantiation.js";
 
 const protocolVersion = 1;
 const maximumProcessesPerWorker = 128;
@@ -38,7 +48,10 @@ const zeroMicroarchitectureStats = Object.freeze({
 type CommandName = "create" | "dispose" | "fail" | "slice" | "terminate";
 
 interface WorkerConfiguration {
+  readonly cpuEngine: Cs486ComputeEngineName;
   readonly protocolVersion: 1;
+  /** Batch-executor artifact bytes; required by, and only by, a wasm engine. */
+  readonly wasmModuleBytes?: Uint8Array;
   readonly workerCount: number;
   readonly workerIndex: number;
 }
@@ -96,7 +109,7 @@ interface FailCommand extends CommonCommand {
 interface OwnedProcess {
   readonly computerId: string;
   lastTick: number;
-  readonly process: Cs486Process;
+  readonly process: Cs486ComputeProcess;
 }
 
 class ComputeWorkerRequestError extends Error {
@@ -114,6 +127,11 @@ const port = parentPort;
 if (port === null)
   throw new Error("CS486 compute worker requires a parent port");
 
+// Built before the ready message so a missing, stale, or malformed wasm
+// artifact fails this worker at startup instead of at the first slice. There is
+// no fallback to the TypeScript engine: the operator selected an engine and a
+// silent substitution would misreport which one produced the guest results.
+const engine = createConfiguredEngine(configuration);
 const processes = new Map<string, OwnedProcess>();
 
 port.on("message", (message: unknown) => {
@@ -149,6 +167,9 @@ port.on("message", (message: unknown) => {
 });
 
 port.postMessage({
+  // Reported from the engine that actually loaded, not from the request, so
+  // pool status is observed truth rather than an echo of configuration.
+  cpuEngine: engine.name,
   protocolVersion,
   type: "ready",
   workerCount: configuration.workerCount,
@@ -187,18 +208,10 @@ function createProcess(
       `CS486 compute worker admits at most ${String(maximumProcessesPerWorker)} processes`,
     );
 
-  // Cs486Process construction performs the authoritative executable validation.
-  // The actor is published to the Map only after every constructor/image check
-  // succeeds, so a rejected create cannot leave partial worker state.
-  const process = new Cs486Process(command.executable, {
-    collectMicroarchitectureStats:
-      command.options.collectMicroarchitectureStats,
-    cpuModel: command.options.cpuModel,
-    memoryBytes: command.options.memoryBytes,
-    syscallHandler: rejectingSyscallHandler,
-  });
-  if (command.options.processImage !== undefined)
-    process.initializeProcessImage(command.options.processImage);
+  // The engine performs the authoritative executable validation. The actor is
+  // published to the Map only after every admission check succeeds, so a
+  // rejected create cannot leave partial worker state.
+  const process = engine.createProcess(command.executable, command.options);
   processes.set(command.processId, {
     computerId: command.computerId,
     lastTick: 0,
@@ -312,7 +325,9 @@ function commonResponse(
   };
 }
 
-function processView(process: Cs486Process): Readonly<Record<string, unknown>> {
+function processView(
+  process: Cs486ComputeProcess,
+): Readonly<Record<string, unknown>> {
   const output = process.output;
   if (output.length > maximumOutputCharacters)
     throw new ComputeWorkerRequestError(
@@ -333,7 +348,7 @@ function processView(process: Cs486Process): Readonly<Record<string, unknown>> {
 }
 
 function processStateView(
-  state: Cs486Process["state"],
+  state: CpuProcessState,
 ): Readonly<Record<string, unknown>> {
   switch (state.kind) {
     case "ready":
@@ -592,10 +607,19 @@ function parseProcessImage(value: unknown): Cs486ProcessImageInitialization {
   };
 }
 
-function rejectingSyscallHandler(name: string): never {
-  throw new Cs486Fault(
-    "UnsupportedOperationError",
-    `CS486 compute worker rejects syscall ${name}`,
+function createConfiguredEngine(
+  worker: WorkerConfiguration,
+): Cs486ComputeCpuEngine {
+  if (worker.cpuEngine === "typescript")
+    return createCs486TypeScriptComputeEngine();
+  const bytes = worker.wasmModuleBytes;
+  if (bytes === undefined)
+    throw new Error(
+      `CS486 compute engine ${worker.cpuEngine} requires batch-executor artifact bytes; run "npm run build:cs486-wasm" first`,
+    );
+  return createCs486WasmComputeEngine(
+    compileCs486WasmModule(bytes),
+    worker.cpuEngine,
   );
 }
 
@@ -603,8 +627,11 @@ function parseWorkerConfiguration(value: unknown): WorkerConfiguration {
   if (
     !isRecord(value) ||
     value.protocolVersion !== protocolVersion ||
+    !isCs486ComputeEngineName(value.cpuEngine) ||
     !isSafeIntegerInRange(value.workerCount, 1, 16) ||
-    !isSafeIntegerInRange(value.workerIndex, 1, value.workerCount)
+    !isSafeIntegerInRange(value.workerIndex, 1, value.workerCount) ||
+    (value.wasmModuleBytes !== undefined &&
+      !(value.wasmModuleBytes instanceof Uint8Array))
   )
     throw new Error("invalid CS486 compute worker configuration");
   return value as unknown as WorkerConfiguration;

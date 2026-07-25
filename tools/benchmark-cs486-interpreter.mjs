@@ -18,7 +18,7 @@ const executionModes = Object.freeze(["cpu-slice", "instruction-slice"]);
 const instrumentationModes = Object.freeze(["enabled", "disabled"]);
 const defaultEngine = "ts";
 const defaultCorpus = "alu-branch";
-export const benchmarkEngines = Object.freeze(["ts", "wasm-rust", "wasm-as"]);
+export const benchmarkEngines = Object.freeze(["ts", "wasm-rust"]);
 export const benchmarkCorpora = Object.freeze([
   "alu-branch",
   "mem-stack",
@@ -301,11 +301,10 @@ export async function loadCs486BenchmarkEngine(
     );
     return module.createCs486BenchmarkMeasure(corpus);
   }
-  const variant = engine === "wasm-rust" ? "rust" : "as";
   const module = await bundleBenchmarkModule(
-    `wasm-engines/${variant}-engine-entry.ts`,
+    "wasm-engines/rust-engine-entry.ts",
   );
-  const artifactBytes = await readCs486WasmArtifactBytes(variant);
+  const artifactBytes = await readCs486WasmArtifactBytes("rust");
   const { exports, memory } = await instantiateCs486WasmBatchExecutor(
     artifactBytes,
     module.cs486WasmRequiredExports,

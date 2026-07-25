@@ -1,6 +1,8 @@
 import readline from "node:readline";
 
 import { BdsDebugSession } from "./bds-debug-session.mjs";
+import { startCs486ComputePlane } from "./cs486-compute-plane.mjs";
+import { resolveMcpRuntimeWorkerCount } from "./mcp-runtime-workers.mjs";
 import {
   defaultWebCompanionConfigPath,
   loadWebCompanionAdminConfig,
@@ -20,12 +22,28 @@ const serverInfo = {
   title: "Computer System Bedrock Debug Server",
   version: "0.1.0",
 };
-const session = new BdsDebugSession();
 const adminConfigPath = defaultWebCompanionConfigPath();
 const persistedAdminConfig = await loadWebCompanionAdminConfig(adminConfigPath);
 const adminOptions = resolveWebCompanionAdminOptions(
   process.env,
   persistedAdminConfig,
+);
+// MCP debugging keeps the in-engine CS486 CPU by default, so an ordinary
+// session starts no worker threads. `BDS_MCP_RUNTIME_WORKERS` opts in to the
+// same compute plane `dev:bds:web` owns, which is the only way an engine
+// selection such as `wasm-rust` reaches guest execution through MCP. A missing
+// wasm artifact fails startup here instead of silently running another engine.
+const computePlane = await startMcpComputePlane();
+const session = new BdsDebugSession(
+  computePlane === undefined
+    ? {}
+    : {
+        runtimeWorkers: {
+          count: computePlane.count,
+          endpoint: computePlane.endpoint,
+          token: computePlane.token,
+        },
+      },
 );
 const webCompanion = new WebCompanionServer({
   bds: session,
@@ -43,7 +61,15 @@ const webCompanion = new WebCompanionServer({
     "WEB_COMPANION_DEBUG_IGNORE_RANGE",
   ),
 });
-await webCompanion.start();
+try {
+  await webCompanion.start();
+} catch (error) {
+  process.stderr.write(
+    `Unable to start the MCP Web companion: ${errorMessage(error)}\n`,
+  );
+  await stopComputePlane();
+  process.exit(1);
+}
 let initialized = false;
 let shuttingDown = false;
 const mcpWebSessions = new Map();
@@ -841,7 +867,15 @@ function toolSuccess(value) {
 }
 
 function status() {
-  return { ...session.getStatus(), web: webCompanion.status() };
+  return {
+    ...session.getStatus(),
+    web: webCompanion.status(),
+    // `null` reports the ordinary session shape: no compute plane, so the pack
+    // runs the in-engine CS486 CPU. A selected engine name is only ever
+    // reported when workers actually execute guest slices with it.
+    cpuEngine: computePlane === undefined ? null : adminOptions.cpuEngine,
+    compute: computePlane?.status() ?? null,
+  };
 }
 
 function toolError(error) {
@@ -908,6 +942,33 @@ function errorMessage(error) {
   return error instanceof Error ? error.message : String(error);
 }
 
+async function startMcpComputePlane() {
+  try {
+    const workerCount = resolveMcpRuntimeWorkerCount(process.env, adminOptions);
+    if (workerCount === undefined) return undefined;
+    return await startCs486ComputePlane({
+      cpuEngine: adminOptions.cpuEngine,
+      workerCount,
+    });
+  } catch (error) {
+    process.stderr.write(
+      `Unable to start the MCP CS486 compute workers: ${errorMessage(error)}\n`,
+    );
+    process.exit(1);
+  }
+}
+
+async function stopComputePlane() {
+  if (computePlane === undefined) return;
+  try {
+    await computePlane.stop();
+  } catch (error) {
+    process.stderr.write(
+      `BDS MCP compute worker shutdown error: ${errorMessage(error)}\n`,
+    );
+  }
+}
+
 async function shutdown() {
   if (shuttingDown) return;
   shuttingDown = true;
@@ -917,6 +978,9 @@ async function shutdown() {
   } catch (error) {
     process.stderr.write(`BDS MCP shutdown error: ${errorMessage(error)}\n`);
   } finally {
+    // BDS holds the only compute sockets, so the listener and every worker
+    // thread are finalized after it stops and on every failure path above.
+    await stopComputePlane();
     mcpWebSessions.clear();
     process.exit(0);
   }

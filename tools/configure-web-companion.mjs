@@ -1,6 +1,10 @@
 #!/usr/bin/env node
 
 import {
+  cs486ComputeEngineNames,
+  defaultCs486ComputeEngine,
+} from "./cs486-compute-engine.mjs";
+import {
   defaultWebCompanionConfigPath,
   loadWebCompanionAdminConfig,
   removeWebCompanionAdminConfig,
@@ -9,7 +13,9 @@ import {
 
 try {
   const arguments_ = process.argv.slice(2);
-  if (arguments_.length > 10) fail("Too many arguments.");
+  // `set` plus four value options plus `--config-file PATH` is 11 tokens; the
+  // ceiling keeps one spare so a typo still reports the specific option error.
+  if (arguments_.length > 12) fail("Too many arguments.");
   const configFileIndex = arguments_.indexOf("--config-file");
   if (configFileIndex >= 0) {
     const configuredPath = arguments_[configFileIndex + 1];
@@ -36,7 +42,7 @@ try {
     print({ path: configPath ?? null, removed, restartRequired: removed });
   } else {
     fail(
-      "Usage: npm run web:config -- <show|set|reset> [--port PORT] [--url ORIGIN] [--runtime-workers COUNT(1..16, default 2)] [--clear-port] [--clear-url] [--clear-runtime-workers (restore 2)] [--config-file PATH]",
+      `Usage: npm run web:config -- <show|set|reset> [--port PORT] [--url ORIGIN] [--runtime-workers COUNT(1..16, default 2)] [--cpu-engine ENGINE(${cs486ComputeEngineNames.join("|")}, default ${defaultCs486ComputeEngine})] [--clear-port] [--clear-url] [--clear-runtime-workers (restore 2)] [--clear-cpu-engine (restore ${defaultCs486ComputeEngine})] [--config-file PATH]`,
     );
   }
 } catch (error) {
@@ -54,7 +60,8 @@ function parseSetArguments(arguments_, current) {
     if (
       option === "--port" ||
       option === "--url" ||
-      option === "--runtime-workers"
+      option === "--runtime-workers" ||
+      option === "--cpu-engine"
     ) {
       const value = arguments_.shift();
       if (value === undefined || value.startsWith("--")) {
@@ -62,6 +69,7 @@ function parseSetArguments(arguments_, current) {
       }
       if (option === "--port") next.port = value;
       else if (option === "--url") next.publicOrigin = value;
+      else if (option === "--cpu-engine") next.cpuEngine = value;
       else next.runtimeWorkerCount = value;
       changed = true;
     } else if (option === "--clear-port") {
@@ -72,6 +80,9 @@ function parseSetArguments(arguments_, current) {
       changed = true;
     } else if (option === "--clear-runtime-workers") {
       delete next.runtimeWorkerCount;
+      changed = true;
+    } else if (option === "--clear-cpu-engine") {
+      delete next.cpuEngine;
       changed = true;
     } else {
       fail(`Unknown option: ${String(option)}`);

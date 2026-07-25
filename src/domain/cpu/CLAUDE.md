@@ -1,5 +1,32 @@
 # CPU domain guidance
 
+## Two implementations of one CPU
+
+`Cs486Process` in `cs486.ts` is the reference implementation and the only engine
+the shipped Bedrock pack runs. The managed Web companion can additionally be
+configured to run the Rust wasm batch executor (`wasm/cs486-batch-executor-rs/`
+plus its host bridge under `tools/`) in its compute workers. Both are production
+paths, so **the CS486 contract now has two implementations that must agree**.
+
+- A change to executable admission and validation, guest RAM accounting and
+  layout, instruction semantics, cycle costs, the cache/bus model, slice budget
+  contracts, syscall policy, fault identity and message text, or terminal-state
+  semantics must land in `cs486.ts` **and** in the wasm executor in the same
+  change. Shipping one side alone makes the same guest program produce different
+  observable results depending on operator configuration.
+- The wasm executor deliberately shares no code with `src/` (see
+  [`wasm/CLAUDE.md`](../../../wasm/CLAUDE.md)); agreement is proven by the
+  differential equivalence harness, not by a compiler. Treat
+  `npm run verify:cs486-wasm-equivalence` as part of the definition of done for
+  any change in this list, and extend its forced cases when a change introduces
+  a new divergence risk.
+- Where wasm genuinely cannot reproduce a behaviour, the engine boundary must
+  refuse the work explicitly at create time rather than approximate it.
+  `tools/cs486-compute-worker-cpu-engine.ts` owns those refusals; deterministic
+  floating point is the standing example and stays in TypeScript.
+- The engine is never selected implicitly. Nothing may fall back from wasm to
+  TypeScript, or the other way, on failure.
+
 ## Shared process and ABI
 
 - ASM, CS QBASIC, C, C++, and Computer System Python execute through one

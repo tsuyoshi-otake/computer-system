@@ -149,14 +149,18 @@ the isolated server. Never point it at the interactive world.
 
 ## Managed runtime workers
 
-- The managed launcher owns one fixed pool (validated default 2, range 1-16) and
-  starts it plus the compute listener before Web/BDS. Any startup failure,
-  signal, BDS exit, or close rejects pending work and finalizes sockets and
-  threads exactly once; the BDS session owns its restricted admin files.
+- `cs486-compute-plane.mjs` owns the one fixed pool (default 2, range 1-16), the
+  bearer token, the exact loopback endpoint, and exactly-once shutdown, and
+  starts before Web/BDS. Any failure, signal, BDS exit, or close rejects pending
+  work and finalizes sockets and threads; BDS owns its restricted admin files.
 - Keep compute WebSockets authenticated, bounded, versioned, and loopback-only.
-  Never publish credentials or secrets; validate correlation and ownership
-  before dispatch, and reject malformed, over-capacity, failed, or closing work
-  without blocking unrelated workers.
+  Validate correlation and ownership before dispatch, and reject malformed,
+  over-capacity, failed, or closing work without blocking unrelated workers.
+- Workers run the engine the operator selected: `typescript` by default,
+  `wasm-rust` opt-in. `dev:bds:web` always starts the plane; the MCP companion
+  only when `BDS_MCP_RUNTIME_WORKERS` is set, and it otherwise rejects a
+  non-default engine at startup. Selection, the artifact, and dual maintenance
+  belong to [`wasm/CLAUDE.md`](../wasm/CLAUDE.md).
 
 ## Pages and asset builders
 

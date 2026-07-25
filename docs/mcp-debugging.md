@@ -26,12 +26,14 @@ variables:
 | `BDS_MCP_WORKDIR`                  | `%USERPROFILE%\tmp\computer-system-bds\mcp-runtime` | Isolated MCP debug runtime                                      |
 | `BDS_MCP_PORT`                     | `19142`                                             | IPv4 server port; IPv6 uses the following port                  |
 | `BDS_MCP_WORLD`                    | `ComputerSystemMcpDebug`                            | Debug world name                                                |
+| `BDS_MCP_RUNTIME_WORKERS`          | `0`                                                 | MCP compute workers; `0` keeps the in-engine CPU, 1-16 opts in  |
 | `WEB_COMPANION_HOST`               | `0.0.0.0`                                           | Web listener interface for trusted LAN access                   |
 | `WEB_COMPANION_PORT`               | `80`                                                | Web listener TCP port                                           |
 | `WEB_COMPANION_PUBLIC_HOST`        | Listener host                                       | Reachable host used in generated HTTP links                     |
 | `WEB_COMPANION_PUBLIC_ORIGIN`      | unset                                               | Complete HTTPS origin advertised behind a reverse proxy         |
 | `WEB_COMPANION_CONFIG_FILE`        | system-wide platform path                           | Persistent administrator configuration file                     |
 | `WEB_COMPANION_RUNTIME_WORKERS`    | `2`                                                 | Managed `dev:bds:web` worker threads; integer from 1 through 16 |
+| `WEB_COMPANION_CPU_ENGINE`         | `typescript`                                        | Compute-worker CS486 engine; `typescript` or `wasm-rust`        |
 | `WEB_COMPANION_ALLOWED_ORIGINS`    | unset                                               | Extra origins, or `*` to accept every request Origin            |
 | `WEB_COMPANION_AUTO_OPEN`          | `1`                                                 | `0` disables and `1` enables host-browser opening               |
 | `WEB_COMPANION_DEBUG_IGNORE_RANGE` | `0`                                                 | Debug only: skip the placed-machine range and dimension check   |
@@ -66,6 +68,50 @@ is displayed as `http://host` and `https://host:443` is displayed as
 `https://host`. The latter is valid only when a TLS reverse proxy actually
 terminates HTTPS; the Node companion does not turn into an HTTPS server merely
 by listening on TCP 443.
+
+`--cpu-engine` selects which CS486 implementation the compute workers run:
+`typescript` (the default production interpreter) or `wasm-rust` (the Issue #106
+Rust batch executor). `wasm-rust` requires `npm run build:cs486-wasm` output; a
+missing or malformed artifact fails managed startup explicitly rather than
+falling back to the interpreter, so the reported engine is always the engine
+that produced the guest results. `--clear-cpu-engine` restores `typescript`, and
+`WEB_COMPANION_CPU_ENGINE` overrides the file for one process. The choice
+affects host cost only; guest clocks, cycle accounting, and program results are
+identical on both engines.
+
+### Managed compute workers in an MCP session
+
+An ordinary MCP debug session runs the in-engine CS486 CPU inside the Bedrock
+script engine. It starts no worker threads and no compute listener, so
+`WEB_COMPANION_CPU_ENGINE` alone cannot change how MCP-driven guest work
+executes. `BDS_MCP_RUNTIME_WORKERS` opts the MCP companion into the same compute
+plane `npm run dev:bds:web` owns:
+
+```powershell
+$env:BDS_MCP_RUNTIME_WORKERS = "2"
+$env:WEB_COMPANION_CPU_ENGINE = "wasm-rust"
+```
+
+With workers enabled the companion starts the pool and the authenticated
+loopback listener before BDS, builds the managed pack, and writes the restricted
+`permissions.json`, `variables.json`, and `secrets.json` for that exact
+endpoint. `bds_status` then reports `runtimeWorkers` (count and endpoint, never
+the bearer token), the selected `cpuEngine`, and the `compute` listener/pool
+snapshot. Without workers those three fields are `null`, which is the honest
+report that no operator-selected engine executed anything.
+
+Two failures are explicit and happen before any world is touched:
+
+- Selecting a non-default engine while the workers stay disabled is rejected at
+  startup. The companion exits non-zero rather than running `typescript` under a
+  `wasm-rust` label.
+- `wasm-rust` with a missing or malformed `npm run build:cs486-wasm` artifact
+  fails pool creation, which fails MCP startup. There is no silent fallback.
+
+The managed pack requires the irreversible Beta APIs experiment. Enable workers
+only against a world that already has it, and never with `resetWorld: true` on a
+world you need to keep; a freshly generated world fails the bootstrap check with
+the explicit Beta APIs message.
 
 ## MCP workflow
 

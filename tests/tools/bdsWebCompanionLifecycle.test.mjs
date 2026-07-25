@@ -103,6 +103,53 @@ describe("BDS Web companion lifecycle", () => {
     ]);
   });
 
+  it("hands the selected CPU engine to the pool and reports it as observed configuration", async () => {
+    const events = [];
+    let poolOptions;
+    const lifecycle = createLifecycle({
+      environment: { WEB_COMPANION_CPU_ENGINE: "wasm-rust" },
+      events,
+      onPoolOptions: (value) => {
+        poolOptions = value;
+      },
+    });
+
+    const status = await lifecycle.start();
+    expect(poolOptions).toEqual({
+      cpuEngine: "wasm-rust",
+      workerCount: 2,
+    });
+    expect(status).toMatchObject({ cpuEngine: "wasm-rust" });
+    expect(status.webConfiguration.environmentOverrides).toMatchObject({
+      cpuEngine: true,
+    });
+
+    await lifecycle.stop();
+  });
+
+  it("fails managed startup when the selected engine cannot load, never falling back", async () => {
+    const events = [];
+    const lifecycle = createLifecycle({
+      environment: { WEB_COMPANION_CPU_ENGINE: "wasm-rust" },
+      events,
+      poolCreateError: new Error(
+        'missing cs486 wasm artifact; run "npm run build:cs486-wasm" first',
+      ),
+    });
+
+    await expect(lifecycle.start()).rejects.toThrow(
+      /missing cs486 wasm artifact/u,
+    );
+    // Nothing after the pool was admitted, and no second pool was created with a
+    // substituted engine.
+    expect(events).toEqual(["pool:create:2"]);
+    expect(lifecycle.status()).toMatchObject({
+      cpuEngine: "wasm-rust",
+      running: false,
+      state: "failed",
+    });
+  });
+
   it("cleans all admitted resources when BDS startup fails", async () => {
     const events = [];
     const lifecycle = createLifecycle({
@@ -172,13 +219,18 @@ function createLifecycle(options) {
     adminConfigPath: undefined,
     environment: {
       WEB_COMPANION_AUTO_OPEN: "0",
+      ...options.environment,
     },
     loadAdminConfig: async () => ({}),
     randomToken: () => token,
     createPool:
       options.createPool ??
-      (async ({ workerCount }) => {
+      (async (poolOptions) => {
+        options.onPoolOptions?.(poolOptions);
+        const { workerCount } = poolOptions;
         events.push(`pool:create:${String(workerCount)}`);
+        if (options.poolCreateError !== undefined)
+          throw options.poolCreateError;
         return {
           async close() {
             events.push("pool:close");

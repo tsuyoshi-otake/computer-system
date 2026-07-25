@@ -3,16 +3,17 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 /**
- * Zero-import loader for the gated Issue #106 CS486 wasm batch-executor
- * prototype artifacts. Both language variants must instantiate against an
- * empty import object and export their own linear memory; the caller passes
- * the required export list from the shared ABI module so this loader never
- * duplicates ABI truth. Host tooling only; nothing here ships in the pack.
+ * Zero-import loader for the Issue #106 CS486 wasm batch-executor artifacts.
+ * A variant must instantiate against an empty import object and export its
+ * own linear memory; the caller passes the required export list from the
+ * shared ABI module so this loader never duplicates ABI truth. The variant
+ * list stayed plural after the AssemblyScript comparison was removed on
+ * 2026-07-25 so a future variant needs no loader change.
  */
 const repositoryRoot = fileURLToPath(new URL("..", import.meta.url));
 const wasmPageBytes = 65_536;
 
-export const cs486WasmVariantNames = ["rust", "as"];
+export const cs486WasmVariantNames = ["rust"];
 
 export function resolveCs486WasmArtifactPath(variant) {
   if (!cs486WasmVariantNames.includes(variant))

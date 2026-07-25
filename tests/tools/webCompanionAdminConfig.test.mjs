@@ -61,19 +61,22 @@ describe("persistent Web companion administrator configuration", () => {
       publicOrigin: "http://terminal.example.test",
     });
     await saveWebCompanionAdminConfig(configPath, {
+      cpuEngine: "wasm-rust",
       port: 8_080,
       publicOrigin: "https://terminal.example.test",
       runtimeWorkerCount: 4,
     });
 
     expect(await loadWebCompanionAdminConfig(configPath)).toEqual({
-      version: 2,
+      version: 3,
+      cpuEngine: "wasm-rust",
       port: 8_080,
       publicOrigin: "https://terminal.example.test",
       runtimeWorkerCount: 4,
     });
     expect(JSON.parse(await readFile(configPath, "utf8"))).toEqual({
-      version: 2,
+      version: 3,
+      cpuEngine: "wasm-rust",
       port: 8_080,
       publicOrigin: "https://terminal.example.test",
       runtimeWorkerCount: 4,
@@ -86,7 +89,7 @@ describe("persistent Web companion administrator configuration", () => {
         version: 1,
         port: 80,
       }),
-    ).toEqual({ version: 2, port: 80 });
+    ).toEqual({ version: 3, port: 80 });
     expect(() =>
       validateWebCompanionAdminConfig({
         version: 1,
@@ -107,6 +110,29 @@ describe("persistent Web companion administrator configuration", () => {
     ).toThrow(/between 1 and 16/u);
   });
 
+  it("gates cpuEngine on version 3 and rejects unknown engines", () => {
+    // An older companion honours neither key, so a file that predates the field
+    // must not be allowed to declare it and be silently ignored.
+    expect(() =>
+      validateWebCompanionAdminConfig({
+        version: 2,
+        cpuEngine: "wasm-rust",
+      }),
+    ).toThrow(/version 2 cannot declare cpuEngine/u);
+    expect(() =>
+      validateWebCompanionAdminConfig({
+        version: 3,
+        cpuEngine: "wasm-unknown",
+      }),
+    ).toThrow(/must be one of: typescript, wasm-rust/u);
+    expect(() => validateWebCompanionAdminConfig({ version: 4 })).toThrow(
+      /must be one of: 1, 2, 3/u,
+    );
+    expect(
+      validateWebCompanionAdminConfig({ version: 3, cpuEngine: "typescript" }),
+    ).toEqual({ version: 3, cpuEngine: "typescript" });
+  });
+
   it("rejects unknown fields, invalid ports, and URL paths", () => {
     expect(() =>
       validateWebCompanionAdminConfig({ version: 2, bind: "0.0.0.0" }),
@@ -124,29 +150,42 @@ describe("persistent Web companion administrator configuration", () => {
 
   it("gives environment variables precedence over persisted values", () => {
     expect(resolveWebCompanionAdminOptions({}, {})).toEqual({
+      cpuEngine: "typescript",
       port: "80",
       publicOrigin: undefined,
       runtimeWorkerCount: 2,
     });
     expect(
       resolveWebCompanionAdminOptions(
+        {},
+        { version: 3, cpuEngine: "wasm-rust" },
+      ).cpuEngine,
+    ).toBe("wasm-rust");
+    expect(
+      resolveWebCompanionAdminOptions(
         {
+          WEB_COMPANION_CPU_ENGINE: "typescript",
           WEB_COMPANION_PORT: "19",
           WEB_COMPANION_PUBLIC_ORIGIN: "https://override.example.test",
           WEB_COMPANION_RUNTIME_WORKERS: "6",
         },
         {
-          version: 2,
+          version: 3,
+          cpuEngine: "wasm-rust",
           port: 80,
           publicOrigin: "https://persisted.example.test",
           runtimeWorkerCount: 4,
         },
       ),
     ).toEqual({
+      cpuEngine: "typescript",
       port: "19",
       publicOrigin: "https://override.example.test",
       runtimeWorkerCount: 6,
     });
+    expect(() =>
+      resolveWebCompanionAdminOptions({ WEB_COMPANION_CPU_ENGINE: "rust" }, {}),
+    ).toThrow(/CS486 compute engine must be one of: typescript, wasm-rust/u);
   });
 
   it("supports set, show, and reset through the administrator CLI", async () => {
@@ -160,6 +199,8 @@ describe("persistent Web companion administrator configuration", () => {
       "http://10.255.10.90:80",
       "--runtime-workers",
       "2",
+      "--cpu-engine",
+      "wasm-rust",
       "--config-file",
       configPath,
     ]);
@@ -167,7 +208,8 @@ describe("persistent Web companion administrator configuration", () => {
     expect(JSON.parse(setResult.stdout)).toMatchObject({
       path: configPath,
       configuration: {
-        version: 2,
+        version: 3,
+        cpuEngine: "wasm-rust",
         port: 80,
         publicOrigin: "http://10.255.10.90",
         runtimeWorkerCount: 2,
@@ -178,6 +220,32 @@ describe("persistent Web companion administrator configuration", () => {
     const showResult = runCli(["show", "--config-file", configPath]);
     expect(showResult.status).toBe(0);
     expect(JSON.parse(showResult.stdout).configuration.port).toBe(80);
+
+    const rejectedResult = runCli([
+      "set",
+      "--cpu-engine",
+      "wasm-unknown",
+      "--config-file",
+      configPath,
+    ]);
+    expect(rejectedResult.status).toBe(1);
+    expect(rejectedResult.stderr).toMatch(
+      /must be one of: typescript, wasm-rust/u,
+    );
+    expect((await loadWebCompanionAdminConfig(configPath)).cpuEngine).toBe(
+      "wasm-rust",
+    );
+
+    const clearResult = runCli([
+      "set",
+      "--clear-cpu-engine",
+      "--config-file",
+      configPath,
+    ]);
+    expect(clearResult.status).toBe(0);
+    expect(
+      JSON.parse(clearResult.stdout).configuration.cpuEngine,
+    ).toBeUndefined();
 
     const resetResult = runCli(["reset", "--config-file", configPath]);
     expect(resetResult.status).toBe(0);

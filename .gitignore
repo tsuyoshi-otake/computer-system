@@ -8,8 +8,8 @@ coverage/
 *.mcpack
 *.mcaddon
 
-# Gated Issue #106 wasm prototype build output (dist/ and build/ above
-# already cover wasm/dist/ and the AssemblyScript build directory)
+# Issue #106 wasm batch-executor build output (dist/ above already covers
+# wasm/dist/)
 wasm/cs486-batch-executor-rs/target/
 
 # Local environments and secrets

@@ -2,16 +2,16 @@ import type { CpuModel } from "../src/domain/cpu/models.js";
 import { cpuModelSpecification } from "../src/domain/cpu/models.js";
 
 /**
- * Shared ABI for the gated Issue #106 Phase 4 CS486 wasm batch-executor
- * prototype. The Rust and AssemblyScript variants implement this exact
- * contract so the host loader, prep tables, cold-op bridge, and harness stay
- * variant-independent. This module is host tooling only; it never ships in
- * the Bedrock pack and never modifies production CPU sources.
+ * Shared ABI for the Issue #106 CS486 wasm batch executor. The Rust variant
+ * implements this exact contract so the host loader, prep tables, cold-op
+ * bridge, and harness stay variant-independent. This module is host tooling
+ * only; it never ships in the Bedrock pack and never modifies production CPU
+ * sources.
  *
  * Layout ownership: the host computes every region offset (relative to the
  * variant's own exported linear memory) and passes them through one params
- * block, so the two variants cannot disagree about layout. Both variants
- * export their own memory and import nothing.
+ * block, so no variant can disagree with the host about layout. A variant
+ * exports its own memory and imports nothing.
  */
 export const cs486WasmAbiVersion = 1;
 

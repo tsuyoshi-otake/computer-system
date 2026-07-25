@@ -9,11 +9,16 @@ import {
   cs486WasmInstructionFlag,
   cs486WasmOpcode,
 } from "../../tools/cs486-wasm-batch-executor-abi.js";
-import type { Cs486WasmColdOpMachine } from "../../tools/cs486-wasm-cold-op-bridge.js";
+import type {
+  Cs486WasmColdOpMachine,
+  Cs486WasmSyscallPolicy,
+} from "../../tools/cs486-wasm-cold-op-bridge.js";
 import {
   cs486WasmFaultToError,
   cs486WasmMaximumOutputBytes,
   executeCs486WasmColdInstruction,
+  isCs486WasmFloatSyscall,
+  rejectCs486WasmSyscall,
 } from "../../tools/cs486-wasm-cold-op-bridge.js";
 
 interface FakeMachineOptions {
@@ -29,6 +34,7 @@ interface FakeMachineOptions {
   readonly operandA?: number;
   readonly registers?: readonly (readonly [number, number])[];
   readonly stackFloorBytes?: number;
+  readonly syscall?: Cs486WasmSyscallPolicy;
 }
 
 interface FakeMachineState {
@@ -88,6 +94,7 @@ function createFakeMachine(options: FakeMachineOptions): {
       state.registers[index] = value;
     },
     stackFloorBytes: options.stackFloorBytes ?? 0,
+    syscall: options.syscall ?? rejectCs486WasmSyscall,
     writeRamInt32(address, value) {
       state.ramWrites.push({ address, value });
     },
@@ -241,6 +248,59 @@ describe("cs486 wasm cold-op bridge", () => {
     expect(caught).toBeInstanceOf(Error);
     expect(caught).not.toBeInstanceOf(Cs486Fault);
     expect((caught as Error).message).toContain("deterministic float");
+  });
+
+  it("classifies only the deterministic-float syscall family", () => {
+    for (const name of [
+      "cs.fp.f32.add",
+      "cs.fp.f64.to.string",
+      "cs.fp.f64.mul",
+    ])
+      expect(isCs486WasmFloatSyscall(name)).toBe(true);
+    for (const name of [
+      "cs.print.character",
+      "cs.time.read",
+      "cs.fp.i32.add",
+      "cs.fpx.f64.add",
+    ])
+      expect(isCs486WasmFloatSyscall(name)).toBe(false);
+  });
+
+  it("routes every non-print syscall through the injected host policy", () => {
+    const seen: string[] = [];
+    const policy: Cs486WasmSyscallPolicy = (name) => {
+      seen.push(name);
+      throw new Cs486Fault(
+        "UnsupportedOperationError",
+        `host policy rejects syscall ${name}`,
+      );
+    };
+    // A float syscall must reach the policy too: the caller, not the bridge,
+    // decides whether it is a host error or a guest-visible fault.
+    for (const name of ["cs.time.read", "cs.fp.f64.add"]) {
+      const { machine } = createFakeMachine({
+        instruction: { name, op: "syscall" },
+        opcode: cs486WasmOpcode.syscall,
+        syscall: policy,
+      });
+      const fault = captureFault(() =>
+        executeCs486WasmColdInstruction(machine),
+      );
+      expect(fault.typeName).toBe("UnsupportedOperationError");
+      expect(fault.message).toBe(`host policy rejects syscall ${name}`);
+    }
+    expect(seen).toEqual(["cs.time.read", "cs.fp.f64.add"]);
+
+    // The print primitive stays inline and never consults the policy.
+    const printable = createFakeMachine({
+      instruction: { name: "cs.print.character", op: "syscall" },
+      opcode: cs486WasmOpcode.syscall,
+      registers: [[0, 0x41]],
+      syscall: policy,
+    });
+    executeCs486WasmColdInstruction(printable.machine);
+    expect(printable.state.output).toBe("A");
+    expect(seen).toEqual(["cs.time.read", "cs.fp.f64.add"]);
   });
 
   it("executes immediate and register indirect calls", () => {

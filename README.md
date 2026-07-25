@@ -445,16 +445,23 @@ binding the companion to TCP 443.
 The managed companion starts that fixed-size pool before BDS and assigns every
 Computer ID to one stable worker. CS386SX, CS486DX, and CS486DX2 keep their
 persisted CPU model, clock, cycle debt, and per-tick guest admission; the worker
-setting changes host concurrency only. A small Web Terminal CPU badge reports
-the stable assignment (`W1/2`, for example) and whether active execution is on a
-worker, Bedrock, or both. The internal worker transport is authenticated,
-loopback-only, bounded, and unavailable to browsers. Managed BDS uses the
-server-admin/server-net Beta modules for this private connection. Enabling the
-required Beta APIs experiment is irreversible. The launcher never changes a
-preserved world silently; it fails explicitly until an operator has stopped and
-backed up that world and deliberately enabled the experiment. Automatic
-enablement is limited to a fresh disposable `ComputerSystemAcceptance` world
-under the current user's temporary directory.
+setting changes host concurrency only. Those workers run the production
+TypeScript CS486 interpreter by default; `--cpu-engine wasm-rust` (or
+`WEB_COMPANION_CPU_ENGINE`) switches them to the Issue #106 Rust WebAssembly
+batch executor, which requires `npm run build:cs486-wasm` output and fails
+managed startup explicitly when that artifact is missing rather than reverting
+to the interpreter. Both engines produce identical guest results; the choice
+affects host cost only, and the shipped Bedrock pack always uses the TypeScript
+interpreter. A small Web Terminal CPU badge reports the stable assignment
+(`W1/2`, for example) and whether active execution is on a worker, Bedrock, or
+both. The internal worker transport is authenticated, loopback-only, bounded,
+and unavailable to browsers. Managed BDS uses the server-admin/server-net Beta
+modules for this private connection. Enabling the required Beta APIs experiment
+is irreversible. The launcher never changes a preserved world silently; it fails
+explicitly until an operator has stopped and backed up that world and
+deliberately enabled the experiment. Automatic enablement is limited to a fresh
+disposable `ComputerSystemAcceptance` world under the current user's temporary
+directory.
 
 Minecraft/BDS and the Web Terminal use different transports: the managed BDS
 defaults to UDP 19142, while the browser companion defaults to TCP 80. For

@@ -2,19 +2,31 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 
+import {
+  assertCs486ComputeEngine,
+  cs486ComputeEngineNames,
+  defaultCs486ComputeEngine,
+} from "./cs486-compute-engine.mjs";
 import { normalizePublicOrigin } from "./web-companion-server.mjs";
 
-const configurationVersion = 2;
-const legacyConfigurationVersion = 1;
+const configurationVersion = 3;
+const supportedConfigurationVersions = Object.freeze([1, 2, 3]);
+/**
+ * Version each field was introduced in. A file may declare a field only if its
+ * declared version is at least this, so an older companion never silently
+ * ignores a key a newer one honours.
+ */
+const keyIntroducedVersion = Object.freeze({
+  cpuEngine: 3,
+  port: 1,
+  publicOrigin: 1,
+  runtimeWorkerCount: 2,
+  version: 1,
+});
 export const defaultRuntimeWorkerCount = 2;
 export const maximumRuntimeWorkerCount = 16;
 const maximumConfigurationBytes = 16 * 1_024;
-const allowedKeys = new Set([
-  "version",
-  "port",
-  "publicOrigin",
-  "runtimeWorkerCount",
-]);
+const allowedKeys = new Set(Object.keys(keyIntroducedVersion));
 
 export function defaultWebCompanionConfigPath(options = {}) {
   const platform = options.platform ?? process.platform;
@@ -78,21 +90,17 @@ export function validateWebCompanionAdminConfig(value) {
       throw new Error(`Unknown Web companion configuration field: ${key}`);
     }
   }
-  if (
-    value.version !== legacyConfigurationVersion &&
-    value.version !== configurationVersion
-  ) {
+  if (!supportedConfigurationVersions.includes(value.version)) {
     throw new Error(
-      `Web companion configuration version must be ${String(legacyConfigurationVersion)} or ${String(configurationVersion)}.`,
+      `Web companion configuration version must be one of: ${supportedConfigurationVersions.join(", ")}.`,
     );
   }
-  if (
-    value.version === legacyConfigurationVersion &&
-    value.runtimeWorkerCount !== undefined
-  ) {
-    throw new Error(
-      "Web companion configuration version 1 cannot declare runtimeWorkerCount.",
-    );
+  for (const [key, introducedVersion] of Object.entries(keyIntroducedVersion)) {
+    if (value[key] !== undefined && value.version < introducedVersion) {
+      throw new Error(
+        `Web companion configuration version ${String(value.version)} cannot declare ${key}.`,
+      );
+    }
   }
   const validated = { version: configurationVersion };
   if (value.port !== undefined)
@@ -104,6 +112,12 @@ export function validateWebCompanionAdminConfig(value) {
     validated.runtimeWorkerCount = validateRuntimeWorkerCount(
       value.runtimeWorkerCount,
       "Persistent runtime worker count",
+    );
+  }
+  if (value.cpuEngine !== undefined) {
+    validated.cpuEngine = validateCpuEngine(
+      value.cpuEngine,
+      "Persistent CS486 compute engine",
     );
   }
   return validated;
@@ -152,6 +166,12 @@ export async function removeWebCompanionAdminConfig(configPath) {
 
 export function resolveWebCompanionAdminOptions(environment, persisted) {
   return {
+    cpuEngine: validateCpuEngine(
+      environment.WEB_COMPANION_CPU_ENGINE ??
+        persisted.cpuEngine ??
+        defaultCs486ComputeEngine,
+      "CS486 compute engine",
+    ),
     port: environment.WEB_COMPANION_PORT ?? persisted.port ?? "80",
     publicOrigin:
       environment.WEB_COMPANION_PUBLIC_ORIGIN ?? persisted.publicOrigin,
@@ -176,6 +196,16 @@ function validatePersistentPort(value) {
     );
   }
   return port;
+}
+
+function validateCpuEngine(value, label) {
+  try {
+    return assertCs486ComputeEngine(value);
+  } catch {
+    throw new RangeError(
+      `${label} must be one of: ${cs486ComputeEngineNames.join(", ")}.`,
+    );
+  }
 }
 
 function validateRuntimeWorkerCount(value, label) {

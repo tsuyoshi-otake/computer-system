@@ -1,13 +1,8 @@
-import { randomBytes } from "node:crypto";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { BdsDebugSession } from "./bds-debug-session.mjs";
-import {
-  CS486_COMPUTE_PATH,
-  createCs486ComputeServer,
-} from "./cs486-compute-server.mjs";
-import { createCs486ComputeWorkerPool } from "./cs486-compute-worker-pool.mjs";
+import { startCs486ComputePlane } from "./cs486-compute-plane.mjs";
 import {
   defaultWebCompanionConfigPath,
   loadWebCompanionAdminConfig,
@@ -24,16 +19,16 @@ export class BdsWebCompanionLifecycle {
   #adminOptions;
   #bds;
   #cleanupPromise;
-  #compute;
   #createBds;
   #createComputeServer;
+  #createPlane;
   #createPool;
   #createWeb;
   #environment;
   #lastError = null;
   #loadAdminConfig;
   #persistedAdminConfig;
-  #pool;
+  #plane;
   #randomToken;
   #startPromise;
   #state = "idle";
@@ -48,18 +43,18 @@ export class BdsWebCompanionLifecycle {
       defaultWebCompanionConfigPath({ environment: this.#environment });
     this.#loadAdminConfig =
       options.loadAdminConfig ?? loadWebCompanionAdminConfig;
-    this.#createPool =
-      options.createPool ??
-      ((poolOptions) => createCs486ComputeWorkerPool(poolOptions));
-    this.#createComputeServer =
-      options.createComputeServer ??
-      ((serverOptions) => createCs486ComputeServer(serverOptions));
+    this.#createPlane =
+      options.createPlane ??
+      ((planeOptions) => startCs486ComputePlane(planeOptions));
+    this.#createPool = options.createPool;
+    this.#createComputeServer = options.createComputeServer;
     this.#createBds =
       options.createBds ?? ((bdsOptions) => new BdsDebugSession(bdsOptions));
     this.#createWeb =
       options.createWeb ?? ((webOptions) => new WebCompanionServer(webOptions));
-    this.#randomToken =
-      options.randomToken ?? (() => randomBytes(32).toString("base64url"));
+    // Pool, listener, and token construction are the compute plane's defaults;
+    // only injected test doubles travel through here.
+    this.#randomToken = options.randomToken;
   }
 
   async start() {
@@ -109,7 +104,8 @@ export class BdsWebCompanionLifecycle {
       running: this.#state === "running",
       minecraft: this.#bds?.getStatus?.() ?? null,
       web: this.#web?.status?.() ?? null,
-      compute: this.#compute?.status?.() ?? null,
+      compute: this.#plane?.status?.() ?? null,
+      cpuEngine: this.#adminOptions?.cpuEngine ?? null,
       runtimeWorkerCount: this.#adminOptions?.runtimeWorkerCount ?? null,
       webConfiguration:
         this.#adminOptions === undefined
@@ -118,6 +114,8 @@ export class BdsWebCompanionLifecycle {
               path: this.#adminConfigPath ?? null,
               persisted: this.#persistedAdminConfig,
               environmentOverrides: {
+                cpuEngine:
+                  this.#environment.WEB_COMPANION_CPU_ENGINE !== undefined,
                 port: this.#environment.WEB_COMPANION_PORT !== undefined,
                 publicOrigin:
                   this.#environment.WEB_COMPANION_PUBLIC_ORIGIN !== undefined,
@@ -139,47 +137,27 @@ export class BdsWebCompanionLifecycle {
     );
     this.#assertStillStarting();
 
-    const token = this.#randomToken();
-    if (
-      typeof token !== "string" ||
-      !/^[A-Za-z0-9_-]{43}$/u.test(token) ||
-      Buffer.from(token, "base64url").byteLength !== 32 ||
-      Buffer.from(token, "base64url").toString("base64url") !== token
-    ) {
-      throw new Error(
-        "Runtime worker token generator did not return 256 bits.",
-      );
-    }
-    this.#pool = await this.#createPool({
+    // The plane owns the fail-loud engine rule: a wasm engine whose artifact is
+    // missing or malformed rejects pool creation, which fails managed startup.
+    // The companion never falls back to the TypeScript engine behind the
+    // operator's back, because the guest results would then come from an engine
+    // nobody selected.
+    this.#plane = await this.#createPlane({
+      assertActive: () => this.#assertStillStarting(),
+      cpuEngine: this.#adminOptions.cpuEngine,
+      createComputeServer: this.#createComputeServer,
+      createPool: this.#createPool,
+      randomToken: this.#randomToken,
       workerCount: this.#adminOptions.runtimeWorkerCount,
     });
     this.#assertStillStarting();
 
-    this.#compute = this.#createComputeServer({
-      pool: this.#pool,
-      port: 0,
-      token,
-    });
-    const computeStatus = await this.#compute.start();
-    this.#assertStillStarting();
-    if (
-      computeStatus?.running !== true ||
-      computeStatus.address !== "127.0.0.1" ||
-      !Number.isSafeInteger(computeStatus.port) ||
-      computeStatus.port < 1 ||
-      computeStatus.port > 65_535 ||
-      computeStatus.path !== CS486_COMPUTE_PATH
-    ) {
-      throw new Error("CS486 compute listener returned an invalid status.");
-    }
-    const endpoint = `ws://${computeStatus.address}:${String(computeStatus.port)}${computeStatus.path}`;
-
     this.#bds = this.#createBds({
       environment: this.#environment,
       runtimeWorkers: {
-        count: this.#adminOptions.runtimeWorkerCount,
-        endpoint,
-        token,
+        count: this.#plane.count,
+        endpoint: this.#plane.endpoint,
+        token: this.#plane.token,
       },
     });
     this.#stopLogForwarding = this.#bds.onLog((entry) => {
@@ -232,8 +210,7 @@ export class BdsWebCompanionLifecycle {
     for (const [resource, method] of [
       [this.#bds, "stop"],
       [this.#web, "stop"],
-      [this.#compute, "stop"],
-      [this.#pool, "close"],
+      [this.#plane, "stop"],
     ]) {
       if (resource === undefined || typeof resource[method] !== "function") {
         continue;
@@ -254,8 +231,7 @@ export class BdsWebCompanionLifecycle {
     }
     this.#bds = undefined;
     this.#web = undefined;
-    this.#compute = undefined;
-    this.#pool = undefined;
+    this.#plane = undefined;
     if (errors.length > 0) {
       this.#lastError = "BDS Web companion shutdown failed.";
       this.#state = "failed";

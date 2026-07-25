@@ -138,16 +138,16 @@ describe("CS486 interpreter host-throughput benchmark", () => {
     expect(
       parseBenchmarkArguments([
         "--engine",
-        "wasm-as",
+        "wasm-rust",
         "--corpus",
         "hosted-c-mid",
       ]),
     ).toMatchObject({
       corpus: "hosted-c-mid",
-      engine: "wasm-as",
+      engine: "wasm-rust",
     });
     expect(() => parseBenchmarkArguments(["--engine", "unknown"])).toThrow(
-      /engine must be one of ts, wasm-rust, wasm-as/u,
+      /engine must be one of ts, wasm-rust/u,
     );
     expect(() => parseBenchmarkArguments(["--corpus", "unknown"])).toThrow(
       /corpus must be one of alu-branch, mem-stack, hosted-c-mid/u,

@@ -4,7 +4,3 @@ packs/resource/ui/server_form.json
 packs/resource/textures/ui/ore-styled/
 packs/resource/textures/ui/unstyled.json
 vendor/
-
-# AssemblyScript source uses compiler-only syntax (e.g. `@inline` on a plain
-# function) that Prettier's TypeScript parser rejects.
-wasm/cs486-batch-executor-as/assembly/

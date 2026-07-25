@@ -11,6 +11,7 @@ import type {
   Cs486WasmSessionSnapshot,
 } from "./wasm-engines/wasm-engine-core.js";
 import { createCs486WasmExecutableSession } from "./wasm-engines/wasm-engine-core.js";
+import type { Cs486WasmHostMemory } from "./wasm-engines/wasm-host-runtime.js";
 import type { Cs486FuzzProgram } from "./wasm-corpora/cs486-fuzz-generator.js";
 import {
   cs486FuzzForcedCases,
@@ -82,7 +83,7 @@ interface GuestSnapshot {
 export function runCs486WasmEquivalenceSuite(
   wasm: {
     readonly exports: Cs486WasmBatchExecutorExports;
-    readonly memory: WebAssembly.Memory;
+    readonly memory: Cs486WasmHostMemory;
   },
   engineName: string,
   options: Cs486WasmEquivalenceOptions = {},
@@ -138,7 +139,7 @@ export function runCs486WasmEquivalenceSuite(
 function compareConfiguration(
   wasm: {
     readonly exports: Cs486WasmBatchExecutorExports;
-    readonly memory: WebAssembly.Memory;
+    readonly memory: Cs486WasmHostMemory;
   },
   engineName: string,
   program: Cs486FuzzProgram,
@@ -221,7 +222,7 @@ function compareConfiguration(
       tsResult.executedInstructions,
       wasmResult.executedInstructions,
     );
-    compare(slice, "stateKind", tsResult.state.kind, wasmResult.kind);
+    compare(slice, "stateKind", tsResult.state.kind, wasmResult.state.kind);
     compareSnapshots(
       slice,
       snapshotGuest(guest),
@@ -234,7 +235,7 @@ function compareConfiguration(
       tsResult.state.kind !== "ready" && !guest.hasPendingCpuCycles;
     const wasmSnapshot = session.snapshot();
     const wasmTerminal =
-      wasmResult.kind !== "ready" && !wasmSnapshot.hasPendingCpuCycles;
+      wasmResult.state.kind !== "ready" && !wasmSnapshot.hasPendingCpuCycles;
     if (tsTerminal && wasmTerminal) break;
   }
   divergences.push(...localDivergences);

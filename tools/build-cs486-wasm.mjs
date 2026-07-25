@@ -13,16 +13,17 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 /**
- * Builds the gated Issue #106 CS486 wasm batch-executor prototype artifacts
- * (Rust and AssemblyScript variants) into `wasm/dist/`. Host tooling only:
- * the artifacts never ship in the Bedrock pack and are never committed.
+ * Builds the Issue #106 CS486 Rust wasm batch-executor artifact into
+ * `wasm/dist/`. Host tooling only: the artifact never ships in the Bedrock
+ * pack and is never committed, but the managed companion requires it when the
+ * operator selects the `wasm-rust` compute engine.
  *
  * Preflight fails fast with actionable instructions when the optional
- * toolchains are missing; `npm run validate` never depends on this script.
+ * toolchain is missing; `npm run validate` never depends on this script.
  *
- * `--check` rebuilds both variants into a temporary directory and verifies
- * the SHA-256 of each rebuilt artifact matches `wasm/dist/`, proving the
- * build is deterministic on this machine.
+ * `--check` rebuilds into a temporary directory and verifies the SHA-256 of
+ * the rebuilt artifact matches `wasm/dist/`, proving the build is
+ * deterministic on this machine.
  */
 const repositoryRoot = fileURLToPath(new URL("..", import.meta.url));
 const rustCrateDirectory = path.join(
@@ -30,25 +31,9 @@ const rustCrateDirectory = path.join(
   "wasm",
   "cs486-batch-executor-rs",
 );
-const asProjectDirectory = path.join(
-  repositoryRoot,
-  "wasm",
-  "cs486-batch-executor-as",
-);
 const distDirectory = path.join(repositoryRoot, "wasm", "dist");
 const rustArtifactName = "cs486-batch-executor.rust.wasm";
-const asArtifactName = "cs486-batch-executor.as.wasm";
 const checksumFileName = "SHA256SUMS.txt";
-// Invoked directly with the current Node binary instead of through the `npx`/
-// `asc` .cmd shims, so no command ever needs shell:true (Node's execFileSync
-// otherwise concatenates argv into the shell command line unescaped).
-const ascBinPath = path.join(
-  repositoryRoot,
-  "node_modules",
-  "assemblyscript",
-  "bin",
-  "asc.js",
-);
 
 function run(command, args, options = {}) {
   return execFileSync(command, args, {
@@ -56,10 +41,6 @@ function run(command, args, options = {}) {
     stdio: ["ignore", "pipe", "pipe"],
     ...options,
   });
-}
-
-function runAsc(args, options = {}) {
-  return run(process.execPath, [ascBinPath, ...args], options);
 }
 
 function preflight() {
@@ -75,13 +56,6 @@ function preflight() {
     throw new Error(
       'missing Rust target wasm32-unknown-unknown; run "rustup target add wasm32-unknown-unknown"',
     );
-  try {
-    runAsc(["--version"], { cwd: repositoryRoot });
-  } catch (error) {
-    throw new Error(
-      `the assemblyscript compiler is required; run "npm install" so the devDependency is available (${describeError(error)})`,
-    );
-  }
 }
 
 function buildRust(targetDirectory) {
@@ -98,17 +72,6 @@ function buildRust(targetDirectory) {
   );
 }
 
-function buildAssemblyScript(outFile) {
-  runAsc(
-    ["--config", "asconfig.json", "--target", "release", "--outFile", outFile],
-    {
-      cwd: asProjectDirectory,
-      stdio: ["ignore", "inherit", "inherit"],
-    },
-  );
-  return outFile;
-}
-
 function sha256(filePath) {
   return createHash("sha256").update(readFileSync(filePath)).digest("hex");
 }
@@ -118,11 +81,7 @@ function buildInto(outputDirectory, cargoTargetDirectory) {
   const rustBuilt = buildRust(cargoTargetDirectory);
   const rustOut = path.join(outputDirectory, rustArtifactName);
   copyFileSync(rustBuilt, rustOut);
-  const asOut = buildAssemblyScript(path.join(outputDirectory, asArtifactName));
-  return {
-    [asArtifactName]: sha256(asOut),
-    [rustArtifactName]: sha256(rustOut),
-  };
+  return { [rustArtifactName]: sha256(rustOut) };
 }
 
 function main() {

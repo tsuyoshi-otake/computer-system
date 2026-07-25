@@ -21,6 +21,33 @@ export const cs486WasmMaximumOutputBytes = 64_000;
 
 const floatSyscallPattern = /^cs\.fp\.(?:f32|f64)\.[a-z0-9.]+$/u;
 
+/** True for the deterministic-float syscall family owned by the TS model. */
+export function isCs486WasmFloatSyscall(name: string): boolean {
+  return floatSyscallPattern.test(name);
+}
+
+/**
+ * Host policy for every syscall except the inline `cs.print.character`
+ * primitive. The wasm executor never runs host callbacks, so a policy always
+ * ends the instruction: throw `Cs486Fault` for a guest-visible fault or a host
+ * `Error` for a configuration the caller must not silently approximate.
+ */
+export type Cs486WasmSyscallPolicy = (name: string) => never;
+
+/**
+ * Default policy. Deterministic-float syscalls raise a host `Error` because
+ * delegating them to this prototype would silently bypass the BigInt rational
+ * float model; every other syscall reproduces the production dispatch fault
+ * for a process with no registered handler.
+ */
+export const rejectCs486WasmSyscall: Cs486WasmSyscallPolicy = (name) => {
+  if (isCs486WasmFloatSyscall(name))
+    throw new Error(
+      `cs486 wasm prototype does not execute float syscall ${name}; deterministic float stays on the TypeScript interpreter`,
+    );
+  throw new Cs486Fault("UnsupportedError", `syscall ${name} is unavailable`);
+};
+
 export interface Cs486WasmColdOpMachine {
   /** Prepared base cycle cost of the cold instruction. */
   readonly baseCycles: number;
@@ -44,6 +71,8 @@ export interface Cs486WasmColdOpMachine {
   recordControlTransfer(taken: boolean): void;
   setInstructionPointer(value: number): void;
   setRegister(index: number, value: number): void;
+  /** Terminal host policy for every syscall other than the print primitive. */
+  readonly syscall: Cs486WasmSyscallPolicy;
   writeRamInt32(address: number, value: number): void;
 }
 
@@ -56,8 +85,8 @@ export type Cs486WasmColdOpResult = {
  * Executes one cold instruction. Guest faults throw `Cs486Fault` exactly as
  * the production interpreter would; the caller owns the crash transition and
  * discards the partially accumulated cycles, matching production accounting.
- * Deterministic-float syscalls throw a host `Error` because delegating them
- * to this prototype would silently bypass the BigInt rational float model.
+ * Every syscall other than `cs.print.character` is delegated to the caller's
+ * `syscall` policy, which always ends the instruction.
  */
 export function executeCs486WasmColdInstruction(
   machine: Cs486WasmColdOpMachine,
@@ -121,14 +150,7 @@ export function executeCs486WasmColdInstruction(
           throw new Cs486Fault("OutputLimitError", "output limit exceeded");
         return { cycles, kind: "executed" };
       }
-      if (floatSyscallPattern.test(name))
-        throw new Error(
-          `cs486 wasm prototype does not execute float syscall ${name}; deterministic float stays on the TypeScript interpreter`,
-        );
-      throw new Cs486Fault(
-        "UnsupportedError",
-        `syscall ${name} is unavailable`,
-      );
+      return machine.syscall(name);
     }
     case cs486WasmOpcode.printString: {
       const source = (

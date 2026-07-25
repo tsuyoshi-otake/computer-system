@@ -9,6 +9,24 @@ prototype is **not integrated** into the production `Cs486Process` path, the
 scheduler, the managed runtime-worker pool, or any release pack; production
 integration remains a separate decision to be made from this evidence.
 
+Status on 2026-07-25: acting on that evidence, the Rust variant became an
+**opt-in** compute-worker engine in the managed Web companion. See
+[Phase 5: opt-in compute-worker integration](#phase-5-opt-in-compute-worker-integration)
+for what changed, what stayed out of scope, and which gate evidence is still
+outstanding. Everything above that section remains the 2026-07-24 record and is
+not restated in light of the integration.
+
+Status on 2026-07-25: the MCP debug companion can now start the same compute
+plane, so an MCP-driven session can actually execute guest work on the selected
+engine. See
+[Phase 6: MCP debug sessions reach the compute plane](#phase-6-mcp-debug-sessions-reach-the-compute-plane).
+
+Status on 2026-07-25: the AssemblyScript variant was deleted after it failed the
+adoption gate. See
+[AssemblyScript variant removal](#assemblyscript-variant-removal). Its
+measurements below are the record that decided it and remain as written; the
+sources, artifact, and toolchain they describe no longer exist in the tree.
+
 ## Implemented boundary
 
 Two WebAssembly batch executors share one host-defined ABI
@@ -245,7 +263,8 @@ tests proving exact equivalence.
 Consequence: the gate evidence supports adopting the **Rust** variant if and
 when Phase 4 proceeds to production integration in the managed runtime-worker
 pool. No integration is performed in this change; the TypeScript interpreter
-remains the only production execution path and the reference oracle.
+remains the only production execution path and the reference oracle. Phase 5
+(2026-07-25) acted on this consequence; see the section below.
 
 ## Rust versus AssemblyScript selection
 
@@ -276,3 +295,256 @@ prototype and belong to the separate integration decision (and Issue #16's open
 load evidence). The full sweep ran while an interactive managed BDS session was
 live on the same host; medians were stable, but a rerun on a quiet host would
 tighten the p95 columns.
+
+## Phase 5: opt-in compute-worker integration
+
+Status on 2026-07-25: implemented and host-verified. The Rust executor is now
+selectable by the managed Web companion's compute workers. The release Bedrock
+pack is untouched and still runs `Cs486Process` exclusively; nothing in this
+phase ships to Minecraft.
+
+### Integrated boundary
+
+- `tools/cs486-compute-worker-cpu-engine.ts` is the only place that knows the
+  two engines apart. It exposes one `Cs486ComputeCpuEngine` contract
+  (`createProcess`, `name`) implemented by `Cs486Process` and by the wasm
+  executor, so `tools/cs486-compute-worker-entry.ts`, the pool, and the loopback
+  wire protocol stay engine-agnostic.
+- Engine names are `typescript` (default) and `wasm-rust`. Precedence is
+  `WEB_COMPANION_CPU_ENGINE`, then the persisted `cpuEngine` field, then the
+  default. The admin config moved to version 3 with a `keyIntroducedVersion`
+  table so an older companion cannot silently ignore a newer key.
+  `npm run web:config -- set --cpu-engine wasm-rust` persists it and
+  `--clear-cpu-engine` restores `typescript`.
+- The pool resolves `wasm/dist/cs486-batch-executor.rust.wasm` **before**
+  spawning any worker and structured-clones the bytes to each thread, so a
+  worker compiles the module once and every guest process instantiates its own
+  linear memory. A missing or malformed artifact rejects pool initialization,
+  which rejects `startManagedBdsWithWeb`'s pool creation, which fails managed
+  startup. There is no fallback to the TypeScript engine in either direction:
+  falling back would attribute guest results to an engine nobody selected.
+- Each worker reports the engine it actually loaded in its `ready` message and
+  the endpoint treats a mismatch as a protocol failure, so a thread that loaded
+  something other than the requested engine never becomes ready. Companion
+  status reports the requested pool engine plus each worker's reported engine.
+- The wasm engine refuses at create time what it cannot execute faithfully:
+  `cs.fp.*` syscalls on a profile that has an FPU (deterministic float stays
+  BigInt-rational TypeScript) and process-image initialization. It runs the
+  shared executable validator itself because it never constructs a
+  `Cs486Process`. On CS386SX it does not refuse the float syscall; it admits the
+  executable and reproduces the identical `UnsupportedError` missing-80387 fault
+  at dispatch, matching the TypeScript engine on that profile.
+- Dual maintenance is now a written rule. `src/domain/cpu/CLAUDE.md` owns the
+  list of responsibilities that must change in both implementations and names
+  `npm run verify:cs486-wasm-equivalence` as the agreement proof;
+  `wasm/CLAUDE.md` and `tools/CLAUDE.md` carry the scoped consequences; the root
+  `CLAUDE.md` carries the repository-wide rule.
+
+### Verification
+
+`Verify:`
+
+```powershell
+npx vitest run tests/tools/cs486ComputeCpuEngine.test.ts tests/tools/cs486ComputeWorkerPool.test.mjs tests/tools/webCompanionAdminConfig.test.mjs tests/tools/bdsWebCompanionLifecycle.test.mjs
+```
+
+`Expect:` all suites pass, including the differential check that a `wasm-rust`
+slice equals a TypeScript slice, the CS386SX fault reproduction, the create-time
+refusals, the `.mjs`/TypeScript engine-registry agreement, the config version-3
+round trip and gating, and the lifecycle assertions that the requested engine
+reaches the pool and that a failed wasm load leaves the companion `failed`
+without a second pool. Observed on 2026-07-25 with `wasm/dist` present: 32
+passed, 0 failed.
+
+`Verify:` `npm run validate` with `wasm/dist` present and again with it removed.
+
+`Expect:` both runs pass completely; without the artifact every wasm-dependent
+suite skips rather than fails, keeping the host gate free of cargo and asc.
+
+Observed on 2026-07-25: with `wasm/dist` present, 308 test files and 2,546 tests
+passed with none skipped; with `wasm/dist` moved aside, 308 test files passed
+with 2,540 passed and 6 skipped. Both runs also completed formatting, ESLint,
+TypeScript, the production pack build, and the Pages build.
+
+### Still outstanding
+
+The Issue #106 gate requires p95 BDS tick non-regression. That column was
+unmeasurable while the executor was unintegrated and is still unmeasured under
+the integrated engine: it needs a real managed-BDS run with
+`WEB_COMPANION_CPU_ENGINE=wasm-rust` compared against the same workload on
+`typescript`, plus Issue #16's multi-user load evidence. Until that exists,
+`wasm-rust` is an opt-in engine backed by host benchmarks and differential
+equivalence, not a defaulted one.
+
+## AssemblyScript variant removal
+
+Status on 2026-07-25: the AssemblyScript variant was deleted from the working
+tree. Everything recorded above about it — the reproducible dual-variant build,
+its differential-equivalence pass, its A/B numbers, the adoption-gate FAIL, and
+the Rust-versus-AssemblyScript selection — is the measurement record that
+produced this decision and is not restated or revised by the removal.
+
+It was removed because it had no remaining role. It failed the >=2x adoption
+gate (11 of 18 cells below 2x, minimum 1.58x), it was never selectable as a
+compute engine, and keeping it obliged every future CPU-behaviour change to be
+ported into a third implementation whose only output was a comparison already
+taken.
+
+Removed or changed:
+
+- Deleted `wasm/cs486-batch-executor-as/`,
+  `tools/wasm-engines/as-engine-entry.ts`, and the built
+  `wasm/dist/cs486-batch-executor.as.wasm`.
+- Dropped the `assemblyscript` devDependency, the `asc` preflight and build step
+  in `tools/build-cs486-wasm.mjs`, and the `.prettierignore` entry that existed
+  only because AssemblyScript source uses compiler-only syntax.
+- Narrowed `cs486WasmVariantNames` to `["rust"]` and `benchmarkEngines` to
+  `["ts", "wasm-rust"]`, so the equivalence CLI, the A/B orchestrator, and their
+  suites derive the smaller matrix without a second edit. The variant list stays
+  plural: a future variant needs no loader change.
+
+`Verify:` `npm run build:cs486-wasm && npm run build:cs486-wasm:check` then
+`npm run validate`. `Expect:` `wasm/dist` holds exactly
+`cs486-batch-executor.rust.wasm` plus `SHA256SUMS.txt`, the rebuild reproduces
+the same digest, and the host gate passes with no AssemblyScript toolchain
+installed.
+
+## Phase 6: MCP debug sessions reach the compute plane
+
+Status on 2026-07-25: implemented, host-verified, and real-BDS-verified. Inside
+an MCP session the `wasm-rust` compute plane is confirmed live against real BDS,
+and a compiled guest program is confirmed executing on a `wasm-rust` compute
+worker and returning its result through `bds_execute_computer_command`. See
+"Real-BDS observation" below for the exact evidence and for the properties of
+the MCP and guest surfaces that observation depends on.
+
+Phase 5 made `wasm-rust` selectable by `npm run dev:bds:web` only. The MCP debug
+companion built the ordinary release pack, so `runtimeWorkerFactory()` returned
+`undefined` and every guest slice ran the in-engine `Cs486Process` no matter
+what `WEB_COMPANION_CPU_ENGINE` said. MCP-driven verification therefore could
+not exercise the wasm engine at all, and a `wasm-rust` selection during an MCP
+session was silently inert — the exact "results attributed to an engine nobody
+ran" failure the rest of this issue is written to prevent.
+
+### Integrated boundary
+
+- `tools/cs486-compute-plane.mjs` now owns pool creation, the 256-bit bearer
+  token, the exact `ws://127.0.0.1:PORT/internal/cs486/v1` endpoint, listener
+  status validation, and exactly-once shutdown. `tools/bds-web-companion.mjs`
+  was refactored onto it with no change to its observable startup order,
+  cancellation behaviour, or status shape; `tools/bds-mcp-server.mjs` starts the
+  same plane. One owner means the fail-loud artifact rule cannot drift between
+  the two entry points.
+- `tools/mcp-runtime-workers.mjs` owns the MCP policy. `BDS_MCP_RUNTIME_WORKERS`
+  is unset or `0` by default, which keeps the in-engine CPU and starts no
+  threads and no listener; `1` through 16 opts in. Anything else is a
+  `RangeError` at startup.
+- Selecting a non-default engine while the workers stay disabled is rejected
+  before the world is touched, with a message naming both the variable and the
+  selected engine. Without this the operator's `wasm-rust` request would produce
+  TypeScript results labelled `wasm-rust` in an MCP evidence log.
+- `bds_status` reports `runtimeWorkers` (count and endpoint), `cpuEngine`, and
+  the `compute` listener/pool snapshot. All three are `null` in the ordinary
+  in-engine shape, so status never names an engine that did not execute a slice.
+  The bearer token stays out of every tool result; only the restricted managed
+  `secrets.json` holds it.
+- The MCP server stops the plane on the Web-companion startup failure path and
+  in `shutdown()`, so an aborted or closed session leaves no listener or worker
+  thread behind.
+
+### Verification
+
+`Verify:` `npm run test:mcp`
+
+`Expect:` the debug-session, MCP-server, runtime-worker-policy, compute-plane,
+and TUI-verifier suites pass, including: the plane starts the pool before the
+listener and closes both exactly once; a pool that cannot load its engine admits
+no listener and creates no second pool; a listener that is not the exact
+authenticated loopback endpoint is rejected; the token never appears in status;
+`bds_status` reports `null` for all three fields without workers and the real
+count, endpoint, engine, and ready pool with `BDS_MCP_RUNTIME_WORKERS=1`; and
+the server exits non-zero with an actionable message for `wasm-rust` without
+workers and for an out-of-range worker count. Observed on 2026-07-25: 5 files,
+39 tests passed.
+
+### Real-BDS observation
+
+Status: complete. The plane is confirmed live and so is the guest-side leg.
+
+`Verify:` start `tools/bds-mcp-server.mjs` over stdio with
+`BDS_MCP_RUNTIME_WORKERS=2`, `WEB_COMPANION_CPU_ENGINE=wasm-rust`,
+`WEB_COMPANION_CONFIG_FILE=""`, an empty disposable `BDS_MCP_WORKDIR` under
+`%USERPROFILE%\tmp`, and `BDS_MCP_WORLD=ComputerSystemAcceptance`. Call
+`bds_status`, then `bds_start` with `resetWorld: true` and
+`acceptanceFixture: true`, then `bds_wait_for_log` for
+`CS_RUNTIME_WORKER_READY`.
+
+`Expect:` `bds_status` before start reports `cpuEngine` `wasm-rust`, a `ready`
+pool of two workers that each report `wasm-rust`, a listener bound to
+`127.0.0.1` on path `/internal/cs486/v1`, and `runtimeWorkers` carrying count
+`2` with the matching `ws://127.0.0.1:<port>/internal/cs486/v1` endpoint and no
+token; `bds_start` reaches `running`; the BDS log contains
+`CS_RUNTIME_WORKER_READY {"workerCount":2}`.
+
+Observed on 2026-07-25 against real BDS on a disposable acceptance world: every
+expectation above held, and `bds_provision_acceptance_fixture` then completed
+with a provisioned Computer. The session used its own ports and work root, so
+the interactive managed companion and its world were untouched.
+
+`Verify:` in that same session, call `bds_execute_computer_command` against the
+provisioned Computer to write, compile, and run a guest C program that sums
+every integer below 4096:
+
+```text
+echo 'int main(void){int s=0;int i;for(i=0;i<4096;i++)s=s+i;printf("%d",s);return 0;}' > /tmp/w.c
+cc /tmp/w.c -o /tmp/w
+run --stats /tmp/w
+```
+
+Take a `bds_status` snapshot while that program is resident, then `bds_get_logs`
+with `diagnosticsOnly` and `bds_stop`.
+
+`Expect:` each command completes; `run --stats` prints `8386560`, the closed
+form of the sum, on stdout with a positive modeled `cpuCycles`; the `bds_status`
+snapshot attributes one owned process to a numbered worker that reports
+`cpuEngine` `wasm-rust`; the diagnostics query returns no entries; `bds_stop`
+returns `idle`.
+
+Observed on 2026-07-25 on a provisioned CS486DX2 acceptance Computer: stdout
+`8386560`, exit code `0`, and 233,531 instructions for 439,093 modeled CPU
+cycles reported as `halted` at 66 MHz. The concurrent `bds_status` attributed
+`ownedProcessCount` `1` to worker `2`, and that worker reports `cpuEngine`
+`wasm-rust`, so the printed result came from a wasm-rust compute worker and not
+from the in-engine CPU. Diagnostics were empty and the session stopped to
+`idle`. The host wall time on the guest statistics line is MCP responsiveness,
+not guest speed, and this single-engine run is not a
+`typescript`-versus-`wasm-rust` comparison.
+
+Three properties of the MCP and guest surfaces had to be respected to reach that
+observation. All three are pre-existing and none is introduced by this change:
+
+- The first guest command races the deterministic CSBIOS power-on sequence.
+  `enqueueDebugShellCommand` answers
+  `{"outcome":"ignored","reason":"not_running"}` until that sequence retires, so
+  a bounded readiness retry has to precede the first real command. The observed
+  run needed five one-second attempts before `whoami` returned `cs`.
+- A guest `main` return value is not observable through MCP. A normally halted
+  CS486 debug job always completes with `exitCode: 0`, so a distinctive result
+  must be asserted on stdout, not on the exit code.
+- CS C takes one declarator per declaration and does not accept a compound
+  assignment as a statement, so `int s=0,i;` and `s+=i;` are both `CSC001`
+  compile errors and the program above uses `int s=0;int i;` and `s=s+i;`
+  instead. A candidate guest program is far cheaper to check against
+  `ShellSession` on the host than against a live BDS session.
+
+### Effect on the outstanding gate
+
+The p95 BDS tick column recorded under "Still outstanding" above stays
+unmeasured. It is no longer structurally unreachable from MCP: a preserved-world
+session with `BDS_MCP_RUNTIME_WORKERS` set selects the same engine the Web
+companion does, the plane is observed live under real BDS, and MCP-driven guest
+work is now observed executing on the selected engine. What is still missing is
+the comparison itself — one workload measured on `wasm-rust` and on `typescript`
+with BDS tick percentiles recorded for both — together with the multi-user load
+evidence of Issue #16. A single-engine PASS is not a non-regression measurement.
+The engine therefore remains opt-in and `typescript` remains the default.

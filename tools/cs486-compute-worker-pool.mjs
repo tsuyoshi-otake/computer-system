@@ -3,6 +3,13 @@ import { Worker } from "node:worker_threads";
 
 import { build } from "esbuild";
 
+import {
+  assertCs486ComputeEngine,
+  cs486ComputeEngineWasmVariant,
+  defaultCs486ComputeEngine,
+} from "./cs486-compute-engine.mjs";
+import { readCs486WasmArtifactBytes } from "./cs486-wasm-batch-executor-loader.mjs";
+
 const protocolVersion = 1;
 const minimumWorkerCount = 1;
 const maximumWorkerCount = 16;
@@ -82,6 +89,16 @@ export class Cs486ComputeWorkerPool {
       typeof options === "number" ? options : (options.workerCount ?? 1);
     assertWorkerCount(workerCount);
     this.configuredWorkerCount = workerCount;
+    this.cpuEngine = assertCs486ComputeEngine(
+      typeof options === "number"
+        ? defaultCs486ComputeEngine
+        : (options.cpuEngine ?? defaultCs486ComputeEngine),
+    );
+    // Tests inject artifact bytes directly so they never depend on a built
+    // `wasm/dist/`; production leaves this undefined and `initialize` reads the
+    // required build, failing startup when it is missing.
+    this.injectedWasmModuleBytes =
+      typeof options === "number" ? undefined : options.wasmModuleBytes;
     this.workers = [];
     this.processes = new Map();
     this.nextConvenienceRequestId = 1;
@@ -164,6 +181,7 @@ export class Cs486ComputeWorkerPool {
         worker.workerIndex,
       );
       return {
+        cpuEngine: worker.reportedCpuEngine ?? null,
         error:
           worker.failure === undefined
             ? null
@@ -182,6 +200,7 @@ export class Cs486ComputeWorkerPool {
       this.initializationFailure !== undefined ||
       workerStatuses.some((worker) => worker.failed);
     return {
+      cpuEngine: this.cpuEngine,
       failed,
       ownedProcessCount: this.processes.size,
       pendingRequestCount,
@@ -207,7 +226,10 @@ export class Cs486ComputeWorkerPool {
 
   async initialize() {
     try {
-      const source = await buildWorkerSource();
+      const [source, wasmModuleBytes] = await Promise.all([
+        buildWorkerSource(),
+        this.resolveWasmModuleBytes(),
+      ]);
       if (this.closeRequested)
         throw poolError(
           "POOL_CLOSED",
@@ -220,6 +242,8 @@ export class Cs486ComputeWorkerPool {
             source,
             index + 1,
             this.configuredWorkerCount,
+            this.cpuEngine,
+            wasmModuleBytes,
           ),
       );
       await Promise.all(this.workers.map((worker) => worker.ready));
@@ -237,6 +261,19 @@ export class Cs486ComputeWorkerPool {
       await Promise.allSettled(this.workers.map((worker) => worker.close()));
       throw error;
     }
+  }
+
+  /**
+   * Batch-executor bytes for the selected engine, or `undefined` for the
+   * TypeScript interpreter. A selected wasm engine whose artifact is missing
+   * rejects here, which fails pool creation and therefore managed startup;
+   * falling back to the interpreter would silently misreport which engine
+   * produced the guest results.
+   */
+  async resolveWasmModuleBytes() {
+    const variant = cs486ComputeEngineWasmVariant(this.cpuEngine);
+    if (variant === null) return undefined;
+    return this.injectedWasmModuleBytes ?? readCs486WasmArtifactBytes(variant);
   }
 
   async requestCreate(command) {
@@ -359,9 +396,11 @@ export class Cs486ComputeWorkerPool {
 }
 
 class ComputeWorkerEndpoint {
-  constructor(source, workerIndex, workerCount) {
+  constructor(source, workerIndex, workerCount, cpuEngine, wasmModuleBytes) {
     this.workerIndex = workerIndex;
     this.workerCount = workerCount;
+    this.requestedCpuEngine = cpuEngine;
+    this.reportedCpuEngine = undefined;
     this.closed = false;
     this.closePromise = undefined;
     this.failure = undefined;
@@ -372,7 +411,13 @@ class ComputeWorkerEndpoint {
       execArgv: [],
       name: `cs486-compute-${String(workerIndex)}`,
       workerData: {
+        cpuEngine,
         protocolVersion,
+        // Structured-cloned per worker, so each thread compiles the artifact
+        // once and every guest process instantiates its own linear memory.
+        ...(wasmModuleBytes === undefined
+          ? {}
+          : { wasmModuleBytes: new Uint8Array(wasmModuleBytes) }),
         workerCount,
         workerIndex,
       },
@@ -490,10 +535,16 @@ class ComputeWorkerEndpoint {
 
   onMessage(message) {
     if (message?.type === "ready") {
-      if (!this.isWorkerMessage(message)) {
+      // The worker reports the engine it actually built, so a thread that
+      // loaded something other than the requested engine never becomes ready.
+      if (
+        !this.isWorkerMessage(message) ||
+        message.cpuEngine !== this.requestedCpuEngine
+      ) {
         this.protocolFailure();
         return;
       }
+      this.reportedCpuEngine = message.cpuEngine;
       this.readyOwner?.resolve();
       this.readyOwner = undefined;
       return;

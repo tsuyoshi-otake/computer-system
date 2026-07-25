@@ -38,7 +38,7 @@ weaken a repository-wide safety rule.
 | [`docs/`](docs/CLAUDE.md)                                                 | Maintainer/operator documentation, verification records, and issue evidence     |
 | [`.github/`](.github/CLAUDE.md)                                           | GitHub automation and its workflow-specific rules                               |
 | [`vendor/bedrock-core-ui-0.9.2/`](vendor/bedrock-core-ui-0.9.2/CLAUDE.md) | Pinned upstream UI source, compiled mirror, and RP protocol assets              |
-| [`wasm/`](wasm/CLAUDE.md)                                                 | Gated Issue #106 Phase 4 Rust/AssemblyScript wasm batch-executor prototype      |
+| [`wasm/`](wasm/CLAUDE.md)                                                 | Issue #106 Rust wasm batch executor and its opt-in compute-worker engine        |
 
 Keep a scoped rule in the narrowest directory that owns it. Do not copy the same
 rule into several files. If a change crosses scopes, read each applicable
@@ -65,6 +65,11 @@ rule into several files. If a change crosses scopes, read each applicable
 - Keep guest timing independent from host admission and wall-clock delay. Host
   elapsed time may control admission and observability but must never rewrite
   guest CPU, disk, memory, or wire timing.
+- The CS486 contract has two production implementations: `Cs486Process` and the
+  Rust wasm batch executor the managed companion can run in its compute workers.
+  A change to a responsibility they share must land in both in the same change.
+  [`src/domain/cpu/CLAUDE.md`](src/domain/cpu/CLAUDE.md) owns that list and the
+  required equivalence evidence.
 - Unsupported Bedrock or guest-OS behavior must fail explicitly. Never silently
   approximate an incompatible feature or imply support that does not exist.
 - Preserve unrelated working-tree changes. Do not commit generated `dist/`
@@ -154,22 +159,16 @@ synchronized.
 - #69-#73: hosted C/libc, archives/Make, byte8, and deterministic floating
   point.
 - #74-#78: Python classes, decorators, iterators, generators, and `send`.
-- #79: Python generator exception suspension, `throw`, `close`, and
-  `GeneratorExit`.
-- #80: Bounded Python `yield from` delegation and nested generator protocols.
-- #81: Bounded synchronous Python generator expressions and lazy comprehension
-  scopes.
-- #82: Bounded synchronous Python context managers and exact finalization.
-- #83: Bounded user-defined Python iterator protocol and managed special-method
-  calls.
-- #85: Bounded generic Python iterable materialization for displays, calls,
-  unpacking, slices, and sets.
-- #87: Bounded Python `__getitem__` sequence-iteration fallback.
-- #88: Bounded Python 3.14 deferred annotations and annotation scopes.
-- #89: Bounded Python callable/sentinel iteration.
-- #90: Bounded Python 3.14 type parameters and lazy type aliases.
-- #91: Bounded Python generic aliases and runtime subscription.
-- #92: Bounded Python 3.14 typing runtime core.
+- #79/#80/#81: Python generator exception suspension, `throw`/`close`/
+  `GeneratorExit`, bounded `yield from` delegation and nested generator
+  protocols, and lazy generator expressions and comprehension scopes.
+- #82/#83: Bounded synchronous Python context managers with exact finalization,
+  the user-defined iterator protocol, and managed special-method calls.
+- #85/#87: Bounded generic Python iterable materialization for displays, calls,
+  unpacking, slices, and sets, plus the `__getitem__` sequence fallback.
+- #88-#92: Bounded Python 3.14 deferred annotations, annotation scopes,
+  callable/sentinel iteration, type parameters, lazy type aliases, generic
+  aliases, runtime subscription, and the typing runtime core.
 - #93: Bounded Python 3.14 coroutines and async protocols.
 - #94: Bounded Python 3.14 async generators and comprehensions.
 - #95: Bounded Python exception groups and `except*`.
@@ -179,6 +178,7 @@ synchronized.
 - #33: Compile RAM lease finalization across completion, disconnect, and detach.
 - #34: DOS memory architecture v2, atomic CONFIG, address allocation, MEM
   snapshots, and declared process grants.
+- #106: CS486 throughput and the opt-in Rust wasm compute-worker engine.
 
 Use English commit messages with useful detail and reference every applicable
 Issue. Issue #4 remains relevant while Phase 2 work is in scope.

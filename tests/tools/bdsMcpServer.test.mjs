@@ -157,21 +157,119 @@ describe("BDS MCP stdio server", () => {
       /Call bds_open_web_terminal first/u,
     );
   });
+
+  it("reports no compute plane while the session keeps the in-engine CPU", async () => {
+    const client = createClient();
+    clients.push(client);
+    await client.request("initialize", {
+      protocolVersion: "2025-11-25",
+      capabilities: {},
+      clientInfo: { name: "vitest", version: "1.0.0" },
+    });
+    client.notify("notifications/initialized", {});
+
+    const status = await client.request("tools/call", {
+      name: "bds_status",
+      arguments: {},
+    });
+    expect(status.structuredContent.result).toMatchObject({
+      compute: null,
+      cpuEngine: null,
+      runtimeWorkers: null,
+    });
+  });
+
+  it("routes guest CPU work to the managed compute workers when opted in", async () => {
+    const client = createClient({ BDS_MCP_RUNTIME_WORKERS: "1" });
+    clients.push(client);
+    await client.request("initialize", {
+      protocolVersion: "2025-11-25",
+      capabilities: {},
+      clientInfo: { name: "vitest", version: "1.0.0" },
+    });
+    client.notify("notifications/initialized", {});
+
+    const status = await client.request("tools/call", {
+      name: "bds_status",
+      arguments: {},
+    });
+    const result = status.structuredContent.result;
+    expect(result).toMatchObject({
+      cpuEngine: "typescript",
+      compute: {
+        address: "127.0.0.1",
+        path: "/internal/cs486/v1",
+        running: true,
+        pool: { state: "ready", workerCount: 1 },
+      },
+    });
+    expect(result.runtimeWorkers.count).toBe(1);
+    expect(result.runtimeWorkers.endpoint).toMatch(
+      /^ws:\/\/127\.0\.0\.1:\d+\/internal\/cs486\/v1$/u,
+    );
+    // The managed bearer secret authorizes the compute socket and must never
+    // travel back through an MCP tool result.
+    expect(result.runtimeWorkers.token).toBeUndefined();
+    expect(JSON.stringify(result)).not.toMatch(/Bearer/u);
+  }, 60_000);
+
+  it("refuses a selected engine the in-engine session could never run", async () => {
+    const { code, stderr } = await runServerToExit({
+      WEB_COMPANION_CPU_ENGINE: "wasm-rust",
+    });
+    expect(code).toBe(1);
+    expect(stderr).toContain("BDS_MCP_RUNTIME_WORKERS");
+    expect(stderr).toContain("wasm-rust");
+  });
+
+  it("rejects a malformed managed worker count", async () => {
+    const { code, stderr } = await runServerToExit({
+      BDS_MCP_RUNTIME_WORKERS: "17",
+    });
+    expect(code).toBe(1);
+    expect(stderr).toMatch(/between 1 and 16/u);
+  });
 });
 
-function createClient() {
+function runServerToExit(environment) {
+  return new Promise((resolve) => {
+    const child = spawn(
+      process.execPath,
+      [path.join(root, "tools", "bds-mcp-server.mjs")],
+      {
+        cwd: root,
+        env: { ...serverEnvironment(), ...environment },
+        stdio: ["pipe", "pipe", "pipe"],
+        windowsHide: true,
+      },
+    );
+    let stderr = "";
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+    child.on("close", (code) => resolve({ code, stderr }));
+  });
+}
+
+function serverEnvironment() {
+  return {
+    ...process.env,
+    BDS_HOME: "C:/not-accessed-by-status",
+    BDS_MCP_PORT: "19151",
+    BDS_MCP_RUNTIME_WORKERS: "",
+    WEB_COMPANION_PORT: "0",
+    WEB_COMPANION_CONFIG_FILE: "",
+    WEB_COMPANION_CPU_ENGINE: "typescript",
+  };
+}
+
+function createClient(environment = {}) {
   const child = spawn(
     process.execPath,
     [path.join(root, "tools", "bds-mcp-server.mjs")],
     {
       cwd: root,
-      env: {
-        ...process.env,
-        BDS_HOME: "C:/not-accessed-by-status",
-        BDS_MCP_PORT: "19151",
-        WEB_COMPANION_PORT: "0",
-        WEB_COMPANION_CONFIG_FILE: "",
-      },
+      env: { ...serverEnvironment(), ...environment },
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
     },
