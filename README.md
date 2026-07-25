@@ -168,6 +168,9 @@ Development setup and Phase 0 evidence are documented in
 [the feasibility matrix](docs/feasibility-matrix.md). The optional Issue #106
 wasm batch-executor prototype and its adoption-gate evidence are recorded in
 [the Issue #106 evidence document](docs/issues/issue-106-wasm-batch-executor.md).
+The CS-Linux `run --batch` declaration that lets a hosted program reach those
+compute workers is recorded in
+[the Issue #114 evidence document](docs/issues/issue-114-run-batch-cs-abi.md).
 Player-experience checks are intentionally isolated in the
 [manual verification checklist](docs/manual-verification.md).
 
@@ -1691,19 +1694,34 @@ CS386SX model, instructions, CPU cycles, and virtual microseconds at its
 persisted clock. Scheduled `run --stats` and `python --stats` also separate host
 wall elapsed time from guest timing and report guest CPU cycles per host second
 plus the modeled-real-time ratio; host delay never changes guest cycle counts.
-On CS-DOS, `QBASIC file.bas` opens the CS QBASIC 1.0 IDE and
-`QBASIC /RUN file.bas` compiles and runs its supported subset. `CSASM`, `CSCC`,
-`CSCPP`, and `PWB` open the CS ASM 1.0 or CS C/C++ 1.0 WorkBench. No frontend
-invokes a host compiler, linker, or native binary. General dynamic/shared
-libraries remain a follow-up on the versioned object and ABI foundation. MCP's
-`cpuCycles` field uses one unit across CS ASM 1.0, CS C/C++ 1.0, CS QBASIC 1.0,
-and desktop Python; machine-instruction counts remain diagnostic values, not
-timing units. The portable CS386SX retains CS ASM 1.0, CS C/C++ 1.0, CS QBASIC
-1.0, and batch support, but rejects `python`/`micropython` commands with status
-127 and does not execute `/startup.py`. CS QBASIC F5, Ctrl+F5, Shift+F5, and
-`/RUN` execute the saved `.BAS` source in a transient validated process and
-return output to the IDE. They do not create a `.OBJ`, `.CSX`, native `.EXE`, or
-another persistent build artifact.
+CS-Linux additionally accepts `run [--batch] [--stats] program [arguments ...]`.
+`--batch` is a guest declaration that the program uses no operating-system
+service: it keeps `argv`, the environment, the working directory, its heap
+placement, standard output and standard error, and its exit status, and every
+other CS ABI operation - file access, terminal size and presence, key waits and
+polls, the clock, and sleeping - fails at once with `UnsupportedOperationError`
+naming the operation and directing the user to re-run without the flag. Nothing
+is approximated. A declared batch program may be executed on the managed compute
+plane instead of the interactive lane, so wall-clock time can fall, but output
+bytes, exit status, instructions, modeled cycles, and cache/bus counters are
+identical with and without it; where it runs stays host operator configuration.
+Batch output is one ordered stream in exact write order, so `--batch` is
+rejected before execution when it is combined with a pipeline or redirect, with
+`&`, with a shell utility, or with an executable that is not a hosted CS-Linux
+program exporting `main`. CS-DOS `run` has no such option. On CS-DOS,
+`QBASIC file.bas` opens the CS QBASIC 1.0 IDE and `QBASIC /RUN file.bas`
+compiles and runs its supported subset. `CSASM`, `CSCC`, `CSCPP`, and `PWB` open
+the CS ASM 1.0 or CS C/C++ 1.0 WorkBench. No frontend invokes a host compiler,
+linker, or native binary. General dynamic/shared libraries remain a follow-up on
+the versioned object and ABI foundation. MCP's `cpuCycles` field uses one unit
+across CS ASM 1.0, CS C/C++ 1.0, CS QBASIC 1.0, and desktop Python;
+machine-instruction counts remain diagnostic values, not timing units. The
+portable CS386SX retains CS ASM 1.0, CS C/C++ 1.0, CS QBASIC 1.0, and batch
+support, but rejects `python`/`micropython` commands with status 127 and does
+not execute `/startup.py`. CS QBASIC F5, Ctrl+F5, Shift+F5, and `/RUN` execute
+the saved `.BAS` source in a transient validated process and return output to
+the IDE. They do not create a `.OBJ`, `.CSX`, native `.EXE`, or another
+persistent build artifact.
 
 The native Python `shell` module is not a user API. It is enabled only for the
 built-in shell program selected when `/startup.py` is empty. User-authored

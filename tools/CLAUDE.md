@@ -156,11 +156,11 @@ the isolated server. Never point it at the interactive world.
 - Keep compute WebSockets authenticated, bounded, versioned, and loopback-only.
   Validate correlation and ownership before dispatch, and reject malformed,
   over-capacity, failed, or closing work without blocking unrelated workers.
-- Workers run the engine the operator selected: `typescript` by default,
-  `wasm-rust` opt-in. `dev:bds:web` always starts the plane; the MCP companion
-  only when `BDS_MCP_RUNTIME_WORKERS` is set, and it otherwise rejects a
-  non-default engine at startup. Selection, the artifact, and dual maintenance
-  belong to [`wasm/CLAUDE.md`](../wasm/CLAUDE.md).
+- A worker refuses every syscall except for a CS-Linux `run --batch` process.
+  Validate its startup process image and CS ABI heap placement at the create
+  boundary and require both together. The serviced subset, engine selection,
+  worker start-up, the artifact, and dual maintenance belong to
+  [`wasm/CLAUDE.md`](../wasm/CLAUDE.md).
 
 ## Pages and asset builders
 

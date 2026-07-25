@@ -581,6 +581,21 @@ export class Cs486Process implements CpuProcess {
     return this.outputValue;
   }
 
+  /**
+   * Appends guest-visible text to this process's single ordered output stream.
+   *
+   * The `print` opcodes and `cs.print.character` append to `outputValue`
+   * directly. A syscall handler that services guest writes without a terminal
+   * has no other way to reach the same buffer in the same order, so it appends
+   * here and inherits the identical ceiling and `OutputLimitError` fault
+   * instead of maintaining a second output buffer.
+   */
+  appendOutput(text: string): void {
+    this.outputValue += text;
+    if (this.outputValue.length > maximumOutputBytes)
+      throw new Cs486Fault("OutputLimitError", "output limit exceeded");
+  }
+
   get registers(): Readonly<Record<Cs486Register, number>> {
     return Object.fromEntries(
       cs486RegisterNames.map((name, index) => [

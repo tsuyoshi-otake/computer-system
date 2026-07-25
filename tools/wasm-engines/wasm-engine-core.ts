@@ -1,6 +1,9 @@
 import { createHash } from "node:crypto";
 
-import { Cs486Fault } from "../../src/domain/cpu/cs486.js";
+import {
+  Cs486Fault,
+  cs486ExecutableDataModel,
+} from "../../src/domain/cpu/cs486.js";
 import type { CpuModel } from "../../src/domain/cpu/models.js";
 import { VmRuntimeError } from "../../src/domain/runtime/errors.js";
 import type {
@@ -117,6 +120,7 @@ function prepareModelContext(
     geometry,
   );
   const context = {
+    dataModel: cs486ExecutableDataModel(executable),
     geometry,
     instructions: executable.instructions,
     memoryLayout,

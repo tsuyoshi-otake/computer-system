@@ -42,6 +42,15 @@ approximating it.
 - Cold opcodes (`call_indirect`, `syscall`, `print`, `halt`) exit before any
   state change; the TS bridge `tools/cs486-wasm-cold-op-bridge.ts` owns their
   execution.
+- An ordinary worker process refuses every syscall. A `run --batch` process is
+  the one exception: it carries a startup process image and the isolated CS ABI
+  subset (`exit`, `heapInfo`, and `fsWrite` on fd 1 and fd 2) that
+  `src/application/runtime/csAbi.ts` implements once for every engine. The
+  bridge supplies that handler with guest memory and registers, and it must
+  charge `accessData` for each read and write in exactly the order
+  `Cs486Process` charges it, or the two engines agree on output and diverge on
+  `run --stats`. Everything outside the subset stays an explicit
+  `UnsupportedOperationError`, never an approximation.
 - Deterministic floating point stays in TS (BigInt rationals). Never add f32/f64
   arithmetic to these modules.
 - Build artifacts (`wasm/dist/`, `cs486-batch-executor-rs/target/`) are never
@@ -52,6 +61,11 @@ approximating it.
 - Selecting `wasm-rust` in the companion requires `npm run build:cs486-wasm`
   output. A missing or malformed artifact fails managed startup explicitly.
   Never add a fallback to the TypeScript engine.
+- Engine selection is operator configuration: `typescript` by default,
+  `wasm-rust` opt-in, never a silent substitution. `dev:bds:web` always starts
+  the compute plane; the MCP companion starts runtime workers only when
+  `BDS_MCP_RUNTIME_WORKERS` is set, and otherwise rejects a non-default engine
+  at startup.
 
 ## Compute-worker engine selection
 

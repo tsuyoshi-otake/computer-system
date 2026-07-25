@@ -31,6 +31,13 @@ export interface ShellForegroundPython extends ShellProcessContext {
 }
 
 export interface ShellForegroundCs486 extends ShellProcessContext {
+  /**
+   * The guest declared with `run --batch` that this program uses no OS service.
+   * Only the isolated CS ABI subset (`exit`, `heapInfo`, and `fsWrite` on fd 1
+   * and fd 2) is serviced; anything else fails explicitly. Present only
+   * alongside `hostedStartup`.
+   */
+  readonly batch?: true;
   readonly command: "basic" | "csasm" | "cscc" | "qbasic" | "run";
   readonly compileCycles: number;
   readonly executable: Cs486Executable;

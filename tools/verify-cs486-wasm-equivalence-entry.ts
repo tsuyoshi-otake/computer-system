@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 
+import { createCsAbiBatchSyscallHandler } from "../src/application/runtime/csAbi.js";
 import { Cs486Process } from "../src/domain/cpu/cs486.js";
+import type { Cs486SyscallHandler } from "../src/domain/cpu/cs486.js";
 import type { CpuModel } from "../src/domain/cpu/models.js";
 import type {
   Cs486BenchmarkExecutionMode,
@@ -18,6 +20,7 @@ import {
   cs486FuzzRandom,
   generateCs486FuzzProgram,
 } from "./wasm-corpora/cs486-fuzz-generator.js";
+import { cs486BatchCsAbiForcedCases } from "./wasm-corpora/batch-cs-abi-corpus.js";
 
 export { cs486WasmRequiredExports } from "./cs486-wasm-batch-executor-abi.js";
 
@@ -97,6 +100,10 @@ export function runCs486WasmEquivalenceSuite(
     throw new RangeError("seedCount must be an integer between 0 and 512");
   const programs: Cs486FuzzProgram[] = [
     ...cs486FuzzForcedCases(),
+    // The one production path where a worker services a CS ABI operation, and
+    // therefore the only corpus that compares syscall-context memory access,
+    // startup images, and rejection faults across the two engines.
+    ...cs486BatchCsAbiForcedCases(),
     ...Array.from({ length: seedCount }, (_, index) =>
       generateCs486FuzzProgram(index + 1),
     ),
@@ -151,11 +158,24 @@ function compareConfiguration(
   count: () => void,
 ): void {
   const label = `program=${program.name} engine=${engineName} cpu=${cpuModel} mode=${executionMode} instrumentation=${instrumentation}`;
+  // Each side gets its own handler instance because the handler owns the
+  // process-scoped output budget; sharing one would let the first side's writes
+  // change the second side's ENOSPC boundary.
+  const guestSyscalls = batchSyscalls(program);
   const guest = new Cs486Process(program.executable, {
     collectMicroarchitectureStats: instrumentation === "enabled",
     cpuModel,
     memoryBytes: program.memoryBytes,
+    ...(guestSyscalls === undefined
+      ? {}
+      : { syscallHandler: guestSyscalls.handler }),
   });
+  guestSyscalls?.attach((text) => {
+    guest.appendOutput(text);
+  });
+  if (program.processImage !== undefined)
+    guest.initializeProcessImage(program.processImage);
+  const wasmSyscalls = batchSyscalls(program);
   const session = createCs486WasmExecutableSession(
     wasm.exports,
     wasm.memory,
@@ -164,9 +184,18 @@ function compareConfiguration(
       cpuModel,
       instrumentation,
       memoryBytes: program.memoryBytes,
+      ...(program.processImage === undefined
+        ? {}
+        : { processImage: program.processImage }),
       startOffset,
+      ...(wasmSyscalls === undefined
+        ? {}
+        : { syscallPolicy: wasmSyscalls.handler }),
     },
   );
+  wasmSyscalls?.attach((text) => {
+    session.appendOutput(text);
+  });
   const planRandom = cs486FuzzRandom(
     planSeed(program.name, cpuModel, executionMode, instrumentation),
   );
@@ -239,6 +268,34 @@ function compareConfiguration(
     if (tsTerminal && wasmTerminal) break;
   }
   divergences.push(...localDivergences);
+}
+
+/**
+ * Isolated CS ABI policy for one side of a batch comparison, or `undefined` for
+ * an ordinary program that must keep refusing every syscall. The output sink is
+ * late-bound because the handler has to exist before the process or session
+ * that owns the output buffer; a syscall can only run inside a slice, which is
+ * strictly later, so an unattached sink is a harness defect.
+ */
+function batchSyscalls(program: Cs486FuzzProgram):
+  | {
+      readonly attach: (sink: (text: string) => void) => void;
+      readonly handler: Cs486SyscallHandler;
+    }
+  | undefined {
+  const layout = program.csAbi;
+  if (layout === undefined) return undefined;
+  let sink: ((text: string) => void) | undefined;
+  return {
+    attach: (next: (text: string) => void): void => {
+      sink = next;
+    },
+    handler: createCsAbiBatchSyscallHandler(layout, (text: string): void => {
+      if (sink === undefined)
+        throw new Error("batch output sink is not attached yet");
+      sink(text);
+    }),
+  };
 }
 
 function compareSnapshots(

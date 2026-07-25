@@ -80,13 +80,19 @@ describe.skipIf(!artifactsPresent)(
         });
         expect(reports).toHaveLength(cs486WasmVariantNames.length);
         for (const report of reports) {
-          // Every configuration ran: (11 forced + 4 seeds) x 3 CPUs x 2
-          // modes x 2 instrumentation settings, with real field comparisons.
-          expect(report.configurations).toBe(15 * 3 * 2 * 2);
+          // Every configuration ran: (11 forced + 5 batch CS ABI + 4 seeds) x
+          // 3 CPUs x 2 modes x 2 instrumentation settings, with real field
+          // comparisons.
+          expect(report.configurations).toBe(20 * 3 * 2 * 2);
           expect(report.comparisons).toBeGreaterThan(report.configurations);
           expect(report.divergences).toEqual([]);
           expect(report.programs).toContain("forced-int-min-div-neg-one");
           expect(report.programs).toContain("fuzz-seed-4");
+          // The `run --batch` subset is a production path on both engines, so
+          // it has to be compared here rather than only on the reference
+          // implementation.
+          expect(report.programs).toContain("batch-heap-write-exit");
+          expect(report.programs).toContain("batch-unsupported-operation");
         }
         expect(divergenceCount).toBe(0);
       },

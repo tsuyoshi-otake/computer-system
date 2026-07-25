@@ -4,6 +4,8 @@ import type {
   Cs486Instruction,
 } from "../../src/domain/cpu/cs486.js";
 import { Cs486Fault } from "../../src/domain/cpu/cs486.js";
+import { cs486Word32DataModel } from "../../src/domain/cpu/cs486Compatibility.js";
+import type { Cs486DataModel } from "../../src/domain/cpu/cs486Compatibility.js";
 import {
   cs486WasmFaultCode,
   cs486WasmInstructionFlag,
@@ -23,6 +25,7 @@ import {
 
 interface FakeMachineOptions {
   readonly baseCycles?: number;
+  readonly dataModel?: Cs486DataModel;
   readonly executionFlags?: number;
   readonly functionEntries?: ReadonlyMap<number, Cs486FunctionSignature>;
   readonly initialOutputLength?: number;
@@ -39,6 +42,7 @@ interface FakeMachineOptions {
 
 interface FakeMachineState {
   readonly events: string[];
+  readonly ram: DataView;
   readonly ramWrites: { readonly address: number; readonly value: number }[];
   readonly registers: Int32Array;
   instructionPointer: number;
@@ -49,10 +53,12 @@ function createFakeMachine(options: FakeMachineOptions): {
   machine: Cs486WasmColdOpMachine;
   state: FakeMachineState;
 } {
+  const memoryBytes = options.memoryBytes ?? 65_536;
   const state: FakeMachineState = {
     events: [],
     instructionPointer: -1,
     output: "",
+    ram: new DataView(new ArrayBuffer(memoryBytes)),
     ramWrites: [],
     registers: new Int32Array(8),
   };
@@ -69,6 +75,7 @@ function createFakeMachine(options: FakeMachineOptions): {
       return initialOutputLength + state.output.length;
     },
     baseCycles: options.baseCycles ?? 1,
+    dataModel: options.dataModel ?? cs486Word32DataModel,
     executionFlags: options.executionFlags ?? 0,
     fetchInstruction(index) {
       state.events.push(`fetch:${String(index)}`);
@@ -81,9 +88,15 @@ function createFakeMachine(options: FakeMachineOptions): {
     instruction: options.instruction,
     instructionCount: options.instructionCount ?? 18,
     instructionIndex: options.instructionIndex ?? 4,
-    memoryBytes: options.memoryBytes ?? 65_536,
+    memoryBytes,
     opcode: options.opcode,
     operandA: options.operandA ?? 0,
+    readRamInt32(address) {
+      return state.ram.getInt32(address, true);
+    },
+    readRamUint8(address) {
+      return state.ram.getUint8(address);
+    },
     recordControlTransfer(taken) {
       state.events.push(`transfer:${String(taken)}`);
     },
@@ -97,6 +110,11 @@ function createFakeMachine(options: FakeMachineOptions): {
     syscall: options.syscall ?? rejectCs486WasmSyscall,
     writeRamInt32(address, value) {
       state.ramWrites.push({ address, value });
+      state.ram.setInt32(address, value, true);
+    },
+    writeRamUint8(address, value) {
+      state.ramWrites.push({ address, value });
+      state.ram.setUint8(address, value);
     },
   };
   return { machine, state };

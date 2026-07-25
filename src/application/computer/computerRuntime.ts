@@ -29,6 +29,7 @@ import {
   Cs486Process,
   runCs486,
   type Cs486Executable,
+  type Cs486ProcessImageInitialization,
   type Cs486RunObservation,
   type Cs486SyscallHandler,
 } from "../../domain/cpu/cs486.js";
@@ -144,9 +145,12 @@ import {
 import type { FloppyMedia } from "../../domain/storage/floppyMedia.js";
 import {
   CsAbiRuntime,
+  createAttachableCsAbiBatchSyscallHandler,
   csAbiErrno,
+  isCsAbiBatchSyscallHandler,
   prepareCsAbiStartup,
   writeTerminalText,
+  type CsAbiBatchHeapLayout,
 } from "../runtime/csAbi.js";
 import {
   advanceCompileJobContinuation,
@@ -1454,6 +1458,19 @@ export class ComputerRuntime {
     request: Extract<ShellForegroundRequest, { readonly kind: "cs486" }>,
     onComplete: (result: DebugShellCommandCompletion) => void,
   ): void {
+    if (request.batch === true) {
+      // This queue attaches no CS ABI startup image, so a batch process would
+      // start with no argv, no heap, and a syscall policy narrower than the one
+      // it was admitted with. Refusing is the only honest outcome.
+      onComplete({
+        outcome: "completed",
+        exitCode: 1,
+        stderr: "run: --batch is unavailable for queued debug execution\n",
+        stdout: "",
+        cpuCycles: 1,
+      });
+      return;
+    }
     const runtimeId = this.nextRuntimeId++;
     const granted = createGrantedCs486Process(
       entry,
@@ -2348,8 +2365,18 @@ export class ComputerRuntime {
             }
           : {}),
         executedInstructions: 0,
+        // A hosted program runs to its own `exit`; only the bounded non-hosted
+        // `run` job carries the resumable instruction ceiling. A batch process
+        // is hosted without a `CsAbiRuntime`, so it is excluded explicitly.
         instructionLimit:
-          request.kind === "cs486" && csAbi === undefined ? 100_000 : undefined,
+          request.kind === "cs486" &&
+          csAbi === undefined &&
+          request.batch !== true
+            ? 100_000
+            : undefined,
+        ...(request.kind === "cs486" && request.batch === true
+          ? { batch: true as const }
+          : {}),
         kind: request.kind,
         ...(memoryGrant === undefined ? {} : { memoryGrant }),
         osPid,
@@ -2595,6 +2622,15 @@ export class ComputerRuntime {
       request.hostedStartup,
       request.credentials,
     );
+    if (request.batch === true) {
+      return this.createBatchCs486Process(
+        entry,
+        request,
+        runtimeId,
+        allowRemote,
+        prepared,
+      );
+    }
     const csAbi = new CsAbiRuntime({
       computerId: entry.record.computerId,
       credentials: request.credentials,
@@ -2677,6 +2713,75 @@ export class ComputerRuntime {
     }
   }
 
+  /**
+   * Foreground path of a batch `run --batch` process.
+   *
+   * The guest declared that this program uses no OS service, so the host builds
+   * the ordinary CS ABI startup image but attaches no `CsAbiRuntime`: the whole
+   * remaining ABI surface is the isolated subset in `createCsAbiBatchSyscallHandler`,
+   * whose effects stay inside the process. That is what makes the process
+   * eligible for the managed compute plane, which owns no terminal, filesystem,
+   * or scheduler to service anything wider.
+   *
+   * Whether it actually runs remotely stays host operator configuration. With no
+   * compute plane configured the same isolated handler runs on the local
+   * `Cs486Process`, which is not a fallback: `--batch` promises "no OS services",
+   * never "runs in a worker".
+   *
+   * Batch output has one ordered sink instead of the `CsAbiRuntime` observer, so
+   * it reaches the terminal at completion rather than per write, and fd 1 and
+   * fd 2 interleave into that single stream.
+   */
+  private createBatchCs486Process(
+    entry: RuntimeEntry,
+    request: Extract<ShellForegroundRequest, { readonly kind: "cs486" }>,
+    runtimeId: number,
+    allowRemote: boolean,
+    prepared: ReturnType<typeof prepareCsAbiStartup>,
+  ): {
+    readonly grant: GuestProcessMemoryGrant;
+    readonly process: ObservableCs486Process;
+  } {
+    const layout: CsAbiBatchHeapLayout = {
+      heapBaseBytes: prepared.heapBaseBytes,
+      heapWords: prepared.heapWords,
+      startupAddress: prepared.startupAddress,
+    };
+    const batch = createAttachableCsAbiBatchSyscallHandler(layout);
+    const granted = createGrantedCs486Process(
+      entry,
+      request.executable,
+      request.command,
+      runtimeId,
+      {
+        batch: { csAbi: layout, processImage: prepared.image },
+        collectMicroarchitectureStats: this.shouldCollectMicroarchitectureStats(
+          request.stats,
+        ),
+        ...(allowRemote
+          ? { remoteFactory: this.remoteCs486ProcessFactory }
+          : {}),
+        syscallHandler: batch.handler,
+      },
+    );
+    try {
+      // A remote process carries the layout and image in its create command and
+      // builds the identical handler inside the worker, so only the local
+      // process needs its image applied and its sink attached here.
+      if (granted.process instanceof Cs486Process) {
+        const local = granted.process;
+        batch.attach((text) => {
+          local.appendOutput(text);
+        });
+        local.initializeProcessImage(prepared.image);
+      }
+      return granted;
+    } catch (error: unknown) {
+      releaseGuestProcessMemory(granted.grant);
+      throw error;
+    }
+  }
+
   private runSynchronousHostedCs486(
     entry: RuntimeEntry,
     request: Extract<ShellForegroundRequest, { readonly kind: "cs486" }>,
@@ -2694,6 +2799,15 @@ export class ComputerRuntime {
       hostedStartup,
       request.credentials,
     );
+    if (request.batch === true) {
+      return this.runSynchronousBatchCs486(
+        entry,
+        request,
+        prepared,
+        memoryBytes,
+        collectMicroarchitectureStats,
+      );
+    }
     let stdout = "";
     const csAbi = new CsAbiRuntime({
       computerId: entry.record.computerId,
@@ -2755,6 +2869,52 @@ export class ComputerRuntime {
     } finally {
       if (!finalized) csAbi.finalize();
     }
+  }
+
+  /**
+   * Synchronous MCP execution of a batch process.
+   *
+   * It runs locally like every other synchronous debug command, and that is not
+   * a downgrade: `--batch` promises that no OS service is used, so the isolated
+   * handler must replace `CsAbiRuntime` here too. Servicing the full ABI just
+   * because this path happens to have a terminal and filesystem would let a
+   * program that `--batch` must reject succeed depending on where it was
+   * started from.
+   */
+  private runSynchronousBatchCs486(
+    entry: RuntimeEntry,
+    request: Extract<ShellForegroundRequest, { readonly kind: "cs486" }>,
+    prepared: ReturnType<typeof prepareCsAbiStartup>,
+    memoryBytes: number,
+    collectMicroarchitectureStats: boolean,
+  ): Cs486RunObservation {
+    const batch = createAttachableCsAbiBatchSyscallHandler({
+      heapBaseBytes: prepared.heapBaseBytes,
+      heapWords: prepared.heapWords,
+      startupAddress: prepared.startupAddress,
+    });
+    const process = new Cs486Process(request.executable, {
+      collectMicroarchitectureStats,
+      cpuModel: entry.record.hardware.cpuModel,
+      memoryBytes,
+      syscallHandler: batch.handler,
+    });
+    batch.attach((text) => {
+      process.appendOutput(text);
+    });
+    process.initializeProcessImage(prepared.image);
+    const slice = process.runInstructionSlice(100_000);
+    if (process.state.kind === "crashed") throw process.state.error;
+    return {
+      cycles: slice.cpuCycles,
+      executedInstructions: slice.executedInstructions,
+      microarchitecture: process.microarchitectureStatsEnabled
+        ? process.microarchitectureStats
+        : null,
+      output: process.output,
+      registers: process.registers,
+      state: process.state.kind === "completed" ? "halted" : "yielded",
+    };
   }
 
   private startJobControl(
@@ -3691,7 +3851,7 @@ export class ComputerRuntime {
       ]);
     } else if (state.kind === "completed") {
       exitCode =
-        foreground.csAbi === undefined
+        foreground.csAbi === undefined && foreground.batch !== true
           ? 0
           : typeof state.value === "number" && Number.isInteger(state.value)
             ? state.value & 0xff
@@ -5307,6 +5467,12 @@ interface DebugGuestJob {
 }
 
 interface ForegroundGuestProcess {
+  /**
+   * Marks a `run --batch` process. It has no `CsAbiRuntime`, yet its exit
+   * status still comes from the guest's own CS ABI `exit`, so completion must
+   * read the process completion value exactly as the hosted path does.
+   */
+  readonly batch?: true;
   readonly command:
     | "basic"
     | "csasm"
@@ -5756,6 +5922,15 @@ function createGrantedCs486Process(
   command: string,
   runtimeId: number,
   options: {
+    /**
+     * Startup image and heap placement of an admitted batch process. A remote
+     * process needs both in its create command; a local one applies them
+     * through its caller, which also owns the output sink.
+     */
+    readonly batch?: {
+      readonly csAbi: CsAbiBatchHeapLayout;
+      readonly processImage: Cs486ProcessImageInitialization;
+    };
     readonly collectMicroarchitectureStats: boolean;
     readonly remoteFactory?: RemoteCs486ProcessFactory;
     readonly syscallHandler?: Cs486SyscallHandler;
@@ -5806,21 +5981,42 @@ function createRemoteGrantedCs486Process(
   runtimeId: number,
   memoryBytes: number,
   options: {
+    readonly batch?: {
+      readonly csAbi: CsAbiBatchHeapLayout;
+      readonly processImage: Cs486ProcessImageInitialization;
+    };
     readonly collectMicroarchitectureStats: boolean;
     readonly syscallHandler?: Cs486SyscallHandler;
   },
 ): ObservableCs486Process {
-  if (options.syscallHandler !== rejectCsAbiSyscallHandler) {
+  // Two policies are isolated enough for a worker: refusing every syscall, and
+  // the batch CS ABI subset whose effects stay inside the process. Anything
+  // else needs a terminal, filesystem, or scheduler the worker does not have.
+  const batchPolicy =
+    options.syscallHandler !== undefined &&
+    isCsAbiBatchSyscallHandler(options.syscallHandler);
+  if (options.syscallHandler !== rejectCsAbiSyscallHandler && !batchPolicy) {
     throw new Error(
       "Companion execution requires the isolated CS486 syscall policy",
     );
   }
+  // The policy and the startup image describe the same decision, so a mismatch
+  // is a host defect rather than something the worker should discover.
+  if (batchPolicy !== (options.batch !== undefined)) {
+    throw new Error(
+      "Companion batch execution requires a CS ABI startup image",
+    );
+  }
   return factory.create({
+    ...(options.batch === undefined ? {} : { csAbi: options.batch.csAbi }),
     collectMicroarchitectureStats: options.collectMicroarchitectureStats,
     computerId: entry.record.computerId,
     cpuModel: entry.record.hardware.cpuModel,
     executable,
     memoryBytes,
+    ...(options.batch === undefined
+      ? {}
+      : { processImage: options.batch.processImage }),
     runtimeId,
   });
 }

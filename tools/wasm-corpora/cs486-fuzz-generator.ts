@@ -1,6 +1,8 @@
+import type { CsAbiBatchHeapLayout } from "../../src/application/runtime/csAbi.js";
 import type {
   Cs486Executable,
   Cs486Instruction,
+  Cs486ProcessImageInitialization,
 } from "../../src/domain/cpu/cs486.js";
 import { createCs486Flat32MemoryMetadata } from "../../src/domain/cpu/cs486.js";
 import { cs486Word32DataModel } from "../../src/domain/cpu/cs486Compatibility.js";
@@ -19,9 +21,17 @@ import type { Cs486Register } from "../../src/domain/cpu/instructionSet.js";
  * that would truncate coverage of its later blocks.
  */
 export interface Cs486FuzzProgram {
+  /**
+   * Heap placement of an admitted `run --batch` process. Present exactly when
+   * the program is allowed to reach the isolated CS ABI subset; absent programs
+   * keep the harness policy that rejects every syscall.
+   */
+  readonly csAbi?: CsAbiBatchHeapLayout;
   readonly executable: Cs486Executable;
   readonly memoryBytes: number;
   readonly name: string;
+  /** Startup image installed before the first instruction, when present. */
+  readonly processImage?: Cs486ProcessImageInitialization;
   /** Per-slice instruction budget the equivalence runner should use. */
   readonly recommendedSliceInstructions: number;
 }

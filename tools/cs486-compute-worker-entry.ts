@@ -1,5 +1,6 @@
 import { parentPort, workerData } from "node:worker_threads";
 
+import type { CsAbiBatchHeapLayout } from "../src/application/runtime/csAbi.js";
 import {
   defaultCs486StackBytes,
   maximumCs486LinearAddressSpaceBytes,
@@ -77,6 +78,7 @@ interface CreateCommand extends CommonCommand {
   readonly options: {
     readonly collectMicroarchitectureStats: boolean;
     readonly cpuModel: CpuModel;
+    readonly csAbi?: CsAbiBatchHeapLayout;
     readonly memoryBytes: number;
     readonly processImage?: Cs486ProcessImageInitialization;
   };
@@ -424,6 +426,7 @@ function parseCreateCommand(
   assertOnlyKeys(value.options, [
     "collectMicroarchitectureStats",
     "cpuModel",
+    "csAbi",
     "memoryBytes",
     "processImage",
   ]);
@@ -443,6 +446,17 @@ function parseCreateCommand(
     value.options.processImage === undefined
       ? undefined
       : parseProcessImage(value.options.processImage);
+  const csAbi =
+    value.options.csAbi === undefined
+      ? undefined
+      : parseCsAbiLayout(value.options.csAbi, value.options.memoryBytes);
+  // A batch process is exactly a CS ABI startup image plus the heap placement
+  // that image was built around. Either half alone would let a worker service
+  // `heapInfo` for memory nothing initialized, so the pair is required.
+  if ((csAbi === undefined) !== (processImage === undefined))
+    throw invalidRequest(
+      "CS486 create requires a CS ABI layout and a process image together",
+    );
   return {
     ...common,
     command: "create",
@@ -450,9 +464,39 @@ function parseCreateCommand(
     options: {
       collectMicroarchitectureStats,
       cpuModel: value.options.cpuModel,
+      ...(csAbi === undefined ? {} : { csAbi }),
       memoryBytes: value.options.memoryBytes,
       ...(processImage === undefined ? {} : { processImage }),
     },
+  };
+}
+
+/**
+ * Validates the batch heap placement against the RAM the same create admitted,
+ * so a malformed or oversized layout is refused before any process exists. The
+ * process itself still enforces its own bounds on every access; this only keeps
+ * the wire payload inside the memory this create declared.
+ */
+function parseCsAbiLayout(
+  value: unknown,
+  memoryBytes: number,
+): CsAbiBatchHeapLayout {
+  if (!isRecord(value)) throw invalidRequest("invalid CS486 CS ABI layout");
+  assertOnlyKeys(value, ["heapBaseBytes", "heapWords", "startupAddress"]);
+  if (
+    !isSafeIntegerInRange(value.heapBaseBytes, 0, memoryBytes) ||
+    !isSafeIntegerInRange(
+      value.heapWords,
+      0,
+      Math.floor(memoryBytes / Int32Array.BYTES_PER_ELEMENT),
+    ) ||
+    !isSafeIntegerInRange(value.startupAddress, 0, memoryBytes)
+  )
+    throw invalidRequest("invalid CS486 CS ABI layout");
+  return {
+    heapBaseBytes: value.heapBaseBytes,
+    heapWords: value.heapWords,
+    startupAddress: value.startupAddress,
   };
 }
 

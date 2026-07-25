@@ -1525,6 +1525,25 @@ export class ShellSession {
     );
   }
 
+  /**
+   * True when this command word list declares CS-Linux `run --batch`.
+   *
+   * Only the two leading option words can be a declaration, exactly as
+   * `runExecutable` parses them, so a program argument that happens to be
+   * spelled `--batch` is not mistaken for one.
+   */
+  private declaresBatchRun(command: ShellCommandNode): boolean {
+    if (this.frontend.id !== "linux") return false;
+    if (this.commands.canonicalCommand(command.words[0] ?? "") !== "run")
+      return false;
+    for (let index = 1; index <= 2; index += 1) {
+      const word = command.words[index];
+      if (word === "--batch") return true;
+      if (word !== "--stats" && word !== "-v") return false;
+    }
+    return false;
+  }
+
   private executePipeline(
     pipeline: ShellPipelineNode,
     depth: number,
@@ -1537,6 +1556,22 @@ export class ShellSession {
     const expandedCommands = pipeline.commands.map((command) =>
       this.expandCommand(command),
     );
+    // A batch process buffers one ordered stream inside whichever engine runs
+    // it and services no `fsRead`, so it cannot reproduce fd 0/1/2 separation
+    // or the back pressure a pipe or a redirect requires. Refuse before the
+    // stage executes, so nothing partially runs.
+    for (const command of expandedCommands) {
+      if (
+        this.declaresBatchRun(command) &&
+        (expandedCommands.length > 1 || command.redirects.length > 0)
+      ) {
+        return commandFailure(
+          "run",
+          "--batch cannot be used with a pipeline or a redirect",
+          2,
+        );
+      }
+    }
     if (this.frontend.id === "linux" && expandedCommands.length > 1) {
       try {
         const lastCommand = expandedCommands.at(-1)!;
@@ -2180,6 +2215,15 @@ export class ShellSession {
         return commandFailure(
           requestedName || "shell",
           "only linked RUN executables may become background jobs",
+          2,
+        );
+      }
+      // A background CS486 job carries no CS ABI startup image, so the
+      // isolated batch subset `--batch` promises would not be serviced there.
+      if (executed.foreground.batch === true) {
+        return commandFailure(
+          requestedName || "run",
+          "--batch cannot become a background job",
           2,
         );
       }

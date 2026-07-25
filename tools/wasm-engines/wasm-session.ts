@@ -1,7 +1,14 @@
 import { createHash } from "node:crypto";
 
-import type { Cs486Executable } from "../../src/domain/cpu/cs486.js";
-import { Cs486Fault } from "../../src/domain/cpu/cs486.js";
+import type {
+  Cs486Executable,
+  Cs486ProcessImageInitialization,
+} from "../../src/domain/cpu/cs486.js";
+import {
+  Cs486Fault,
+  cs486ExecutableDataModel,
+} from "../../src/domain/cpu/cs486.js";
+import type { Cs486DataModel } from "../../src/domain/cpu/cs486Compatibility.js";
 import type { Cs486Register } from "../../src/domain/cpu/instructionSet.js";
 import { cs486RegisterNames } from "../../src/domain/cpu/instructionSet.js";
 import type { CpuMicroarchitectureStats } from "../../src/domain/cpu/memoryHierarchy.js";
@@ -34,6 +41,7 @@ import type {
 } from "../cs486-wasm-cold-op-bridge.js";
 import {
   cs486WasmFaultToError,
+  cs486WasmMaximumOutputBytes,
   executeCs486WasmColdInstruction,
   rejectCs486WasmSyscall,
 } from "../cs486-wasm-cold-op-bridge.js";
@@ -69,6 +77,7 @@ export type Cs486WasmSliceMode = "cpu-slice" | "instruction-slice";
 export type Cs486WasmInstrumentationMode = "disabled" | "enabled";
 
 export interface Cs486WasmPreparedModelContext {
+  readonly dataModel: Cs486DataModel;
   readonly geometry: ReturnType<typeof cs486WasmCacheGeometry>;
   readonly instructions: Cs486Executable["instructions"];
   readonly memoryLayout: Cs486WasmMemoryLayout;
@@ -121,6 +130,13 @@ export interface Cs486WasmExecutableSession {
   readonly microarchitectureStatsEnabled: boolean;
   readonly output: string;
   readonly state: Cs486WasmSessionState;
+  /**
+   * Appends guest-visible text to the same ordered buffer the inline `print`
+   * cold ops write to, so an isolated syscall handler never needs a second
+   * output stream. Mirrors `Cs486Process.appendOutput`, including its ceiling
+   * and `OutputLimitError` fault.
+   */
+  appendOutput(text: string): void;
   fail(error: VmRuntimeError): Cs486WasmSessionState;
   registerValue(register: Cs486Register): number;
   runSlice(
@@ -137,6 +153,12 @@ export interface Cs486WasmSessionOptions {
   readonly cpuModel: CpuModel;
   readonly instrumentation: Cs486WasmInstrumentationMode;
   readonly memoryBytes: number;
+  /**
+   * Application-owned startup image installed before the first instruction,
+   * mirroring `Cs486Process.initializeProcessImage` validation for word/byte
+   * segments, heap bounds, and right-to-left argument pushes.
+   */
+  readonly processImage?: Cs486ProcessImageInitialization;
   readonly startOffset: number;
   /**
    * Host policy for every syscall except the inline `cs.print.character`
@@ -183,6 +205,7 @@ export function createCs486WasmExecutableSession(
   const bytes = new Uint8Array(memory.buffer);
   const collectStats = options.instrumentation === "enabled";
   const setupContext: Cs486WasmPreparedModelContext = {
+    dataModel: cs486ExecutableDataModel(executable),
     geometry,
     instructions: executable.instructions,
     memoryLayout: layout,
@@ -201,6 +224,13 @@ export function createCs486WasmExecutableSession(
   if (configureCode !== 0)
     throw new Error(
       `cs486 wasm configure rejected the params block with code ${String(configureCode)}`,
+    );
+  if (options.processImage !== undefined)
+    applyCs486WasmProcessImage(
+      view,
+      layout,
+      processLayout,
+      options.processImage,
     );
 
   // The RAM image has been copied into linear memory, so nothing below may
@@ -237,13 +267,19 @@ export function createCs486WasmExecutableSession(
       true,
     );
   };
-  const markCompleted = (): void => {
+  const markCompleted = (value?: number): void => {
+    // `halt` and end-of-program complete with EAX, exactly as production.
+    // A syscall handler that returns a completion status owns that value
+    // instead, so an ABI `exit` reports the status the guest passed rather
+    // than whatever EAX happened to hold.
     state = {
       kind: "completed",
-      value: view.getInt32(
-        layout.registersBase + cs486WasmEaxRegisterIndex * 4,
-        true,
-      ),
+      value:
+        value ??
+        view.getInt32(
+          layout.registersBase + cs486WasmEaxRegisterIndex * 4,
+          true,
+        ),
     };
   };
   const isTerminal = (): boolean => state.kind !== "ready";
@@ -351,7 +387,7 @@ export function createCs486WasmExecutableSession(
             totalCycles += coldResult.cycles;
           }
           if (coldResult.kind === "completed") {
-            markCompleted();
+            markCompleted(coldResult.completionValue);
             break running;
           }
           break;
@@ -388,6 +424,11 @@ export function createCs486WasmExecutableSession(
   });
 
   return {
+    appendOutput(text) {
+      output += text;
+      if (output.length > cs486WasmMaximumOutputBytes)
+        throw new Cs486Fault("OutputLimitError", "output limit exceeded");
+    },
     fail(error) {
       // Production `fail`/`terminate` are no-ops once terminal, so the first
       // recorded outcome stays the one observable terminal state.
@@ -421,6 +462,140 @@ export function createCs486WasmExecutableSession(
       return state;
     },
   };
+}
+
+/**
+ * Installs an admitted application-owned startup image into wasm linear memory
+ * before the first instruction runs. This is the wasm half of
+ * `Cs486Process.initializeProcessImage`: the validation order, limits, fault
+ * identities, fault text, write order, and final `esp` must stay identical, or
+ * a CS ABI program observes a different startup depending on the engine the
+ * operator selected. Sessions are created per run and this is the only caller,
+ * so the production "no longer initializable" state check has no analogue here.
+ */
+export function applyCs486WasmProcessImage(
+  view: DataView,
+  layout: Cs486WasmMemoryLayout,
+  processLayout: Cs486WasmProcessLayout,
+  image: Cs486ProcessImageInitialization,
+): void {
+  if (image.segments.length > 32 || image.stackArguments.length > 32) {
+    throw new Cs486Fault(
+      "ResourceLimitError",
+      "CS486 process image entry limit exceeded",
+    );
+  }
+  let initializedBytes = 0;
+  const ranges: { readonly end: number; readonly start: number }[] = [];
+  for (const segment of image.segments) {
+    if (
+      !Number.isSafeInteger(segment.address) ||
+      segment.address < 0 ||
+      (segment.bytes === undefined && segment.address % 4 !== 0)
+    ) {
+      throw new Cs486Fault(
+        "MemoryAccessError",
+        "CS486 process image address is invalid or unaligned",
+      );
+    }
+    if (segment.bytes !== undefined && segment.words.length !== 0)
+      throw new Cs486Fault(
+        "ValueError",
+        "CS486 process image segment cannot mix words and bytes",
+      );
+    const segmentBytes =
+      segment.bytes === undefined
+        ? segment.words.length * 4
+        : segment.bytes.length;
+    initializedBytes += segmentBytes;
+    if (initializedBytes > 32 * 1_024) {
+      throw new Cs486Fault(
+        "ResourceLimitError",
+        "CS486 process image byte limit exceeded",
+      );
+    }
+    const end = segment.address + segmentBytes;
+    if (
+      !Number.isSafeInteger(end) ||
+      segment.address < processLayout.heapBaseBytes ||
+      end > processLayout.stackFloorBytes
+    ) {
+      throw new Cs486Fault(
+        "MemoryAccessError",
+        "CS486 process image is outside declared heap memory",
+      );
+    }
+    if (segment.bytes === undefined) {
+      for (const word of segment.words) {
+        if (
+          !Number.isInteger(word) ||
+          word < -0x80_00_00_00 ||
+          word > 0xff_ff_ff_ff
+        )
+          throw new Cs486Fault(
+            "ValueError",
+            "CS486 process image contains an invalid word",
+          );
+      }
+    } else if (
+      segment.bytes.some(
+        (byte) => !Number.isInteger(byte) || byte < 0 || byte > 0xff,
+      )
+    ) {
+      throw new Cs486Fault(
+        "ValueError",
+        "CS486 process image contains an invalid byte",
+      );
+    }
+    ranges.push({ end, start: segment.address });
+  }
+  ranges.sort((left, right) => left.start - right.start);
+  for (let index = 1; index < ranges.length; index += 1) {
+    if (ranges[index]!.start < ranges[index - 1]!.end) {
+      throw new Cs486Fault(
+        "MemoryAccessError",
+        "CS486 process image segments overlap",
+      );
+    }
+  }
+  const nextStack = processLayout.memoryBytes - image.stackArguments.length * 4;
+  if (nextStack < processLayout.stackFloorBytes) {
+    throw new Cs486Fault(
+      "StackOverflowError",
+      "CS486 startup arguments exceed the declared stack",
+    );
+  }
+  for (const argument of image.stackArguments) {
+    if (!Number.isInteger(argument)) {
+      throw new Cs486Fault(
+        "ValueError",
+        "CS486 startup argument is not an integer word",
+      );
+    }
+  }
+
+  for (const segment of image.segments) {
+    if (segment.bytes === undefined)
+      for (const [index, word] of segment.words.entries())
+        view.setInt32(
+          layout.ramBase + segment.address + index * 4,
+          word | 0,
+          true,
+        );
+    else
+      for (const [index, byte] of segment.bytes.entries())
+        view.setUint8(layout.ramBase + segment.address + index, byte);
+  }
+  let stack = processLayout.memoryBytes;
+  for (let index = image.stackArguments.length - 1; index >= 0; index -= 1) {
+    stack -= 4;
+    view.setInt32(
+      layout.ramBase + stack,
+      image.stackArguments[index]! | 0,
+      true,
+    );
+  }
+  view.setInt32(layout.registersBase + espRegisterIndex * 4, stack, true);
 }
 
 /** Guest stack pointer, read without materializing the register record. */
@@ -553,12 +728,15 @@ export function createCs486WasmColdOpMachine(
     accessData: (address, kind) =>
       exports.access_data(address, kind === "write" ? 1 : 0),
     appendOutput,
+    dataModel: context.dataModel,
     fetchInstruction: (index) => exports.fetch_instruction(index),
     functionEntries: context.processLayout.functionEntries,
     getRegister: (index) =>
       view.getInt32(layout.registersBase + index * 4, true),
     instructionCount: context.prepared.opcodes.length,
     memoryBytes: context.processLayout.memoryBytes,
+    readRamInt32: (address) => view.getInt32(layout.ramBase + address, true),
+    readRamUint8: (address) => view.getUint8(layout.ramBase + address),
     recordControlTransfer: (taken) =>
       exports.record_control_transfer(taken ? 1 : 0),
     setInstructionPointer: (value) =>
@@ -573,6 +751,8 @@ export function createCs486WasmColdOpMachine(
     syscall: syscallPolicy,
     writeRamInt32: (address, value) =>
       view.setInt32(layout.ramBase + address, value, true),
+    writeRamUint8: (address, value) =>
+      view.setUint8(layout.ramBase + address, value),
   };
   const instructions = context.instructions;
   return (instructionIndex) => ({

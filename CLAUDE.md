@@ -167,14 +167,14 @@ synchronized.
   callable/sentinel iteration, type parameters, lazy type aliases, generic
   aliases, runtime subscription, and the typing runtime core.
 - #93-#96: Bounded Python 3.14 coroutines, async protocols, async generators and
-  comprehensions, exception groups with `except*`, template strings, and
-  `string.templatelib`.
+  comprehensions, `except*` exception groups, and `string.templatelib`.
 - #97/#98/#100/#101/#102: Bounded Python descriptors, attribute customization,
   deletion, C3 inheritance, `super`/class cells, and `__new__` construction.
 - #33: Compile RAM lease finalization across completion, disconnect, and detach.
 - #34: DOS memory architecture v2, atomic CONFIG, address allocation, MEM
   snapshots, and declared process grants.
-- #106: CS486 throughput and the opt-in Rust wasm compute-worker engine.
+- #106/#114: CS486 throughput, the opt-in Rust wasm compute-worker engine, and
+  `run --batch` with its isolated CS ABI worker subset.
 - #111: CS-Linux login-boundary tty clear and released-terminal input.
 - #112: Bounded rotating OS runtime journal and visible CSBIOS boot failure.
 - #113: One `terminal_keys` wakeup owner, bounded atomic CPU sub-slices, and

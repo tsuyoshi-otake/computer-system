@@ -20,6 +20,18 @@ paths, so **the CS486 contract now has two implementations that must agree**.
   `npm run verify:cs486-wasm-equivalence` as part of the definition of done for
   any change in this list, and extend its forced cases when a change introduces
   a new divergence risk.
+- Process-image initialization (`initializeProcessImage`) and the isolated batch
+  CS ABI subset are on that list. `run --batch` gives a worker process a startup
+  image and lets it reach `exit`, `heapInfo`, and `fsWrite` on fd 1 and fd 2
+  through `createCsAbiBatchSyscallHandler`; both engines service them, and both
+  charge the same syscall-context memory accesses in the same order, so a bridge
+  that reads the same bytes differently still diverges on `run --stats`. The
+  handler itself lives once in `src/application/runtime/csAbi.ts` and is shared
+  by the in-session, TypeScript-worker, and wasm-worker paths; only the guest
+  memory and register access underneath it is per engine. Extend
+  `tools/wasm-corpora/batch-cs-abi-corpus.ts` when that subset changes, and keep
+  `tests/tools/cs486BatchCsAbiCorpus.test.ts` pinning what each corpus program
+  reaches on `Cs486Process` so zero divergences cannot mean zero coverage.
 - Where wasm genuinely cannot reproduce a behaviour, the engine boundary must
   refuse the work explicitly at create time rather than approximate it.
   `tools/cs486-compute-worker-cpu-engine.ts` owns those refusals; deterministic

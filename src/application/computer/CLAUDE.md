@@ -11,6 +11,19 @@
 - Periodic snapshots must be fixed-batch O(K), without allocating an O(N) list
   on every pass.
 
+## Hosted and batch guest execution
+
+- A hosted foreground process gets its CS ABI startup image and its syscall
+  policy from the same place. `run --batch` builds the image here and attaches
+  the isolated batch handler instead of a `CsAbiRuntime`; that pairing is what
+  makes it eligible for the compute plane, which owns no terminal, filesystem,
+  or scheduler. Never widen the batch policy to match a path that happens to
+  have those.
+- An execution path that attaches no startup image must refuse `--batch` instead
+  of running the process anyway. The queued MCP debug path does exactly that: a
+  process there would start with no argv, no heap, and a policy narrower than
+  the one it was admitted with.
+
 ## Terminal and security finalization
 
 - `ComputerRuntime` owns the final `terminal_closed` security transition. On

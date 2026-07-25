@@ -1,4 +1,5 @@
 import {
+  Cs486Fault,
   cs486ExecutableMemoryRequirements,
   cs486ExecutableDataModel,
   parseCs486FunctionSignature,
@@ -1324,6 +1325,200 @@ export class CsAbiRuntime {
     this.emitOutput(1, this.stdoutBuffer);
     this.stdoutBuffer = "";
   }
+}
+
+/**
+ * Heap placement a batch process reads through `heapInfo`. The host builds the
+ * startup image before the process exists, so all three values are already
+ * decided and stay constant for its whole life; the handler only reports them.
+ */
+export interface CsAbiBatchHeapLayout {
+  readonly heapBaseBytes: number;
+  readonly heapWords: number;
+  readonly startupAddress: number;
+}
+
+/**
+ * `Cs486SyscallHandler` tagged as the isolated batch policy.
+ *
+ * Ownership boundaries that must refuse a terminal-backed `CsAbiRuntime`
+ * handler test this tag instead of comparing against one particular function
+ * identity, so a batch process and a fully rejected process can both satisfy
+ * the same guard.
+ */
+export interface CsAbiBatchSyscallHandler extends Cs486SyscallHandler {
+  readonly isolatedCsAbi: true;
+}
+
+export function isCsAbiBatchSyscallHandler(
+  handler: Cs486SyscallHandler | undefined,
+): handler is CsAbiBatchSyscallHandler {
+  return (
+    handler !== undefined &&
+    (handler as Partial<CsAbiBatchSyscallHandler>).isolatedCsAbi === true
+  );
+}
+
+/** Rejection of an operation a batch process is not allowed to reach. */
+class CsAbiBatchRejection extends Error {
+  constructor(readonly fault: Cs486Fault) {
+    super(fault.message);
+    this.name = "CsAbiBatchRejection";
+  }
+}
+
+/**
+ * CS ABI policy for a process that runs with no OS services attached.
+ *
+ * A batch process executes wherever the host schedules it, including a managed
+ * compute worker that has no guest filesystem, terminal, scheduler, or clock.
+ * Only the three operations whose entire effect stays inside the process are
+ * serviced:
+ *
+ * - `exit` completes with the normalized status, exactly as `CsAbiRuntime`.
+ * - `heapInfo` reports the placement the host already committed to. It is a
+ *   pure read of create-time values, so it cannot depend on where it runs.
+ * - `fsWrite` on fd 1 and fd 2 appends to the process's own output stream.
+ *
+ * Every other selector, every other descriptor, and every non-`cs` syscall
+ * raises `UnsupportedOperationError`. Nothing is approximated: a batch process
+ * that reaches for a file, a key, or the clock fails with a guest-visible fault
+ * naming the operation, and the caller re-runs it without batch mode.
+ *
+ * Unlike `CsAbiRuntime`, fd 1 is not line buffered and fd 2 is not a separate
+ * sink. Both descriptors append to one ordered stream in exact write order,
+ * which is what the process already does for its `print` opcodes. That removes
+ * any buffered remainder, so terminating a batch process cannot drop output it
+ * already accepted.
+ */
+export function createCsAbiBatchSyscallHandler(
+  layout: CsAbiBatchHeapLayout,
+  appendOutput: (text: string) => void,
+): CsAbiBatchSyscallHandler {
+  let outputWords = 0;
+  const handler = (
+    name: string,
+    context: Cs486SyscallContext,
+  ): Cs486SyscallResult => {
+    if (name !== "cs") return completeErrno(context, csAbiErrno.eperm);
+    try {
+      switch (context.readRegister("ebx")) {
+        case csAbiSelectors.exit:
+          return {
+            kind: "complete",
+            value: normalizeExitStatus(context.readRegister("ecx")),
+          };
+        case csAbiSelectors.heapInfo:
+          return batchHeapInfo(context, layout);
+        case csAbiSelectors.fsWrite: {
+          const written = batchWrite(context, appendOutput, outputWords);
+          outputWords = written.outputWords;
+          return written.result;
+        }
+        default:
+          throw rejectBatchOperation(
+            `CS ABI operation ${String(context.readRegister("ebx"))}`,
+          );
+      }
+    } catch (error: unknown) {
+      // A rejection is the batch contract failing, not a guest errno: it must
+      // reach the process as the fault it is. Everything else keeps the
+      // production mapping so a serviced operation reports the same errno it
+      // would report under CsAbiRuntime.
+      if (error instanceof CsAbiBatchRejection) throw error.fault;
+      return completeErrno(context, errnoFor(error));
+    }
+  };
+  return Object.assign(handler, { isolatedCsAbi: true as const });
+}
+
+/** A batch handler whose output sink is supplied after construction. */
+export interface AttachableCsAbiBatchSyscallHandler {
+  readonly attach: (sink: (text: string) => void) => void;
+  readonly handler: CsAbiBatchSyscallHandler;
+}
+
+/**
+ * Batch handler for a caller that owns the output buffer it writes into.
+ *
+ * Every host that runs a batch process - the shell session, MCP, the local
+ * runtime path, and both compute-worker engines - has to build the handler
+ * before the process or wasm session that accumulates output, so the sink
+ * cannot be a construction argument. `attach` runs immediately after that
+ * construction and strictly before any slice, which makes an unattached sink a
+ * host defect rather than a state a guest can reach.
+ */
+export function createAttachableCsAbiBatchSyscallHandler(
+  layout: CsAbiBatchHeapLayout,
+): AttachableCsAbiBatchSyscallHandler {
+  let sink: ((text: string) => void) | undefined;
+  return {
+    attach: (next: (text: string) => void): void => {
+      sink = next;
+    },
+    handler: createCsAbiBatchSyscallHandler(layout, (text) => {
+      if (sink === undefined)
+        throw new Error("Batch CS ABI output sink is not attached");
+      sink(text);
+    }),
+  };
+}
+
+function rejectBatchOperation(operation: string): CsAbiBatchRejection {
+  return new CsAbiBatchRejection(
+    new Cs486Fault(
+      "UnsupportedOperationError",
+      `batch process cannot use ${operation}; re-run this program without batch mode`,
+    ),
+  );
+}
+
+function batchHeapInfo(
+  context: Cs486SyscallContext,
+  layout: CsAbiBatchHeapLayout,
+): Cs486SyscallResult {
+  if (context.readRegister("ecx") !== 0)
+    requireMemoryRange(context, context.readRegister("ecx"), 1);
+  if (context.readRegister("edx") !== 0)
+    requireMemoryRange(context, context.readRegister("edx"), 1);
+  if (context.readRegister("ecx") !== 0)
+    context.writeInt32(context.readRegister("ecx"), layout.heapWords);
+  if (context.readRegister("edx") !== 0)
+    context.writeInt32(context.readRegister("edx"), layout.startupAddress);
+  context.writeRegister("eax", layout.heapBaseBytes);
+  context.writeRegister("edx", layout.heapWords);
+  context.writeRegister("esi", layout.startupAddress);
+  return { kind: "continue" };
+}
+
+function batchWrite(
+  context: Cs486SyscallContext,
+  appendOutput: (text: string) => void,
+  outputWords: number,
+): { readonly outputWords: number; readonly result: Cs486SyscallResult } {
+  const descriptor = context.readRegister("ecx");
+  const pointer = context.readRegister("edx");
+  const count = requireIoCount(context.readRegister("esi"));
+  requireIoMemoryRange(context, pointer, count);
+  let text = "";
+  for (let index = 0; index < count; index += 1) {
+    const codePoint = readGuestIoUnit(context, pointer, index);
+    if (
+      codePoint > 0x10_ff_ff ||
+      (codePoint >= 0xd8_00 && codePoint <= 0xdf_ff)
+    )
+      return { outputWords, result: completeErrno(context, csAbiErrno.einval) };
+    text += String.fromCodePoint(codePoint);
+  }
+  if (descriptor !== 1 && descriptor !== 2)
+    throw rejectBatchOperation(`file descriptor ${String(descriptor)}`);
+  if (outputWords + count > csAbiLimits.outputWords)
+    return { outputWords, result: completeErrno(context, csAbiErrno.enospc) };
+  appendOutput(text);
+  return {
+    outputWords: outputWords + count,
+    result: completeSuccess(context, count),
+  };
 }
 
 export function writeTerminalText(

@@ -16,6 +16,14 @@ for what changed, what stayed out of scope, and which gate evidence is still
 outstanding. Everything above that section remains the 2026-07-24 record and is
 not restated in light of the integration.
 
+Status on 2026-07-26: hosted CS-Linux programs could not reach a compute worker
+at all, because a worker refused every syscall and every startup image while
+`cc`-linked programs always carry one. The CS-Linux `run --batch` declaration
+and the isolated CS ABI subset that fix this are recorded separately in
+[the Issue #114 evidence document](issue-114-run-batch-cs-abi.md). Engine
+selection is unaffected: `--batch` says the program uses no OS service, not that
+it runs on wasm.
+
 Status on 2026-07-25: the MCP debug companion can now start the same compute
 plane, so an MCP-driven session can actually execute guest work on the selected
 engine. See

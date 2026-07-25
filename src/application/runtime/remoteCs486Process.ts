@@ -6,7 +6,11 @@ import type {
 } from "../../domain/runtime/cpuProcess.js";
 import { isTerminalCpuProcessState } from "../../domain/runtime/cpuProcess.js";
 import { VmRuntimeError } from "../../domain/runtime/errors.js";
-import type { Cs486Executable } from "../../domain/cpu/cs486.js";
+import type {
+  Cs486Executable,
+  Cs486ProcessImageInitialization,
+} from "../../domain/cpu/cs486.js";
+import type { CsAbiBatchHeapLayout } from "./csAbi.js";
 import type { CpuMicroarchitectureStats } from "../../domain/cpu/memoryHierarchy.js";
 import type { CpuModel } from "../../domain/cpu/models.js";
 
@@ -26,8 +30,16 @@ export interface RemoteCs486ProcessCreateRequest {
   readonly collectMicroarchitectureStats: boolean;
   readonly computerId: string;
   readonly cpuModel: CpuModel;
+  /**
+   * Heap placement of an admitted batch process, present exactly when the host
+   * built a CS ABI startup image for a process that runs with no OS services.
+   * It travels with `processImage`: a worker that receives one without the
+   * other rejects the create.
+   */
+  readonly csAbi?: CsAbiBatchHeapLayout;
   readonly executable: Cs486Executable;
   readonly memoryBytes: number;
+  readonly processImage?: Cs486ProcessImageInitialization;
   readonly runtimeId: number;
 }
 
@@ -44,7 +56,9 @@ export type Cs486WorkerCommand =
       readonly options: {
         readonly collectMicroarchitectureStats: boolean;
         readonly cpuModel: CpuModel;
+        readonly csAbi?: CsAbiBatchHeapLayout;
         readonly memoryBytes: number;
+        readonly processImage?: Cs486ProcessImageInitialization;
       };
       readonly processId: string;
       readonly protocolVersion: typeof protocolVersion;
@@ -200,7 +214,14 @@ export class RemoteCs486Process implements ObservableCs486Process {
         options: {
           collectMicroarchitectureStats: request.collectMicroarchitectureStats,
           cpuModel: request.cpuModel,
+          // Both batch fields are omitted rather than sent as `undefined` so an
+          // ordinary process keeps producing the exact create payload workers
+          // already validate.
+          ...(request.csAbi === undefined ? {} : { csAbi: request.csAbi }),
           memoryBytes: request.memoryBytes,
+          ...(request.processImage === undefined
+            ? {}
+            : { processImage: request.processImage }),
         },
         processId,
         protocolVersion,

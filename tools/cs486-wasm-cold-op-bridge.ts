@@ -1,5 +1,12 @@
-import type { Cs486Instruction } from "../src/domain/cpu/cs486.js";
+import type {
+  Cs486Instruction,
+  Cs486SyscallContext,
+  Cs486SyscallResult,
+} from "../src/domain/cpu/cs486.js";
 import { Cs486Fault } from "../src/domain/cpu/cs486.js";
+import type { Cs486DataModel } from "../src/domain/cpu/cs486Compatibility.js";
+import type { Cs486Register } from "../src/domain/cpu/instructionSet.js";
+import { cs486RegisterNames } from "../src/domain/cpu/instructionSet.js";
 import {
   cs486WasmFaultCode,
   cs486WasmInstructionFlag,
@@ -28,11 +35,19 @@ export function isCs486WasmFloatSyscall(name: string): boolean {
 
 /**
  * Host policy for every syscall except the inline `cs.print.character`
- * primitive. The wasm executor never runs host callbacks, so a policy always
- * ends the instruction: throw `Cs486Fault` for a guest-visible fault or a host
- * `Error` for a configuration the caller must not silently approximate.
+ * primitive.
+ *
+ * The wasm executor never runs host callbacks, so the policy is called with a
+ * `Cs486SyscallContext` built over wasm linear memory and returns the same
+ * `Cs486SyscallResult` a production `Cs486SyscallHandler` returns. A policy
+ * may also end the instruction by throwing: `Cs486Fault` for a guest-visible
+ * fault, or a host `Error` for a configuration the caller must not silently
+ * approximate.
  */
-export type Cs486WasmSyscallPolicy = (name: string) => never;
+export type Cs486WasmSyscallPolicy = (
+  name: string,
+  context: Cs486SyscallContext,
+) => Cs486SyscallResult;
 
 /**
  * Default policy. Deterministic-float syscalls raise a host `Error` because
@@ -51,6 +66,8 @@ export const rejectCs486WasmSyscall: Cs486WasmSyscallPolicy = (name) => {
 export interface Cs486WasmColdOpMachine {
   /** Prepared base cycle cost of the cold instruction. */
   readonly baseCycles: number;
+  /** Executable data model, handed to the syscall context unchanged. */
+  readonly dataModel: Cs486DataModel;
   readonly executionFlags: number;
   readonly functionEntries: ReadonlyMap<number, string>;
   /** Original instruction object (for syscall names and print strings). */
@@ -68,15 +85,23 @@ export interface Cs486WasmColdOpMachine {
   appendOutput(text: string): number;
   fetchInstruction(index: number): number;
   getRegister(index: number): number;
+  readRamInt32(address: number): number;
+  readRamUint8(address: number): number;
   recordControlTransfer(taken: boolean): void;
   setInstructionPointer(value: number): void;
   setRegister(index: number, value: number): void;
-  /** Terminal host policy for every syscall other than the print primitive. */
+  /** Host policy for every syscall other than the print primitive. */
   readonly syscall: Cs486WasmSyscallPolicy;
   writeRamInt32(address: number, value: number): void;
+  writeRamUint8(address: number, value: number): void;
 }
 
 export type Cs486WasmColdOpResult = {
+  /**
+   * Completion status a syscall handler produced. Absent for `halt`, whose
+   * completion value is EAX exactly as in production.
+   */
+  readonly completionValue?: number;
   readonly cycles: number;
   readonly kind: "completed" | "executed";
 };
@@ -150,7 +175,7 @@ export function executeCs486WasmColdInstruction(
           throw new Cs486Fault("OutputLimitError", "output limit exceeded");
         return { cycles, kind: "executed" };
       }
-      return machine.syscall(name);
+      return executeWasmSyscall(machine, name, cycles);
     }
     case cs486WasmOpcode.printString: {
       const source = (
@@ -185,6 +210,101 @@ export function executeCs486WasmColdInstruction(
         "invalid prepared instruction opcode",
       );
   }
+}
+
+/**
+ * Runs one syscall through the host policy.
+ *
+ * The context mirrors the production one in `Cs486Process.executeNext` field
+ * for field: every accessor bounds-checks the address the same way and charges
+ * the same modeled data-access cycles through the wasm cache state in the same
+ * order, so a handler that reads three words costs the same on both engines.
+ * Losing that order would make `run --stats` disagree between engines while
+ * the guest result still matched, which is the harder divergence to notice.
+ */
+function executeWasmSyscall(
+  machine: Cs486WasmColdOpMachine,
+  name: string,
+  cycles: number,
+): Cs486WasmColdOpResult {
+  let memoryCycles = 0;
+  const checked = (address: number, width: number): number => {
+    if (
+      !Number.isInteger(address) ||
+      address < 0 ||
+      address > machine.memoryBytes - width
+    )
+      throw new Cs486Fault(
+        "MemoryAccessError",
+        `address ${String(address)} is outside RAM`,
+      );
+    return address;
+  };
+  const result = machine.syscall(name, {
+    dataModel: machine.dataModel,
+    memoryLimitBytes: machine.memoryBytes,
+    readInt32: (address) => {
+      const target = checked(address, 4);
+      memoryCycles += machine.accessData(target, "read");
+      return machine.readRamInt32(target);
+    },
+    readRegister: (register) => machine.getRegister(registerIndex(register)),
+    readUint8: (address) => {
+      const target = checked(address, 1);
+      memoryCycles += machine.accessData(target, "read");
+      return machine.readRamUint8(target);
+    },
+    writeInt32: (address, value) => {
+      const target = checked(address, 4);
+      memoryCycles += machine.accessData(target, "write");
+      machine.writeRamInt32(target, value | 0);
+    },
+    writeRegister: (register, value) =>
+      machine.setRegister(registerIndex(register), value | 0),
+    writeUint8: (address, value) => {
+      const target = checked(address, 1);
+      memoryCycles += machine.accessData(target, "write");
+      machine.writeRamUint8(target, value & 0xff);
+    },
+  });
+  const extraCycles = result.cycles ?? 0;
+  if (
+    !Number.isSafeInteger(extraCycles) ||
+    extraCycles < 0 ||
+    extraCycles > 100_000_000
+  )
+    throw new Cs486Fault("ResourceLimitError", "invalid syscall cycle charge");
+  const total = cycles + extraCycles + memoryCycles;
+  switch (result.kind) {
+    case "continue":
+      return { cycles: total, kind: "executed" };
+    case "complete": {
+      if (typeof result.value !== "number" || !Number.isInteger(result.value))
+        throw new Error(
+          `cs486 wasm syscall ${name} completed with a non-integer value`,
+        );
+      return {
+        completionValue: result.value,
+        cycles: total,
+        kind: "completed",
+      };
+    }
+    default:
+      // Sleeping, event waits, and syscall-driven control transfers belong to
+      // a scheduler the wasm session does not have. Approximating one here
+      // would silently change guest control flow, so the configuration is
+      // rejected as a host error instead.
+      throw new Error(
+        `cs486 wasm syscall ${name} returned unsupported result kind ${result.kind}`,
+      );
+  }
+}
+
+function registerIndex(register: Cs486Register): number {
+  const index = cs486RegisterNames.indexOf(register);
+  if (index < 0)
+    throw new RangeError(`unknown CS486 register ${String(register)}`);
+  return index;
 }
 
 function pushValue(machine: Cs486WasmColdOpMachine, value: number): number {

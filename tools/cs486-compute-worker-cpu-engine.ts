@@ -1,9 +1,14 @@
 import {
+  createAttachableCsAbiBatchSyscallHandler,
+  type CsAbiBatchHeapLayout,
+} from "../src/application/runtime/csAbi.js";
+import {
   Cs486Fault,
   Cs486Process,
   validateCs486Executable,
   type Cs486Executable,
   type Cs486ProcessImageInitialization,
+  type Cs486SyscallHandler,
 } from "../src/domain/cpu/cs486.js";
 import type { CpuMicroarchitectureStats } from "../src/domain/cpu/memoryHierarchy.js";
 import type { CpuModel } from "../src/domain/cpu/models.js";
@@ -81,6 +86,12 @@ export interface Cs486ComputeProcess {
 export interface Cs486ComputeProcessOptions {
   readonly collectMicroarchitectureStats: boolean;
   readonly cpuModel: CpuModel;
+  /**
+   * Heap placement of an admitted batch process. Present exactly when the host
+   * decided this process runs with no OS services attached, which is the only
+   * case where a worker may service a CS ABI syscall at all.
+   */
+  readonly csAbi?: CsAbiBatchHeapLayout;
   readonly memoryBytes: number;
   readonly processImage?: Cs486ProcessImageInitialization;
 }
@@ -97,9 +108,11 @@ export interface Cs486ComputeCpuEngine {
  * Terminal syscall policy of the compute worker, shared by both engines.
  *
  * The worker has no guest filesystem, terminal, or scheduler to service a
- * syscall against, so every syscall is refused rather than approximated. Both
- * engines must report the identical fault, which is why this lives here instead
- * of inside either engine.
+ * syscall against, so an ordinary process refuses every syscall rather than
+ * approximating it. Both engines must report the identical fault, which is why
+ * this lives here instead of inside either engine. Only an admitted batch
+ * process replaces this policy, and only with the isolated CS ABI subset whose
+ * whole effect stays inside the process.
  */
 export function rejectCs486ComputeSyscall(name: string): never {
   throw new Cs486Fault(
@@ -108,9 +121,30 @@ export function rejectCs486ComputeSyscall(name: string): never {
   );
 }
 
+/**
+ * Syscall policy of one process, shared by both engines.
+ *
+ * A process without `csAbi` keeps the terminal rejection above. A batch process
+ * gets the single isolated CS ABI handler from `csAbi.ts`, so the operations a
+ * batch process may reach have exactly one implementation no matter which
+ * engine the operator selected.
+ *
+ * The output sink is late-bound by `csAbi.ts` because the handler must exist
+ * before the process or session that owns the output buffer does.
+ */
+function createComputeSyscallHandler(options: Cs486ComputeProcessOptions): {
+  readonly attach: (sink: (text: string) => void) => void;
+  readonly handler: Cs486SyscallHandler;
+} {
+  if (options.csAbi === undefined)
+    return { attach: () => {}, handler: rejectCs486ComputeSyscall };
+  return createAttachableCsAbiBatchSyscallHandler(options.csAbi);
+}
+
 export function createCs486TypeScriptComputeEngine(): Cs486ComputeCpuEngine {
   return {
     createProcess(executable, options) {
+      const syscalls = createComputeSyscallHandler(options);
       // Cs486Process construction performs the authoritative executable
       // validation; the wasm engine below has to call the same validator
       // explicitly because it never builds a Cs486Process.
@@ -118,7 +152,10 @@ export function createCs486TypeScriptComputeEngine(): Cs486ComputeCpuEngine {
         collectMicroarchitectureStats: options.collectMicroarchitectureStats,
         cpuModel: options.cpuModel,
         memoryBytes: options.memoryBytes,
-        syscallHandler: rejectCs486ComputeSyscall,
+        syscallHandler: syscalls.handler,
+      });
+      syscalls.attach((text) => {
+        process.appendOutput(text);
       });
       if (options.processImage !== undefined)
         process.initializeProcessImage(options.processImage);
@@ -141,6 +178,7 @@ export function createCs486WasmComputeEngine(
     createProcess(executable, options) {
       validateCs486Executable(executable);
       assertCs486WasmExecutableSupported(executable, options);
+      const syscalls = createComputeSyscallHandler(options);
       const { exports, memory } = instantiateCs486WasmModule(module);
       const session = createCs486WasmExecutableSession(
         exports,
@@ -152,10 +190,17 @@ export function createCs486WasmComputeEngine(
             ? "enabled"
             : "disabled",
           memoryBytes: options.memoryBytes,
+          processImage: options.processImage,
           startOffset: memory.buffer.byteLength,
-          syscallPolicy: createWasmSyscallPolicy(options.cpuModel),
+          syscallPolicy: createWasmSyscallPolicy(
+            options.cpuModel,
+            syscalls.handler,
+          ),
         },
       );
+      syscalls.attach((text) => {
+        session.appendOutput(text);
+      });
       return createWasmComputeProcess(session, executable);
     },
     name,
@@ -184,10 +229,6 @@ function assertCs486WasmExecutableSupported(
   executable: Cs486Executable,
   options: Cs486ComputeProcessOptions,
 ): void {
-  if (options.processImage !== undefined)
-    throw new Error(
-      "CS486 wasm compute engine cannot initialize a process image; run this process on the typescript engine",
-    );
   if (options.cpuModel === "cs386sx") return;
   for (const instruction of executable.instructions) {
     if (instruction.op !== "syscall") continue;
@@ -202,16 +243,21 @@ function assertCs486WasmExecutableSupported(
  * Host syscall policy for a wasm session. Mirrors the production dispatch
  * order: `executeFloatSyscall` runs before the handler lookup, so on CS386SX a
  * `cs.fp.*` call reports the missing coprocessor rather than the worker's
- * handler rejection.
+ * handler rejection. Everything past that point is the same handler object the
+ * TypeScript engine installs, so a batch process cannot observe a different CS
+ * ABI depending on the engine.
  */
-function createWasmSyscallPolicy(cpuModel: CpuModel): Cs486WasmSyscallPolicy {
-  return (name) => {
+function createWasmSyscallPolicy(
+  cpuModel: CpuModel,
+  handler: Cs486SyscallHandler,
+): Cs486WasmSyscallPolicy {
+  return (name, context) => {
     if (cpuModel === "cs386sx" && isCs486WasmFloatSyscall(name))
       throw new Cs486Fault(
         "UnsupportedError",
         `${name} requires an 80387 coprocessor unavailable on CS386SX`,
       );
-    return rejectCs486ComputeSyscall(name);
+    return handler(name, context);
   };
 }
 

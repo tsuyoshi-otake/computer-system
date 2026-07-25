@@ -110,8 +110,8 @@ authoritative OS-presence aggregates.
   Runlevels 2-5 are deliberately identical multi-user aliases; 0/6 reuse the
   existing shutdown/reboot lifecycle; 1/S stop rc.d services. `telinit {0-6|S}`
   (root-only; `init` is its alias) and read-only `runlevel` are the guest
-  commands; `service NAME status` remains status-only exactly as before
-  (`/etc/init.d/<name> start|stop|restart` is the only mutation path).
+  commands; `service NAME status` stays status-only and
+  `/etc/init.d/<name> start|stop|restart` is the only mutation path.
 - Service mutation is centralized in the internal `cs-init-ctl NAME ACTION`
   primitive (root-only, not listed in the public command index or `man -k`): a
   fixed table (today `syslog`, `cron`) is the only thing that produces real
@@ -119,20 +119,23 @@ authoritative OS-presence aggregates.
   genuinely interpreted but cannot invent a new working service. Deleting or
   removing the executable bit from an `/etc/init.d/<name>` script makes its
   direct invocation fail explicitly (127/126) without disturbing `cs-init-ctl`
-  itself. The inittab-driven rc.d service start-up runs synchronously during
-  `ShellSession` construction (see `computer/CLAUDE.md` for the paced-render vs.
-  synchronous-completion split at the `ComputerRuntime` boundary).
-- `/etc/crontab` is the only supported crontab surface. `crontab -l` reads it
-  and root `crontab -e` opens it in the existing `vi`; there is no per-user
+  itself. The inittab-driven rc.d start-up runs synchronously inside
+  `ShellSession` construction; `computer/CLAUDE.md` owns the render split.
+- `/etc/crontab` is the only supported crontab surface: `crontab -l` reads it,
+  root `crontab -e` opens it in the existing `vi`, and there is no per-user
   spool. `linuxCrontab.ts` parses its bounded 7-field lines (`*`, numbers, `a-b`
   ranges, comma lists, `*/n` and `a-b/n` steps) and re-parses only on `cron`
-  service start/restart. Cron due-time comparisons must use the tick-derived
-  virtual calendar (`virtualCalendarFields`), never the injected wall-clock
-  `ShellClockSource` used by `date`/login timestamps, so job firing stays a
-  deterministic function of guest tick count.
+  service start/restart. Due-time comparisons must use the tick-derived virtual
+  calendar (`virtualCalendarFields`), never the wall-clock `ShellClockSource`,
+  so firing stays a deterministic function of guest tick count.
 - Only one interactive `sleep`, `python`/`micropython`, or `run` command may use
   a trailing `&`. Reject background redirects, pipelines, scripts, aliases,
   functions, MCP submissions, and unsupported commands before side effects.
+- `run [--batch] [--stats] program [args ...]` is CS-Linux only and takes both
+  options in either order. `--batch` declares no OS service, never where the
+  program runs, and delivers one ordered unbuffered stream at completion, so
+  refuse it on DOS, with a pipeline, redirect, or `&`, for a shell utility, and
+  for an executable without `main`. An unserviced operation fails explicitly.
 - `/proc/devices`, `/proc/services`, `/proc/loadavg`, `/proc/mounts`,
   `/proc/<pid>/{cmdline,stat,status}`, and `/proc/self/*` are dynamic state
   views. `/var/log/messages`, `/var/log/auth.log`, and `dmesg` use the bounded
@@ -142,8 +145,7 @@ authoritative OS-presence aggregates.
   both snapshots, defaults to 0, and renders one leading notice line. Rollback
   skips an already evicted entry. Every other capacity stays fatal.
 - `/dev/null`, `/dev/zero`, `/dev/tty`, `/dev/console`, `/dev/tty1`, `/dev/hda`,
-  and absent-media `/dev/fd0` share the device registry and do not imply host
-  devices.
+  and absent-media `/dev/fd0` share the device registry, not host devices.
 - Persist only the cold projection: journals, last login, service definitions,
   mount definitions, and offline device identities survive. Processes, jobs,
   sessions, active mounts, and PID/job cursors restart from validated cold
@@ -174,10 +176,9 @@ authoritative OS-presence aggregates.
 - An observer failure restores and republishes the previous aggregate. Cold
   projection always detaches transient A: media while retaining C: metadata;
   stale media-generation operations fail explicitly.
-- `TREE` remains O(N), capped at 512 entries and 32 levels. `DIR`, `COPY`,
-  `DEL`/`ERASE`, `MD`/`RD`, `MOVE`, `REN`, `TYPE`, `TREE`, `VOL`, `VER`,
-  `DOSKEY`, `MEM`, `ATTRIB`, `LABEL`, and read-only `CHKDSK` must not leak Linux
-  output.
+- `TREE` remains O(N), capped at 512 entries and 32 levels. It, `DIR`, `COPY`,
+  `DEL`/`ERASE`, `MD`/`RD`, `MOVE`, `REN`, `TYPE`, `VOL`, `VER`, `DOSKEY`,
+  `MEM`, `ATTRIB`, `LABEL`, and read-only `CHKDSK` must not leak Linux output.
 - DOS exposes an underline prompt cursor. Arrow-key history is disabled until a
   bare `DOSKEY` installs it; `DOSKEY /HISTORY` only lists retained entries. F3
   recalls the most recent submitted line independently.

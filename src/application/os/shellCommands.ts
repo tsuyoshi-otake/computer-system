@@ -20,12 +20,18 @@ import type { LinuxGuestMemorySnapshot } from "./linuxGuestMemoryManager.js";
 import type { VirtualDevice } from "./osProfile.js";
 import { formatOsIdentity } from "./osIdentity.js";
 import {
+  Cs486Fault,
+  Cs486Process,
   cs486ExecutableDataModel,
   runCs486,
   validateCs486Executable,
   type Cs486Executable,
+  type Cs486RunObservation,
 } from "../../domain/cpu/cs486.js";
-import { cpuModelSpecification } from "../../domain/cpu/models.js";
+import {
+  cpuModelSpecification,
+  type CpuModel,
+} from "../../domain/cpu/models.js";
 import {
   cs486Byte8DataModel,
   cs486Word32DataModel,
@@ -34,7 +40,11 @@ import {
 import type { CpuMicroarchitectureStats } from "../../domain/cpu/memoryHierarchy.js";
 import { cpuCyclesToMicroseconds } from "../../domain/cpu/timing.js";
 import { TerminalBuffer } from "../../domain/terminal/terminalBuffer.js";
-import { CsAbiRuntime, prepareCsAbiStartup } from "../runtime/csAbi.js";
+import {
+  CsAbiRuntime,
+  createAttachableCsAbiBatchSyscallHandler,
+  prepareCsAbiStartup,
+} from "../runtime/csAbi.js";
 import {
   assembleCs486,
   assembleCs486Object,
@@ -5166,14 +5176,27 @@ export class ShellCommandRuntime {
       stats = true;
       arguments_ = arguments_.slice(0, -1);
     }
-    if (arguments_[0] === "--stats" || arguments_[0] === "-v") {
-      if (stats) return this.toolchainUsage("run [--stats] <executable>");
-      stats = true;
+    // `--batch` is CS-Linux only: it declares that the program uses no OS
+    // service, and CS-DOS `run` has no such concept to declare.
+    const linux = this.options.profile.id === "linux";
+    const usage = linux
+      ? "run [--batch] [--stats] <executable> [arguments ...]"
+      : "run [--stats] <executable>";
+    let batch = false;
+    // Two leading options exist, so two passes admit them in either order.
+    for (let option = 0; option < 2; option += 1) {
+      const word = arguments_[0];
+      if (word === "--stats" || word === "-v") {
+        if (stats) return this.toolchainUsage(usage);
+        stats = true;
+      } else if (word === "--batch") {
+        if (batch || !linux) return this.toolchainUsage(usage);
+        batch = true;
+      } else break;
       arguments_ = arguments_.slice(1);
     }
     const [path, ...programArguments] = arguments_;
-    if (path === undefined)
-      return this.toolchainUsage("run [--stats] <executable> [arguments ...]");
+    if (path === undefined) return this.toolchainUsage(usage);
     if (this.options.profile.id === "dos" && programArguments.length > 0) {
       return this.toolchainUsage("run [--stats] <executable>");
     }
@@ -5183,6 +5206,8 @@ export class ShellCommandRuntime {
     if (utility !== undefined) {
       if (stats)
         return failure(path, "system utilities do not accept run --stats");
+      if (batch)
+        return failure(path, "system utilities do not accept run --batch");
       return this.dispatch(utility, programArguments, "");
     }
     if (!encoded.startsWith("CS486\n"))
@@ -5194,24 +5219,31 @@ export class ShellCommandRuntime {
       return failure(path, "invalid executable encoding");
     }
     validateCs486Executable(executable);
+    const hosted =
+      linux &&
+      (executable.version === 4 ||
+        executable.version === 5 ||
+        executable.version === 6) &&
+      executable.symbols?.some(
+        ({ name, section, type }) =>
+          name === "main" && section === "text" && type === "function",
+      ) === true;
+    // A non-hosted executable reaches no CS ABI service to begin with, so
+    // `--batch` would promise something it cannot change.
+    if (batch && !hosted)
+      return failure(path, "--batch requires a hosted CS-Linux executable");
     return this.executeCs486(
       executable,
       stats,
       0,
-      this.options.profile.id === "linux" &&
-        (executable.version === 4 ||
-          executable.version === 5 ||
-          executable.version === 6) &&
-        executable.symbols?.some(
-          ({ name, section, type }) =>
-            name === "main" && section === "text" && type === "function",
-        ) === true
+      hosted
         ? {
             argv: [resolvedPath, ...programArguments],
             cwd: this.currentDirectory,
             environment: this.hostedEnvironmentSnapshot(),
           }
         : undefined,
+      batch,
     );
   }
 
@@ -5262,11 +5294,13 @@ export class ShellCommandRuntime {
       readonly cwd: string;
       readonly environment: readonly (readonly [string, string])[];
     },
+    batch = false,
   ): ShellCommandResult {
     if (this.options.deferGuestExecution === true) {
       return {
         exitCode: 0,
         foreground: {
+          ...(batch ? { batch: true as const } : {}),
           command: compileCycles > 0 ? "basic" : "run",
           compileCycles,
           credentials: this.options.credentials(),
@@ -5316,6 +5350,8 @@ export class ShellCommandRuntime {
       } as const;
       if (hostedStartup === undefined) {
         result = runCs486(executable, runOptions);
+      } else if (batch) {
+        result = this.runBatchCs486(executable, hostedStartup, runOptions);
       } else {
         const credentials = this.options.credentials();
         const prepared = prepareCsAbiStartup(
@@ -5378,6 +5414,68 @@ export class ShellCommandRuntime {
         newline,
       ),
       cpuCycles: Math.min(1_000_000, compileCycles + result.cycles),
+    };
+  }
+
+  /**
+   * In-session execution of a `run --batch` program.
+   *
+   * The process is built here rather than through `runCs486` so the isolated
+   * CS ABI handler can append through `Cs486Process.appendOutput`. That keeps
+   * batch writes in the same ordered buffer as inline `print` output, exactly
+   * as the ComputerRuntime and compute-worker paths do; a separate host-side
+   * string would reorder a program that used both.
+   */
+  private runBatchCs486(
+    executable: Cs486Executable,
+    hostedStartup: {
+      readonly argv: readonly string[];
+      readonly cwd: string;
+      readonly environment: readonly (readonly [string, string])[];
+    },
+    runOptions: {
+      readonly collectMicroarchitectureStats: boolean;
+      readonly cpuModel: CpuModel;
+      readonly instructionLimit: number;
+      readonly memoryBytes: number;
+    },
+  ): Cs486RunObservation {
+    const prepared = prepareCsAbiStartup(
+      executable,
+      hostedStartup,
+      this.options.credentials(),
+    );
+    const batch = createAttachableCsAbiBatchSyscallHandler({
+      heapBaseBytes: prepared.heapBaseBytes,
+      heapWords: prepared.heapWords,
+      startupAddress: prepared.startupAddress,
+    });
+    const process = new Cs486Process(executable, {
+      collectMicroarchitectureStats: runOptions.collectMicroarchitectureStats,
+      cpuModel: runOptions.cpuModel,
+      memoryBytes: runOptions.memoryBytes,
+      syscallHandler: batch.handler,
+    });
+    batch.attach((text) => {
+      process.appendOutput(text);
+    });
+    process.initializeProcessImage(prepared.image);
+    const slice = process.runInstructionSlice(runOptions.instructionLimit);
+    if (process.state.kind === "crashed") {
+      throw new Cs486Fault(
+        process.state.error.typeName,
+        process.state.error.message,
+      );
+    }
+    return {
+      cycles: slice.cpuCycles,
+      executedInstructions: slice.executedInstructions,
+      microarchitecture: process.microarchitectureStatsEnabled
+        ? process.microarchitectureStats
+        : null,
+      output: process.output,
+      registers: process.registers,
+      state: process.state.kind === "completed" ? "halted" : "yielded",
     };
   }
 
