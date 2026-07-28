@@ -55,7 +55,7 @@ describe("OS filesystem images and disk profiles", (): void => {
 
     expect(afterSecond).toEqual(afterFirst);
     const snapshot = second.filesystem.snapshot();
-    expect(snapshot.baseImageId).toBe("cs-linux-1.0-rootfs-v19");
+    expect(snapshot.baseImageId).toBe("cs-linux-1.0-rootfs-v20");
     expect(second.filesystem.exists("/home/cs")).toBe(true);
     expect(second.filesystem.exists("/home/computer")).toBe(false);
     expect(snapshot.files.some(([path]) => path.startsWith("/usr/bin/"))).toBe(
@@ -100,7 +100,7 @@ describe("OS filesystem images and disk profiles", (): void => {
 
     new ShellSession(filesystem, { osProfile: "linux" });
 
-    expect(filesystem.baseImageId).toBe("cs-linux-1.0-rootfs-v19");
+    expect(filesystem.baseImageId).toBe("cs-linux-1.0-rootfs-v20");
     expect(filesystem.exists("/etc/inittab")).toBe(true);
     expect(filesystem.exists("/etc/init.d/syslog")).toBe(true);
     expect(filesystem.exists("/etc/init.d/cron")).toBe(true);
@@ -236,7 +236,7 @@ describe("OS filesystem images and disk profiles", (): void => {
 
     new ShellSession(filesystem, { osProfile: "linux" });
 
-    expect(filesystem.baseImageId).toBe("cs-linux-1.0-rootfs-v19");
+    expect(filesystem.baseImageId).toBe("cs-linux-1.0-rootfs-v20");
     expect(filesystem.exists("/usr/bin/sudo")).toBe(true);
     expect(filesystem.exists("/usr/bin/ls")).toBe(false);
     expect(filesystem.exists("/home/computer")).toBe(false);
@@ -260,7 +260,7 @@ describe("OS filesystem images and disk profiles", (): void => {
     const dos = new InMemoryFilesystem();
     const dosShell = new ShellSession(dos, { osProfile: "dos" });
 
-    expect(linux.baseImageId).toBe("cs-linux-1.0-rootfs-v19");
+    expect(linux.baseImageId).toBe("cs-linux-1.0-rootfs-v20");
     expect(linux.exists("/usr/bin/basic")).toBe(false);
     expect(linux.exists("/usr/bin/basicc")).toBe(false);
     expect(linuxShell.submit("basic C:/DEMO.BAS").exitCode).toBe(127);
@@ -341,7 +341,7 @@ describe("OS filesystem images and disk profiles", (): void => {
     expect(filesystem.exists("/usr/bin/make")).toBe(true);
 
     new ShellSession(filesystem, { osProfile: "linux" });
-    expect(filesystem.baseImageId).toBe("cs-linux-1.0-rootfs-v19");
+    expect(filesystem.baseImageId).toBe("cs-linux-1.0-rootfs-v20");
     expect(filesystem.exists("/usr/bin/git")).toBe(true);
   });
 
@@ -360,7 +360,7 @@ describe("OS filesystem images and disk profiles", (): void => {
 
     new ShellSession(filesystem, { osProfile: "linux" });
 
-    expect(filesystem.baseImageId).toBe("cs-linux-1.0-rootfs-v19");
+    expect(filesystem.baseImageId).toBe("cs-linux-1.0-rootfs-v20");
     expect(filesystem.readFile("/root/preserved")).toBe("overlay\n");
     expect(filesystem.exists("/usr/include/cs/syscall.h")).toBe(true);
     expect(filesystem.exists("/usr/src/cs-libc/libc.c")).toBe(true);
@@ -387,7 +387,7 @@ describe("OS filesystem images and disk profiles", (): void => {
 
     new ShellSession(filesystem, { osProfile: "linux" });
 
-    expect(filesystem.baseImageId).toBe("cs-linux-1.0-rootfs-v19");
+    expect(filesystem.baseImageId).toBe("cs-linux-1.0-rootfs-v20");
     expect(filesystem.readFile("/root/preserved-v13")).toBe("overlay\n");
     expect(filesystem.exists("/usr/games/nethack")).toBe(true);
     expect(filesystem.exists("/usr/src/nethack/main.c")).toBe(true);
@@ -417,7 +417,7 @@ describe("OS filesystem images and disk profiles", (): void => {
 
     new ShellSession(filesystem, { osProfile: "linux" });
 
-    expect(filesystem.baseImageId).toBe("cs-linux-1.0-rootfs-v19");
+    expect(filesystem.baseImageId).toBe("cs-linux-1.0-rootfs-v20");
     expect(filesystem.readFile("/root/preserved-v14")).toBe("overlay\n");
     expect(filesystem.exists("/usr/include/stdarg.h")).toBe(true);
     expect(filesystem.readFile("/usr/src/cs-libc/libc.c")).toContain(
@@ -456,7 +456,7 @@ describe("OS filesystem images and disk profiles", (): void => {
 
     new ShellSession(filesystem, { osProfile: "linux" });
 
-    expect(filesystem.baseImageId).toBe("cs-linux-1.0-rootfs-v19");
+    expect(filesystem.baseImageId).toBe("cs-linux-1.0-rootfs-v20");
     expect(filesystem.readFile("/root/preserved-v15")).toBe("overlay\n");
     expect(filesystem.readFile("/usr/include/stdbool.h")).toContain(
       "#define bool _Bool",
@@ -496,7 +496,7 @@ describe("OS filesystem images and disk profiles", (): void => {
 
     new ShellSession(filesystem, { osProfile: "linux" });
 
-    expect(filesystem.baseImageId).toBe("cs-linux-1.0-rootfs-v19");
+    expect(filesystem.baseImageId).toBe("cs-linux-1.0-rootfs-v20");
     expect(filesystem.readFile("/root/preserved-v16")).toBe("overlay\n");
     expect(filesystem.exists("/usr/include/dirent.h")).toBe(true);
     expect(filesystem.exists("/usr/include/curses.h")).toBe(true);
@@ -528,7 +528,7 @@ describe("OS filesystem images and disk profiles", (): void => {
 
     new ShellSession(filesystem, { osProfile: "linux" });
 
-    expect(filesystem.baseImageId).toBe("cs-linux-1.0-rootfs-v19");
+    expect(filesystem.baseImageId).toBe("cs-linux-1.0-rootfs-v20");
     expect(filesystem.readFile("/root/preserved-v17")).toBe("overlay\n");
     expect(filesystem.exists("/usr/include/cs/byte.h")).toBe(true);
     expect(filesystem.exists("/usr/lib/cs-byte8-v1/libc.csa")).toBe(true);
@@ -559,7 +559,7 @@ describe("OS filesystem images and disk profiles", (): void => {
 
     new ShellSession(filesystem, { osProfile: "linux" });
 
-    expect(filesystem.baseImageId).toBe("cs-linux-1.0-rootfs-v19");
+    expect(filesystem.baseImageId).toBe("cs-linux-1.0-rootfs-v20");
     expect(filesystem.readFile("/root/preserved-v18")).toBe("overlay\n");
     expect(filesystem.exists("/usr/include/float.h")).toBe(true);
     expect(filesystem.exists("/usr/include/math.h")).toBe(true);

@@ -176,8 +176,9 @@ synchronized.
 - #112: Bounded rotating OS runtime journal and visible CSBIOS boot failure.
 - #113: One `terminal_keys` wakeup owner, bounded atomic CPU sub-slices, and
   unsaturated cumulative CPU accounting.
-- #118: Deferred terminal writes must suspend instead of discarding hosted
-  stdout and answering the guest with a fabricated `EAGAIN`.
+- #118: Deferred terminal writes suspend instead of discarding guest stdout.
+- #119: Bounded CS-Linux `perl` on a modern Perl 5.40 surface, with a
+  guest-owned matcher and explicit rejection of modules and `eval STRING`.
 
 Use English commit messages with useful detail and reference every applicable
 Issue. Issue #4 remains relevant while Phase 2 work is in scope.

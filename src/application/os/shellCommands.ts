@@ -142,6 +142,7 @@ import type {
   OsRuntimeState,
 } from "./osRuntimeState.js";
 import { parseLinuxCrontab } from "./linuxCrontab.js";
+import { executeLinuxPerl } from "./linuxPerl.js";
 import { executeLinuxAwk, executeLinuxSed } from "./linuxTextProcessors.js";
 import {
   executeLinuxGzip,
@@ -2410,7 +2411,7 @@ export class ShellCommandRuntime {
           [
             "Computer System BusyBox shell",
             "files: pwd cd ls cat mkdir rmdir touch rm cp mv ln readlink realpath find du quota",
-            "text: echo printf head tail wc grep sed awk sort uniq tr nl",
+            "text: echo printf head tail wc grep sed awk perl sort uniq tr nl",
             "text+: tee cmp diff sha256sum md5sum base64 od hexdump xargs",
             "shell: sh bash source env printenv export unset alias unalias command read local shift getopts",
             "system: clear vi more less crontab shutdown reboot exit login logout passwd su sudo true false",
@@ -2440,6 +2441,8 @@ export class ShellCommandRuntime {
         return this.cat(arguments_, stdin);
       case "awk":
         return this.linuxAwk(arguments_, stdin);
+      case "perl":
+        return this.linuxPerl(arguments_, stdin);
       case "sed":
         return this.linuxSed(arguments_, stdin);
       case "crontab":
@@ -8070,6 +8073,23 @@ export class ShellCommandRuntime {
     const result = executeLinuxAwk(arguments_, stdin, (path) =>
       this.readFile(path),
     );
+    return status(result.exitCode, result.stdout, result.stderr);
+  }
+
+  private linuxPerl(
+    arguments_: readonly string[],
+    stdin: string,
+  ): ShellCommandResult {
+    const result = executeLinuxPerl(arguments_, stdin, {
+      environment: this.environment,
+      isDirectory: (path: string): boolean =>
+        this.filesystem.isDirectory(this.resolvePath(path)),
+      pathExists: (path: string): boolean => this.pathExists(path),
+      readFile: (path: string): string => this.readFile(path),
+      writeFile: (path: string, contents: string, append: boolean): void => {
+        this.writeFile(path, contents, append);
+      },
+    });
     return status(result.exitCode, result.stdout, result.stderr);
   }
 

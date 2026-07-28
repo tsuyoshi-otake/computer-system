@@ -301,7 +301,7 @@ describe("Linux OS boot layout", (): void => {
     expect(shell.submit("ls /")).toMatchObject({ exitCode: 127 });
 
     const snapshot = filesystem.snapshot();
-    expect(snapshot.baseImageId).toBe("cs-linux-1.0-rootfs-v19");
+    expect(snapshot.baseImageId).toBe("cs-linux-1.0-rootfs-v20");
     expect(snapshot.tombstones).toContain("/usr/bin/ls");
     expect(snapshot.files.some(([path]) => path === "/usr/bin/ls")).toBe(false);
 

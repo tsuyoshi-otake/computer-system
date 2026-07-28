@@ -100,6 +100,7 @@ const linuxCommands = [
   "mv",
   "nice",
   "nohup",
+  "perl",
   "printf",
   "ps",
   "python",

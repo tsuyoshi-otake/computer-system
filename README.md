@@ -768,7 +768,7 @@ deliberately rejects `LESS`, `2>`, `2>>`, `2>&1`, and `|&` before side effects.
 
 ```text
 files:  pwd cd ls cat mkdir rmdir touch rm cp mv ln readlink realpath find stat
-text:   echo printf head tail wc grep sed awk sort uniq tr cut seq tee cmp diff xargs
+text:   echo printf head tail wc grep sed awk perl sort uniq tr cut seq tee cmp diff xargs
 archive: tar gzip gunzip zip unzip
 inspect: file sha256sum od hexdump df du quota mount dmesg
 shell:  sh bash source env printenv export unset alias unalias command read
@@ -788,10 +788,21 @@ utilities. `crontab -l` reads the single system `/etc/crontab`, while root
 `crontab -e` edits that same file with the existing `vi`; no per-user spool is
 created, and cron reloads the file on service start or restart. `sed` and `awk`
 use a guest-owned pattern/parser subset with explicit program, rule, input, and
-record ceilings. `tar`, `gzip`, and `zip` use byte-preserving filesystem I/O;
-archive extraction is preflighted and transactional. Gzip emits and accepts
-stored-DEFLATE streams, and ZIP accepts unencrypted method-0 archives;
-unsupported compression, ZIP64, traversal, and symlink pivots fail explicitly.
+record ceilings. `perl` is a bounded Perl 5.40-surface interpreter written for
+the guest: `use strict`/`use warnings`/`use v5.40`/`say`, scalars, arrays,
+hashes, `my` scoping, subroutines, statement modifiers, `sort`/`grep`/`map`
+blocks, `sprintf`, `split`, `tr///cdrs`, `s///` including the `e` and `r`
+modifiers, here-documents, loop labels, `eval BLOCK` with `$@`, the
+`-e -n -p -l -a -F -c -v` switches, and bounded three-argument `open` against
+the guest filesystem only. It uses its own bounded backtracking matcher instead
+of host regular expressions, iterates hashes in insertion order so runs stay
+deterministic, and has no wall clock. Modules, references, `bless`,
+`eval STRING`, `fork`, `exec`, `system`, and backticks are rejected at compile
+time rather than approximated. `tar`, `gzip`, and `zip` use byte-preserving
+filesystem I/O; archive extraction is preflighted and transactional. Gzip emits
+and accepts stored-DEFLATE streams, and ZIP accepts unencrypted method-0
+archives; unsupported compression, ZIP64, traversal, and symlink pivots fail
+explicitly.
 
 `nice` changes the bounded scheduler slice and exposes NI through `ps` and
 `top`. `nohup` applies only to supported background `sleep`, Python, or linked

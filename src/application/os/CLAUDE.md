@@ -88,7 +88,7 @@ authoritative OS-presence aggregates.
 - The shell is a bounded BusyBox-compatible subset. It supports quoting,
   variables, `$?`, pipelines, redirects, `&&`, `||`, `;`, and bounded
   `sh`/`bash` scripts. Cap pipeline bytes, script depth/lines, expansions, and
-  regex-like input. Add sandbox applets rather than invoking host tools.
+  regex-like input. Add bounded applets such as `perl` rather than host tools.
 - The pre-login prompt is `<computer-id> login:`, optionally preceded by
   `/etc/issue`. After authentication, the shell prints the real `/etc/motd`
   before a wall-clock `Last login:` line when a previous timestamp exists;

@@ -421,6 +421,21 @@ const pages = Object.freeze([
     ["sed", "cut"],
   ),
   page(
+    "perl",
+    1,
+    "bounded Perl 5 interpreter",
+    [
+      "perl [-c] [-w] [-l] [-n | -p] [-a] [-F PATTERN] [-e PROGRAM] [SCRIPT] [ARG ...]",
+      "perl -v",
+    ],
+    [
+      "Runs a bounded subset of Perl 5.40 inside the guest: scalars, arrays, hashes, my scoping, subroutines, references-free data, statement modifiers, sort/grep/map blocks, sprintf, split, join, here-documents, loop labels, tr///cdrs, and s/// with the e and r modifiers, all matched by the bounded CS matcher instead of host regular expressions.",
+      "Program text, statements, variables, output, open handles, recursion depth, and matcher steps all have fixed limits, and exceeding one fails explicitly with exit status 2.",
+      "Modules, references, bless, eval STRING, fork, exec, system, backticks, and any host escape are rejected at compile time. Hash iteration order is insertion order, so scripts stay deterministic.",
+    ],
+    ["awk", "python", "sed"],
+  ),
+  page(
     "tar",
     1,
     "create, list, or extract bounded ustar archives",

@@ -190,7 +190,8 @@ const linuxProfile: OsProfile = {
       previousBaseImageId !== "cs-linux-1.0-rootfs-v16" &&
       previousBaseImageId !== "cs-linux-1.0-rootfs-v17" &&
       previousBaseImageId !== "cs-linux-1.0-rootfs-v18" &&
-      previousBaseImageId !== "cs-linux-1.0-rootfs-v19"
+      previousBaseImageId !== "cs-linux-1.0-rootfs-v19" &&
+      previousBaseImageId !== "cs-linux-1.0-rootfs-v20"
     ) {
       migrateLinuxCommandLayout(filesystem);
     }

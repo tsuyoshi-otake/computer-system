@@ -43,7 +43,8 @@ const linuxV15ImageId = "cs-linux-1.0-rootfs-v15";
 const linuxV16ImageId = "cs-linux-1.0-rootfs-v16";
 const linuxV17ImageId = "cs-linux-1.0-rootfs-v17";
 const linuxV18ImageId = "cs-linux-1.0-rootfs-v18";
-const currentLinuxImageId = "cs-linux-1.0-rootfs-v19";
+const linuxV19ImageId = "cs-linux-1.0-rootfs-v19";
+const currentLinuxImageId = "cs-linux-1.0-rootfs-v20";
 const legacyDosImageId = "cs-dos-1.0-rootfs-v1";
 const previousDosImageId = "cs-dos-1.0-rootfs-v2";
 const recentDosImageId = "cs-dos-1.0-rootfs-v3";
@@ -557,6 +558,7 @@ const linuxCommandSizes: Readonly<Record<string, number>> = Object.freeze({
   bash: 65_536,
   ls: 13_312,
   micropython: 98_304,
+  perl: 81_920,
   python: 98_304,
   sh: 32_768,
 });
@@ -576,8 +578,14 @@ const linuxV11CommandNames = new Set([
   "zip",
 ]);
 const linuxV12CommandNames = new Set(["git"]);
-const preV12LinuxCommandNames = Object.freeze(
+const linuxV20CommandNames = new Set(["perl"]);
+const preV20LinuxCommandNames = Object.freeze(
   commandExecutableNamesFor("linux").filter(
+    (command) => !linuxV20CommandNames.has(command),
+  ),
+);
+const preV12LinuxCommandNames = Object.freeze(
+  preV20LinuxCommandNames.filter(
     (command) => !linuxV12CommandNames.has(command),
   ),
 );
@@ -653,6 +661,19 @@ export const linuxFilesystemImage: FilesystemBaseImage = Object.freeze({
   ),
 });
 
+const currentV19LinuxFilesystemImage: FilesystemBaseImage = Object.freeze({
+  id: linuxV19ImageId,
+  directories: currentGamesLinuxImageDirectories,
+  files: Object.freeze(
+    linuxFilesystemImage.files.filter(
+      (file) =>
+        ![...linuxV20CommandNames].some(
+          (command) => file.path === commandExecutablePath("linux", command),
+        ),
+    ),
+  ),
+});
+
 const hostedCLibcV18FilesByPath = new Map(
   withInstallTimestamp(hostedCLibcV18Files).map((file) => [file.path, file]),
 );
@@ -661,7 +682,7 @@ const currentV18LinuxFilesystemImage: FilesystemBaseImage = Object.freeze({
   id: linuxV18ImageId,
   directories: currentV18GamesLinuxImageDirectories,
   files: Object.freeze(
-    linuxFilesystemImage.files.flatMap((file) => {
+    currentV19LinuxFilesystemImage.files.flatMap((file) => {
       const historical = hostedCLibcV18FilesByPath.get(file.path);
       if (historical !== undefined) return [historical];
       return hostedCLibcFiles.some(({ path }) => path === file.path)
@@ -701,7 +722,7 @@ const currentV16LinuxFilesystemImage: FilesystemBaseImage = Object.freeze({
   id: linuxV16ImageId,
   directories: currentV16GamesLinuxImageDirectories,
   files: Object.freeze(
-    linuxFilesystemImage.files.flatMap((file) => {
+    currentV19LinuxFilesystemImage.files.flatMap((file) => {
       if (
         file.path === commandExecutablePath("linux", "ar") ||
         file.path === commandExecutablePath("linux", "ranlib")
@@ -1139,6 +1160,7 @@ export function registerOsFilesystemImages(): void {
   registerFilesystemBaseImage(currentV16LinuxFilesystemImage);
   registerFilesystemBaseImage(currentV17LinuxFilesystemImage);
   registerFilesystemBaseImage(currentV18LinuxFilesystemImage);
+  registerFilesystemBaseImage(currentV19LinuxFilesystemImage);
   registerFilesystemBaseImage(linuxFilesystemImage);
   registerFilesystemBaseImage(legacyDosFilesystemImage);
   registerFilesystemBaseImage(previousDosFilesystemImage);
