@@ -187,6 +187,69 @@ The fixture provisions one Computer, so this is CS486DX2 evidence. CS386SX and
 CS486DX rest on the host A/B harness, which measured equivalence and throughput
 on all three profiles.
 
+## Measured headroom and exhausted directions
+
+Verify on 2026-07-28: profile the interpreter on `hosted-c-mid`, CS486DX2,
+`cpu-slice`, 4,000,000 instructions, then size each candidate by replacing one
+modeled component with a stub and re-measuring, and finally A/B each real
+candidate against the shipped bundle with alternating best-of rounds.
+
+Expect: a self-time breakdown that identifies the dominant serial cost, and a
+measured ceiling for each direction before any of them is implemented.
+
+Result: the remaining cost is concentrated in the memory-hierarchy model, and
+every structural attempt to reduce it measured neutral or worse.
+
+Self time: `runHotCpuBurst` 36.2%, `SetAssociativeCache.access` 18.0%,
+`fetchInstruction` 9.9%, garbage collection 4.5%, `accessCachedLine` 4.3%,
+`accessData` 2.0%. The hierarchy is roughly 34% of the process and roughly 46%
+of interpreter-only time.
+
+Stub ceilings, host `M/s`, best of five, against 85.0 baseline: stubbing both
+`fetchInstruction` and `accessData` reaches 189.9 (2.23x), `fetchInstruction`
+alone 137.7 (1.62x), `accessData` alone 94.5 (1.11x). Instruction fetch is
+therefore the dominant serial bottleneck. Narrowing it further, a
+`fetchInstruction` reduced to only its two statistics counters reaches 121.4, so
+the counters cost about a third of that ceiling and the cache lookup the rest.
+The realistic ceiling for a perfect fetch fast path is about 1.4x, not 1.62x.
+
+Five candidates were built and measured against that ceiling. None shipped:
+
+| candidate                                                            | measured                    |
+| -------------------------------------------------------------------- | --------------------------- |
+| Per-stream line hints in `fetchInstruction`/`accessData`             | 0.94x                       |
+| The same hints with the existing global line memo restored alongside | 0.89x                       |
+| Removing the global line memo alone                                  | 0.95x                       |
+| Inlining the global memo's hit path into `fetchInstruction`          | 0.86x                       |
+| Splitting the miss paths out of `accessCachedLine` and `access`      | 0.98x                       |
+| Inlining `push`/`pop` into the burst's stack lane                    | 0.98x-1.06x, geomean ~1.01x |
+
+The stream hints were verified equivalent by the full 18-configuration harness
+before being rejected on throughput; the rest were rejected before equivalence
+work began. Their hint hit rate on the instruction stream is 72.9%, so the
+design worked and still lost: every hint needs a `lastAccess` record written on
+every access, and that bookkeeping costs more than the two saved calls save.
+
+The single largest signal is that growing `fetchInstruction`'s body is expensive
+out of proportion to the work added — inlining a five-operation hit path into it
+cost 14%. The hot chain is at a local optimum that resists both inlining and
+splitting, which reproduces the 0.997x result already recorded above from a
+different direction. Inlining `push`/`pop` does remove a heap allocation per
+`pop` and `ret`, but its measured effect stays inside this host's ±5% run-to-run
+spread on `mem-stack`, so it is not evidence of a gain.
+
+A typed-array replacement for the `DataView` guest-memory accesses measured
+1.045x on `mem-stack` as an unguarded stub. Dword and byte accesses are admitted
+unaligned by design, so a shipped version needs an alignment branch and a host
+endianness guard that the stub did not pay, and 16-bit accesses would keep their
+current path. What remains after those guards is smaller than the measurement
+spread.
+
+Further throughput work on this interpreter should target something other than
+the L1 model's hot path. The next untested directions are the per-instruction
+budget arithmetic in `runHotCpuBurst` and the burst's own dispatch, not the
+cache.
+
 ## Explicit exclusions
 
 This work does not add a second CS486 interpreter, transpiler, or native
