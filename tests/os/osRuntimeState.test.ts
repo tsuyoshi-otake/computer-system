@@ -43,30 +43,48 @@ describe("OS runtime state", (): void => {
       tick: 4,
       uid: 1000,
     });
-    state.transitionProcess(worker.pid, {
-      cycles: 1_250,
-      kind: "account_cycles",
-      tick: 5,
+    const jobBeforeAccounting = state.job(job.jobId);
+    const revisionBeforeAccounting = state.revision;
+    expect(
+      state.transitionProcess(worker.pid, {
+        cycles: 1_250,
+        kind: "account_cycles",
+        tick: 5,
+      }),
+    ).toMatchObject({
+      changedTick: 5,
+      cpuCycles: 1_250,
+      state: "ready",
     });
+    expect(state.job(job.jobId)).toBe(jobBeforeAccounting);
+    expect(state.job(job.jobId)).toMatchObject({
+      changedTick: 4,
+      state: "running",
+    });
+    expect(state.revision).toBe(revisionBeforeAccounting + 1);
     expect(state.signalProcess(worker.pid, "SIGSTOP", 6)).toMatchObject({
       cpuCycles: 1_250,
       lastSignal: "SIGSTOP",
       state: "stopped",
       waitReason: "SIGSTOP",
     });
-    expect(state.job(job.jobId)?.state).toBe("stopped");
+    const stoppedJob = state.job(job.jobId);
+    expect(stoppedJob).not.toBe(jobBeforeAccounting);
+    expect(stoppedJob).toMatchObject({ changedTick: 6, state: "stopped" });
     expect(state.signalProcess(worker.pid, "SIGCONT", 7)).toMatchObject({
       lastSignal: "SIGCONT",
       state: "ready",
     });
-    expect(state.job(job.jobId)?.state).toBe("running");
+    const continuedJob = state.job(job.jobId);
+    expect(continuedJob).not.toBe(stoppedJob);
+    expect(continuedJob).toMatchObject({ changedTick: 7, state: "running" });
     expect(
       state.transitionJob(job.jobId, {
         kind: "complete",
         status: 7,
         tick: 8,
       }),
-    ).toMatchObject({ exitStatus: 7, state: "done" });
+    ).toMatchObject({ changedTick: 8, exitStatus: 7, state: "done" });
     expect(state.process(worker.pid)).toMatchObject({
       exitStatus: 7,
       state: "zombie",
@@ -101,6 +119,55 @@ describe("OS runtime state", (): void => {
         uid: 1000,
       }).pid,
     ).toBe(3);
+  });
+
+  it("accounts cycles at the 32-job boundary without rewriting job records", (): void => {
+    const state = runningState({ maximumJobs: 32, maximumProcesses: 33 });
+    const processes = Array.from({ length: 32 }, (_, index) => {
+      const command = `worker-${String(index + 1)}`;
+      const process = state.spawnProcess({
+        command,
+        gid: 1000,
+        parentPid: 1,
+        startTick: 3,
+        uid: 1000,
+      });
+      state.createJob({
+        command,
+        pid: process.pid,
+        tick: 3,
+        uid: 1000,
+      });
+      return process;
+    });
+    const jobsBeforeAccounting = state.jobs();
+    const revisionBeforeAccounting = state.revision;
+
+    state.transitionProcess(processes[0]!.pid, {
+      cycles: 1,
+      kind: "account_cycles",
+      tick: 4,
+    });
+    for (const [index, job] of state.jobs().entries()) {
+      expect(job).toBe(jobsBeforeAccounting[index]);
+    }
+    for (let index = 1; index < processes.length; index += 1) {
+      state.transitionProcess(processes[index]!.pid, {
+        cycles: index + 1,
+        kind: "account_cycles",
+        tick: 4,
+      });
+    }
+
+    expect(state.revision).toBe(revisionBeforeAccounting + processes.length);
+    for (const [index, job] of state.jobs().entries()) {
+      expect(job).toBe(jobsBeforeAccounting[index]);
+      expect(job).toMatchObject({ changedTick: 3, state: "running" });
+      expect(state.process(job.pid)).toMatchObject({
+        changedTick: 4,
+        cpuCycles: index + 1,
+      });
+    }
   });
 
   it("keeps sessions, services, mounts, devices, and proc views coherent", (): void => {

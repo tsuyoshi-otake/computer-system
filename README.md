@@ -77,7 +77,7 @@ adapters, portable computer identity, integrated desktop displays, and bounded
 Bedrock probes are covered by host and Bedrock Dedicated Server verification.
 
 The latest public build is
-[v0.1.0-alpha.12](https://github.com/tsuyoshi-otake/computer-system/releases/tag/v0.1.0-alpha.12).
+[v0.1.0-alpha.13](https://github.com/tsuyoshi-otake/computer-system/releases/tag/v0.1.0-alpha.13).
 It is an alpha preview of the implemented Phase 2 slice, not the later Phase 6
 release-hardening milestone. Back up an existing world before testing it.
 
@@ -192,7 +192,7 @@ transport.
 ## Install the alpha preview
 
 1. Download
-   [`computer-system-0.1.0-alpha.12.mcaddon`](https://github.com/tsuyoshi-otake/computer-system/releases/download/v0.1.0-alpha.12/computer-system-0.1.0-alpha.12.mcaddon).
+   [`computer-system-0.1.0-alpha.13.mcaddon`](https://github.com/tsuyoshi-otake/computer-system/releases/download/v0.1.0-alpha.13/computer-system-0.1.0-alpha.13.mcaddon).
 2. Open the downloaded file with Minecraft for Windows to import both packs.
 3. In the target world's settings, activate the Computer System Behavior Pack.
    Its declared dependency activates the matching Resource Pack.

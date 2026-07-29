@@ -4,20 +4,20 @@
     "name": "Computer System Phase 0 BP",
     "description": "Bedrock feasibility probes for Computer System",
     "uuid": "c2a57113-2d13-4006-bdda-2cec5b99ae8c",
-    "version": [0, 1, 16],
+    "version": [0, 1, 17],
     "min_engine_version": [1, 26, 30]
   },
   "modules": [
     {
       "type": "data",
       "uuid": "513241b5-c1d8-4d0d-80a2-066bfd65c07d",
-      "version": [0, 1, 16]
+      "version": [0, 1, 17]
     },
     {
       "type": "script",
       "language": "javascript",
       "uuid": "c0de9c03-90ec-452b-be20-773a58b38b54",
-      "version": [0, 1, 16],
+      "version": [0, 1, 17],
       "entry": "scripts/main.js"
     }
   ],

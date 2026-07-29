@@ -127,6 +127,7 @@ export type OsProcessTransition =
 export type OsJobState = "running" | "stopped" | "done";
 
 export interface OsJobRecord {
+  /** Tick of the last job lifecycle transition; CPU accounting does not advance it. */
   readonly changedTick: number;
   readonly command: string;
   readonly exitStatus?: number;
@@ -655,7 +656,9 @@ export class OsRuntimeState {
         break;
     }
     this.processRecords.set(pid, updated);
-    this.synchronizeProcessDependents(updated, event);
+    if (event.kind !== "account_cycles") {
+      this.synchronizeProcessDependents(updated, event);
+    }
     this.bumpRevision();
     return updated;
   }
@@ -2063,7 +2066,7 @@ export class OsRuntimeState {
 
   private synchronizeProcessDependents(
     process: OsProcessRecord,
-    event: OsProcessTransition,
+    event: Exclude<OsProcessTransition, { readonly kind: "account_cycles" }>,
   ): void {
     if (process.state === "stopped") {
       for (const [jobId, job] of this.jobRecords) {
