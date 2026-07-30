@@ -446,6 +446,10 @@ function createShellModule(
       throw new VmRuntimeError("ValueError", "Invalid terminal mouse event");
     return executeShellOperation(() => shell.mouse(encoded));
   });
+  const eof = fn("eof", (positional, keywords) => {
+    requireArity(positional, keywords, 0, 0);
+    return executeShellOperation(() => shell.eof());
+  });
   const disconnect = fn("disconnect", (positional, keywords) => {
     requireArity(positional, keywords, 0, 0);
     writeTerminalLines(context.terminal, shell.disconnect());
@@ -454,6 +458,7 @@ function createShellModule(
   return namespace("shell", {
     banner,
     disconnect,
+    eof,
     keys,
     mouse,
     prompt,

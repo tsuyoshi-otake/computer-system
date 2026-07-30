@@ -54,7 +54,9 @@ const terminalInteractionContexts = new Set([
   "less",
   "login",
   "more",
+  "perl-source",
   "pwb",
+  "python-repl",
   "qbasic",
   "secret",
   "shell",
@@ -118,6 +120,7 @@ export function terminalInteractionFromTerminal(terminal) {
     );
   }
   if (
+    typeof interaction.eof !== "boolean" ||
     typeof interaction.secretInput !== "boolean" ||
     !terminalCtrlCActions.has(interaction.ctrlCAction) ||
     !Number.isSafeInteger(interaction.interactionGeneration) ||
@@ -125,6 +128,15 @@ export function terminalInteractionFromTerminal(terminal) {
   ) {
     throw new TerminalInteractionProtocolError(
       "The terminal frame has invalid interaction flags.",
+    );
+  }
+  if (
+    interaction.eof &&
+    interaction.context !== "perl-source" &&
+    interaction.context !== "python-repl"
+  ) {
+    throw new TerminalInteractionProtocolError(
+      "EOF input is unavailable in this terminal context.",
     );
   }
   if (
@@ -284,6 +296,178 @@ export function insertPastedCommand(
     cursor: prefix.length + inserted.length,
     value: `${prefix}${inserted}${suffix}`,
   };
+}
+
+const maximumSubmittedLineLength = 128;
+
+/**
+ * Keeps one admitted, non-secret line visible until the guest terminal either
+ * echoes it or performs an authoritative destructive presentation operation.
+ */
+export class SubmittedLineHandoffController {
+  #generation = 0;
+  #pending;
+
+  get pending() {
+    return this.#pending !== undefined;
+  }
+
+  get presentation() {
+    return this.#pending?.ticket.presentation;
+  }
+
+  begin({ secretInput = false, terminal, value }) {
+    requireSubmittedLine(value);
+    if (this.#pending !== undefined) return { outcome: "busy" };
+    if (secretInput) return { outcome: "secret" };
+    const frame = terminalSubmissionFrame(terminal);
+    this.#generation += 1;
+    const presentation = Object.freeze({
+      anchor: Object.freeze({ x: frame.cursorX, y: frame.cursorY }),
+      value,
+    });
+    const ticket = Object.freeze({
+      baseReplacementEpoch: frame.replacementEpoch,
+      baseTerminalRevision: frame.terminalRevision,
+      generation: this.#generation,
+      presentation,
+    });
+    this.#pending = { accepted: false, ticket };
+    return { outcome: "started", ticket };
+  }
+
+  accept(ticket, terminal) {
+    if (!this.#owns(ticket)) return { outcome: "stale" };
+    this.#pending.accepted = true;
+    return this.observe(terminal);
+  }
+
+  reject(ticket) {
+    if (!this.#owns(ticket)) return false;
+    this.#generation += 1;
+    this.#pending = undefined;
+    return true;
+  }
+
+  observe(terminal) {
+    const frame = terminalSubmissionFrame(terminal);
+    const pending = this.#pending;
+    if (pending === undefined) return { outcome: "idle" };
+    if (!pending.accepted) return { outcome: "pending" };
+    const { ticket } = pending;
+    if (
+      frame.terminalRevision < ticket.baseTerminalRevision ||
+      frame.replacementEpoch < ticket.baseReplacementEpoch
+    ) {
+      return { outcome: "pending" };
+    }
+    if (frame.replacementEpoch > ticket.baseReplacementEpoch) {
+      return this.#complete("replaced");
+    }
+    if (frame.terminalRevision <= ticket.baseTerminalRevision) {
+      return { outcome: "pending" };
+    }
+    if (ticket.presentation.value.length === 0) {
+      return this.#complete("advanced");
+    }
+    if (submittedLineMatches(ticket.presentation, terminal)) {
+      return this.#complete("echoed");
+    }
+    return { outcome: "pending" };
+  }
+
+  cancel() {
+    const ticket = this.#pending?.ticket;
+    this.#generation += 1;
+    this.#pending = undefined;
+    return ticket?.presentation;
+  }
+
+  #complete(outcome) {
+    const presentation = this.#pending.ticket.presentation;
+    this.#generation += 1;
+    this.#pending = undefined;
+    return { outcome, presentation };
+  }
+
+  #owns(ticket) {
+    return (
+      ticket !== null &&
+      typeof ticket === "object" &&
+      ticket.generation === this.#generation &&
+      this.#pending?.ticket === ticket
+    );
+  }
+}
+
+function terminalSubmissionFrame(terminal) {
+  if (
+    terminal === null ||
+    typeof terminal !== "object" ||
+    !Number.isSafeInteger(terminal.width) ||
+    terminal.width <= 0 ||
+    terminal.width > 200 ||
+    !Number.isSafeInteger(terminal.height) ||
+    terminal.height <= 0 ||
+    terminal.height > 100 ||
+    !Array.isArray(terminal.rows) ||
+    terminal.rows.length !== terminal.height ||
+    terminal.rows.some(
+      (row) => typeof row !== "string" || [...row].length !== terminal.width,
+    ) ||
+    !Number.isSafeInteger(terminal.cursor?.x) ||
+    terminal.cursor.x <= 0 ||
+    !Number.isSafeInteger(terminal.cursor?.y) ||
+    terminal.cursor.y <= 0 ||
+    terminal.cursor.y > terminal.height ||
+    !Number.isSafeInteger(terminal.terminalRevision) ||
+    terminal.terminalRevision < 0 ||
+    !Number.isSafeInteger(terminal.replacementEpoch) ||
+    terminal.replacementEpoch < 0
+  ) {
+    throw new TerminalInteractionProtocolError(
+      "This terminal frame does not provide bounded submission handoff state.",
+    );
+  }
+  return {
+    cursorX: terminal.cursor.x,
+    cursorY: terminal.cursor.y,
+    replacementEpoch: terminal.replacementEpoch,
+    terminalRevision: terminal.terminalRevision,
+  };
+}
+
+function submittedLineMatches(presentation, terminal) {
+  let x = presentation.anchor.x;
+  let y = presentation.anchor.y;
+  let rowCharacters;
+  let rowY = 0;
+  for (const character of [...presentation.value]) {
+    if (x > terminal.width) {
+      x = 1;
+      y += 1;
+    }
+    if (y > terminal.height) return false;
+    if (rowY !== y) {
+      rowCharacters = [...terminal.rows[y - 1]];
+      rowY = y;
+    }
+    if (rowCharacters[x - 1] !== character) {
+      return false;
+    }
+    x += 1;
+  }
+  return true;
+}
+
+function requireSubmittedLine(value) {
+  if (
+    typeof value !== "string" ||
+    value.length > maximumSubmittedLineLength ||
+    /[\0\r\n]/u.test(value)
+  ) {
+    throw new RangeError("Submitted terminal line is out of range");
+  }
 }
 
 const maximumCompletionLineLength = 128;

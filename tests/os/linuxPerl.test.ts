@@ -2,8 +2,11 @@ import { describe, expect, it } from "vitest";
 
 import {
   executeLinuxPerl,
+  executePreparedLinuxPerl,
   linuxPerlLimits,
   linuxPerlVersion,
+  prepareLinuxPerlCommand,
+  type LinuxPerlExecutionInput,
   type LinuxPerlIo,
 } from "../../src/application/os/linuxPerl.js";
 import { CredentialedFilesystem } from "../../src/application/os/credentialedFilesystem.js";
@@ -47,9 +50,134 @@ function run(
   return { code: result.exitCode, err: result.stderr, out: result.stdout };
 }
 
+function runPrepared(
+  arguments_: readonly string[],
+  input: LinuxPerlExecutionInput,
+  files = new Map<string, string>(),
+): PerlRun {
+  const io = hostedIo(files);
+  const result = executePreparedLinuxPerl(
+    prepareLinuxPerlCommand(arguments_, io),
+    input,
+    io,
+  );
+  return { code: result.exitCode, err: result.stderr, out: result.stdout };
+}
+
 function linuxSession(): ShellSession {
   return new ShellSession(new InMemoryFilesystem(), { osProfile: "linux" });
 }
+
+describe("CS-Linux perl command preparation", (): void => {
+  it("distinguishes inline, script, stdin, version, and invalid commands", (): void => {
+    const files = new Map<string, string>([
+      ["/tmp/program.pl", 'print "ok\\n";'],
+    ]);
+    const io = hostedIo(files);
+
+    expect(prepareLinuxPerlCommand(["-e", 'print "ok\\n";'], io).kind).toBe(
+      "inline",
+    );
+    expect(prepareLinuxPerlCommand(["/tmp/program.pl"], io).kind).toBe(
+      "script",
+    );
+    expect(prepareLinuxPerlCommand([], io).kind).toBe("stdin");
+    expect(prepareLinuxPerlCommand(["-"], io).kind).toBe("stdin");
+    expect(prepareLinuxPerlCommand(["-v"], io).kind).toBe("version");
+    expect(prepareLinuxPerlCommand(["-e"], io)).toMatchObject({
+      kind: "invalid",
+      message: "option -e requires code",
+    });
+  });
+
+  it("keeps clustered options and inline-program arguments out of stdin-source mode", (): void => {
+    const io = hostedIo(new Map());
+    const stdin = prepareLinuxPerlCommand(["-F:", "-lna", "-", "kept"], io);
+    const inline = prepareLinuxPerlCommand(
+      ["-lane", 'print "$F[0]";', "-"],
+      io,
+    );
+
+    expect(stdin).toMatchObject({
+      kind: "stdin",
+      options: {
+        autosplit: true,
+        fieldSeparator: ":",
+        lineEnding: true,
+        loop: "quiet",
+      },
+      scriptArguments: ["kept"],
+    });
+    expect(inline).toMatchObject({
+      kind: "inline",
+      scriptArguments: ["-"],
+    });
+  });
+});
+
+describe("CS-Linux perl stdin-source execution", (): void => {
+  it("runs supplied piped source immediately for bare perl and explicit dash", (): void => {
+    expect(
+      runPrepared([], { kind: "source", source: 'print "bare\\n";' }),
+    ).toEqual({ code: 0, err: "", out: "bare\n" });
+    expect(
+      runPrepared(["-"], { kind: "source", source: 'print "dash\\n";' }),
+    ).toEqual({ code: 0, err: "", out: "dash\n" });
+  });
+
+  it("accepts an explicitly supplied empty program and never replays it as runtime stdin", (): void => {
+    expect(runPrepared([], { kind: "source", source: "" })).toEqual({
+      code: 0,
+      err: "",
+      out: "",
+    });
+    expect(
+      runPrepared(["-"], {
+        kind: "source",
+        source: 'while (<STDIN>) { print "source was replayed\\n"; }',
+      }),
+    ).toEqual({ code: 0, err: "", out: "" });
+  });
+
+  it("requires tagged source input instead of interpreting ordinary data stdin as a program", (): void => {
+    expect(run([], 'print "not a program\\n";')).toEqual({
+      code: 2,
+      err: "perl: program source must be supplied explicitly\n",
+      out: "",
+    });
+  });
+
+  it("keeps inline and script runtime data stdin separate from their source", (): void => {
+    const files = new Map<string, string>([
+      ["/tmp/filter.pl", "while (<STDIN>) { print uc $_; }"],
+    ]);
+
+    expect(run(["-pe", "s/a/A/g;"], "a\n")).toEqual({
+      code: 0,
+      err: "",
+      out: "A\n",
+    });
+    expect(run(["/tmp/filter.pl"], "a\n", files)).toEqual({
+      code: 0,
+      err: "",
+      out: "A\n",
+    });
+  });
+
+  it("accepts exactly 64 KiB of UTF-8 source and rejects one byte more", (): void => {
+    const exact = `#${"é".repeat(32_767)}\n`;
+
+    expect(runPrepared([], { kind: "source", source: exact })).toEqual({
+      code: 0,
+      err: "",
+      out: "",
+    });
+    const plusOne = runPrepared([], { kind: "source", source: `${exact}x` });
+    expect(plusOne.code).toBe(255);
+    expect(plusOne.out).toBe("");
+    expect(plusOne.err).toContain("program byte limit exceeded");
+  });
+});
 
 describe("bounded CS-Linux perl one-liners", (): void => {
   it("prints from -e and reports its version", (): void => {

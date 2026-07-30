@@ -64,6 +64,18 @@ describe("Computer System Linux shell and editor", (): void => {
         stats: false,
       },
     });
+    expect(shell.submit("python")).toMatchObject({
+      exitCode: 0,
+      foreground: {
+        command: "python",
+        kind: "python-repl",
+        path: "/home/cs/__repl__.py",
+      },
+    });
+    expect(shell.submit("python > /tmp/repl.txt")).toMatchObject({
+      exitCode: 2,
+      stderr: "python: interactive REPL does not support redirection\n",
+    });
     expect(shell.submit("python /tmp/demo.py | cat")).toMatchObject({
       exitCode: 0,
       foreground: { command: "pipeline", kind: "pipeline" },
@@ -82,12 +94,120 @@ describe("Computer System Linux shell and editor", (): void => {
       exitCode: 127,
       stderr: "python: MicroPython is not available on CS386SX\n",
     });
+    expect(unsupported.submit("python")).toMatchObject({
+      exitCode: 127,
+      stderr: "python: MicroPython is not available on CS386SX\n",
+    });
     const dos = new ShellSession(filesystem, {
       hardware: portableComputerHardware,
       osProfile: "dos",
     });
     expect(dos.submit("PYTHON C:\\TEMP\\DEMO.PY")).toMatchObject({
       exitCode: 127,
+    });
+  });
+
+  it("executes bare Perl source from pipes and input redirects", (): void => {
+    const filesystem = new InMemoryFilesystem();
+    const shell = new ShellSession(filesystem);
+    filesystem.writeFile("/tmp/program.pl", 'print "redirect\\n";\n');
+    filesystem.writeFile("/tmp/empty.pl", "");
+
+    expect(shell.submit("perl < /tmp/program.pl")).toMatchObject({
+      exitCode: 0,
+      stdout: "redirect\n",
+    });
+    expect(shell.submit("perl < /tmp/empty.pl")).toMatchObject({
+      exitCode: 0,
+      stdout: "",
+    });
+    expect(shell.submit(`printf 'print "pipe\\n";\\n' | perl`)).toMatchObject({
+      exitCode: 0,
+      stdout: "pipe\n",
+    });
+    expect(
+      shell.submit(
+        `printf 'while (<STDIN>) { print "replayed\\n"; }\\n' | perl`,
+      ),
+    ).toMatchObject({ exitCode: 0, stdout: "" });
+  });
+
+  it("collects bounded terminal Perl source until EOF without shell history", (): void => {
+    const filesystem = new InMemoryFilesystem();
+    const shell = new ShellSession(filesystem);
+
+    expect(shell.submit("perl")).toMatchObject({ exitCode: 0, lines: [] });
+    expect(shell.prompt()).toBe("");
+    expect(shell.terminalInteraction()).toMatchObject({
+      context: "perl-source",
+      ctrlCAction: "cancel",
+      eof: true,
+      history: false,
+      inputMode: "line",
+    });
+    expect(shell.submit('print "tty\\n";')).toMatchObject({
+      exitCode: 0,
+      lines: [],
+    });
+    expect(shell.eof()).toMatchObject({ exitCode: 0, stdout: "tty\n" });
+    expect(shell.prompt()).toBe("cs@c-000000:~$ ");
+    expect(shell.submit("history").stdout).not.toContain('print "tty\\n";');
+
+    expect(shell.submit("perl")).toMatchObject({ exitCode: 0 });
+    expect(shell.eof()).toMatchObject({ exitCode: 0, stdout: "" });
+
+    expect(shell.submit("perl > /tmp/perl-output.txt").exitCode).toBe(0);
+    shell.submit('print "written\\n";');
+    expect(shell.eof()).toMatchObject({ exitCode: 0, stdout: "" });
+    expect(filesystem.readFile("/tmp/perl-output.txt")).toBe("written\n");
+  });
+
+  it("finalizes terminal Perl cancellation, limits, disconnect, and MCP paths", (): void => {
+    const filesystem = new InMemoryFilesystem();
+    const shell = new ShellSession(filesystem);
+
+    shell.submit("perl");
+    shell.submit('open my $fh, ">", "/tmp/mutated"; print $fh "bad";');
+    expect(shell.cancelTerminalInteraction()).toBe(true);
+    expect(shell.submit("echo $?").stdout).toBe("130\n");
+    expect(filesystem.exists("/tmp/mutated")).toBe(false);
+    expect(shell.terminalInteraction().context).toBe("shell");
+    expect(shell.submit("echo recovered").stdout).toBe("recovered\n");
+
+    shell.submit("perl");
+    expect(shell.submit("x".repeat(65_535))).toMatchObject({
+      exitCode: 0,
+      stderr: "",
+    });
+    expect(shell.cancelTerminalInteraction()).toBe(true);
+
+    shell.submit("perl");
+    expect(shell.submit("x".repeat(65_536))).toMatchObject({
+      exitCode: 2,
+      stderr: "perl: program byte limit exceeded\n",
+    });
+    expect(shell.terminalInteraction().context).toBe("shell");
+
+    shell.submit("perl");
+    for (let line = 0; line < 4_096; line += 1)
+      expect(shell.submit("").exitCode).toBe(0);
+    expect(shell.submit("")).toMatchObject({
+      exitCode: 2,
+      stderr: "perl: program line limit exceeded\n",
+    });
+    expect(shell.eof()).toMatchObject({
+      exitCode: 2,
+      stderr: "shell: EOF is unavailable in the current input context\n",
+    });
+
+    shell.submit("perl");
+    shell.submit('print "must not run\\n";');
+    shell.disconnect();
+    expect(filesystem.exists("/tmp/mutated")).toBe(false);
+    expect(shell.submitDebugCommand("perl")).toMatchObject({
+      exitCode: 2,
+      stderr:
+        "debug: interactive Perl source collection is not supported through MCP\n",
     });
   });
 

@@ -110,4 +110,58 @@ describe("terminal cell buffer", (): void => {
     ).toThrow(TerminalError);
     expect(terminal.snapshot()).toEqual(snapshot);
   });
+
+  it("tracks only visible-buffer replacement operations with a transient epoch", (): void => {
+    const terminal = new TerminalBuffer(2, 2, {
+      maxHeight: 3,
+      maxWidth: 3,
+    });
+
+    expect(terminal.replacementEpoch).toBe(0);
+    terminal.setCursorPosition(2, 1);
+    terminal.setCursorBlink(true);
+    terminal.setTextColor(3);
+    terminal.setBackgroundColor(4);
+    terminal.write("x");
+    expect(terminal.replacementEpoch).toBe(0);
+
+    terminal.resize(3, 3);
+    expect(terminal.replacementEpoch).toBe(1);
+    terminal.resize(3, 3);
+    expect(terminal.replacementEpoch).toBe(1);
+    terminal.clear();
+    terminal.clearLine();
+    terminal.scroll(0);
+    expect(terminal.replacementEpoch).toBe(3);
+    terminal.scroll(1);
+    expect(terminal.replacementEpoch).toBe(4);
+
+    expect(terminal.applyFrame([], { blink: true, x: 1, y: 1 }, 3, 4)).toBe(0);
+    expect(terminal.replacementEpoch).toBe(5);
+    expect(terminal.applyFrame([], { blink: true, x: 1, y: 1 }, 3, 4)).toBe(0);
+    expect(terminal.replacementEpoch).toBe(5);
+
+    const snapshot = terminal.snapshot();
+    const stableEpoch = terminal.replacementEpoch;
+    expect(() =>
+      terminal.applyFrame(
+        [[{ background: 4, character: "\n", foreground: 3 }]],
+        { blink: true, x: 1, y: 1 },
+      ),
+    ).toThrow(TerminalError);
+    expect(terminal.replacementEpoch).toBe(stableEpoch);
+    expect(terminal.snapshot()).toEqual(snapshot);
+
+    terminal.restore(snapshot);
+    expect(terminal.replacementEpoch).toBe(stableEpoch + 1);
+    const restoredEpoch = terminal.replacementEpoch;
+    expect(() =>
+      terminal.restore({
+        ...snapshot,
+        cursor: { ...snapshot.cursor, blink: "invalid" as never },
+      }),
+    ).toThrow(TerminalError);
+    expect(terminal.replacementEpoch).toBe(restoredEpoch);
+    expect(terminal.snapshot()).toEqual(snapshot);
+  });
 });

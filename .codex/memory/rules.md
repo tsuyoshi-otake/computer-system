@@ -504,3 +504,9 @@
   publication. Evidence: Issue #102 C3/argument/result, nested-fault, heap,
   low-slice, RAM-baseline, 2,133-test full-gate, browser, and MCP/BDS
   verification.
+- [Terminal relay allowlists] Model no-payload actions as exact alternatives,
+  separate from payload-bearing actions. Applying a shared trailing-space and
+  payload pattern makes a valid EOF impossible to relay or accidentally accepts
+  malformed EOF data. Evidence: the exact `eof` BDS relay regression, malformed
+  `eof ` and `eof payload` rejections, and real-BDS Perl/Python Ctrl+D flows all
+  pass after separating the alternatives.

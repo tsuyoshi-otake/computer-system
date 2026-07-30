@@ -395,6 +395,207 @@ describe("ComputerRuntime", (): void => {
     expect(record.lifecycle.state.kind).not.toBe("off");
   });
 
+  it("keeps one Python process, PID, and RAM grant across interactive cells", (): void => {
+    const record = new ComputerRecord("c-000122", "standard");
+    const runtime = runtimeWith(record);
+    runtime.powerOn(record.computerId);
+    completeBootCycle(runtime, record);
+    const baselineRam = runtime.guestMemoryStatus(record.computerId)?.usedBytes;
+
+    expect(
+      runtime.queueEvent(record.computerId, "terminal_line", "python"),
+    ).toMatchObject({ outcome: "accepted" });
+    runUntilTerminalContext(runtime, record.computerId, "python-repl");
+    expect(runtime.terminalInteraction(record.computerId)).toMatchObject({
+      context: "python-repl",
+      ctrlCAction: "cancel",
+      eof: true,
+      history: false,
+      inputMode: "line",
+    });
+    expect(
+      runtime.queueEvent(record.computerId, "terminal_eof", "payload"),
+    ).toMatchObject({ outcome: "failed" });
+    expect(
+      runtime.queueEvent(record.computerId, "terminal_line", 42),
+    ).toMatchObject({ outcome: "failed" });
+    expect(runtime.terminalInteraction(record.computerId).context).toBe(
+      "python-repl",
+    );
+    const foregroundBefore = pythonReplForeground(runtime, record.computerId);
+    const admittedRam = runtime.guestMemoryStatus(record.computerId)?.usedBytes;
+    expect(admittedRam).toBeGreaterThan(baselineRam ?? 0);
+
+    runtime.queueEvent(record.computerId, "terminal_line", "value = 40");
+    runUntilTerminalContext(runtime, record.computerId, "python-repl");
+    runtime.queueEvent(record.computerId, "terminal_line", "value + 2");
+    runUntilTerminalContext(runtime, record.computerId, "python-repl");
+    runtime.queueEvent(record.computerId, "terminal_line", "1 / 0");
+    runUntilTerminalContext(runtime, record.computerId, "python-repl");
+
+    runtime.queueEvent(record.computerId, "terminal_line", "def answer():");
+    expect(runtime.terminalInteraction(record.computerId).context).toBe(
+      "python-repl",
+    );
+    expect(runtime.cancelTerminalInteraction(record.computerId)).toMatchObject({
+      outcome: "accepted",
+      state: "interaction_cancelled",
+    });
+    runtime.queueEvent(record.computerId, "terminal_line", "value + 3");
+    runUntilTerminalContext(runtime, record.computerId, "python-repl");
+
+    const foregroundAfter = pythonReplForeground(runtime, record.computerId);
+    expect(foregroundAfter.process).toBe(foregroundBefore.process);
+    expect(foregroundAfter.memoryGrant).toBe(foregroundBefore.memoryGrant);
+    expect(foregroundAfter.osPid).toBe(foregroundBefore.osPid);
+    expect(foregroundAfter.runtimeId).toBe(foregroundBefore.runtimeId);
+    expect(runtime.guestMemoryStatus(record.computerId)?.usedBytes).toBe(
+      admittedRam,
+    );
+
+    expect(runtime.queueEvent(record.computerId, "terminal_eof")).toMatchObject(
+      {
+        outcome: "accepted",
+      },
+    );
+    runUntilTerminalContext(runtime, record.computerId, "shell");
+    expect(runtime.guestMemoryStatus(record.computerId)?.usedBytes).toBe(
+      baselineRam,
+    );
+    const output = record.terminal.snapshot().rows.join("\n");
+    expect(output).toContain("targeting Python 3.14");
+    expect(output).toContain("42");
+    expect(output).toContain("ZeroDivisionError");
+    expect(output).toContain("43");
+    expect(output).toContain("cs@c-000122:~$ ");
+    expect(record.filesystem.readFile("/home/cs/.bash_history")).not.toContain(
+      "value = 40",
+    );
+  });
+
+  it("runs terminal-owned Perl source once at EOF and drops it on reboot", (): void => {
+    const record = new ComputerRecord("c-000126", "standard");
+    const runtime = runtimeWith(record);
+    runtime.powerOn(record.computerId);
+    completeBootCycle(runtime, record);
+    const baselineRam = runtime.guestMemoryStatus(record.computerId)?.usedBytes;
+
+    runtime.queueEvent(record.computerId, "terminal_line", "perl");
+    runUntilTerminalContext(runtime, record.computerId, "perl-source");
+    expect(runtime.terminalInteraction(record.computerId)).toMatchObject({
+      context: "perl-source",
+      ctrlCAction: "cancel",
+      eof: true,
+      history: false,
+    });
+    expect(
+      runtime.guestMemoryStatus(record.computerId)?.usedBytes,
+    ).toBeGreaterThan(baselineRam ?? 0);
+    runtime.queueEvent(
+      record.computerId,
+      "terminal_line",
+      'print "terminal-perl\\n";',
+    );
+    expect(runtime.queueEvent(record.computerId, "terminal_eof")).toMatchObject(
+      {
+        outcome: "accepted",
+      },
+    );
+    runUntilTerminalContext(runtime, record.computerId, "shell");
+    expect(runtime.guestMemoryStatus(record.computerId)?.usedBytes).toBe(
+      baselineRam,
+    );
+    expect(record.terminal.snapshot().rows.join("\n")).toContain(
+      "terminal-perl",
+    );
+    expect(record.filesystem.readFile("/home/cs/.bash_history")).not.toContain(
+      "terminal-perl",
+    );
+
+    runtime.queueEvent(record.computerId, "terminal_line", "perl");
+    runUntilTerminalContext(runtime, record.computerId, "perl-source");
+    runtime.queueEvent(
+      record.computerId,
+      "terminal_line",
+      'open my $fh, ">", "/tmp/replayed"; print $fh "bad";',
+    );
+    expect(runtime.reboot(record.computerId)).toMatchObject({
+      outcome: "accepted",
+    });
+    completeBootCycle(runtime, record, 400);
+    runUntilTerminalContext(runtime, record.computerId, "shell");
+    expect(record.filesystem.exists("/tmp/replayed")).toBe(false);
+  });
+
+  it("finalizes a waiting Python REPL once on terminal disconnect", (): void => {
+    const record = new ComputerRecord("c-000123", "standard");
+    const runtime = runtimeWith(record);
+    runtime.powerOn(record.computerId);
+    completeBootCycle(runtime, record);
+    const baselineRam = runtime.guestMemoryStatus(record.computerId)?.usedBytes;
+    runtime.queueEvent(record.computerId, "terminal_line", "python");
+    runUntilTerminalContext(runtime, record.computerId, "python-repl");
+
+    expect(
+      runtime.queueEvent(record.computerId, "terminal_closed"),
+    ).toMatchObject({ outcome: "accepted" });
+    runTicks(runtime, 4);
+    expect(runtime.guestMemoryStatus(record.computerId)?.usedBytes).toBe(
+      baselineRam,
+    );
+    expect(
+      pythonReplForeground(runtime, record.computerId, false),
+    ).toBeUndefined();
+  });
+
+  it("releases a waiting Python REPL before rebooting the same Computer", (): void => {
+    const record = new ComputerRecord("c-000124", "standard");
+    const runtime = runtimeWith(record);
+    runtime.powerOn(record.computerId);
+    completeBootCycle(runtime, record);
+    runtime.queueEvent(record.computerId, "terminal_line", "python");
+    runUntilTerminalContext(runtime, record.computerId, "python-repl");
+
+    expect(runtime.reboot(record.computerId)).toMatchObject({
+      outcome: "accepted",
+    });
+    completeBootCycle(runtime, record, 400);
+    runUntilTerminalContext(runtime, record.computerId, "shell");
+    expect(
+      pythonReplForeground(runtime, record.computerId, false),
+    ).toBeUndefined();
+    expect(record.lifecycle.state.kind).not.toBe("off");
+  });
+
+  it("terminates the REPL explicitly when Ctrl+C interrupts a running cell", (): void => {
+    const record = new ComputerRecord("c-000125", "standard");
+    const runtime = runtimeWith(record);
+    runtime.powerOn(record.computerId);
+    completeBootCycle(runtime, record);
+    const baselineRam = runtime.guestMemoryStatus(record.computerId)?.usedBytes;
+    runtime.queueEvent(record.computerId, "terminal_line", "python");
+    runUntilTerminalContext(runtime, record.computerId, "python-repl");
+    runtime.queueEvent(record.computerId, "terminal_line", "while True:");
+    runtime.queueEvent(record.computerId, "terminal_line", "    pass");
+    runtime.queueEvent(record.computerId, "terminal_line", "");
+    runtime.runTick();
+    expect(runtime.terminalInteraction(record.computerId)).toMatchObject({
+      context: "busy",
+      ctrlCAction: "interrupt",
+      inputMode: "none",
+    });
+
+    expect(runtime.interrupt(record.computerId)).toMatchObject({
+      outcome: "accepted",
+      state: "foreground_interrupted",
+    });
+    runUntilTerminalContext(runtime, record.computerId, "shell");
+    expect(runtime.guestMemoryStatus(record.computerId)?.usedBytes).toBe(
+      baselineRam,
+    );
+    expect(record.terminal.snapshot().rows.join("\n")).toContain("^C");
+  });
+
   it("interrupts foreground Python without powering off the shell", (): void => {
     const record = new ComputerRecord("c-000011", "standard");
     const runtime = runtimeWith(record);
@@ -820,6 +1021,57 @@ describe("ComputerRuntime", (): void => {
     expect(faultRuntime.vmState(fault.computerId)).toBeUndefined();
   });
 });
+
+interface TestPythonReplForeground {
+  readonly memoryGrant?: unknown;
+  readonly osPid: number;
+  readonly process: unknown;
+  readonly pythonRepl?: unknown;
+  readonly runtimeId: number;
+}
+
+function pythonReplForeground(
+  runtime: ComputerRuntime,
+  computerId: string,
+): TestPythonReplForeground;
+function pythonReplForeground(
+  runtime: ComputerRuntime,
+  computerId: string,
+  required: false,
+): TestPythonReplForeground | undefined;
+function pythonReplForeground(
+  runtime: ComputerRuntime,
+  computerId: string,
+  required = true,
+): TestPythonReplForeground | undefined {
+  const entries = (
+    runtime as unknown as {
+      readonly entries: Map<
+        string,
+        { readonly foreground?: TestPythonReplForeground }
+      >;
+    }
+  ).entries;
+  const foreground = entries.get(computerId)?.foreground;
+  if (foreground?.pythonRepl !== undefined) return foreground;
+  if (!required) return undefined;
+  throw new Error(`Computer ${computerId} has no active Python REPL`);
+}
+
+function runUntilTerminalContext(
+  runtime: ComputerRuntime,
+  computerId: string,
+  context: "perl-source" | "python-repl" | "shell",
+  maximumTicks = 64,
+): void {
+  for (let tick = 0; tick <= maximumTicks; tick += 1) {
+    if (runtime.terminalInteraction(computerId).context === context) return;
+    if (tick < maximumTicks) runtime.runTick();
+  }
+  throw new Error(
+    `Computer ${computerId} did not reach terminal context ${context}`,
+  );
+}
 
 function computer(
   id: string,

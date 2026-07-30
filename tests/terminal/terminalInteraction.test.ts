@@ -36,6 +36,7 @@ describe("TerminalInteractionDescriptor", (): void => {
       context: "shell",
       inputMode: "line",
       ctrlCAction: "abort-line",
+      eof: false,
       interactionGeneration: 0,
       schema: 2,
     });
@@ -58,6 +59,35 @@ describe("TerminalInteractionDescriptor", (): void => {
         secretInput: false,
       }),
     ).toThrow(/hints exceed 5/u);
+  });
+
+  it("advertises EOF only for the bounded source and REPL contexts", (): void => {
+    const source = createTerminalInteractionDescriptor({
+      context: "perl-source",
+      ctrlCAction: "cancel",
+      cursorShape: "block",
+      eof: true,
+      history: false,
+      inputMode: "line",
+      pointer: "none",
+      presentation: "terminal",
+      secretInput: false,
+    });
+
+    expect(source.eof).toBe(true);
+    expect(() =>
+      createTerminalInteractionDescriptor({
+        context: "shell",
+        ctrlCAction: "abort-line",
+        cursorShape: "block",
+        eof: true,
+        history: false,
+        inputMode: "line",
+        pointer: "none",
+        presentation: "terminal",
+        secretInput: false,
+      }),
+    ).toThrow(/EOF is unavailable/u);
   });
 
   it("rejects unbounded text and inconsistent interaction capabilities", (): void => {

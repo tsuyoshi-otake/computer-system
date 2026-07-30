@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   BoundedEditorKeyQueue,
   CompletionRequestController,
+  SubmittedLineHandoffController,
   editorKeyFromKeyboardEvent,
   hasCopySelection,
   insertPastedCommand,
@@ -105,6 +106,7 @@ describe("Web terminal input helpers", () => {
       cursorShape: "block",
       pointer: "none",
       presentation: "terminal",
+      eof: false,
       secretInput: false,
       context: "shell",
       ctrlCAction: "abort-line",
@@ -142,6 +144,24 @@ describe("Web terminal input helpers", () => {
     });
   });
 
+  it("accepts EOF only when the active source or REPL context advertises it", () => {
+    expect(
+      terminalInteractionFromTerminal({
+        interaction: {
+          ...interactionForValidation(),
+          context: "python-repl",
+          eof: true,
+          history: false,
+        },
+      }),
+    ).toMatchObject({ context: "python-repl", eof: true });
+    expect(() =>
+      terminalInteractionFromTerminal({
+        interaction: { ...interactionForValidation(), eof: true },
+      }),
+    ).toThrow(/EOF input/u);
+  });
+
   it("fails closed for missing, unknown, or unbounded interaction schemas", () => {
     expect(() => terminalInteractionFromTerminal({ rows: [] })).toThrow(
       /interaction schema 2/u,
@@ -154,6 +174,7 @@ describe("Web terminal input helpers", () => {
           cursorShape: "block",
           pointer: "cell",
           presentation: "dos-tui",
+          eof: false,
           secretInput: false,
           context: "edit",
           ctrlCAction: "terminal-key",
@@ -171,6 +192,7 @@ describe("Web terminal input helpers", () => {
           cursorShape: "block",
           pointer: "cell",
           presentation: "dos-tui",
+          eof: false,
           secretInput: false,
           context: "edit",
           ctrlCAction: "terminal-key",
@@ -344,6 +366,171 @@ describe("Web terminal input helpers", () => {
   });
 });
 
+describe("submitted Web terminal line handoff", () => {
+  it.each([
+    ["CS-Linux", "printf ISSUE123-LINUX", "block"],
+    ["CS-DOS", "ECHO ISSUE123-DOS", "underline"],
+  ])(
+    "retains an admitted %s command across stale and unrelated frames until its exact echo",
+    (_profile, value, cursorShape) => {
+      const controller = new SubmittedLineHandoffController();
+      const baseline = terminalFrame({ cursorShape });
+      const started = controller.begin({
+        secretInput: false,
+        terminal: baseline,
+        value,
+      });
+
+      expect(started.outcome).toBe("started");
+      expect(controller.accept(started.ticket, baseline)).toEqual({
+        outcome: "pending",
+      });
+      expect(controller.presentation).toMatchObject({ value });
+
+      const background = terminalFrame({
+        cursorShape,
+        rows: ["background job"],
+        terminalRevision: 2,
+      });
+      expect(controller.observe(background)).toEqual({ outcome: "pending" });
+      expect(controller.presentation).toMatchObject({ value });
+
+      const echoed = terminalWithEcho(baseline, value, 3);
+      expect(controller.observe(echoed)).toMatchObject({
+        outcome: "echoed",
+        presentation: { value },
+      });
+      expect(controller.pending).toBe(false);
+      expect(controller.observe(echoed)).toEqual({ outcome: "idle" });
+    },
+  );
+
+  it.each([
+    ["Linux clear", "clear", "line", "terminal"],
+    ["DOS CLS", "CLS", "line", "terminal"],
+    ["Linux NetHack", "nethack", "keys", "terminal"],
+    ["DOS EDIT", "EDIT C:\\ISSUE.TXT", "keys", "dos-tui"],
+  ])(
+    "hands %s directly to an authoritative clear, scroll, or full-screen replacement",
+    (_scenario, value, inputMode, presentation) => {
+      const controller = new SubmittedLineHandoffController();
+      const baseline = terminalFrame();
+      const started = controller.begin({
+        secretInput: false,
+        terminal: baseline,
+        value,
+      });
+      expect(controller.accept(started.ticket, baseline)).toEqual({
+        outcome: "pending",
+      });
+
+      const replaced = terminalFrame({
+        inputMode,
+        presentation,
+        replacementEpoch: 1,
+        rows: inputMode === "keys" ? ["File  Edit", "........", "Dlvl:1"] : [],
+        terminalRevision: 2,
+      });
+      expect(controller.observe(replaced)).toMatchObject({
+        outcome: "replaced",
+        presentation: { value },
+      });
+      expect(controller.pending).toBe(false);
+    },
+  );
+
+  it("matches an authoritative echo across the terminal's right edge", () => {
+    const controller = new SubmittedLineHandoffController();
+    const baseline = terminalFrame({ cursor: { blink: true, x: 15, y: 1 } });
+    const started = controller.begin({
+      secretInput: false,
+      terminal: baseline,
+      value: "abcdefg",
+    });
+    controller.accept(started.ticket, baseline);
+
+    expect(
+      controller.observe(terminalWithEcho(baseline, "abcxefg", 2)),
+    ).toEqual({ outcome: "pending" });
+    expect(
+      controller.observe(terminalWithEcho(baseline, "abcdefg", 3)),
+    ).toMatchObject({ outcome: "echoed" });
+  });
+
+  it("acknowledges an empty line only after the authoritative revision advances", () => {
+    const controller = new SubmittedLineHandoffController();
+    const baseline = terminalFrame();
+    const started = controller.begin({
+      secretInput: false,
+      terminal: baseline,
+      value: "",
+    });
+
+    expect(controller.accept(started.ticket, baseline)).toEqual({
+      outcome: "pending",
+    });
+    expect(
+      controller.observe(
+        terminalFrame({
+          cursor: { blink: true, x: 1, y: 2 },
+          terminalRevision: 2,
+        }),
+      ),
+    ).toMatchObject({ outcome: "advanced" });
+  });
+
+  it("never retains a secret and finalizes rejection, duplication, and disconnect explicitly", () => {
+    const controller = new SubmittedLineHandoffController();
+    const baseline = terminalFrame();
+    expect(
+      controller.begin({
+        secretInput: true,
+        terminal: baseline,
+        value: "not-stored",
+      }),
+    ).toEqual({ outcome: "secret" });
+    expect(controller.pending).toBe(false);
+
+    const draft = "VER";
+    const started = controller.begin({
+      secretInput: false,
+      terminal: baseline,
+      value: draft,
+    });
+    expect(
+      controller.begin({
+        secretInput: false,
+        terminal: baseline,
+        value: "duplicate",
+      }),
+    ).toEqual({ outcome: "busy" });
+    expect(controller.reject(started.ticket)).toBe(true);
+    expect(draft).toBe("VER");
+    expect(controller.pending).toBe(false);
+
+    const next = controller.begin({
+      secretInput: false,
+      terminal: baseline,
+      value: "nethack",
+    });
+    controller.accept(next.ticket, baseline);
+    expect(controller.cancel()).toMatchObject({ value: "nethack" });
+    expect(controller.pending).toBe(false);
+  });
+
+  it("fails closed when handoff counters are absent or unbounded", () => {
+    const controller = new SubmittedLineHandoffController();
+    const missing = terminalFrame();
+    delete missing.replacementEpoch;
+    expect(() => controller.observe(missing)).toThrow(/handoff state/u);
+    expect(() =>
+      controller.observe(
+        terminalFrame({ terminalRevision: Number.MAX_SAFE_INTEGER + 1 }),
+      ),
+    ).toThrow(/handoff state/u);
+  });
+});
+
 function completionResponse() {
   return {
     cursor: 2,
@@ -360,11 +547,68 @@ function interactionForValidation() {
     cursorShape: "block",
     pointer: "none",
     presentation: "terminal",
+    eof: false,
     secretInput: false,
     context: "shell",
     ctrlCAction: "abort-line",
     history: true,
     hints: [],
     interactionGeneration: 1,
+  };
+}
+
+function terminalFrame(options = {}) {
+  const width = 20;
+  const height = 4;
+  const inputMode = options.inputMode ?? "line";
+  const presentation = options.presentation ?? "terminal";
+  const keyInput = inputMode === "keys";
+  const dosTui = presentation === "dos-tui";
+  const rows = Array.from({ length: height }, (_, index) =>
+    String(options.rows?.[index] ?? "")
+      .padEnd(width, " ")
+      .slice(0, width),
+  );
+  return {
+    schema: 1,
+    width,
+    height,
+    rows,
+    cursor: options.cursor ?? { blink: true, x: 3, y: 1 },
+    terminalRevision: options.terminalRevision ?? 1,
+    replacementEpoch: options.replacementEpoch ?? 0,
+    interaction: {
+      ...interactionForValidation(),
+      cursorShape: options.cursorShape ?? "block",
+      inputMode,
+      presentation,
+      pointer: keyInput && dosTui ? "cell" : "none",
+      context: keyInput ? (dosTui ? "edit" : "cs-abi") : "shell",
+      ctrlCAction: keyInput
+        ? dosTui
+          ? "terminal-key"
+          : "interrupt"
+        : "abort-line",
+      history: !keyInput,
+    },
+  };
+}
+
+function terminalWithEcho(baseline, value, terminalRevision) {
+  const rows = baseline.rows.map((row) => [...row]);
+  let x = baseline.cursor.x;
+  let y = baseline.cursor.y;
+  for (const character of [...value]) {
+    if (x > baseline.width) {
+      x = 1;
+      y += 1;
+    }
+    rows[y - 1][x - 1] = character;
+    x += 1;
+  }
+  return {
+    ...baseline,
+    rows: rows.map((row) => row.join("")),
+    terminalRevision,
   };
 }

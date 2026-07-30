@@ -552,6 +552,9 @@ describe("Web companion HTTP server", () => {
       () =>
         server.store.activeSession(handoff.sessionId)?.terminalVersion === 1,
     );
+    expect(
+      server.store.activeSession(handoff.sessionId)?.terminal?.terminal,
+    ).toMatchObject({ replacementEpoch: 0, terminalRevision: 0 });
     const captured = server.captureTuiScreen({
       computerId: "c-000001",
       sessionId: handoff.sessionId,
@@ -1204,6 +1207,43 @@ describe("Web companion HTTP server", () => {
       /^scriptevent computer_system:web-input [A-Za-z0-9_-]+ [A-Za-z0-9_-]{6,20} 1 line hello%20world$/u,
     );
 
+    const unavailableEof = await post(status.origin, "/api/input", token, {
+      interactionGeneration: 1,
+      kind: "eof",
+    });
+    expect(unavailableEof.status).toBe(409);
+    expect(await unavailableEof.json()).toMatchObject({
+      code: "input_mode_changed",
+    });
+
+    bds.log(
+      `CS_WEB_TERMINAL ${JSON.stringify(
+        tuiSnapshot(sessionId, {
+          interaction: {
+            ...shellInteraction(),
+            context: "python-repl",
+            eof: true,
+            history: false,
+          },
+        }),
+      )}`,
+    );
+    const eof = await post(status.origin, "/api/input", token, {
+      interactionGeneration: 1,
+      kind: "eof",
+    });
+    expect(eof.status).toBe(202);
+    expect(bds.commands.at(-1)).toMatch(
+      /^scriptevent computer_system:web-input [A-Za-z0-9_-]+ [A-Za-z0-9_-]{6,20} 1 eof$/u,
+    );
+    const eofValue = await post(status.origin, "/api/input", token, {
+      interactionGeneration: 1,
+      kind: "eof",
+      value: "forbidden",
+    });
+    expect(eofValue.status).toBe(400);
+    expect(bds.commands.at(-1)).toMatch(/ 1 eof$/u);
+
     bds.log(`CS_WEB_TERMINAL ${JSON.stringify(tuiSnapshot(sessionId))}`);
 
     const keys = await fetch(`${status.origin}/api/input`, {
@@ -1366,6 +1406,16 @@ describe("Web companion HTTP server", () => {
     {
       label: "missing interaction",
       mutate: (snapshot) => delete snapshot.terminal.interaction,
+    },
+    {
+      label: "missing terminal revision metadata",
+      mutate: (snapshot) => delete snapshot.terminal.terminalRevision,
+    },
+    {
+      label: "negative replacement epoch",
+      mutate: (snapshot) => {
+        snapshot.terminal.replacementEpoch = -1;
+      },
     },
     {
       label: "unknown cursor shape",
@@ -2114,7 +2164,7 @@ class FakeBds {
       });
     }
     const input =
-      /^scriptevent computer_system:web-input ([A-Za-z0-9_-]+) ([A-Za-z0-9_-]{6,20}) [0-9]{1,16} (?:abort-line|cancel|interrupt|line|keys|mouse) /u.exec(
+      /^scriptevent computer_system:web-input ([A-Za-z0-9_-]+) ([A-Za-z0-9_-]{6,20}) [0-9]{1,16} (?:eof$|(?:abort-line|cancel|interrupt|line|keys|mouse) )/u.exec(
         command,
       );
     if (input !== null && this.autoInputAck) {
@@ -2209,6 +2259,7 @@ function tuiSnapshot(sessionId, options = {}) {
           cursorShape: "block",
           pointer: "none",
           presentation: "terminal",
+          eof: false,
           secretInput: true,
           context: "secret",
           ctrlCAction: "cancel",
@@ -2222,6 +2273,7 @@ function tuiSnapshot(sessionId, options = {}) {
           cursorShape: "block",
           pointer: "cell",
           presentation: "dos-tui",
+          eof: false,
           secretInput: false,
           context: "edit",
           ctrlCAction: "terminal-key",
@@ -2247,6 +2299,8 @@ function tuiSnapshot(sessionId, options = {}) {
         Array.from({ length: height }, () => [...backgroundRow]),
       cursor: options.cursor ?? { x: 2, y: 1, blink: true },
       interaction,
+      replacementEpoch: options.replacementEpoch ?? 0,
+      terminalRevision: options.terminalRevision ?? 0,
     },
   };
 }
@@ -2258,6 +2312,7 @@ function shellInteraction() {
     cursorShape: "block",
     pointer: "none",
     presentation: "terminal",
+    eof: false,
     secretInput: false,
     context: "shell",
     ctrlCAction: "abort-line",
@@ -2277,6 +2332,7 @@ function csAbiInteraction() {
     cursorShape: "block",
     pointer: "none",
     presentation: "terminal",
+    eof: false,
     secretInput: false,
     context: "cs-abi",
     ctrlCAction: "interrupt",

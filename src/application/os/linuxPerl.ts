@@ -134,18 +134,103 @@ class PerlReturnSignal extends Error {
   }
 }
 
-interface PerlOptions {
-  autosplit: boolean;
-  checkOnly: boolean;
-  fieldSeparator: string | undefined;
-  lineEnding: boolean;
-  loop: "none" | "print" | "quiet";
-  programName: string;
-  source: string;
+export interface LinuxPerlOptions {
+  readonly autosplit: boolean;
+  readonly checkOnly: boolean;
+  readonly fieldSeparator: string | undefined;
+  readonly lineEnding: boolean;
+  readonly loop: "none" | "print" | "quiet";
+  readonly programName: string;
+  readonly source: string;
 }
+
+export type LinuxPerlCommandPreparation =
+  | {
+      readonly kind: "inline" | "script" | "stdin";
+      readonly options: LinuxPerlOptions;
+      readonly scriptArguments: readonly string[];
+    }
+  | { readonly kind: "invalid"; readonly message: string }
+  | { readonly kind: "version" };
+
+/**
+ * Tagged input prevents a command's program text from accidentally becoming
+ * runtime STDIN. `source` is accepted only for a prepared stdin-source command.
+ */
+export type LinuxPerlExecutionInput =
+  | { readonly kind: "data"; readonly stdin: string }
+  | { readonly kind: "source"; readonly source: string };
 
 const usageText =
   "usage: perl [-n|-p] [-a] [-l] [-F PATTERN] [-c] [-w] [-e CODE] [SCRIPT] [ARGUMENT ...]\n";
+
+/**
+ * Prepares one bounded `perl` command without deciding how stdin will arrive.
+ *
+ * Shell frontends use `kind === "stdin"` to collect program text from a TTY
+ * or pipeline. Invalid command lines are represented rather than diagnosed so
+ * a frontend never needs to duplicate Perl switch parsing to make that choice.
+ */
+export function prepareLinuxPerlCommand(
+  arguments_: readonly string[],
+  io: LinuxPerlIo,
+): LinuxPerlCommandPreparation {
+  try {
+    return parseCommandLine(arguments_, io);
+  } catch (error) {
+    return {
+      kind: "invalid",
+      message:
+        error instanceof PerlUsageError ? error.message : describe(error),
+    };
+  }
+}
+
+/**
+ * Runs a previously prepared bounded `perl` command.
+ *
+ * A stdin-source command runs only from explicitly tagged source input. Its
+ * source is consumed as the program and runtime STDIN is always EOF.
+ */
+export function executePreparedLinuxPerl(
+  prepared: LinuxPerlCommandPreparation,
+  input: LinuxPerlExecutionInput,
+  io: LinuxPerlIo,
+): LinuxPerlResult {
+  if (prepared.kind === "invalid") {
+    return failure(new PerlUsageError(prepared.message), "perl");
+  }
+  if (prepared.kind === "version") return versionResult();
+
+  if (prepared.kind === "stdin") {
+    if (input.kind !== "source") {
+      return {
+        exitCode: 2,
+        stderr: "perl: program source must be supplied explicitly\n",
+        stdout: "",
+      };
+    }
+    return executePreparedProgram(
+      { ...prepared.options, source: input.source },
+      prepared.scriptArguments,
+      "",
+      io,
+    );
+  }
+  if (input.kind !== "data") {
+    return {
+      exitCode: 2,
+      stderr: "perl: source input is valid only for a stdin program\n",
+      stdout: "",
+    };
+  }
+  return executePreparedProgram(
+    prepared.options,
+    prepared.scriptArguments,
+    input.stdin,
+    io,
+  );
+}
 
 /** Runs one bounded `perl` invocation and returns its guest-visible result. */
 export function executeLinuxPerl(
@@ -153,26 +238,30 @@ export function executeLinuxPerl(
   stdin: string,
   io: LinuxPerlIo,
 ): LinuxPerlResult {
-  let options: PerlOptions;
-  let scriptArguments: readonly string[];
-  try {
-    const parsed = parseCommandLine(arguments_, io);
-    if (parsed.version) {
-      return {
-        exitCode: 0,
-        stderr: "",
-        stdout:
-          `This is perl 5, version 40, subversion 0 (v${linuxPerlVersion}) built for cs486-cs-linux\n\n` +
-          "CS-Linux perl runs a bounded Perl subset inside the guest sandbox.\n" +
-          "See 'man perl' for the supported surface and its fixed limits.\n",
-      };
-    }
-    options = parsed.options;
-    scriptArguments = parsed.scriptArguments;
-  } catch (error) {
-    return failure(error, "perl");
-  }
+  return executePreparedLinuxPerl(
+    prepareLinuxPerlCommand(arguments_, io),
+    { kind: "data", stdin },
+    io,
+  );
+}
 
+function versionResult(): LinuxPerlResult {
+  return {
+    exitCode: 0,
+    stderr: "",
+    stdout:
+      `This is perl 5, version 40, subversion 0 (v${linuxPerlVersion}) built for cs486-cs-linux\n\n` +
+      "CS-Linux perl runs a bounded Perl subset inside the guest sandbox.\n" +
+      "See 'man perl' for the supported surface and its fixed limits.\n",
+  };
+}
+
+function executePreparedProgram(
+  options: LinuxPerlOptions,
+  scriptArguments: readonly string[],
+  stdin: string,
+  io: LinuxPerlIo,
+): LinuxPerlResult {
   if (utf8ByteLength(stdin) > linuxPerlLimits.maximumInputBytes) {
     return {
       exitCode: 2,
@@ -207,16 +296,10 @@ export function executeLinuxPerl(
   return interpreter.run(program.body);
 }
 
-interface CommandLine {
-  readonly options: PerlOptions;
-  readonly scriptArguments: readonly string[];
-  readonly version: boolean;
-}
-
 function parseCommandLine(
   arguments_: readonly string[],
   io: LinuxPerlIo,
-): CommandLine {
+): Exclude<LinuxPerlCommandPreparation, { readonly kind: "invalid" }> {
   const inlineParts: string[] = [];
   let autosplit = false;
   let checkOnly = false;
@@ -233,7 +316,7 @@ function parseCommandLine(
     if (argument.length < 2 || !argument.startsWith("-") || argument === "-")
       break;
     if (argument === "--version") {
-      return emptyCommandLine(true);
+      return { kind: "version" };
     }
     if (argument.startsWith("--")) {
       throw new PerlUsageError(`Unrecognized switch: ${argument}`);
@@ -281,7 +364,7 @@ function parseCommandLine(
           loop = "print";
           break;
         case "v":
-          return emptyCommandLine(true);
+          return { kind: "version" };
         case "w":
         case "W":
           break;
@@ -295,6 +378,7 @@ function parseCommandLine(
 
   if (inlineParts.length > 0) {
     return {
+      kind: "inline",
       options: {
         autosplit,
         checkOnly,
@@ -305,12 +389,27 @@ function parseCommandLine(
         source: inlineParts.join("\n"),
       },
       scriptArguments: Object.freeze(arguments_.slice(index)),
-      version: false,
     };
   }
 
   const scriptPath = arguments_[index];
-  if (scriptPath === undefined) throw new PerlUsageError("no program given");
+  if (scriptPath === undefined || scriptPath === "-") {
+    return {
+      kind: "stdin",
+      options: {
+        autosplit,
+        checkOnly,
+        fieldSeparator,
+        lineEnding,
+        loop,
+        programName: "-",
+        source: "",
+      },
+      scriptArguments: Object.freeze(
+        scriptPath === undefined ? [] : arguments_.slice(index + 1),
+      ),
+    };
+  }
   let source: string;
   try {
     source = io.readFile(scriptPath);
@@ -320,6 +419,7 @@ function parseCommandLine(
     );
   }
   return {
+    kind: "script",
     options: {
       autosplit,
       checkOnly,
@@ -330,23 +430,6 @@ function parseCommandLine(
       source,
     },
     scriptArguments: Object.freeze(arguments_.slice(index + 1)),
-    version: false,
-  };
-}
-
-function emptyCommandLine(version: boolean): CommandLine {
-  return {
-    options: {
-      autosplit: false,
-      checkOnly: false,
-      fieldSeparator: undefined,
-      lineEnding: false,
-      loop: "none",
-      programName: "-e",
-      source: "",
-    },
-    scriptArguments: Object.freeze([]),
-    version,
   };
 }
 
@@ -505,7 +588,7 @@ class PerlInterpreter {
   private readonly subs = new Map<string, PerlBlock>();
 
   constructor(
-    private readonly options: PerlOptions,
+    private readonly options: LinuxPerlOptions,
     scriptArguments: readonly string[],
     stdin: string,
     private readonly io: LinuxPerlIo,

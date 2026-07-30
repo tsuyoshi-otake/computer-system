@@ -211,7 +211,7 @@ describe("Bedrock terminal adapters", () => {
 
     expect(bridge).toContain('const inputMarker = "CS_WEB_INPUT "');
     expect(handler).toContain(
-      "([A-Za-z0-9_-]{6,20}) ([0-9]{1,16}) (abort-line|cancel|interrupt|line|keys|mouse)",
+      "(?:(eof)|(abort-line|cancel|interrupt|line|keys|mouse)",
     );
     expect(handler).toContain(
       "interactionGeneration !== interaction.interactionGeneration",
@@ -225,12 +225,13 @@ describe("Bedrock terminal adapters", () => {
     expect(handler).toContain('failedInputResult("malformed_input")');
     expect(handler).toContain('failedInputResult("invalid_encoding")');
     expect(handler.match(/computerHost\.runtime\.queueEvent/gu)).toHaveLength(
-      3,
+      4,
     );
     expect(handler.match(/const result = safeInputQueueResult/gu)).toHaveLength(
-      3,
+      4,
     );
-    expect(handler.match(/finalizeInputRequest\(/gu)).toHaveLength(21);
+    expect(handler.match(/finalizeInputRequest\(/gu)).toHaveLength(23);
+    expect(handler).toContain('"terminal_eof"');
     expect(handler).not.toContain("snapshotScheduler.requestEager");
 
     expect(mouseFlush).toContain("pending.requestId");
@@ -260,6 +261,8 @@ describe("Bedrock terminal adapters", () => {
     const emit = bridge.slice(start, end);
 
     expect(bridge).toContain("lastTerminalRevision?: number");
+    expect(bridge).toContain("lastReplacementEpoch?: number");
+    expect(bridge).toContain("readonly replacementEpoch: number");
     expect(bridge).toContain("lastSnapshotMetadata?: string");
     expect(bridge).toContain("sharedSnapshotFrames");
     expect(emit).toContain("sharedSnapshotFrames.get(record.computerId)");
@@ -267,11 +270,18 @@ describe("Bedrock terminal adapters", () => {
     expect(
       emit.indexOf("const terminalRevision = record.terminal.revision"),
     ).toBeLessThan(emit.indexOf("record.terminal.snapshot()"));
+    expect(
+      emit.indexOf("const replacementEpoch = record.terminal.replacementEpoch"),
+    ).toBeLessThan(emit.indexOf("record.terminal.snapshot()"));
     expect(emit).toContain("session.lastTerminal === record.terminal");
     expect(emit).toContain("session.lastTerminalRevision === terminalRevision");
+    expect(emit).toContain("session.lastReplacementEpoch === replacementEpoch");
     expect(emit).toContain("session.lastSnapshotMetadata === metadata");
     expect(emit).toContain("const interaction =");
     expect(emit).toContain("interaction,");
+    expect(emit).toContain("replacementEpoch,");
+    expect(emit).toContain("terminalRevision,");
+    expect(bridge).toContain("cached.replacementEpoch === replacementEpoch");
     expect(emit).toContain("const execution:");
     expect(emit).toContain("execution,");
     expect(emit).not.toContain("secretInput,");

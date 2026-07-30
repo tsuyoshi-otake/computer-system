@@ -18,7 +18,9 @@ export type TerminalInteractionContext =
   | "less"
   | "login"
   | "more"
+  | "perl-source"
   | "pwb"
+  | "python-repl"
   | "qbasic"
   | "secret"
   | "shell"
@@ -37,6 +39,8 @@ export interface TerminalInteractionDescriptor {
   readonly context: TerminalInteractionContext;
   readonly ctrlCAction: TerminalCtrlCAction;
   readonly cursorShape: TerminalInteractionCursorShape;
+  /** Whether the active guest interaction has an explicit Ctrl+D/EOF action. */
+  readonly eof: boolean;
   readonly helpTopicId?: string;
   readonly hints: readonly TerminalInteractionHint[];
   readonly history: boolean;
@@ -50,8 +54,9 @@ export interface TerminalInteractionDescriptor {
 
 export type TerminalInteractionDescriptorInput = Omit<
   TerminalInteractionDescriptor,
-  "hints" | "interactionGeneration" | "schema"
+  "eof" | "hints" | "interactionGeneration" | "schema"
 > & {
+  readonly eof?: boolean;
   readonly hints?: readonly TerminalInteractionHint[];
   readonly interactionGeneration?: number;
 };
@@ -89,6 +94,17 @@ export function createTerminalInteractionDescriptor(
   }
   if (typeof input.history !== "boolean") {
     throw new RangeError("terminal history flag is invalid");
+  }
+  const eof = input.eof ?? false;
+  if (typeof eof !== "boolean") {
+    throw new RangeError("terminal EOF flag is invalid");
+  }
+  if (
+    eof &&
+    input.context !== "perl-source" &&
+    input.context !== "python-repl"
+  ) {
+    throw new RangeError("terminal EOF is unavailable in this context");
   }
   if (input.history && (input.inputMode !== "line" || input.secretInput)) {
     throw new RangeError("terminal history requires non-secret line input");
@@ -154,6 +170,7 @@ export function createTerminalInteractionDescriptor(
     context: input.context,
     ctrlCAction: input.ctrlCAction,
     cursorShape: input.cursorShape,
+    eof,
     ...(input.helpTopicId === undefined
       ? {}
       : { helpTopicId: input.helpTopicId }),

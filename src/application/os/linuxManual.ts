@@ -29,8 +29,8 @@ const pages = Object.freeze([
     ["nethack [--help|--version]"],
     [
       "NetHack for CS-Linux is a reduced guest-authored CS C 2.0 game with ten dungeon levels, the Amulet of Yendor, bounded monsters and items, hunger, experience, and explored-tile memory. It is not an unmodified upstream NetHack port.",
-      "Move with h, j, k, l, y, u, b, and n. Use , to pick up, i to inspect the bounded pack, and a to use its first item. Use < and > only on legal stairs, ? for the in-game key help screen, S to save and exit, and #quit (or q) to abandon unsaved progress. The bottom status line always shows Dlvl, HP, Lv, XP, turn count, hunger stage, and Amulet possession. Only explicit S writes a save.",
-      "The save path is the immutable launch environment's $HOME/.nethack.sav. A successful save writes a mode-0600 sibling temporary file and atomically replaces the canonical record. Missing HOME, malformed saves, DAC denial, capacity failure, interruption, and terminal close fail without silently saving.",
+      "Move with h, j, k, l, y, u, b, and n. Items remain on the floor until , picks them up. The 80 by 25 inventory and selectors preserve fixed a-p slots: i displays the pack, e eats, q quaffs, r reads, w wields (w- unwields), W wears armor, T takes armor off, and d drops a stack. ? or * redisplays a selector and Esc cancels without spending a turn. Use < and > only on legal stairs, ? for the in-game key help screen, S to save and exit, and the complete #quit command to abandon unsaved progress. The bottom status line always shows Dlvl, HP, Lv, XP, turn count, hunger stage, and Amulet possession. Only successful world mutations consume a turn; display, cancel, invalid selection, and rejected capacity changes do not.",
+      "The save path is the immutable launch environment's $HOME/.nethack.sav. Version 3 records retain fixed inventory slots, stack quantities, and equipped weapon and armor, while exact version 2 records remain loadable and migrate on the next explicit save. A record is fully validated before live state changes. A successful save writes a mode-0600 sibling temporary file and atomically replaces the canonical record. Missing HOME, malformed saves, DAC denial, capacity failure, interruption, and terminal close fail without silently saving.",
       "The stock root-owned executable is /usr/games/nethack. Sources and an explicit-rule Makefile are under /usr/src/nethack. A writable copy can be rebuilt with guest make, cc, and ld; make install PREFIX=/usr/local installs /usr/local/games/nethack and requires root privileges for that destination.",
     ],
     ["make", "cc", "ld", "vi"],
@@ -421,15 +421,30 @@ const pages = Object.freeze([
     ["sed", "cut"],
   ),
   page(
+    "python",
+    1,
+    "compile and run bounded Computer System Python",
+    ["python", "python [--stats] FILE", "micropython [--stats] FILE"],
+    [
+      "With no operands, starts a persistent interactive session on one validated CS486 process. The >>> and ... prompts collect bounded cells; globals, imports, functions, classes, closures, and generators remain available to later cells without replacing the process, PID, scheduler entry, or RAM grant.",
+      "A compound statement stays at ... until a blank line commits the suite. Open delimiters and triple-quoted strings commit when they close. A non-None final expression is displayed once with the bounded Python representation; an already loaded source module is reused rather than initialized again.",
+      "Ctrl+D exits at an input prompt. Ctrl+C at >>> or ... discards only the pending cell; Ctrl+C while a cell is executing terminates that REPL with status 130 because a terminated CS486 process is never replaced silently. Interactive cell source is excluded from shell history and is capped at 512000 UTF-8 bytes per session.",
+      "The interactive form is terminal-only and rejects redirects, pipelines, background execution, command scripts, MCP debug use, --stats, and filesystem CS486OBJ extension imports. FILE mode retains its existing foreground, redirect, pipeline, background, extension, MCP, and statistics behavior.",
+      "Computer System Python 1.0 is a bounded partial implementation targeting Python 3.14 syntax and core semantics, not a CPython or full Python 3.14 compatibility claim. User Python is unavailable on CS386SX and returns status 127.",
+    ],
+    ["perl", "vi", "run"],
+  ),
+  page(
     "perl",
     1,
     "bounded Perl 5 interpreter",
     [
-      "perl [-c] [-w] [-l] [-n | -p] [-a] [-F PATTERN] [-e PROGRAM] [SCRIPT] [ARG ...]",
+      "perl [-c] [-w] [-l] [-n | -p] [-a] [-F PATTERN] [-e PROGRAM] [- | SCRIPT] [ARG ...]",
       "perl -v",
     ],
     [
       "Runs a bounded subset of Perl 5.40 inside the guest: scalars, arrays, hashes, my scoping, subroutines, references-free data, statement modifiers, sort/grep/map blocks, sprintf, split, join, here-documents, loop labels, tr///cdrs, and s/// with the e and r modifiers, all matched by the bounded CS matcher instead of host regular expressions.",
+      "With no -e program or script, perl reads program text from standard input. A pipe or < redirect supplies that source immediately; on the terminal, enter source lines and press Ctrl+D to run them or Ctrl+C to discard them. Source lines are not shell history. Consumed program source is not replayed as runtime STDIN, so use -e or a script when processing piped data.",
       "Program text, statements, variables, output, open handles, recursion depth, and matcher steps all have fixed limits, and exceeding one fails explicitly with exit status 2.",
       "Modules, references, bless, eval STRING, fork, exec, system, backticks, and any host escape are rejected at compile time. Hash iteration order is insertion order, so scripts stay deterministic.",
     ],
@@ -527,6 +542,7 @@ const pages = Object.freeze([
 ] satisfies readonly LinuxManualPage[]);
 
 const pagesByName = new Map(pages.map((entry) => [entry.name, entry] as const));
+pagesByName.set("micropython", pagesByName.get("python")!);
 
 export function linuxManualPage(name: string): LinuxManualPage | undefined {
   return pagesByName.get(name.toLowerCase());

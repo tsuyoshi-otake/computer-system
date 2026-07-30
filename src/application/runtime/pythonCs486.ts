@@ -147,6 +147,60 @@ export interface PythonCs486Program {
   readonly runtime: PythonCs486Runtime;
 }
 
+export type PythonCs486ReplSubmission =
+  | { readonly kind: "complete"; readonly display?: string }
+  | { readonly kind: "error"; readonly diagnostic: string }
+  | { readonly kind: "incomplete" };
+
+export type PythonCs486ReplPromptKind =
+  "primary" | "continuation" | "running" | "closed";
+
+export type PythonCs486ReplLineResult =
+  | { readonly kind: "cell-ready" }
+  | { readonly kind: "incomplete" }
+  | { readonly diagnostic: string; readonly kind: "syntax-error" };
+
+export type PythonCs486ReplCellCompletion = {
+  readonly diagnostic?: string;
+  readonly display?: string;
+  readonly kind: "ready";
+};
+
+export interface PythonCs486ReplBounds {
+  readonly maximumSourceBytes: number;
+  readonly pendingSourceBytes: number;
+  readonly totalSourceBytes: number;
+}
+
+export interface PythonCs486Repl {
+  readonly program: PythonCs486Program;
+  /**
+   * Admits one complete cell at the process's completed input boundary. The
+   * caller runs `program.process` normally after a `complete` result and then
+   * reads `lastResult` for guest execution diagnostics or expression display.
+   */
+  submit(source: string): PythonCs486ReplSubmission;
+  /** Accumulates one terminal line and atomically admits a complete cell. */
+  submitLine(line: string): PythonCs486ReplLineResult;
+  /** Consumes a completed cell result without treating it as foreground exit. */
+  takeCellCompletion(): PythonCs486ReplCellCompletion | undefined;
+  /** Stops source collection; foreground-process finalization remains the owner. */
+  eof(): { readonly kind: "closed" };
+  /** Clears only a quiescent, partially collected cell. */
+  cancelPendingInput(): boolean;
+  get promptKind(): PythonCs486ReplPromptKind;
+  get bounds(): PythonCs486ReplBounds;
+  get lastResult(): PythonCs486ReplSubmission | undefined;
+}
+
+export interface PreparedPythonCs486Repl {
+  readonly requirements: Extract<
+    Cs486ExecutableMemoryRequirements,
+    { readonly kind: "declared" }
+  >;
+  create(linearMemoryBytes: number): PythonCs486Repl;
+}
+
 export interface PythonCs486PreparationOptions extends Omit<
   PythonCs486Options,
   "memoryBytes"
@@ -189,6 +243,347 @@ export function createPythonCs486Program(
     ...preparationOptions,
     managedRuntimeMemoryBytes: runtimeMemoryBytes,
   }).create(memoryBytes);
+}
+
+/**
+ * Creates one persistent interactive Python session. Cells are compiled into
+ * CS486 continuation code and appended only after the existing process has
+ * completed a prior cell; no host evaluator, secondary runtime, or per-cell
+ * process participates in execution.
+ */
+export function createPythonCs486Repl(
+  options: Omit<PythonCs486Options, "source">,
+): PythonCs486Repl {
+  const limits = options.limits ?? defaultPythonRuntimeLimits;
+  const runtimeMemoryBytes = Math.min(
+    options.memoryBytes,
+    limits.maxMemoryBytes ?? options.memoryBytes,
+  );
+  const { memoryBytes, ...preparationOptions } = options;
+  return preparePythonCs486Repl({
+    ...preparationOptions,
+    managedRuntimeMemoryBytes: runtimeMemoryBytes,
+  }).create(memoryBytes);
+}
+
+/** Prepares the empty boot image before the caller admits one RAM grant. */
+export function preparePythonCs486Repl(
+  options: Omit<PythonCs486PreparationOptions, "source">,
+): PreparedPythonCs486Repl {
+  const prepared = preparePythonCs486Program({ ...options, source: "" });
+  return Object.freeze({
+    requirements: prepared.requirements,
+    create(linearMemoryBytes: number): PythonCs486Repl {
+      return createPythonCs486ReplController(
+        options,
+        prepared.create(linearMemoryBytes),
+      );
+    },
+  });
+}
+
+function createPythonCs486ReplController(
+  options: Omit<PythonCs486PreparationOptions, "source">,
+  program: PythonCs486Program,
+): PythonCs486Repl {
+  let sourceBytes = 0;
+  let pendingSource = "";
+  let pendingRequiresBlankLine = false;
+  let lastResult: PythonCs486ReplSubmission | undefined;
+  let pendingCellCompletion: PythonCs486ReplCellCompletion | undefined;
+  let awaitingExecutionResult = false;
+  let closed = false;
+
+  const observeCellCompletion = ():
+    PythonCs486ReplCellCompletion | undefined => {
+    if (pendingCellCompletion !== undefined) return pendingCellCompletion;
+    if (!awaitingExecutionResult || program.process.state.kind === "ready")
+      return undefined;
+    const result = program.runtime.lastReplResult;
+    if (result === undefined) return undefined;
+    awaitingExecutionResult = false;
+    lastResult = result;
+    if (result.kind === "error")
+      return (pendingCellCompletion = {
+        diagnostic: result.diagnostic,
+        kind: "ready",
+      });
+    if (result.kind === "complete") {
+      return (pendingCellCompletion = {
+        ...(result.display === undefined ? {} : { display: result.display }),
+        kind: "ready",
+      });
+    }
+    return (pendingCellCompletion = {
+      diagnostic:
+        "RuntimeError: incomplete result escaped a running Python cell",
+      kind: "ready",
+    });
+  };
+
+  const compileSubmission = (
+    source: string,
+    allowIncomplete: boolean,
+  ):
+    | { readonly compilation: PythonCompilation; readonly kind: "compiled" }
+    | PythonCs486ReplSubmission => {
+    const cellBytes = utf8ByteLength(source);
+    if (cellBytes > maximumTotalSourceBytes - sourceBytes) {
+      return {
+        diagnostic: "MemoryError: interactive source limit exceeded",
+        kind: "error",
+      };
+    }
+    try {
+      return {
+        compilation: compileReplCell(options, program, source),
+        kind: "compiled",
+      };
+    } catch (error: unknown) {
+      const syntax = error instanceof LanguageSyntaxError ? error : undefined;
+      if (
+        allowIncomplete &&
+        syntax !== undefined &&
+        isIncompleteReplSyntax(source, syntax)
+      ) {
+        return { kind: "incomplete" };
+      }
+      return { diagnostic: replDiagnostic(error), kind: "error" };
+    }
+  };
+
+  const submitSource = (
+    source: string,
+    allowIncomplete: boolean,
+  ): PythonCs486ReplSubmission => {
+    const compiled = compileSubmission(source, allowIncomplete);
+    if (compiled.kind !== "compiled") return (lastResult = compiled);
+    try {
+      program.runtime.assertReplQuiescent();
+      // The process validates the complete candidate image before it becomes
+      // runnable. Runtime installation is a non-throwing replacement of
+      // already validated metadata and occurs in the same synchronous turn.
+      program.process.appendInstructionsAtCompletion(
+        compiled.compilation.executable.instructions,
+      );
+      program.runtime.beginReplCell();
+      program.runtime.installReplCompilation(compiled.compilation);
+      sourceBytes += utf8ByteLength(source);
+      awaitingExecutionResult = true;
+      return (lastResult = { kind: "complete" });
+    } catch (error: unknown) {
+      awaitingExecutionResult = false;
+      return (lastResult = {
+        diagnostic: replDiagnostic(error),
+        kind: "error",
+      });
+    }
+  };
+
+  return {
+    program,
+    get lastResult(): PythonCs486ReplSubmission | undefined {
+      observeCellCompletion();
+      pendingCellCompletion = undefined;
+      return lastResult;
+    },
+    get bounds(): PythonCs486ReplBounds {
+      return {
+        maximumSourceBytes: maximumTotalSourceBytes,
+        pendingSourceBytes: utf8ByteLength(pendingSource),
+        totalSourceBytes: sourceBytes,
+      };
+    },
+    get promptKind(): PythonCs486ReplPromptKind {
+      observeCellCompletion();
+      if (closed) return "closed";
+      if (
+        awaitingExecutionResult ||
+        pendingCellCompletion !== undefined ||
+        program.process.state.kind === "ready"
+      )
+        return "running";
+      return pendingSource === "" ? "primary" : "continuation";
+    },
+    submit(source: string): PythonCs486ReplSubmission {
+      if (closed)
+        return (lastResult = {
+          diagnostic: "EOFError: Python REPL input is closed",
+          kind: "error",
+        });
+      if (pendingCellCompletion !== undefined)
+        return (lastResult = {
+          diagnostic: "RuntimeError: prior Python REPL cell is not finalized",
+          kind: "error",
+        });
+      if (typeof source !== "string")
+        throw new TypeError("Python REPL source must be a string");
+      return submitSource(source, true);
+    },
+    submitLine(line: string): PythonCs486ReplLineResult {
+      if (typeof line !== "string")
+        throw new TypeError("Python REPL line must be a string");
+      if (
+        closed ||
+        awaitingExecutionResult ||
+        program.process.state.kind === "ready"
+      ) {
+        return {
+          diagnostic: "RuntimeError: Python REPL is not at an input boundary",
+          kind: "syntax-error",
+        };
+      }
+      const candidate = `${pendingSource}${line}\n`;
+      const requiresBlankLine =
+        pendingRequiresBlankLine || replCellStartsCompoundStatement(candidate);
+      if (requiresBlankLine && line.trim() !== "") {
+        const probed = compileSubmission(candidate, true);
+        if (probed.kind === "error") {
+          pendingSource = "";
+          pendingRequiresBlankLine = false;
+          lastResult = probed;
+          return { diagnostic: probed.diagnostic, kind: "syntax-error" };
+        }
+        pendingSource = candidate;
+        pendingRequiresBlankLine = true;
+        lastResult = { kind: "incomplete" };
+        return { kind: "incomplete" };
+      }
+      const result = submitSource(
+        candidate,
+        !(requiresBlankLine && line.trim() === ""),
+      );
+      if (result.kind === "incomplete") {
+        pendingSource = candidate;
+        pendingRequiresBlankLine =
+          pendingRequiresBlankLine ||
+          replCellStartsCompoundStatement(candidate);
+        return result;
+      }
+      pendingSource = "";
+      pendingRequiresBlankLine = false;
+      if (result.kind === "complete") return { kind: "cell-ready" };
+      return { diagnostic: result.diagnostic, kind: "syntax-error" };
+    },
+    takeCellCompletion(): PythonCs486ReplCellCompletion | undefined {
+      const completion = observeCellCompletion();
+      pendingCellCompletion = undefined;
+      return completion;
+    },
+    cancelPendingInput(): boolean {
+      if (
+        closed ||
+        awaitingExecutionResult ||
+        program.process.state.kind === "ready"
+      )
+        return false;
+      pendingSource = "";
+      pendingRequiresBlankLine = false;
+      return true;
+    },
+    eof(): { readonly kind: "closed" } {
+      pendingSource = "";
+      pendingRequiresBlankLine = false;
+      closed = true;
+      return { kind: "closed" };
+    },
+  };
+}
+
+function compileReplCell(
+  options: Omit<PythonCs486PreparationOptions, "source">,
+  program: PythonCs486Program,
+  source: string,
+): PythonCompilation {
+  const graph = resolveModules({ ...options, source }, () => undefined);
+  if (graph.extensions.length !== 0)
+    throw new VmRuntimeError(
+      "ImportError",
+      "interactive extension-object imports are unavailable",
+    );
+  const compilation = new PythonCs486Compiler(
+    graph,
+    program.executable.memory,
+    true,
+  ).compile();
+  return rebaseReplCompilation(
+    compilation,
+    program.runtime,
+    program.process.instructionCount,
+  );
+}
+
+function isIncompleteReplSyntax(
+  source: string,
+  error: LanguageSyntaxError,
+): boolean {
+  return (
+    (error.span.start.offset >= source.length &&
+      (error.message.startsWith("Expected ") ||
+        error.message.startsWith("Unclosed delimiter"))) ||
+    (error.message.startsWith("Unterminated string literal") &&
+      hasUnclosedTripleQuotedLiteral(source))
+  );
+}
+
+function replCellStartsCompoundStatement(source: string): boolean {
+  const firstCodeLine = source
+    .split("\n")
+    .map((line) => line.trim())
+    .find((line) => line !== "" && !line.startsWith("#"));
+  if (firstCodeLine === undefined) return false;
+  if (firstCodeLine.startsWith("@")) return true;
+  return (
+    /^(?:async\s+)?(?:class|def|for|if|match|try|while|with)\b/u.test(
+      firstCodeLine,
+    ) && /:\s*(?:#.*)?$/u.test(source.trimEnd())
+  );
+}
+
+function hasUnclosedTripleQuotedLiteral(source: string): boolean {
+  let quote: "'" | '"' | undefined;
+  let triple = false;
+  for (let index = 0; index < source.length; index += 1) {
+    const character = source[index]!;
+    if (quote === undefined) {
+      if (character === "#") {
+        while (index + 1 < source.length && source[index + 1] !== "\n")
+          index += 1;
+        continue;
+      }
+      if (character !== "'" && character !== '"') continue;
+      quote = character;
+      triple = source[index + 1] === quote && source[index + 2] === quote;
+      if (triple) index += 2;
+      continue;
+    }
+    if (character === "\\") {
+      index += 1;
+      continue;
+    }
+    if (
+      character === quote &&
+      triple &&
+      source[index + 1] === quote &&
+      source[index + 2] === quote
+    ) {
+      quote = undefined;
+      triple = false;
+      index += 2;
+      continue;
+    }
+    if (character === quote && !triple) {
+      quote = undefined;
+      continue;
+    }
+    if (character === "\n" && !triple) quote = undefined;
+  }
+  return quote !== undefined && triple;
+}
+
+function replDiagnostic(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  return String(error);
 }
 
 export function preparePythonCs486Program(
@@ -688,6 +1083,8 @@ type PythonOperation =
       readonly span: SourceSpan;
     }
   | { readonly kind: "pop"; readonly span: SourceSpan }
+  | { readonly kind: "repl_complete"; readonly span: SourceSpan }
+  | { readonly kind: "repl_display"; readonly span: SourceSpan }
   | {
       readonly kind: "prepare_async_context" | "prepare_context";
       readonly span: SourceSpan;
@@ -1180,10 +1577,12 @@ class PythonCs486Compiler {
   private currentScopeKind: ScopeInfo["kind"] = "module";
   private currentAnnotationEntryIds:
     ReadonlyMap<AnnotatedAssignmentStatement, number> | undefined;
+  private displayStatement: Statement | undefined;
 
   constructor(
     private readonly graph: ResolvedGraph,
     private readonly memory: Cs486Flat32MemoryMetadata,
+    private readonly displayLastExpression = false,
   ) {
     this.modules = graph.modules.map((module) => ({
       annotationEntryCount: 0,
@@ -1213,7 +1612,12 @@ class PythonCs486Compiler {
       this.modules[module.id]!.annotationFunctionId =
         annotationPlan?.functionId;
       this.modules[module.id]!.target = this.instructions.length;
+      this.displayStatement =
+        this.displayLastExpression && module.id === 0
+          ? module.statements.at(-1)
+          : undefined;
       this.statements(module.statements);
+      this.displayStatement = undefined;
       this.emitOperation({
         kind: "module_complete",
         moduleId: module.id,
@@ -1811,7 +2215,10 @@ class PythonCs486Compiler {
         return;
       case "ExpressionStatement":
         this.expression(statement.expression);
-        this.emitOperation({ kind: "pop", span: statement.span });
+        this.emitOperation({
+          kind: this.displayStatement === statement ? "repl_display" : "pop",
+          span: statement.span,
+        });
         return;
       case "ForStatement": {
         this.expression(statement.iterable);
@@ -3398,6 +3805,258 @@ class PythonCs486Compiler {
   }
 }
 
+function rebaseReplCompilation(
+  compilation: PythonCompilation,
+  runtime: PythonCs486Runtime,
+  instructionBase: number,
+): PythonCompilation {
+  const bases = runtime.replCompilationBases(compilation.modules);
+  const functionId = (id: number): number =>
+    checkedReplIndex(id, bases.functionId, "function");
+  const classId = (id: number): number =>
+    checkedReplIndex(id, bases.classId, "class");
+  const moduleId = (id: number): number => {
+    const rebased = bases.moduleIds[id];
+    if (!Number.isSafeInteger(id) || id < 0 || rebased === undefined)
+      throw new VmRuntimeError(
+        "ExecutableFormatError",
+        "invalid Python module id",
+      );
+    return rebased;
+  };
+  const target = (reference: TargetReference): TargetReference => ({
+    target: checkedReplIndex(reference.target, instructionBase, "instruction"),
+  });
+  const imported = (value: ResolvedImport): ResolvedImport =>
+    value.kind === "python"
+      ? { ...value, moduleId: moduleId(value.moduleId) }
+      : value;
+  const handlers = (
+    values: readonly CompiledExceptionHandler[],
+  ): readonly CompiledExceptionHandler[] =>
+    values.map((handler) => ({ ...handler, target: target(handler.target) }));
+  const operation = (value: PythonOperation): PythonOperation => {
+    switch (value.kind) {
+      case "make_function":
+        return { ...value, functionId: functionId(value.functionId) };
+      case "make_class":
+      case "class_complete":
+        return { ...value, classId: classId(value.classId) };
+      case "make_type_parameter":
+        return {
+          ...value,
+          ...(value.boundFunctionId === undefined
+            ? {}
+            : { boundFunctionId: functionId(value.boundFunctionId) }),
+          ...(value.constraintsFunctionId === undefined
+            ? {}
+            : {
+                constraintsFunctionId: functionId(value.constraintsFunctionId),
+              }),
+          ...(value.defaultFunctionId === undefined
+            ? {}
+            : { defaultFunctionId: functionId(value.defaultFunctionId) }),
+        };
+      case "make_type_alias":
+        return { ...value, valueFunctionId: functionId(value.valueFunctionId) };
+      case "class_set_name_step":
+        return {
+          ...value,
+          classId: classId(value.classId),
+          doneTarget: target(value.doneTarget),
+        };
+      case "class_set_name_resume":
+        return { ...value, target: target(value.target) };
+      case "yield":
+        return { ...value, resumeTarget: target(value.resumeTarget) };
+      case "begin_control":
+        return {
+          ...value,
+          action:
+            value.action.kind === "jump"
+              ? { ...value.action, target: target(value.action.target) }
+              : value.action,
+          finalizers: value.finalizers.map(target),
+        };
+      case "push_handler":
+        return {
+          ...value,
+          handlers: handlers(value.handlers),
+          ...(value.finallyTarget === undefined
+            ? {}
+            : { finallyTarget: target(value.finallyTarget) }),
+          ...(value.starExitTarget === undefined
+            ? {}
+            : { starExitTarget: target(value.starExitTarget) }),
+        };
+      case "push_finally_guard":
+        return { ...value, finallyTarget: target(value.finallyTarget) };
+      case "module_complete":
+        return value.moduleId === 0
+          ? { kind: "repl_complete", span: value.span }
+          : { ...value, moduleId: moduleId(value.moduleId) };
+      case "import":
+        return {
+          ...value,
+          imported: imported(value.imported),
+          ...(value.bindModuleId === undefined
+            ? {}
+            : { bindModuleId: moduleId(value.bindModuleId) }),
+        };
+      case "module_has_attribute":
+        return { ...value, imported: imported(value.imported) };
+      case "bind_from":
+        return { ...value, imported: imported(value.imported) };
+      default:
+        return value;
+    }
+  };
+  const operations = compilation.operations.map(operation);
+  const instructionIndexes = new Set<number>();
+  const instructions = compilation.executable.instructions.map(
+    (instruction, index): Cs486Instruction => {
+      const next = compilation.executable.instructions[index + 1];
+      if (
+        instruction.op === "mov" &&
+        instruction.destination === "ebx" &&
+        instruction.source.kind === "immediate" &&
+        next?.op === "syscall" &&
+        next.name === pythonSyscallName
+      ) {
+        const operationIndex = instruction.source.value;
+        if (
+          !Number.isSafeInteger(operationIndex) ||
+          operationIndex < 0 ||
+          operationIndex >= compilation.operations.length
+        ) {
+          throw new VmRuntimeError(
+            "ExecutableFormatError",
+            "invalid Python operation index in REPL cell",
+          );
+        }
+        instructionIndexes.add(operationIndex);
+        return {
+          ...instruction,
+          source: {
+            kind: "immediate",
+            value: checkedReplIndex(
+              operationIndex,
+              bases.operationId,
+              "operation",
+            ),
+          },
+        };
+      }
+      if ("target" in instruction) {
+        return {
+          ...instruction,
+          target: checkedReplIndex(
+            instruction.target,
+            instructionBase,
+            "instruction",
+          ),
+        };
+      }
+      return instruction;
+    },
+  );
+  if (instructionIndexes.size !== operations.length) {
+    throw new VmRuntimeError(
+      "ExecutableFormatError",
+      "Python REPL cell does not bind every operation to CS486 code",
+    );
+  }
+  const installedModuleIds = new Set<number>();
+  const modules = compilation.modules.slice(1).flatMap((descriptor) => {
+    const id = moduleId(descriptor.id);
+    if (id < bases.existingModuleCount || installedModuleIds.has(id)) {
+      return [];
+    }
+    if (id !== bases.existingModuleCount + installedModuleIds.size) {
+      throw new VmRuntimeError(
+        "ExecutableFormatError",
+        "Python REPL module layout is not contiguous",
+      );
+    }
+    installedModuleIds.add(id);
+    return [
+      {
+        ...descriptor,
+        ...(descriptor.annotationFunctionId === undefined
+          ? {}
+          : {
+              annotationFunctionId: functionId(descriptor.annotationFunctionId),
+            }),
+        id,
+        ...(descriptor.parentModuleId === undefined
+          ? {}
+          : { parentModuleId: moduleId(descriptor.parentModuleId) }),
+        target: checkedReplIndex(
+          descriptor.target,
+          instructionBase,
+          "instruction",
+        ),
+      },
+    ];
+  });
+  return {
+    ...compilation,
+    callableIteratorFunctions: {
+      iter: functionId(compilation.callableIteratorFunctions.iter),
+      next: functionId(compilation.callableIteratorFunctions.next),
+    },
+    classes: compilation.classes.map((descriptor) => ({
+      ...descriptor,
+      ...(descriptor.annotationFunctionId === undefined
+        ? {}
+        : {
+            annotationFunctionId: functionId(descriptor.annotationFunctionId),
+          }),
+      id: classId(descriptor.id),
+      target: checkedReplIndex(
+        descriptor.target,
+        instructionBase,
+        "instruction",
+      ),
+    })),
+    executable: { ...compilation.executable, instructions },
+    functions: compilation.functions.map((descriptor) => ({
+      ...descriptor,
+      ...(descriptor.annotationFunctionId === undefined
+        ? {}
+        : {
+            annotationFunctionId: functionId(descriptor.annotationFunctionId),
+          }),
+      id: functionId(descriptor.id),
+      target: checkedReplIndex(
+        descriptor.target,
+        instructionBase,
+        "instruction",
+      ),
+    })),
+    modules,
+    operations,
+  };
+}
+
+function checkedReplIndex(value: number, base: number, kind: string): number {
+  const rebased = value + base;
+  if (
+    !Number.isSafeInteger(value) ||
+    value < 0 ||
+    !Number.isSafeInteger(rebased)
+  )
+    throw new VmRuntimeError(
+      "ExecutableFormatError",
+      `invalid Python ${kind} index`,
+    );
+  return rebased;
+}
+
+function replModuleKey(module: CompiledModule): string {
+  return `${module.name}\0${module.path}\0${module.isPackage ? "package" : "module"}`;
+}
+
 function statementsContainDirectYield(
   statements: readonly Statement[],
 ): boolean {
@@ -4553,8 +5212,10 @@ export class PythonCs486Runtime {
   private pendingCallDispatch: PendingCallDispatch | undefined;
   private pendingConstructorCompletion:
     PendingConstructorCompletion | undefined;
+  private replCellActive = false;
+  private replCellResult: PythonCs486ReplSubmission | undefined;
 
-  constructor(private readonly options: PythonRuntimeOptions) {
+  constructor(private options: PythonRuntimeOptions) {
     if (!Number.isSafeInteger(options.memoryBytes) || options.memoryBytes <= 0)
       throw new RangeError("memoryBytes must be a positive safe integer");
     if (
@@ -4939,6 +5600,93 @@ export class PythonCs486Runtime {
     return this.frames[0]?.globals ?? new Map();
   }
 
+  get lastReplResult(): PythonCs486ReplSubmission | undefined {
+    return this.replCellResult;
+  }
+
+  replCompilationBases(modules: readonly CompiledModule[]): {
+    readonly classId: number;
+    readonly existingModuleCount: number;
+    readonly functionId: number;
+    readonly moduleIds: readonly number[];
+    readonly operationId: number;
+  } {
+    const existingModules = new Map<string, number>();
+    for (let index = 1; index < this.options.modules.length; index += 1) {
+      const module = this.options.modules[index]!;
+      const state = this.moduleStates[index];
+      if (state?.kind === "loaded" || state?.kind === "loading") {
+        existingModules.set(replModuleKey(module), index);
+      }
+    }
+    const moduleIds: number[] = [];
+    let nextModuleId = this.options.modules.length;
+    for (const [index, module] of modules.entries()) {
+      if (module.id !== index) {
+        throw new VmRuntimeError(
+          "ExecutableFormatError",
+          "Python REPL module ids are not dense",
+        );
+      }
+      if (index === 0) {
+        moduleIds.push(0);
+        continue;
+      }
+      const key = replModuleKey(module);
+      let id = existingModules.get(key);
+      if (id === undefined) {
+        id = nextModuleId;
+        nextModuleId += 1;
+        existingModules.set(key, id);
+      }
+      moduleIds.push(id);
+    }
+    return {
+      classId: this.options.classes.length,
+      existingModuleCount: this.options.modules.length,
+      functionId: this.options.functions.length,
+      moduleIds,
+      operationId: this.options.operations.length,
+    };
+  }
+
+  assertReplQuiescent(): void {
+    if (
+      this.stack.length !== 0 ||
+      this.frames.length !== 1 ||
+      this.callMarkers.length !== 0 ||
+      this.exceptionHandlers.length !== 0 ||
+      this.activeFaults.length !== 0 ||
+      this.pendingControl !== undefined ||
+      this.pendingCallDispatch !== undefined ||
+      this.pendingConstructorCompletion !== undefined
+    ) {
+      throw new VmRuntimeError(
+        "ProcessStateError",
+        "Python REPL cell requires a quiescent runtime boundary",
+      );
+    }
+  }
+
+  beginReplCell(): void {
+    this.assertReplQuiescent();
+    this.replCellActive = true;
+    this.replCellResult = undefined;
+  }
+
+  installReplCompilation(compilation: PythonCompilation): void {
+    this.moduleStates.push(
+      ...compilation.modules.map(() => ({ kind: "unloaded" as const })),
+    );
+    this.options = {
+      ...this.options,
+      classes: [...this.options.classes, ...compilation.classes],
+      functions: [...this.options.functions, ...compilation.functions],
+      modules: [...this.options.modules, ...compilation.modules],
+      operations: [...this.options.operations, ...compilation.operations],
+    };
+  }
+
   syscall(name: string, context: Cs486SyscallContext): Cs486SyscallResult {
     if (name !== pythonSyscallName)
       throw new VmRuntimeError(
@@ -4973,7 +5721,22 @@ export class PythonCs486Runtime {
               error instanceof Error ? error.message : String(error),
               operation.span,
             );
-      return this.routeFault(fault, context);
+      try {
+        return this.routeFault(fault, context);
+      } catch (unhandled: unknown) {
+        if (!this.replCellActive) throw unhandled;
+        return this.completeReplFailure(
+          unhandled instanceof VmRuntimeError
+            ? unhandled
+            : new VmRuntimeError(
+                "RuntimeError",
+                unhandled instanceof Error
+                  ? unhandled.message
+                  : String(unhandled),
+                operation.span,
+              ),
+        );
+      }
     }
   }
 
@@ -5000,6 +5763,23 @@ export class PythonCs486Runtime {
           this.noteRuntimeValue(operation.value);
         }
         return continued(baseCycles);
+      case "repl_display": {
+        const value = this.pop(operation.span);
+        if (value !== null)
+          this.replCellResult = {
+            display: formatReplDisplayValue(
+              value,
+              this.options.limits.maxStringLength,
+              operation.span,
+            ),
+            kind: "complete",
+          };
+        return continued(baseCycles);
+      }
+      case "repl_complete":
+        this.replCellActive = false;
+        this.replCellResult ??= { kind: "complete" };
+        return { cycles: baseCycles, kind: "complete", value: null };
       case "load_name": {
         if (
           operation.name === "__annotations__" &&
@@ -7683,6 +8463,29 @@ export class PythonCs486Runtime {
     }
     this.rollbackCalls(0);
     throw routedFault;
+  }
+
+  private completeReplFailure(fault: VmRuntimeError): Cs486SyscallResult {
+    // An unhandled interactive cell fault is a cell outcome, not a process
+    // crash. Retain the root globals (and every value reachable from them), but
+    // discard only transient execution state so the same CS486 process can
+    // accept the next quiescent cell.
+    this.stack.length = 0;
+    this.frames.length = 1;
+    this.callMarkers.length = 0;
+    this.exceptionHandlers.length = 0;
+    this.activeFaults.length = 0;
+    this.pendingControl = undefined;
+    this.pendingCallDispatch = undefined;
+    this.pendingConstructorCompletion = undefined;
+    this.activeMaterializations.clear();
+    this.classCompletionStack.length = 0;
+    this.replCellActive = false;
+    this.replCellResult = {
+      diagnostic: `${fault.typeName}: ${fault.message}`,
+      kind: "error",
+    };
+    return { cycles: 16, kind: "complete", value: null };
   }
 
   private beginExceptStar(
@@ -14206,6 +15009,70 @@ function formatValue(value: RuntimeValue): string {
   if (isInstance(value)) return `<${value.classObject.name} object>`;
   if (isBoundMethod(value)) return `<bound method ${value.callable.name}>`;
   return `<${value.kind}>`;
+}
+
+function formatReplDisplayValue(
+  value: RuntimeValue,
+  maximumStringLength: number,
+  span: SourceSpan,
+): string {
+  const activeContainers = new Set<object>();
+  const checked = (text: string): string => {
+    if (text.length > maximumStringLength)
+      throw new VmLimitError("interactive display", span);
+    return text;
+  };
+  const render = (current: RuntimeValue, depth: number): string => {
+    if (depth > 64) throw new VmLimitError("interactive display depth", span);
+    if (typeof current === "string")
+      return checked(pythonStringRepresentation(current, false));
+    if (isSequence(current)) {
+      if (activeContainers.has(current))
+        return current.kind === "list" ? "[...]" : "(...)";
+      activeContainers.add(current);
+      try {
+        const items = current.values.map((item) => render(item, depth + 1));
+        if (current.kind === "list") return checked(`[${items.join(", ")}]`);
+        if (items.length === 0) return "()";
+        return checked(`(${items.join(", ")}${items.length === 1 ? "," : ""})`);
+      } finally {
+        activeContainers.delete(current);
+      }
+    }
+    if (isDictionary(current)) {
+      if (activeContainers.has(current)) return "{...}";
+      activeContainers.add(current);
+      try {
+        return checked(
+          `{${[...current.entries]
+            .map(
+              ([key, item]) =>
+                `${render(key, depth + 1)}: ${render(item, depth + 1)}`,
+            )
+            .join(", ")}}`,
+        );
+      } finally {
+        activeContainers.delete(current);
+      }
+    }
+    if (isSet(current)) {
+      if (activeContainers.has(current)) return "{...}";
+      activeContainers.add(current);
+      try {
+        return current.entries.size === 0
+          ? "set()"
+          : checked(
+              `{${[...current.entries.values()]
+                .map((item) => render(item, depth + 1))
+                .join(", ")}}`,
+            );
+      } finally {
+        activeContainers.delete(current);
+      }
+    }
+    return checked(formatValue(current));
+  };
+  return render(value, 0);
 }
 
 function compare(

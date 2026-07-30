@@ -296,6 +296,43 @@ describe("Web terminal UI", () => {
     expect(inputHelpers).not.toContain("getModifierState");
   });
 
+  it("hands one submitted Linux or DOS line to the authoritative terminal frame", async () => {
+    const [css, script, inputHelpers] = await Promise.all([
+      source("web/styles.css"),
+      source("web/app.js"),
+      source("web/terminal-input.js"),
+    ]);
+
+    expect(script).toContain("new SubmittedLineHandoffController()");
+    expect(script).toContain("submittedLineHandoff.begin({");
+    expect(script).toContain("submittedLineHandoff.accept(");
+    expect(script).toContain("submittedLineHandoff.observe(terminal)");
+    expect(script).toContain("discardSubmittedLineHandoff()");
+    expect(script).toContain(
+      'elements.commandInput.classList.add("submitted-line")',
+    );
+    expect(css).toContain("textarea.submitted-line:disabled");
+    expect(inputHelpers).toContain("class SubmittedLineHandoffController");
+    expect(inputHelpers).toContain('this.#complete("echoed")');
+    expect(inputHelpers).toContain('this.#complete("replaced")');
+    const sendLineSource = script.slice(
+      script.indexOf("async function sendLine()"),
+      script.indexOf("function submittedLineHandoffComplete"),
+    );
+    expect(sendLineSource).toMatch(
+      /if \(submittedSecret\)\s*\{[\s\S]*?elements\.commandInput\.value = "";/u,
+    );
+    const secretClear = sendLineSource.indexOf(
+      'elements.commandInput.value = "";',
+    );
+    const transport = sendLineSource.indexOf(
+      'await sendInput({ kind: "line", value: line })',
+    );
+    expect(secretClear).toBeGreaterThanOrEqual(0);
+    expect(secretClear).toBeLessThan(transport);
+    expect(sendLineSource).toContain("if (submittedSecret) return;");
+  });
+
   it("preserves native copy selections and normalizes bounded paste", async () => {
     const [html, css, script, inputHelpers] = await Promise.all([
       source("web/index.html"),
@@ -487,7 +524,7 @@ describe("Web terminal UI", () => {
     expect(script).toContain('api("/api/take-control"');
     expect(script).toContain('accessMode === "writer"');
     expect(script).toMatch(
-      /accessMode === "viewer"\s+\? "LOCKED"\s+: writable\s+\? interactionStateLabel\(\)\s+: state/u,
+      /accessMode === "viewer"\s+\? "LOCKED"\s+: submittedLineHandoff\.pending\s+\? "WAIT"\s+: writable\s+\? interactionStateLabel\(\)\s+: state/u,
     );
     expect(script).toContain('error?.code === "read_only"');
     expect(script).toContain('error?.code === "out_of_range"');

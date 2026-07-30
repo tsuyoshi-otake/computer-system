@@ -1,6 +1,6 @@
 {
   "name": "computer-system",
-  "version": "0.1.0-alpha.13",
+  "version": "0.1.0-alpha.14",
   "private": true,
   "description": "ComputerCraft-inspired programmable computers for Minecraft Bedrock Edition",
   "type": "module",
@@ -30,7 +30,7 @@
     "test:mcp:serial:bds": "node tools/bds-serial-mcp-smoke.mjs",
     "test:pages": "vitest run tests/tools/pagesBuild.test.mjs tests/tools/pagesUi.test.mjs tests/tools/webManual.test.mjs",
     "test:python314": "vitest run tests/tools/python314Compatibility.test.mjs tests/language tests/runtime/pythonCoroutines.test.ts tests/runtime/pythonAsyncGenerators.test.ts tests/runtime/pythonExceptionGroups.test.ts tests/runtime/pythonTemplateStrings.test.ts tests/runtime/pythonDescriptors.test.ts tests/runtime/pythonAttributeHooks.test.ts tests/runtime/pythonDeletion.test.ts tests/runtime/pythonAnnotations.test.ts tests/runtime/pythonTypeParameters.test.ts tests/runtime/pythonTypeParametersAcceptance.test.ts tests/runtime/pythonGenericAliases.test.ts tests/runtime/pythonTyping.test.ts tests/runtime/pythonAssert.test.ts tests/runtime/pythonCs486.test.ts tests/runtime/pythonCs486ObjectV2.test.ts tests/runtime/pythonAssignments.test.ts tests/runtime/pythonCalls.test.ts tests/runtime/pythonClasses.test.ts tests/runtime/pythonMultipleInheritance.test.ts tests/runtime/pythonSuper.test.ts tests/runtime/pythonNew.test.ts tests/runtime/pythonClosures.test.ts tests/runtime/pythonComprehensions.test.ts tests/runtime/pythonGeneratorExpressions.test.ts tests/runtime/pythonContextManagers.test.ts tests/runtime/pythonDecorators.test.ts tests/runtime/pythonExpressionFunctions.test.ts tests/runtime/pythonGenerators.test.ts tests/runtime/pythonYieldFrom.test.ts tests/runtime/pythonIterableMaterialization.test.ts tests/runtime/pythonSequenceIteration.test.ts tests/runtime/pythonCallableSentinelIteration.test.ts tests/runtime/pythonNamedExpressions.test.ts tests/runtime/pythonNumbers.test.ts tests/runtime/pythonPackages.test.ts tests/runtime/pythonPatternMatching.test.ts tests/runtime/pythonHeapAccounting.test.ts tests/runtime/pythonIterators.test.ts tests/runtime/pythonSlicing.test.ts tests/runtime/pythonUnpacking.test.ts tests/runtime/limits.test.ts",
-    "test:web": "vitest run tests/tools/webSessionStore.test.mjs tests/tools/webCompanionServer.test.mjs tests/tools/webCompanionAdminConfig.test.mjs tests/tools/webUi.test.mjs tests/tools/terminalDisplayPower.test.mjs tests/tools/terminalLayout.test.mjs tests/tools/terminalPresentation.test.mjs tests/tools/crtCurvatureMap.test.mjs",
+    "test:web": "vitest run tests/tools/webSessionStore.test.mjs tests/tools/webCompanionServer.test.mjs tests/tools/webCompanionAdminConfig.test.mjs tests/tools/webUi.test.mjs tests/tools/terminalInput.test.mjs tests/tools/terminalDisplayPower.test.mjs tests/tools/terminalLayout.test.mjs tests/tools/terminalPresentation.test.mjs tests/tools/crtCurvatureMap.test.mjs",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
     "validate": "npm run format:check && npm run lint && npm run typecheck && npm run test && npm run build && npm run build:pages"

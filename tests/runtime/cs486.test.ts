@@ -4,11 +4,51 @@ import { assembleCs486 } from "../../src/application/toolchain/cs486Assembler.js
 import {
   createCs486Flat32MemoryMetadata,
   runCs486,
+  Cs486Process,
   Cs486Fault,
   type Cs486ExecutableV3,
 } from "../../src/domain/cpu/cs486.js";
 
 describe("CS486DX execution core", (): void => {
+  it("appends a validated continuation only from a completed quiescent boundary", (): void => {
+    const executable: Cs486ExecutableV3 = {
+      format: "cs486-executable",
+      instructions: [],
+      memory: createCs486Flat32MemoryMetadata(),
+      version: 3,
+    };
+    const process = new Cs486Process(executable, { memoryBytes: 65_536 });
+    expect(() =>
+      process.appendInstructionsAtCompletion([
+        {
+          destination: "eax",
+          op: "mov",
+          source: { kind: "immediate", value: 1 },
+        },
+      ]),
+    ).toThrow(/completed quiescent boundary/u);
+
+    process.runCpuSlice(100_000);
+    expect(process.state.kind).toBe("completed");
+    const instructionCount = process.instructionCount;
+    expect(() =>
+      process.appendInstructionsAtCompletion([{ op: "jmp", target: 99 }]),
+    ).toThrow(/invalid jmp instruction/u);
+    expect(process.instructionCount).toBe(instructionCount);
+    expect(process.state.kind).toBe("completed");
+
+    process.appendInstructionsAtCompletion([
+      {
+        destination: "eax",
+        op: "mov",
+        source: { kind: "immediate", value: 42 },
+      },
+    ]);
+    expect(process.state.kind).toBe("ready");
+    process.runCpuSlice(100_000);
+    expect(process.state).toEqual({ kind: "completed", value: 42 });
+  });
+
   it("executes registers, branches, stack operations, and cycle costs", (): void => {
     const executable = assembleCs486(`
       mov eax, 0

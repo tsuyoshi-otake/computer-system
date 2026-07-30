@@ -392,6 +392,21 @@ describe("BDS debug session", () => {
     ).toBe(true);
     expect(
       isAllowedWebRelayCommand(
+        "scriptevent computer_system:web-input abcdefghijkl request-eof 7 eof",
+      ),
+    ).toBe(true);
+    expect(
+      isAllowedWebRelayCommand(
+        "scriptevent computer_system:web-input abcdefghijkl request-eof 7 eof ",
+      ),
+    ).toBe(false);
+    expect(
+      isAllowedWebRelayCommand(
+        "scriptevent computer_system:web-input abcdefghijkl request-eof 7 eof value",
+      ),
+    ).toBe(false);
+    expect(
+      isAllowedWebRelayCommand(
         "scriptevent computer_system:web-take-control abcdefghijkl",
       ),
     ).toBe(true);

@@ -133,7 +133,7 @@ synchronized.
   VIRT/RSS accounting.
 - #38: Authentic CS-Linux/CS-DOS filesystem layout and command placement.
 - #39: Authentic CS-Linux login and session text with wall-clock history.
-- #40: Web Terminal cell cursor, bounded line editing, and integer grid scaling.
+- #40/#123: Web Terminal cursor, grid scaling, and Linux/DOS line handoff.
 - #48: CS Make state consistency v2 and scheduler-admitted planning.
 - #42: SysV init and the single `/etc/crontab` command/scheduler surface.
 - #44: Bounded guest-side CS-Linux Make and tick-sliced build ownership.
@@ -177,8 +177,8 @@ synchronized.
 - #113: One `terminal_keys` wakeup owner, bounded atomic CPU sub-slices, and
   unsaturated cumulative CPU accounting.
 - #118: Deferred terminal writes suspend instead of discarding guest stdout.
-- #119: Bounded CS-Linux `perl` on a modern Perl 5.40 surface, with a
-  guest-owned matcher and explicit rejection of modules and `eval STRING`.
+- #119/#122: Bounded guest-owned Perl 5.40 and a persistent bare Python REPL on
+  one production CS486 process, PID, scheduler entry, runtime, and RAM grant.
 
 Use English commit messages with useful detail and reference every applicable
 Issue. Issue #4 remains relevant while Phase 2 work is in scope.

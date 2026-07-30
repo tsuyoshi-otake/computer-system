@@ -135,6 +135,20 @@ describe("Web terminal field manual", () => {
     }
   });
 
+  it("documents the authoritative Linux and DOS submitted-line handoff", () => {
+    const terminal =
+      manualChapters.find(({ id }) => id === "terminal-editor")?.html ?? "";
+    for (const required of [
+      "Submitted-line handoff",
+      "one non-secret CS-Linux or CS-DOS line",
+      "Input admission and unrelated output alone do not erase the line",
+      "NetHack, EDIT, or another full-screen program",
+      "Passwords and every other secret-input line are excluded",
+    ]) {
+      expect(terminal).toContain(required);
+    }
+  });
+
   it("documents the bounded Python exception-group profile", () => {
     const python =
       manualChapters.find(({ id }) => id === "micropython")?.html ?? "";
@@ -153,6 +167,35 @@ describe("Web terminal field manual", () => {
     ]) {
       expect(python).toContain(required);
     }
+  });
+
+  it("documents the persistent Python REPL and bare Perl source boundaries", () => {
+    const python =
+      manualChapters.find(({ id }) => id === "micropython")?.html ?? "";
+    const linux = manualChapters.find(({ id }) => id === "shell")?.html ?? "";
+    for (const required of [
+      "Persistent terminal REPL",
+      "one PID, scheduler entry, and RAM grant",
+      "blank line commits the suite",
+      "bounded Python-style representation",
+      "side effects do not replay",
+      "CS486OBJ",
+      "Ctrl</kbd>+<kbd>D",
+      "512,000 UTF-8 bytes",
+    ]) {
+      expect(python).toContain(required);
+    }
+    for (const required of [
+      "Bare Perl source input",
+      "press <kbd>Ctrl</kbd>+<kbd>D</kbd>",
+      "Ctrl</kbd>+<kbd>C",
+      "64 KiB and 4,096 lines",
+      "never replayed",
+    ]) {
+      expect(linux).toContain(required);
+    }
+    expect(linux).toContain("<code>\\b</code>");
+    expect(linux).not.toContain("\u0008");
   });
 
   it("documents bounded Python 3.14 template strings", () => {

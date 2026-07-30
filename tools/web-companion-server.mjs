@@ -1162,6 +1162,20 @@ export class WebCompanionServer {
         "",
       );
     }
+    if (body?.kind === "eof") {
+      if (Object.hasOwn(body, "value")) {
+        throw new WebSessionError(
+          "input",
+          "Terminal EOF does not take a value.",
+        );
+      }
+      requireInteractionInput(interaction, "eof");
+      return this.requestInputAdmission(
+        active.sessionId,
+        interaction.interactionGeneration,
+        "eof",
+      );
+    }
     if (body?.kind === "mouse") {
       const value = body.value;
       if (
@@ -1259,7 +1273,12 @@ export class WebCompanionServer {
     );
   }
 
-  async requestInputAdmission(sessionId, interactionGeneration, kind, encoded) {
+  async requestInputAdmission(
+    sessionId,
+    interactionGeneration,
+    kind,
+    encoded = "",
+  ) {
     if (this.pendingInputs.size >= maximumPendingInputs) {
       throw retryableInputBusy(
         "Too many terminal input admissions are pending.",
@@ -1294,7 +1313,9 @@ export class WebCompanionServer {
     this.pendingInputs.set(requestId, pending);
     try {
       await this.bds.runWebRelay(
-        `scriptevent computer_system:web-input ${sessionId} ${requestId} ${String(interactionGeneration)} ${kind} ${encoded}`,
+        `scriptevent computer_system:web-input ${sessionId} ${requestId} ${String(interactionGeneration)} ${kind}${
+          kind === "eof" ? "" : ` ${encoded}`
+        }`,
       );
     } catch (error) {
       const relayError =
@@ -1966,6 +1987,18 @@ function optionalSessionTerminalInteraction(session) {
 }
 
 function requirePublishedTerminalInteraction(payload) {
+  const terminal = payload?.terminal;
+  if (
+    terminal === null ||
+    typeof terminal !== "object" ||
+    Array.isArray(terminal) ||
+    !Number.isSafeInteger(terminal.terminalRevision) ||
+    terminal.terminalRevision < 0 ||
+    !Number.isSafeInteger(terminal.replacementEpoch) ||
+    terminal.replacementEpoch < 0
+  ) {
+    throw new Error("Invalid terminal frame revision metadata.");
+  }
   const interaction = payload?.terminal?.interaction;
   if (
     interaction === null ||
@@ -1984,7 +2017,9 @@ function requirePublishedTerminalInteraction(payload) {
       "less",
       "login",
       "more",
+      "perl-source",
       "pwb",
+      "python-repl",
       "qbasic",
       "secret",
       "shell",
@@ -1994,6 +2029,7 @@ function requirePublishedTerminalInteraction(payload) {
       "vi-normal",
       "vi-output",
     ].includes(interaction.context) ||
+    typeof interaction.eof !== "boolean" ||
     typeof interaction.secretInput !== "boolean" ||
     !["abort-line", "cancel", "interrupt", "none", "terminal-key"].includes(
       interaction.ctrlCAction,
@@ -2021,6 +2057,9 @@ function requirePublishedTerminalInteraction(payload) {
     (interaction.secretInput &&
       interaction.inputMode !== "line" &&
       interaction.inputMode !== "none") ||
+    (interaction.eof &&
+      interaction.context !== "perl-source" &&
+      interaction.context !== "python-repl") ||
     (interaction.ctrlCAction === "abort-line" &&
       (interaction.inputMode !== "line" || interaction.secretInput)) ||
     (interaction.ctrlCAction === "cancel" &&
@@ -2051,11 +2090,13 @@ function requireInteractionInput(interaction, kind) {
         ? interaction.ctrlCAction === "cancel"
         : kind === "abort-line"
           ? interaction.ctrlCAction === "abort-line"
-          : kind === "mouse"
-            ? interaction.pointer === "cell"
-            : kind === "keys"
-              ? interaction.inputMode === "keys"
-              : interaction.inputMode === "line";
+          : kind === "eof"
+            ? interaction.eof === true
+            : kind === "mouse"
+              ? interaction.pointer === "cell"
+              : kind === "keys"
+                ? interaction.inputMode === "keys"
+                : interaction.inputMode === "line";
   if (allowed) return;
   throw new WebSessionError(
     "input_mode_changed",

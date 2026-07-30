@@ -39,7 +39,12 @@ It is not the public Pages site.
   the current glyph, underline cursors draw a bar, and CSS-only stepped blink
   honors reduced-motion preferences without invalidating cached rows.
 - Overlay semantic input at the terminal cursor so physical typing appears at
-  the prompt. Physical Enter submits `terminal_line`.
+  the prompt. Physical Enter submits `terminal_line`. Keep one admitted,
+  non-secret submitted line at that prompt until the authoritative frame echoes
+  its exact cells or a clear, scroll, resize, restore, or full-screen frame
+  replacement advances the terminal replacement marker. Ordinary output and
+  transport admission do not erase it. Secret input never enters this handoff
+  and must be cleared locally before awaiting either admission or rejection.
 - Ctrl+C copies selected terminal/command text; with no selection it interrupts
   advertised foreground work or aborts the current line without shutting down an
   idle Computer. Plain-text paste is bounded and never auto-submits. Up/Down

@@ -9,7 +9,11 @@ import {
   type JobControlStartResult,
   type AccountedNativeModuleContext,
 } from "../runtime/nativeModules.js";
-import { preparePythonCs486Program } from "../runtime/pythonCs486.js";
+import {
+  preparePythonCs486Program,
+  preparePythonCs486Repl,
+  type PythonCs486Repl,
+} from "../runtime/pythonCs486.js";
 import {
   RoundRobinScheduler,
   type SchedulerLimits,
@@ -625,6 +629,12 @@ export class ComputerRuntime {
     if (entry.stopIntent !== undefined && !name.startsWith("block_io:")) {
       return { outcome: "ignored", reason: "stopping" };
     }
+    if (
+      entry.foreground?.pythonRepl !== undefined &&
+      (name === "terminal_line" || name === "terminal_eof")
+    ) {
+      return this.queuePythonReplTerminalEvent(entry, name, arguments_);
+    }
     const compileJob = entry.compileJob;
     if (
       compileJob?.request.task.kind === "make" &&
@@ -716,6 +726,52 @@ export class ComputerRuntime {
     } catch (error: unknown) {
       return failure(error);
     }
+  }
+
+  private queuePythonReplTerminalEvent(
+    entry: RuntimeEntry,
+    name: "terminal_eof" | "terminal_line",
+    arguments_: readonly RuntimeValue[],
+  ): RuntimeCommandResult {
+    const foreground = entry.foreground;
+    const repl = foreground?.pythonRepl;
+    if (
+      foreground === undefined ||
+      repl === undefined ||
+      foreground.replBoundaryPending === true ||
+      foreground.replClosePending === true
+    ) {
+      return { outcome: "ignored", reason: "not_running" };
+    }
+    const promptKind = repl.promptKind;
+    if (promptKind !== "primary" && promptKind !== "continuation") {
+      return { outcome: "ignored", reason: "not_running" };
+    }
+    if (name === "terminal_eof") {
+      if (arguments_.length !== 0)
+        return failure(new Error("Python REPL EOF does not accept a payload"));
+      repl.eof();
+      foreground.replClosePending = true;
+      return { outcome: "accepted", state: entry.record.lifecycle.state.kind };
+    }
+    if (arguments_.length !== 1 || typeof arguments_[0] !== "string")
+      return failure(new Error("Python REPL line input must be one string"));
+
+    const line = arguments_[0];
+    writeTerminalLines(entry.record.terminal, [line]);
+    const submitted = repl.submitLine(line);
+    if (submitted.kind === "cell-ready") {
+      foreground.replBoundaryPending = true;
+    } else if (submitted.kind === "incomplete") {
+      writeTerminalPrompt(entry.record.terminal, "... ");
+    } else {
+      writeTerminalLines(
+        entry.record.terminal,
+        terminalDiagnosticLines(submitted.diagnostic),
+      );
+      writeTerminalPrompt(entry.record.terminal, ">>> ");
+    }
+    return { outcome: "accepted", state: entry.record.lifecycle.state.kind };
   }
 
   runTick(scope?: TickWorkScope): void {
@@ -831,7 +887,20 @@ export class ComputerRuntime {
               foregroundState.kind === "crashed" ||
               foregroundState.kind === "terminated")
           ) {
-            this.completeForegroundProcess(entry, foreground, foregroundState);
+            if (
+              foreground.pythonRepl !== undefined &&
+              foregroundState.kind === "completed" &&
+              foreground.replClosePending !== true
+            ) {
+              if (foreground.replBoundaryPending === true)
+                this.completePythonReplBoundary(entry, foreground);
+            } else {
+              this.completeForegroundProcess(
+                entry,
+                foreground,
+                foregroundState,
+              );
+            }
           }
         }
         for (const background of [...entry.backgroundJobs.values()]) {
@@ -978,6 +1047,34 @@ export class ComputerRuntime {
     if (entry === undefined || interaction.context === "unavailable") {
       return own(interaction);
     }
+    const pythonReplPrompt = entry.foreground?.pythonRepl?.promptKind;
+    if (
+      entry.stopIntent === undefined &&
+      entry.foreground?.pythonRepl !== undefined &&
+      entry.foreground.replBoundaryPending !== true &&
+      entry.foreground.replClosePending !== true &&
+      (pythonReplPrompt === "primary" || pythonReplPrompt === "continuation")
+    ) {
+      return own(
+        createTerminalInteractionDescriptor({
+          context: "python-repl",
+          ctrlCAction: "cancel",
+          cursorShape: interaction.cursorShape,
+          eof: true,
+          helpTopicId: "python",
+          hints: [
+            { key: "Enter", label: "Run or continue cell" },
+            { key: "Ctrl+D", label: "Exit REPL" },
+            { key: "Ctrl+C", label: "Cancel input" },
+          ],
+          history: false,
+          inputMode: "line",
+          pointer: "none",
+          presentation: "terminal",
+          secretInput: false,
+        }),
+      );
+    }
     if (
       entry.foreground?.csAbi !== undefined &&
       entry.stopIntent === undefined
@@ -1040,6 +1137,14 @@ export class ComputerRuntime {
   cancelTerminalInteraction(computerId: string): RuntimeCommandResult {
     const entry = this.entries.get(computerId);
     if (entry === undefined) return { outcome: "missing", computerId };
+    if (
+      this.terminalInteraction(computerId).ctrlCAction === "cancel" &&
+      entry.foreground?.pythonRepl?.cancelPendingInput() === true
+    ) {
+      writeTerminalLines(entry.record.terminal, ["^C"]);
+      writeTerminalPrompt(entry.record.terminal, ">>> ");
+      return { outcome: "accepted", state: "interaction_cancelled" };
+    }
     if (
       this.terminalInteraction(computerId).ctrlCAction !== "cancel" ||
       entry.shell?.cancelTerminalInteraction() !== true
@@ -2270,7 +2375,10 @@ export class ComputerRuntime {
       return this.startCompileJob(entry, request);
     }
     const cpu = cpuModelSpecification(entry.record.hardware.cpuModel);
-    if (request.kind === "python" && !cpu.supportsMicroPython) {
+    if (
+      (request.kind === "python" || request.kind === "python-repl") &&
+      !cpu.supportsMicroPython
+    ) {
       return {
         outcome: "failed",
         exitCode: 127,
@@ -2279,6 +2387,7 @@ export class ComputerRuntime {
     }
     let process: CpuProcess | undefined;
     let memoryGrant: GuestProcessMemoryGrant | undefined;
+    let pythonRepl: PythonCs486Repl | undefined;
     let csAbi: CsAbiRuntime | undefined;
     let osPid: number | undefined;
     let osPids: number[] = [];
@@ -2295,6 +2404,15 @@ export class ComputerRuntime {
         );
         process = granted.process;
         memoryGrant = granted.memoryGrant;
+      } else if (request.kind === "python-repl") {
+        const granted = this.createForegroundPythonRepl(
+          entry,
+          request,
+          runtimeId,
+        );
+        process = granted.repl.program.process;
+        memoryGrant = granted.memoryGrant;
+        pythonRepl = granted.repl;
       } else if (request.kind === "pipeline") {
         process = request.start((stageRequest) => {
           const stageRuntimeId = this.nextRuntimeId++;
@@ -2400,14 +2518,24 @@ export class ComputerRuntime {
         osPid,
         osPids,
         process,
+        ...(pythonRepl === undefined
+          ? {}
+          : {
+              pythonRepl,
+              replBannerPending: true,
+              replBoundaryPending: true,
+            }),
         ...(csAbi === undefined ? {} : { csAbi }),
         runtimeId,
         stats:
-          request.kind === "debugger" || request.kind === "pipeline"
+          request.kind === "debugger" ||
+          request.kind === "pipeline" ||
+          request.kind === "python-repl"
             ? false
             : request.stats,
         ...(request.kind !== "debugger" &&
         request.kind !== "pipeline" &&
+        request.kind !== "python-repl" &&
         request.stats
           ? {
               startedHostMilliseconds: this.readHostElapsedMilliseconds(),
@@ -3693,6 +3821,72 @@ export class ComputerRuntime {
     }
   }
 
+  private createForegroundPythonRepl(
+    entry: RuntimeEntry,
+    request: Extract<ShellForegroundRequest, { readonly kind: "python-repl" }>,
+    runtimeId: number,
+  ): {
+    readonly memoryGrant: GuestProcessMemoryGrant;
+    readonly repl: PythonCs486Repl;
+  } {
+    const filesystem = guestFilesystemForEntry(
+      entry,
+      request.credentials,
+      request.umask,
+    );
+    const environment = createAccountedNativeEnvironment({
+      clock: this.clock,
+      computerId: numericComputerId(entry.record.computerId),
+      computerName: entry.record.computerId,
+      osProfile: activeOsProfile(entry),
+      osRuntimeState: entry.osRuntimeState,
+      dosRuntimeState: activeDosRuntimeState(entry),
+      filesystem: activeFilesystem(entry),
+      exposeShellModule: false,
+      guestFilesystem: filesystem,
+      terminal: entry.record.terminal,
+      hardware: entry.record.hardware,
+      guestRamLedger: requireGuestRamLedger(entry),
+      redstone: entry.record.redstone,
+      currentTick: () => this.scheduler.tickNumber,
+      queueEvent: (name, ...arguments_) =>
+        this.scheduler.queueEvent(runtimeId, name, ...arguments_),
+      startTimer: (delay) => this.scheduler.startTimer(runtimeId, delay),
+      cancelTimer: (timerId) => this.scheduler.cancelTimer(runtimeId, timerId),
+      shutdown: () => this.requestEntryStop(entry, "shutdown", "shutdown"),
+      reboot: () => this.requestEntryStop(entry, "reboot", "reboot"),
+      ticksPerSecond: this.ticksPerSecond,
+      shell: entry.shell,
+      serial: this.serial,
+      peripherals: this.peripherals,
+      runHostWork: (lane, units, operation) =>
+        this.runHostWork(lane, units, entry.record.computerId, operation),
+    });
+    const prepared = preparePythonCs486Repl({
+      cpuModel: entry.record.hardware.cpuModel,
+      environment,
+      filesystem,
+      path: request.path,
+    });
+    const memoryGrant = grantCs486MemoryRequirements(
+      prepared.requirements,
+      guestProcessMemoryAdmission(
+        entry,
+        request.command,
+        `runtime-${String(runtimeId)}`,
+      ),
+    );
+    try {
+      return {
+        memoryGrant,
+        repl: prepared.create(memoryGrant.memoryBytes),
+      };
+    } catch (error: unknown) {
+      releaseGuestProcessMemory(memoryGrant);
+      throw error;
+    }
+  }
+
   private createBackgroundPythonProcess(
     entry: RuntimeEntry,
     request: Extract<ShellBackgroundRequest, { readonly kind: "python" }>,
@@ -3759,6 +3953,37 @@ export class ComputerRuntime {
       throw error;
     }
     return { memoryGrant, process };
+  }
+
+  private completePythonReplBoundary(
+    entry: RuntimeEntry,
+    foreground: ForegroundGuestProcess,
+  ): void {
+    const repl = foreground.pythonRepl;
+    if (repl === undefined)
+      throw new Error("Python REPL boundary has no controller");
+    const completion = repl.takeCellCompletion();
+    foreground.replBoundaryPending = false;
+    if (foreground.replBannerPending === true) {
+      foreground.replBannerPending = false;
+      writeTerminalLines(entry.record.terminal, [
+        `Computer System Python 1.0 (targeting Python 3.14) on ${cpuModelSpecification(entry.record.hardware.cpuModel).runtimeName}`,
+      ]);
+    }
+    if (completion?.diagnostic !== undefined)
+      writeTerminalLines(
+        entry.record.terminal,
+        terminalDiagnosticLines(completion.diagnostic),
+      );
+    if (completion?.display !== undefined)
+      writeTerminalLines(
+        entry.record.terminal,
+        terminalDiagnosticLines(completion.display),
+      );
+    if (repl.promptKind === "primary")
+      writeTerminalPrompt(entry.record.terminal, ">>> ");
+    else if (repl.promptKind === "continuation")
+      writeTerminalPrompt(entry.record.terminal, "... ");
   }
 
   private completeForegroundProcess(
@@ -5514,7 +5739,8 @@ interface ForegroundGuestProcess {
   executedInstructions: number;
   readonly instructionLimit?: number;
   readonly jobId?: number;
-  readonly kind: "cs486" | "debugger" | "pipeline" | "python" | "sleep";
+  readonly kind:
+    "cs486" | "debugger" | "pipeline" | "python" | "python-repl" | "sleep";
   lastPagerRevision?: number;
   limitReached?: boolean;
   readonly memoryGrant?: GuestProcessMemoryGrant;
@@ -5523,6 +5749,10 @@ interface ForegroundGuestProcess {
   readonly pipelineCompletion?: () => ShellCommandResult;
   readonly pipelineStageExitCodes?: () => readonly number[];
   readonly process: CpuProcess;
+  readonly pythonRepl?: PythonCs486Repl;
+  replBannerPending?: boolean;
+  replBoundaryPending?: boolean;
+  replClosePending?: boolean;
   readonly runtimeId: number;
   readonly startedHostMilliseconds?: number;
   readonly stats: boolean;
@@ -5722,6 +5952,14 @@ function writeShellCommandOutput(
       : normalized;
     writeTerminalLines(terminal, withoutFinalNewline.split("\n"));
   }
+}
+
+function terminalDiagnosticLines(text: string): readonly string[] {
+  const normalized = text.replaceAll("\r\n", "\n").replaceAll("\r", "\n");
+  const withoutFinalNewline = normalized.endsWith("\n")
+    ? normalized.slice(0, -1)
+    : normalized;
+  return withoutFinalNewline.split("\n");
 }
 
 function formatClock(clockHz: number): string {

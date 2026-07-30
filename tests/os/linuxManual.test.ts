@@ -66,6 +66,11 @@ describe("CS-Linux manual metadata", (): void => {
     const more = renderLinuxManualPage(linuxManualPage("more")!);
     expect(more).toContain("COMMAND | more");
     expect(more).toContain("live pipe input");
+    const python = renderLinuxManualPage(linuxManualPage("python")!);
+    expect(python).toContain("persistent interactive session");
+    expect(python).toContain("Ctrl+D exits");
+    expect(python).toContain("process, PID, scheduler entry, or RAM grant");
+    expect(linuxManualPage("micropython")).toBe(linuxManualPage("python"));
   });
 
   it("serves man and apropos through installed sandbox utilities", (): void => {
@@ -82,6 +87,12 @@ describe("CS-Linux manual metadata", (): void => {
       "|&  >  >>  <  2>  2>>  2>&1",
     );
     expect(shell.submit("man less").stdout).toContain("COMMAND | less");
+    expect(shell.submit("man perl").stdout).toContain(
+      "press Ctrl+D to run them or Ctrl+C to discard them",
+    );
+    expect(shell.submit("man python").stdout).toContain(
+      "one validated CS486 process",
+    );
     const dos = new ShellSession(new InMemoryFilesystem(), {
       osProfile: "dos",
     });

@@ -478,14 +478,14 @@ export class Cs486Process implements CpuProcess {
   private readonly registerValues = new Int32Array(cs486RegisterNames.length);
   private readonly cpuModel: CpuModel;
   private readonly memoryHierarchy: CpuMemoryHierarchy;
-  private readonly instructionBaseCycles: Uint32Array;
-  private readonly instructionBranchCycleDeltas: Uint8Array;
-  private readonly instructionExecutionFlags: Uint8Array;
-  private readonly hasHotBurstEntries: boolean;
-  private readonly instructionHotBurstEntries: Uint8Array;
-  private readonly instructionOpcodes: Uint8Array;
-  private readonly instructionOperandA: Int32Array;
-  private readonly instructionOperandB: Int32Array;
+  private instructionBaseCycles: Uint32Array;
+  private instructionBranchCycleDeltas: Uint8Array;
+  private instructionExecutionFlags: Uint8Array;
+  private hasHotBurstEntries: boolean;
+  private instructionHotBurstEntries: Uint8Array;
+  private instructionOpcodes: Uint8Array;
+  private instructionOperandA: Int32Array;
+  private instructionOperandB: Int32Array;
   private readonly memoryBytes: number;
   private readonly heapBaseBytes: number;
   private readonly functionEntries = new Map<number, Cs486FunctionSignature>();
@@ -501,7 +501,7 @@ export class Cs486Process implements CpuProcess {
   private lastFloatStatus = 0;
 
   constructor(
-    private readonly executable: Cs486Executable,
+    private executable: Cs486Executable,
     private readonly options: {
       readonly collectMicroarchitectureStats?: boolean;
       readonly externalMemoryUsageBytes?: () => number;
@@ -608,6 +608,68 @@ export class Cs486Process implements CpuProcess {
   /** Current zero-based instruction address for read-only debugger inspection. */
   get instructionAddress(): number {
     return this.instructionPointer;
+  }
+
+  /** Number of decoded instructions in the current immutable execution image. */
+  get instructionCount(): number {
+    return this.instructionOpcodes.length;
+  }
+
+  /**
+   * Atomically appends validated code at a completed, fall-through boundary.
+   *
+   * This is intentionally narrower than a loader or a reset: the existing RAM,
+   * registers, heap, output, timing state, and syscall owner survive unchanged.
+   * It exists for a REPL that has already reached a visible input boundary and
+   * needs its one production CS486 process to execute a newly compiled cell.
+   */
+  appendInstructionsAtCompletion(
+    instructions: readonly Cs486Instruction[],
+  ): void {
+    const previousInstructionCount = this.instructionOpcodes.length;
+    if (
+      this.stateValue.kind !== "completed" ||
+      this.instructionPointer < 0 ||
+      this.instructionPointer > previousInstructionCount ||
+      this.cycleDebt !== 0 ||
+      this.pendingResume !== undefined
+    ) {
+      throw new Cs486Fault(
+        "ProcessStateError",
+        "CS486 executable extension requires a completed quiescent boundary",
+      );
+    }
+    if (instructions.length === 0)
+      throw new Cs486Fault(
+        "ExecutableFormatError",
+        "CS486 executable extension must contain at least one instruction",
+      );
+
+    const executable: Cs486Executable = {
+      ...this.executable,
+      instructions: [...this.executable.instructions, ...instructions],
+    };
+    // Validate the complete candidate before deriving any execution tables or
+    // touching process state. This covers every appended branch target and the
+    // configured format-wide instruction ceiling in one deterministic pass.
+    validateCs486Executable(executable);
+    const semantics = prepareCs486SemanticInstructions(executable);
+    const timing = prepareCs486InstructionTiming(executable, this.cpuModel);
+
+    this.executable = executable;
+    this.instructionBaseCycles = timing.baseCycles;
+    this.instructionBranchCycleDeltas = timing.branchCycleDeltas;
+    this.instructionExecutionFlags = semantics.executionFlags;
+    this.hasHotBurstEntries = semantics.hasHotBurstEntries;
+    this.instructionHotBurstEntries = semantics.hotBurstEntries;
+    this.instructionOpcodes = semantics.opcodes;
+    this.instructionOperandA = semantics.operandA;
+    this.instructionOperandB = semantics.operandB;
+    // A completed top-level program may intentionally have auxiliary function
+    // bodies after its completion syscall. Continuations always start after the
+    // prior complete image, so those bodies cannot become fall-through code.
+    this.instructionPointer = previousInstructionCount;
+    this.stateValue = { kind: "ready" };
   }
 
   /**

@@ -11,6 +11,9 @@ while True:
     elif event[0] == "terminal_keys":
         shell.keys(event[1])
         shell.prompt()
+    elif event[0] == "terminal_eof":
+        shell.eof()
+        shell.prompt()
     elif event[0] == "terminal_mouse":
         shell.mouse(event[1])
         shell.prompt()

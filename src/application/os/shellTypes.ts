@@ -30,6 +30,14 @@ export interface ShellForegroundPython extends ShellProcessContext {
   readonly stats: boolean;
 }
 
+/** One terminal-owned persistent Python session on a single CS486 process. */
+export interface ShellForegroundPythonRepl extends ShellProcessContext {
+  readonly command: "micropython" | "python";
+  readonly kind: "python-repl";
+  /** Synthetic source origin used only for relative import resolution. */
+  readonly path: string;
+}
+
 export interface ShellForegroundCs486 extends ShellProcessContext {
   /**
    * The guest declared with `run --batch` that this program uses no OS service.
@@ -173,7 +181,8 @@ export type ShellForegroundRequest =
   | ShellForegroundCs486
   | ShellForegroundDebugger
   | ShellForegroundPipeline
-  | ShellForegroundPython;
+  | ShellForegroundPython
+  | ShellForegroundPythonRepl;
 
 export interface ShellToolchainCommandResult extends GuestToolchainResult {
   readonly foreground?: ShellForegroundRequest;

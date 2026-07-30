@@ -185,6 +185,8 @@ import {
   DosRuntimeStateError,
   type DosRuntimeState,
 } from "./dosRuntimeState.js";
+import type { LinuxPerlCommandPreparation } from "./linuxPerl.js";
+import { perlParserLimits } from "./linuxPerlParser.js";
 
 export interface ShellResult {
   readonly action?: ShellAction;
@@ -245,6 +247,9 @@ const dosEditorResidentBytes = 256 * 1_024;
 const viResidentBytes = 192 * 1_024;
 const pagerResidentBytes = 96 * 1_024;
 const maximumBackgroundCommandBytes = 512;
+const maximumPerlSourceLines = 4_096;
+const perlSourceResidentBytes =
+  perlParserLimits.maximumProgramBytes + 32 * 1_024;
 const maximumAuthenticationFailures = 3;
 const maximumIdentityAliases = 128;
 const maximumIdentityFunctions = 128;
@@ -342,6 +347,31 @@ interface PipelineBufferSink {
 }
 
 type PipelineSink = PipelineBufferSink | PipelineCaptureSink | PipelineFileSink;
+
+type PreparedLinuxPerlStdin = Exclude<
+  LinuxPerlCommandPreparation,
+  { readonly kind: "invalid" } | { readonly kind: "version" }
+> & { readonly kind: "stdin" };
+
+interface CapturedPerlShellContext {
+  readonly credentials: ProcessCredentials;
+  readonly shellState: ShellRuntimeIdentityState;
+  readonly umask: number;
+}
+
+interface PerlSourceRouting extends CapturedPerlShellContext {
+  readonly stderrSink: PipelineCaptureSink | PipelineFileSink;
+  readonly stdoutSink: PipelineCaptureSink | PipelineFileSink;
+}
+
+interface PerlSourceCollection {
+  readonly executionContext: CapturedPerlShellContext;
+  readonly memory: ShellUtilityMemoryGrant;
+  readonly prepared: PreparedLinuxPerlStdin;
+  routing?: PerlSourceRouting;
+  readonly sourceChunks: string[];
+  sourceBytes: number;
+}
 
 interface IdentityFrame {
   readonly aliases: ReadonlyMap<string, string>;
@@ -446,6 +476,7 @@ export class ShellSession {
   private nextDosPipeSpoolId = 1;
   private pendingPagerContinuation: (() => ShellResult) | undefined;
   private readonly deferGuestExecution: boolean;
+  private perlSourceCollection: PerlSourceCollection | undefined;
 
   constructor(
     private readonly filesystem: InMemoryFilesystem,
@@ -644,7 +675,8 @@ export class ShellSession {
     if (
       this.vi !== undefined ||
       this.editor !== undefined ||
-      this.pager !== undefined
+      this.pager !== undefined ||
+      this.perlSourceCollection !== undefined
     )
       return "";
     const conversationPrompt = this.linuxConversationPrompt();
@@ -670,6 +702,25 @@ export class ShellSession {
     if (this.vi !== undefined) return this.vi.terminalInteraction();
     if (this.editor !== undefined) return this.editor.terminalInteraction();
     if (this.pager !== undefined) return this.pager.terminalInteraction();
+    if (this.perlSourceCollection !== undefined) {
+      return createTerminalInteractionDescriptor({
+        context: "perl-source",
+        ctrlCAction: "cancel",
+        cursorShape: profileCursorShape(this.frontend.id),
+        eof: true,
+        helpTopicId: "perl",
+        hints: [
+          { key: "Enter", label: "Add source line" },
+          { key: "Ctrl+D", label: "Run source" },
+          { key: "Ctrl+C", label: "Cancel" },
+        ],
+        history: false,
+        inputMode: "line",
+        pointer: "none",
+        presentation: "terminal",
+        secretInput: false,
+      });
+    }
     const secretInput =
       this.linuxConversation !== undefined ||
       (this.authentication?.isSecretInput() ?? false);
@@ -728,6 +779,12 @@ export class ShellSession {
 
   cancelTerminalInteraction(): boolean {
     if (this.disconnected) return false;
+    const perlSource = this.takePerlSourceCollection();
+    if (perlSource !== undefined) {
+      perlSource.memory.release();
+      this.lastExitCode = 130;
+      return true;
+    }
     if (this.linuxConversation !== undefined) {
       this.linuxConversation = undefined;
       this.lastExitCode = 130;
@@ -783,6 +840,10 @@ export class ShellSession {
     this.pager = undefined;
     this.pendingPagerContinuation = undefined;
     this.pendingEditorCommand = undefined;
+    const perlSource = this.takePerlSourceCollection();
+    if (perlSource !== undefined) {
+      finalize(() => perlSource.memory.release());
+    }
     finalize(() => this.commands.closeDebugger());
     if (this.ownsGuestRamLedger) {
       finalize(() => {
@@ -840,6 +901,8 @@ export class ShellSession {
     if (this.vi !== undefined) result = this.submitViLine(line);
     else if (this.editor !== undefined) result = this.submitEditor(line);
     else if (this.pager !== undefined) result = this.submitPager(line);
+    else if (this.perlSourceCollection !== undefined)
+      result = this.submitPerlSource(line);
     else if (this.linuxConversation !== undefined)
       result = this.submitLinuxConversation(line);
     else if (this.authentication?.isAuthenticated() === false) {
@@ -945,6 +1008,33 @@ export class ShellSession {
     return this.withCpuCycles(result);
   }
 
+  /** Completes the terminal-owned input stream advertised by the active mode. */
+  eof(): ShellResult {
+    this.armTerminalSession();
+    this.cpuCyclesValue = 1;
+    this.commands.beginFilesystemIo();
+    let result =
+      this.perlSourceCollection === undefined
+        ? resultFromStreams(
+            "",
+            "shell: EOF is unavailable in the current input context\n",
+            2,
+          )
+        : this.finishPerlSource();
+    const ioWaitEvent = this.commands.completeFilesystemIo(
+      !this.suppressFilesystemWait,
+    );
+    if (
+      ioWaitEvent !== undefined &&
+      result.foreground === undefined &&
+      result.action === undefined
+    ) {
+      result = { ...result, ioWaitEvent };
+    }
+    this.notifyOsRuntimeChanged();
+    return this.withCpuCycles(result);
+  }
+
   submitDebugCommand(line: string): ShellResult {
     this.armTerminalSession();
     if (!this.isAuthenticated()) {
@@ -964,10 +1054,16 @@ export class ShellSession {
         127,
       );
     }
-    if (this.vi !== undefined || this.editor !== undefined) {
+    if (
+      this.vi !== undefined ||
+      this.editor !== undefined ||
+      this.perlSourceCollection !== undefined
+    ) {
       return resultFromStreams(
         "",
-        "debug: interactive editor session is active\n",
+        this.perlSourceCollection === undefined
+          ? "debug: interactive editor session is active\n"
+          : "debug: interactive Perl source collection is active\n",
         2,
       );
     }
@@ -1003,6 +1099,15 @@ export class ShellSession {
       return resultFromStreams(
         "",
         "debug: interactive authentication commands are not supported through MCP\n",
+        2,
+      );
+    }
+    if (this.perlSourceCollection !== undefined) {
+      const perlSource = this.takePerlSourceCollection()!;
+      perlSource.memory.release();
+      return resultFromStreams(
+        "",
+        "debug: interactive terminal-control commands are not supported through MCP\n",
         2,
       );
     }
@@ -1166,7 +1271,8 @@ export class ShellSession {
       !this.isAuthenticated() ||
       this.linuxConversation !== undefined ||
       this.vi !== undefined ||
-      this.editor !== undefined
+      this.editor !== undefined ||
+      this.perlSourceCollection !== undefined
     ) {
       return {
         candidates: [],
@@ -1292,6 +1398,212 @@ export class ShellSession {
         resultFromStreams("", `editor: ${message(error)}\n`, 2),
       );
     }
+  }
+
+  private startPerlSourceCollection(
+    prepared: PreparedLinuxPerlStdin,
+  ): ShellCommandResult {
+    if (this.perlSourceCollection !== undefined) {
+      return commandFailure(
+        "perl",
+        "standard-input source is already active",
+        2,
+      );
+    }
+    let memory: ShellUtilityMemoryGrant | undefined;
+    try {
+      const executionContext = this.capturePerlShellContext();
+      memory = this.admitLinuxUtilityMemory({
+        displayName: "perl stdin source",
+        moduleId: "perl-source",
+        residentBytes: perlSourceResidentBytes,
+      });
+      this.perlSourceCollection = {
+        executionContext,
+        memory,
+        prepared,
+        sourceBytes: 0,
+        sourceChunks: [],
+      };
+      return commandSuccess();
+    } catch (error: unknown) {
+      memory?.release();
+      return commandFailure("perl", message(error), 1);
+    }
+  }
+
+  private submitPerlSource(line: string): ShellResult {
+    const collection = this.perlSourceCollection;
+    if (collection === undefined) {
+      return resultFromStreams(
+        "",
+        "perl: standard-input source is not active\n",
+        2,
+      );
+    }
+    const chunk = `${line}\n`;
+    const nextBytes = collection.sourceBytes + utf8ByteLength(chunk);
+    if (
+      nextBytes > perlParserLimits.maximumProgramBytes ||
+      collection.sourceChunks.length >= maximumPerlSourceLines
+    ) {
+      this.takePerlSourceCollection();
+      collection.memory.release();
+      this.lastExitCode = 2;
+      return resultFromStreams(
+        "",
+        nextBytes > perlParserLimits.maximumProgramBytes
+          ? "perl: program byte limit exceeded\n"
+          : "perl: program line limit exceeded\n",
+        2,
+      );
+    }
+    collection.sourceChunks.push(chunk);
+    collection.sourceBytes = nextBytes;
+    return resultFromStreams("", "", 0);
+  }
+
+  private finishPerlSource(): ShellResult {
+    const collection = this.takePerlSourceCollection();
+    if (collection === undefined) {
+      return resultFromStreams(
+        "",
+        "perl: standard-input source is not active\n",
+        2,
+      );
+    }
+    let executed: ShellCommandResult;
+    try {
+      executed = this.runInCapturedPerlContext(
+        collection.executionContext,
+        () =>
+          this.commands.executePreparedLinuxPerl(collection.prepared, {
+            kind: "source",
+            source: collection.sourceChunks.join(""),
+          }),
+      );
+    } catch (error: unknown) {
+      executed = commandFailure("perl", message(error), 1);
+    }
+    try {
+      collection.memory.release();
+    } catch (error: unknown) {
+      executed = mergeCommandResults(
+        executed,
+        commandFailure(
+          "perl",
+          `source memory release failed: ${message(error)}`,
+        ),
+      );
+    }
+    const routing = collection.routing;
+    if (routing === undefined) {
+      executed = mergeCommandResults(
+        executed,
+        commandFailure("perl", "standard-input source routing is unavailable"),
+      );
+    } else {
+      executed = this.routePerlSourceOutput(executed, routing);
+    }
+    this.lastExitCode = executed.exitCode;
+    return shellResultFromCommand(executed);
+  }
+
+  private attachPerlSourceRouting(
+    stdoutSink: PipelineSink,
+    stderrSink: PipelineSink,
+  ): ShellCommandResult | undefined {
+    const collection = this.perlSourceCollection;
+    if (collection === undefined || collection.routing !== undefined) {
+      return undefined;
+    }
+    if (stdoutSink.kind === "pipe" || stderrSink.kind === "pipe") {
+      this.takePerlSourceCollection();
+      collection.memory.release();
+      return commandFailure(
+        "perl",
+        "interactive standard-input source cannot own a pipeline endpoint",
+        2,
+      );
+    }
+    collection.routing = {
+      ...this.capturePerlShellContext(),
+      stderrSink,
+      stdoutSink,
+    };
+    return undefined;
+  }
+
+  private routePerlSourceOutput(
+    result: ShellCommandResult,
+    routing: PerlSourceRouting,
+  ): ShellCommandResult {
+    return this.runInCapturedPerlContext(routing, () => {
+      const terminalEvents: ShellOutputEvent[] = [];
+      let exitCode = result.exitCode;
+      for (const event of commandOutputEvents(result)) {
+        const sink =
+          event.descriptor === 1 ? routing.stdoutSink : routing.stderrSink;
+        try {
+          if (sink.kind === "file") {
+            this.commands.writeFile(sink.path, event.text, true);
+          } else {
+            terminalEvents.push({
+              descriptor: sink.descriptor,
+              text: event.text,
+            });
+          }
+        } catch (error: unknown) {
+          exitCode = 1;
+          terminalEvents.push({
+            descriptor: 2,
+            text: this.commandError("perl", error),
+          });
+        }
+      }
+      return {
+        exitCode,
+        outputEvents: terminalEvents,
+        stderr: terminalEvents
+          .filter(({ descriptor }) => descriptor === 2)
+          .map(({ text }) => text)
+          .join(""),
+        stdout: terminalEvents
+          .filter(({ descriptor }) => descriptor === 1)
+          .map(({ text }) => text)
+          .join(""),
+      };
+    });
+  }
+
+  private capturePerlShellContext(): CapturedPerlShellContext {
+    return {
+      credentials: this.credentialContext.current,
+      shellState: this.commands.captureIdentityState(),
+      umask: this.guestFilesystem.getUmask(),
+    };
+  }
+
+  private runInCapturedPerlContext<T>(
+    context: CapturedPerlShellContext,
+    operation: () => T,
+  ): T {
+    const parentState = this.commands.captureIdentityState();
+    const parentUmask = this.guestFilesystem.getUmask();
+    try {
+      this.commands.restoreIdentityState(context.shellState);
+      this.guestFilesystem.setUmask(context.umask);
+      return this.credentialContext.runWith(context.credentials, operation);
+    } finally {
+      this.commands.restoreIdentityState(parentState);
+      this.guestFilesystem.setUmask(parentUmask);
+    }
+  }
+
+  private takePerlSourceCollection(): PerlSourceCollection | undefined {
+    const collection = this.perlSourceCollection;
+    this.perlSourceCollection = undefined;
+    return collection;
   }
 
   private withCpuCycles(result: ShellResult): ShellResult {
@@ -1920,6 +2232,16 @@ export class ShellSession {
           stdout: "",
         };
       }
+      if (
+        this.perlSourceCollection !== undefined &&
+        this.perlSourceCollection.routing === undefined
+      ) {
+        const routingFailure = this.attachPerlSourceRouting(
+          stdoutSink,
+          stderrSink,
+        );
+        if (routingFailure !== undefined) executed = routingFailure;
+      }
       exitCode = executed.exitCode;
       action = executed.action;
       sleepTicks = executed.sleepTicks;
@@ -2394,6 +2716,32 @@ export class ShellSession {
           127,
         );
       }
+      if (arguments_.length === 0) {
+        if (this.debugSubmission)
+          return commandFailure(
+            name,
+            "interactive REPL is unavailable through MCP debug commands",
+            2,
+          );
+        if (command.redirects.length > 0)
+          return commandFailure(
+            name,
+            "interactive REPL does not support redirection",
+            2,
+          );
+        return {
+          exitCode: 0,
+          foreground: {
+            command: name === "micropython" ? "micropython" : "python",
+            credentials: this.credentialContext.current,
+            kind: "python-repl",
+            path: this.commands.resolvePath("__repl__.py"),
+            umask: this.guestFilesystem.getUmask(),
+          },
+          stderr: "",
+          stdout: "",
+        };
+      }
       const stats = arguments_[0] === "--stats";
       const pathArgument = stats ? arguments_[1] : arguments_[0];
       if (pathArgument === undefined || arguments_.length !== (stats ? 2 : 1)) {
@@ -2704,6 +3052,33 @@ export class ShellSession {
       if (name === "sh" || name === "bash" || name === "source")
         return this.executeScript(name, arguments_, stdin, depth);
       return commandFailure(name, "invalid shell script command", 2);
+    }
+    if (this.frontend.id === "linux" && name === "perl") {
+      const prepared = this.commands.prepareLinuxPerl(arguments_);
+      if (prepared.kind === "stdin") {
+        const hasInputRedirect = command.redirects.some(
+          (redirect) => redirect.kind === "open" && redirect.descriptor === 0,
+        );
+        const mayCollectFromTerminal =
+          depth === 0 &&
+          interactiveAllowed &&
+          foregroundAllowed &&
+          !hasInputRedirect;
+        if (mayCollectFromTerminal && this.debugSubmission) {
+          return commandFailure(
+            "debug",
+            "interactive Perl source collection is not supported through MCP",
+            2,
+          );
+        }
+        if (mayCollectFromTerminal) {
+          return this.startPerlSourceCollection({ ...prepared, kind: "stdin" });
+        }
+        return this.commands.executePreparedLinuxPerl(prepared, {
+          kind: "source",
+          source: stdin,
+        });
+      }
     }
     const result = this.commands.execute(command.words, stdin);
     this.cpuCyclesValue += result.cpuCycles ?? 0;

@@ -142,7 +142,13 @@ import type {
   OsRuntimeState,
 } from "./osRuntimeState.js";
 import { parseLinuxCrontab } from "./linuxCrontab.js";
-import { executeLinuxPerl } from "./linuxPerl.js";
+import {
+  executePreparedLinuxPerl,
+  prepareLinuxPerlCommand,
+  type LinuxPerlCommandPreparation,
+  type LinuxPerlExecutionInput,
+  type LinuxPerlIo,
+} from "./linuxPerl.js";
 import { executeLinuxAwk, executeLinuxSed } from "./linuxTextProcessors.js";
 import {
   executeLinuxGzip,
@@ -8080,7 +8086,32 @@ export class ShellCommandRuntime {
     arguments_: readonly string[],
     stdin: string,
   ): ShellCommandResult {
-    const result = executeLinuxPerl(arguments_, stdin, {
+    return this.executePreparedLinuxPerl(this.prepareLinuxPerl(arguments_), {
+      kind: "data",
+      stdin,
+    });
+  }
+
+  /** Parses Perl switches once so the shell can identify fd-0 program source. */
+  prepareLinuxPerl(arguments_: readonly string[]): LinuxPerlCommandPreparation {
+    return prepareLinuxPerlCommand(arguments_, this.linuxPerlIo());
+  }
+
+  /** Executes a prepared Perl invocation through the credentialed guest I/O. */
+  executePreparedLinuxPerl(
+    prepared: LinuxPerlCommandPreparation,
+    input: LinuxPerlExecutionInput,
+  ): ShellCommandResult {
+    const result = executePreparedLinuxPerl(
+      prepared,
+      input,
+      this.linuxPerlIo(),
+    );
+    return status(result.exitCode, result.stdout, result.stderr);
+  }
+
+  private linuxPerlIo(): LinuxPerlIo {
+    return {
       environment: this.environment,
       isDirectory: (path: string): boolean =>
         this.filesystem.isDirectory(this.resolvePath(path)),
@@ -8089,8 +8120,7 @@ export class ShellCommandRuntime {
       writeFile: (path: string, contents: string, append: boolean): void => {
         this.writeFile(path, contents, append);
       },
-    });
-    return status(result.exitCode, result.stdout, result.stderr);
+    };
   }
 
   private linuxArchiveCommand(

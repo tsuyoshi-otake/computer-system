@@ -1703,3 +1703,74 @@ first-send restriction, and reported no horizontal overflow. The only console
 entry was the local static server's unrelated favicon 404; there were no
 page-script warnings or exceptions. Browser, snapshot/log files, and owned
 loopback servers were finalized.
+
+### 2026-07-30 Issues #119/#122 Perl stdin and persistent Python REPL
+
+`Verify:` Run
+`rtk vitest run tests/runtime/cs486.test.ts tests/runtime/pythonCs486Repl.test.ts tests/os/linuxPerl.test.ts tests/os/linuxManual.test.ts tests/os/shellSession.test.ts tests/computer/computerHost.test.ts tests/terminal/terminalInteraction.test.ts tests/tools/terminalInput.test.mjs tests/tools/webCompanionServer.test.mjs tests/tools/webManual.test.mjs tests/bedrock/terminalAdapters.test.mjs tests/tools/bdsDebugSession.test.mjs`,
+then `rtk npm run validate`. Re-list repository Node/Vitest processes after each
+test command.
+
+`Expect:` Bare Perl accepts pipe, redirect, and bounded terminal source without
+replaying source as runtime stdin. Bare Python retains one PID, scheduler entry,
+RAM grant, runtime, and production `Cs486Process` across cells. EOF, interrupt,
+stale/viewer/malformed input, exact/plus-one capacities, errors, disconnect,
+logout, reboot, and shutdown all reach one observable terminal state. All host
+gates and both production builds pass, and no Vitest process survives.
+
+`Result:` The focused command passed 238 tests. The full gate passed Prettier,
+ESLint, TypeScript, all 313 test files and 2,670 tests, the production Bedrock
+pack, and the 16-chapter Pages build. Both post-test process checks found zero
+repository Vitest Node processes.
+
+`Verify:` Start an isolated real BDS with the TypeScript CS486 engine and two
+runtime workers. In its real Chrome writer, run bare `perl`, enter
+`print "final-tty\\n";`, and send Ctrl+D. Start bare `python`, execute
+persistent value and function cells, enter `if True:`, and exit with Ctrl+D.
+Inspect `man perl`, `man python`, the matching Web Manual sections, layout
+metrics, and browser diagnostics. Stop the owned BDS through its graceful
+sentinel.
+
+`Expect:` Perl prints `final-tty` once. Python displays its banner, `>>>`,
+`...`, two results of `42`, and one restored shell prompt. Manuals state the
+exact stdin/REPL contracts and limits. The page has no horizontal overflow or
+console diagnostic, and every isolated server reaches idle with no surviving
+process.
+
+`Result:` Real-BDS Computers `c-cej5mm` and `c-r20rqv` produced the expected
+visible Perl, Python, and manual output. The final page measured 1,835 px for
+both client and scroll width and returned an empty diagnostic log. Chrome's
+automation safety layer did not deliver synthetic Ctrl+C, and Windows Computer
+Use stopped because it could not determine the localhost URL with sufficient
+policy confidence. The passing browser-input, Web, BDS, Computer, and runtime
+tests provide the exact pending/running Ctrl+C evidence; no safety barrier was
+bypassed. Both owned BDS sessions reported `state: idle` and empty stderr.
+
+### 2026-07-30 Issue #123 submitted-line handoff
+
+`Verify:` Start the managed BDS/Web companion, attach its real Chrome writer,
+and run `printf ISSUE123-LINUX`, `clear`, and `nethack` from CS-Linux. Return to
+the shell, enter CS-DOS through the supported machine/profile flow, and run
+`ECHO ISSUE123-DOS`, `CLS`, and `EDIT C:\ISSUE.TXT`. Also submit one password or
+other advertised secret-input line. Observe the prompt cells continuously from
+physical Enter until each authoritative echo, clear, or full-screen frame.
+
+`Expect:` A non-secret submitted line remains visible at its original prompt
+cell after Enter and across stale or unrelated output. The exact guest echo
+replaces the overlay once, while `clear`, `CLS`, NetHack, and EDIT take over the
+screen atomically with no blank frame or duplicate command. The secret is never
+shown, retained, or added to history. Closing, replacing, taking writer control,
+moving out of range, and reconnecting do not replay a retained line. Chrome
+reports no page exception and the 80x25 display has no horizontal overflow.
+
+`Result:` Passed on 2026-07-30. Six focused suites passed 130 tests; `test:web`
+passed 9 files / 136 tests, `test:pages` passed 3 files / 31 tests, the Pages
+build produced all 16 chapters, and `npm run validate` passed 313 files / 2,685
+tests plus every build gate. Disposable real-BDS CS-Linux and CS-DOS Computers
+were driven from the user's real Chrome session. The Linux `printf`, DOS `ECHO`,
+`clear`, `CLS`, NetHack, and EDIT handoffs matched the expectation. A
+rejected-secret live check exposed and then verified the fix for a local
+password-clearing order bug: no secret was present immediately or after the
+rejection. Both pages reported zero browser errors and equal 1,500 px
+client/scroll widths; both BDS sessions stopped at `idle` with zero diagnostics
+and no surviving owned process.

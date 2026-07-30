@@ -35,6 +35,7 @@ export class TerminalBuffer {
   private backgroundValue = 15;
   private cursorBlinkValue = false;
   private revisionValue = 0;
+  private replacementEpochValue = 0;
 
   constructor(
     width = 51,
@@ -80,6 +81,15 @@ export class TerminalBuffer {
     return this.revisionValue;
   }
 
+  /**
+   * Monotonic transient marker for operations that replace visible terminal
+   * content rather than incrementally writing it. It is intentionally absent
+   * from persisted snapshots.
+   */
+  get replacementEpoch(): number {
+    return this.replacementEpochValue;
+  }
+
   resize(width: number, height: number): void {
     requireDimension(width, this.limits.maxWidth, "width");
     requireDimension(height, this.limits.maxHeight, "height");
@@ -99,6 +109,7 @@ export class TerminalBuffer {
     this.cursorXValue = Math.min(this.cursorXValue, width + 1);
     this.cursorYValue = Math.min(this.cursorYValue, height);
     this.revisionValue += 1;
+    this.replacementEpochValue += 1;
   }
 
   setCursorPosition(x: number, y: number): void {
@@ -153,6 +164,7 @@ export class TerminalBuffer {
       this.blankCell(),
     );
     this.revisionValue += 1;
+    this.replacementEpochValue += 1;
   }
 
   clearLine(): void {
@@ -160,6 +172,7 @@ export class TerminalBuffer {
       this.cells[this.index(x, this.cursorYValue)] = this.blankCell();
     }
     this.revisionValue += 1;
+    this.replacementEpochValue += 1;
   }
 
   scroll(lines: number): void {
@@ -178,6 +191,7 @@ export class TerminalBuffer {
     }
     this.cells = next;
     this.revisionValue += 1;
+    this.replacementEpochValue += 1;
   }
 
   cell(x: number, y: number): TerminalCell {
@@ -263,6 +277,7 @@ export class TerminalBuffer {
       this.foregroundValue !== nextForeground ||
       this.backgroundValue !== nextBackground;
     if (!stateChanged) return 0;
+    this.replacementEpochValue += 1;
     for (const { cell, index } of pending) this.cells[index] = cell;
     this.cursorXValue = cursor.x;
     this.cursorYValue = cursor.y;
@@ -331,11 +346,15 @@ export class TerminalBuffer {
     }
     requireWriteCursorX(snapshot.cursor.x);
     requireCoordinate(snapshot.cursor.y, this.height, "y");
+    if (typeof snapshot.cursor.blink !== "boolean") {
+      throw new TerminalError("Terminal cursor blink must be boolean");
+    }
     this.cells = cells;
     this.cursorXValue = snapshot.cursor.x;
     this.cursorYValue = snapshot.cursor.y;
     this.cursorBlinkValue = snapshot.cursor.blink;
     this.revisionValue += 1;
+    this.replacementEpochValue += 1;
   }
 
   private blankCell(): TerminalCell {

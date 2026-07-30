@@ -38,7 +38,8 @@ describe("OS filesystem images and disk profiles", (): void => {
       portable.filesystem.limits.capacityBytes -
       portable.filesystem.getFreeSpace();
     expect(linuxUsed).toBeGreaterThan(2 * 1_048_576);
-    expect(linuxUsed).toBeLessThan(10 * 1_048_576);
+    // The guest-built NetHack executable is charged as a real rootfs blob.
+    expect(linuxUsed).toBeLessThan(12 * 1_048_576);
     expect(dosUsed).toBeGreaterThan(500 * 1_024);
     expect(dosUsed).toBeLessThan(1_048_576);
     expect(desktop.filesystem.getSize("/boot/vmlinuz-cs486")).toBe(786_432);
@@ -641,7 +642,10 @@ describe("OS filesystem images and disk profiles", (): void => {
   });
 
   it("renames a full legacy home with internal and external hard links without duplicating bytes", (): void => {
-    const capacityBytes = 10 * 1_048_576;
+    // Keep the fixture above the current charged base image, then consume every
+    // remaining byte so the migration still proves hard-link preservation at
+    // an actually full filesystem.
+    const capacityBytes = 12 * 1_048_576;
     const filesystem = new InMemoryFilesystem({
       capacityBytes,
       maxEntries: 4_096,

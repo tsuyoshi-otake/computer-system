@@ -326,7 +326,7 @@ suppressed error may leave a device accidentally marked as running.
 - [Static archives, dependency files, and bounded Make rules](https://github.com/tsuyoshi-otake/computer-system/issues/71)
 - [Versioned 8-bit-byte C profile and binary guest I/O](https://github.com/tsuyoshi-otake/computer-system/issues/72)
 - [Deterministic floating-point ABI and guest libm](https://github.com/tsuyoshi-otake/computer-system/issues/73)
-- [Preserved reduced NetHack prototype (frozen; excluded from current implementation)](https://github.com/tsuyoshi-otake/computer-system/issues/64)
+- [Preserved reduced NetHack prototype (corridor FOV/latency and fixed-slot inventory fidelity reauthorized; broader game work remains frozen and excluded)](https://github.com/tsuyoshi-otake/computer-system/issues/64)
 - [Computer System Python 1.0: Python 3.14 CS Profile](https://github.com/tsuyoshi-otake/computer-system/issues/49)
 - [Python 3.14 compatibility contract](https://github.com/tsuyoshi-otake/computer-system/issues/50)
 - [Bounded Python 3.14 frontend and runtime foundations](https://github.com/tsuyoshi-otake/computer-system/issues/51)

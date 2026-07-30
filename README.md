@@ -77,7 +77,7 @@ adapters, portable computer identity, integrated desktop displays, and bounded
 Bedrock probes are covered by host and Bedrock Dedicated Server verification.
 
 The latest public build is
-[v0.1.0-alpha.13](https://github.com/tsuyoshi-otake/computer-system/releases/tag/v0.1.0-alpha.13).
+[v0.1.0-alpha.14](https://github.com/tsuyoshi-otake/computer-system/releases/tag/v0.1.0-alpha.14).
 It is an alpha preview of the implemented Phase 2 slice, not the later Phase 6
 release-hardening milestone. Back up an existing world before testing it.
 
@@ -95,8 +95,11 @@ connects the browser directly to the same fixed-cell terminal model. The Web
 Terminal provides a full-width Linux-style screen, inline cursor-positioned
 input, physical Enter, selection-aware copy and Ctrl+C, bounded plain-text
 paste, and command history without relying on Bedrock's narrow CustomForm
-container. Interactive commands use a targeted bounded snapshot path, so their
-visible response does not wait for every viewer in the periodic round-robin.
+container. After Enter, one non-secret Linux or DOS line remains visible until
+the authoritative guest cells echo it or an actual clear, scroll, resize, or
+full-screen replacement takes ownership; password fields clear immediately.
+Interactive commands use a targeted bounded snapshot path, so their visible
+response does not wait for every viewer in the periodic round-robin.
 
 On the DOS profile, `EDIT [path]` opens an original DOS-era full-screen editor.
 Running `EDIT` by itself starts an `UNTITLED` buffer backed by `C:\NONAME.TXT`.
@@ -192,7 +195,7 @@ transport.
 ## Install the alpha preview
 
 1. Download
-   [`computer-system-0.1.0-alpha.13.mcaddon`](https://github.com/tsuyoshi-otake/computer-system/releases/download/v0.1.0-alpha.13/computer-system-0.1.0-alpha.13.mcaddon).
+   [`computer-system-0.1.0-alpha.14.mcaddon`](https://github.com/tsuyoshi-otake/computer-system/releases/download/v0.1.0-alpha.14/computer-system-0.1.0-alpha.14.mcaddon).
 2. Open the downloaded file with Minecraft for Windows to import both packs.
 3. In the target world's settings, activate the Computer System Behavior Pack.
    Its declared dependency activates the matching Resource Pack.
@@ -325,14 +328,25 @@ waits. The MCP direct `python <file>`, `micropython <file>`, and bounded
 multiline `python -c <source>` forms run through the target Computer's Computer
 System Python compiler, filesystem, hardware profile, and RAM limit. Only the
 inline Python debug form may contain encoded line breaks; ordinary debug
-commands remain one line. The normal CS-Linux shell also accepts
-`python <file>`, `python --stats <file>`, and the `micropython` alias as a
-foreground process; it can wait for guest events and returns to the prompt on
-completion, failure, or Ctrl+C. Python is compiled to CS486 control flow and an
-allowlisted managed-runtime syscall ABI; there is no separate Python VM. The
-non-TUI MCP execution path rejects waits and long-running work and reports
-machine instructions, CPU cycles, and virtual time at the target Computer's
-clock, using the same units as `run --stats`.
+commands remain one line. The normal CS-Linux shell also accepts bare `python`
+as a persistent `>>>`/`...` session, plus `python <file>`,
+`python --stats <file>`, and the `micropython` compatibility alias. Interactive
+cells retain globals, imports, functions, classes, closures, and generators on
+one CS486 process with one PID, scheduler entry, and RAM grant. Compound suites
+remain at `...` until a blank line; open delimiters and triple-quoted strings
+complete when closed. Non-`None` final expressions use a bounded Python-style
+representation, and a loaded source module is reused instead of initialized
+again. Ctrl+D exits at an input prompt; Ctrl+C discards pending input there,
+while Ctrl+C during a running cell terminates that REPL explicitly. Cell source
+is excluded from shell history and bounded to 512,000 UTF-8 bytes per session.
+Interactive mode rejects redirects, pipelines, background work, scripts,
+`--stats`, and filesystem `CS486OBJ` extension imports; file mode keeps its
+existing process-scoped redirect, pipeline, background, extension, event, and
+statistics behavior. Python is compiled to CS486 control flow and an allowlisted
+managed-runtime syscall ABI; there is no separate Python VM. The non-TUI MCP
+execution path rejects the interactive REPL, waits, and long-running work and
+reports machine instructions, CPU cycles, and virtual time at the target
+Computer's clock, using the same units as `run --stats`.
 
 ## Browser terminal
 
@@ -803,6 +817,13 @@ filesystem I/O; archive extraction is preflighted and transactional. Gzip emits
 and accepts stored-DEFLATE streams, and ZIP accepts unencrypted method-0
 archives; unsupported compression, ZIP64, traversal, and symlink pivots fail
 explicitly.
+
+With no `-e` program or script path, `perl` reads its program from standard
+input. A pipe or `<` redirect supplies the bounded 64 KiB source immediately; at
+an interactive terminal, enter source lines and press Ctrl+D to run or Ctrl+C to
+discard them. Those lines are not written to shell history, disconnect drops the
+unfinished source, and the consumed source is not replayed as runtime stdin. Use
+`perl -e ...` or a script path when the pipe or redirect is program data.
 
 `nice` changes the bounded scheduler slice and exposes NI through `ps` and
 `top`. `nohup` applies only to supported background `sleep`, Python, or linked

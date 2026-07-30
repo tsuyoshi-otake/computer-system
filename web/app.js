@@ -1,6 +1,7 @@
 import {
   BoundedEditorKeyQueue,
   CompletionRequestController,
+  SubmittedLineHandoffController,
   editorKeyFromKeyboardEvent,
   hasCopySelection,
   insertPastedCommand,
@@ -198,6 +199,7 @@ let manualChapterIndex = 0;
 let manualSectionId = "";
 const commandHistory = [];
 const editorKeyQueue = new BoundedEditorKeyQueue();
+const submittedLineHandoff = new SubmittedLineHandoffController();
 const mouseTransitionQueue = [];
 const floppyAudio = new WebFloppyDriveAudio();
 
@@ -233,6 +235,16 @@ elements.commandForm.addEventListener("submit", (event) => {
   void sendLine();
 });
 elements.commandInput.addEventListener("keydown", (event) => {
+  if (
+    event.ctrlKey &&
+    !event.metaKey &&
+    event.key.toLowerCase() === "d" &&
+    terminalInteraction?.eof === true
+  ) {
+    event.preventDefault();
+    void sendInput({ kind: "eof" });
+    return;
+  }
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "c") {
     const action = resolveTerminalCtrlCAction(terminalInteraction, {
       hasSelection: hasCopySelection(
@@ -782,6 +794,7 @@ async function consumeEvents(response, generation) {
       const event = JSON.parse(line);
       if (event.type === "replaced") {
         const discarded = discardEditorKeys();
+        discardSubmittedLineHandoff();
         cancelPendingTerminalRender();
         token = "";
         sessionStorage.removeItem(tokenStorageKey);
@@ -810,18 +823,90 @@ async function sendLine() {
   if (terminalInteraction?.inputMode !== "line") return;
   const line = elements.commandInput.value;
   const submittedSecret = terminalInteraction.secretInput;
-  if (commandPending || elements.commandInput.disabled) return;
-  const accepted = await sendInput({ kind: "line", value: line });
-  if (accepted) {
-    if (!submittedSecret && line.length > 0 && commandHistory.at(-1) !== line) {
-      commandHistory.push(line);
-      if (commandHistory.length > 100) commandHistory.shift();
+  if (
+    commandPending ||
+    submittedLineHandoff.pending ||
+    elements.commandInput.disabled
+  )
+    return;
+  let submissionTicket;
+  if (!submittedSecret) {
+    let submission;
+    try {
+      submission = submittedLineHandoff.begin({
+        secretInput: false,
+        terminal: renderedCursorTerminal,
+        value: line,
+      });
+    } catch (error) {
+      failInteractionProtocol(errorMessage(error));
+      return;
     }
-    historyCursor = commandHistory.length;
-    historyDraft = "";
+    if (submission.outcome !== "started") return;
+    submissionTicket = submission.ticket;
+    elements.commandInput.classList.add("submitted-line");
+    elements.commandInput.setAttribute("aria-busy", "true");
+  }
+  if (submittedSecret) {
+    // A credential must leave the browser field before transport begins. Keep
+    // it cleared even when admission fails, so no rejected or disconnected
+    // branch can turn secret input into a retained submitted-line overlay.
     elements.commandInput.value = "";
     refreshLocalLineCursor();
   }
+  const accepted = await sendInput({ kind: "line", value: line });
+  if (!accepted) {
+    if (
+      submissionTicket !== undefined &&
+      submittedLineHandoff.reject(submissionTicket)
+    ) {
+      finishSubmittedLinePresentation(false);
+    }
+    return;
+  }
+  if (!submittedSecret && line.length > 0 && commandHistory.at(-1) !== line) {
+    commandHistory.push(line);
+    if (commandHistory.length > 100) commandHistory.shift();
+  }
+  historyCursor = commandHistory.length;
+  historyDraft = "";
+  if (submittedSecret) return;
+  let handoff;
+  try {
+    handoff = submittedLineHandoff.accept(
+      submissionTicket,
+      renderedCursorTerminal,
+    );
+  } catch (error) {
+    failInteractionProtocol(errorMessage(error));
+    return;
+  }
+  if (submittedLineHandoffComplete(handoff)) {
+    finishSubmittedLinePresentation(true);
+  } else {
+    setInputAvailable(connectionState === "online", "WAIT");
+  }
+}
+
+function submittedLineHandoffComplete(result) {
+  return (
+    result?.outcome === "advanced" ||
+    result?.outcome === "echoed" ||
+    result?.outcome === "replaced"
+  );
+}
+
+function finishSubmittedLinePresentation(clear) {
+  elements.commandInput.classList.remove("submitted-line");
+  elements.commandInput.setAttribute("aria-busy", "false");
+  if (clear) elements.commandInput.value = "";
+  refreshLocalLineCursor();
+}
+
+function discardSubmittedLineHandoff() {
+  if (submittedLineHandoff.cancel() === undefined) return false;
+  finishSubmittedLinePresentation(true);
+  return true;
 }
 
 async function completeCommandLine() {
@@ -1038,11 +1123,16 @@ function renderTerminalNow(payload) {
   const terminal = payload?.terminal;
   if (!Array.isArray(terminal?.rows)) return;
   let nextInteraction;
+  let submittedLineOutcome;
   try {
     nextInteraction = terminalInteractionFromTerminal(terminal);
+    submittedLineOutcome = submittedLineHandoff.observe(terminal);
   } catch (error) {
     failInteractionProtocol(errorMessage(error));
     return;
+  }
+  if (submittedLineHandoffComplete(submittedLineOutcome)) {
+    finishSubmittedLinePresentation(true);
   }
   const nextDosTuiPresentation = nextInteraction.presentation === "dos-tui";
   const nextMode = nextDosTuiPresentation ? "dos" : "default";
@@ -1086,7 +1176,10 @@ function renderTerminalNow(payload) {
           : "Terminal command line",
   );
   renderInteractionHints(terminalInteraction);
-  if (terminalInteraction.inputMode === "keys") {
+  if (
+    terminalInteraction.inputMode === "keys" &&
+    !submittedLineHandoff.pending
+  ) {
     elements.commandInput.value = "";
   }
   elements.computerName.textContent = payload.label ?? payload.computerId;
@@ -1098,13 +1191,16 @@ function renderTerminalNow(payload) {
   elements.terminalSize.textContent = `${String(terminal.width)} \u00d7 ${String(terminal.height)}`;
   const cursorX = Number.isInteger(terminal.cursor?.x) ? terminal.cursor.x : 1;
   const cursorY = Number.isInteger(terminal.cursor?.y) ? terminal.cursor.y : 1;
+  const submittedLine = submittedLineHandoff.presentation;
+  const inputCursorX = submittedLine?.anchor.x ?? cursorX;
+  const inputCursorY = submittedLine?.anchor.y ?? cursorY;
   elements.commandForm.style.setProperty(
     "--cursor-left",
-    `${String(Math.max(0, cursorX - 1))}ch`,
+    `${String(Math.max(0, inputCursorX - 1))}ch`,
   );
   elements.commandForm.style.setProperty(
     "--cursor-top",
-    `${String(Math.max(0, cursorY - 1))}em`,
+    `${String(Math.max(0, inputCursorY - 1))}em`,
   );
   const colorX = Math.max(0, Math.min(terminal.width - 1, cursorX - 1));
   const colorY = Math.max(0, Math.min(terminal.height - 1, cursorY - 1));
@@ -1170,18 +1266,26 @@ function cellColors(foreground, background, x, activePalette) {
 }
 
 function renderTerminalCursor(terminal, activePalette, cursorX, cursorY) {
-  let x = Math.max(0, Math.min(terminal.width - 1, cursorX - 1));
-  let y = Math.max(0, Math.min(terminal.height - 1, cursorY - 1));
-  if (terminalInteraction?.inputMode === "line") {
+  const submittedLine = submittedLineHandoff.presentation;
+  const baseCursorX = submittedLine?.anchor.x ?? cursorX;
+  const baseCursorY = submittedLine?.anchor.y ?? cursorY;
+  let x = Math.max(0, Math.min(terminal.width - 1, baseCursorX - 1));
+  let y = Math.max(0, Math.min(terminal.height - 1, baseCursorY - 1));
+  if (
+    submittedLine !== undefined ||
+    terminalInteraction?.inputMode === "line"
+  ) {
+    const localValue = submittedLine?.value ?? elements.commandInput.value;
     const local = calculateLineCursorCell({
       baseX: x,
       baseY: y,
       columns: terminal.width,
       rows: terminal.height,
       selectionStart:
-        elements.commandInput.selectionStart ??
-        elements.commandInput.value.length,
-      value: elements.commandInput.value,
+        submittedLine === undefined
+          ? (elements.commandInput.selectionStart ?? localValue.length)
+          : localValue.length,
+      value: localValue,
     });
     x = local.x;
     y = local.y;
@@ -1219,20 +1323,22 @@ function renderTerminalCursor(terminal, activePalette, cursorX, cursorY) {
     colors.background,
   );
   let glyph = characters[x] ?? " ";
+  const localValue = submittedLine?.value ?? elements.commandInput.value;
+  const localSelectionStart =
+    submittedLine === undefined
+      ? elements.commandInput.selectionStart
+      : localValue.length;
   if (
     shape === "block" &&
-    terminalInteraction?.inputMode === "line" &&
-    elements.commandInput.selectionStart !== null &&
-    elements.commandInput.selectionStart < elements.commandInput.value.length
+    (submittedLine !== undefined ||
+      terminalInteraction?.inputMode === "line") &&
+    localSelectionStart !== null &&
+    localSelectionStart < localValue.length
   ) {
     glyph =
       terminalInteraction.secretInput === true
         ? "•"
-        : ([
-            ...elements.commandInput.value.slice(
-              elements.commandInput.selectionStart,
-            ),
-          ][0] ?? " ");
+        : ([...localValue.slice(localSelectionStart)][0] ?? " ");
   }
   elements.terminalCursor.textContent = shape === "block" ? glyph : "";
 }
@@ -1241,7 +1347,8 @@ function refreshLocalLineCursor() {
   const terminal = renderedCursorTerminal;
   const activePalette = renderedCursorPalette;
   if (
-    terminalInteraction?.inputMode !== "line" ||
+    (!submittedLineHandoff.pending &&
+      terminalInteraction?.inputMode !== "line") ||
     terminal === undefined ||
     activePalette === undefined
   ) {
@@ -1784,12 +1891,14 @@ function updateSession(session) {
   }
   if (session.mode === "writer" || session.mode === "viewer") {
     accessMode = session.mode;
+    if (accessMode === "viewer") discardSubmittedLineHandoff();
     setInputAvailable(
       connectionState === "online",
       accessMode === "writer" ? "INPUT" : "VIEW ONLY",
     );
   }
   if (session.access === "out_of_range") {
+    discardSubmittedLineHandoff();
     floppyAudio.stopAll();
     setConnection("offline", "OUT OF RANGE");
     setInputAvailable(false, "MOVE WITHIN 3 BLOCKS");
@@ -1799,6 +1908,7 @@ function updateSession(session) {
   }
   if (session.state === "closed" || session.state === "expired") {
     const discarded = discardEditorKeys();
+    discardSubmittedLineHandoff();
     cancelPendingTerminalRender();
     void floppyAudio.close();
     sessionClosed = true;
@@ -1888,6 +1998,7 @@ function setInputAvailable(available, state) {
     accessMode === "writer" &&
     machineAcceptsInput(machineLifecycle) &&
     !commandPending &&
+    !submittedLineHandoff.pending &&
     !completionPending &&
     !takeoverPending &&
     !sessionClosed;
@@ -1906,9 +2017,11 @@ function setInputAvailable(available, state) {
   elements.inputState.textContent =
     accessMode === "viewer"
       ? "LOCKED"
-      : writable
-        ? interactionStateLabel()
-        : state;
+      : submittedLineHandoff.pending
+        ? "WAIT"
+        : writable
+          ? interactionStateLabel()
+          : state;
   updatePowerButton();
   updateEjectButton();
   if (writable) elements.commandInput.focus();
@@ -2023,6 +2136,7 @@ async function closeSession() {
   try {
     await api("/api/close", { method: "POST" });
     const discarded = discardEditorKeys();
+    discardSubmittedLineHandoff();
     cancelPendingTerminalRender();
     sessionClosed = true;
     reconnectGeneration += 1;
@@ -2146,6 +2260,7 @@ function terminalContentSize() {
 }
 
 function fail(message) {
+  discardSubmittedLineHandoff();
   sessionClosed = true;
   sessionStorage.removeItem(tokenStorageKey);
   token = "";
@@ -2157,6 +2272,7 @@ function fail(message) {
 
 function failInteractionProtocol(message) {
   const discarded = discardEditorKeys();
+  discardSubmittedLineHandoff();
   cancelPendingTerminalRender();
   sessionClosed = true;
   streamGeneration += 1;
@@ -2244,6 +2360,7 @@ async function connectWithCode(
 
 async function reconnectWithCode(code) {
   if (!/^[0-9]{4}$/u.test(code)) return;
+  discardSubmittedLineHandoff();
   const generation = ++reconnectGeneration;
   const deadline = Date.now() + 30 * 60_000;
   const maximumAttempts = 64;
@@ -2329,6 +2446,7 @@ function acceptConnection(nextToken, code) {
     throw new Error("The companion returned an invalid session token.");
   }
   const discarded = discardEditorKeys();
+  discardSubmittedLineHandoff();
   reconnectGeneration += 1;
   token = nextToken;
   hardwareTextModeConfirmed = false;

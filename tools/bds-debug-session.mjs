@@ -574,7 +574,7 @@ export function isAllowedWebRelayCommand(command) {
     /^scriptevent computer_system:web-floppy-eject [A-Za-z0-9_-]{12,32} [A-Za-z0-9_-]{6,20}$/u.test(
       command,
     ) ||
-    /^scriptevent computer_system:web-input [A-Za-z0-9_-]{12,32} [A-Za-z0-9_-]{6,20} [0-9]{1,16} (?:abort-line|cancel|interrupt|line|keys|mouse) [^\s]{0,180}$/u.test(
+    /^scriptevent computer_system:web-input [A-Za-z0-9_-]{12,32} [A-Za-z0-9_-]{6,20} [0-9]{1,16} (?:eof|(?:abort-line|cancel|interrupt|line|keys|mouse) [^\s]{0,180})$/u.test(
       command,
     ) ||
     /^scriptevent computer_system:web-complete [A-Za-z0-9_-]{12,32} [A-Za-z0-9_-]{6,20} [0-9]{1,16} [0-9]{1,3} v[^\s]{0,128}$/u.test(

@@ -1,6 +1,6 @@
 # Issue #119: bounded CS-Linux Perl 5 interpreter
 
-Status: implemented and host-verified.
+Status: implemented and verified on the host, real BDS, and real Chrome.
 
 CS-Linux already shipped `awk`, `sed`, and a Python 3.14 profile but had no
 `perl`. This issue adds one, so the classic Unix scripting layer is complete.
@@ -33,7 +33,12 @@ Three new modules under `src/application/os/`:
   bounded three-argument `open` against the guest filesystem only.
 
 Command-line switches: `-e`, `-n`, `-p`, `-l`, `-a`, `-F`, `-c`, `-w`/`-W`,
-`-v`/`--version`, `--`, and a script path with its own `@ARGV`.
+`-v`/`--version`, `--`, and a script path with its own `@ARGV`. Bare `perl` and
+an explicit `perl -` read program source from standard input. A pipe or
+redirection executes that source at EOF. A controlling-terminal invocation
+collects source until Ctrl+D and lets Ctrl+C cancel without compiling or
+executing it. Source bytes are never replayed as the executed program's data
+stdin.
 
 ### Determinism
 
@@ -83,6 +88,12 @@ on `while`, `until`, `for`, and `foreach`; anywhere else it fails explicitly.
 - `perl` in `linuxCommands` (`commandRegistry.ts`) and the shell dispatch and
   `help` index (`shellCommands.ts`).
 - `man perl` (`linuxManual.ts`).
+- The terminal interaction descriptor, Bedrock bridge, Web companion, and
+  browser input path carry one explicit EOF event. EOF is accepted only for a
+  current writer, generation, context, and an interaction that advertises it.
+  The shell owns one bounded Perl source collector (64 KiB and 4,096 lines),
+  excludes its lines from history, and releases its RAM lease on completion,
+  cancellation, disconnect, logout, or shutdown.
 - `/usr/bin/perl` at 81,920 bytes in the new `cs-linux-1.0-rootfs-v20` base
   image. `cs-linux-1.0-rootfs-v19` is retained as the historical image without
   it, and `osProfile.ts` accepts v20 as a non-migrating previous image, so an
@@ -110,11 +121,29 @@ on `while`, `until`, `for`, and `foreach`; anywhere else it fails explicitly.
 6. Verify: delete `/usr/bin/perl`, then `perl -e 1` Expect: 127. — covered by
    "returns 127 once the installed executable is deleted", which also proves the
    unprivileged session cannot delete the executable itself.
-7. Verify: `npm run validate` Expect: exit 0. — observed 2026-07-29 on Node 24,
-   Windows 11: prettier, ESLint, `tsc --noEmit`, 2,639 Vitest cases in 312
+7. Verify: `printf 'print "pipe\\n";' | perl` and `perl < /tmp/program.pl`
+   Expect: each source executes once at EOF and receives an empty runtime stdin.
+   — covered by the shell-session pipe and redirect cases and the interpreter's
+   prepared-stdin-source cases.
+8. Verify: start bare `perl`, enter multiple source lines, then send Ctrl+D
+   Expect: one compile/run and the shell prompt is restored. Send Ctrl+C instead
+   Expect: status 130, no execution, no retained source/history/RAM. — covered
+   by the terminal interaction, source-capacity, cancellation, disconnect, and
+   history cases.
+9. Verify: `npm run validate` Expect: exit 0. — observed 2026-07-30 on Node 24,
+   Windows 11: Prettier, ESLint, `tsc --noEmit`, 2,670 Vitest cases in 313
    files, the Bedrock pack build, and the 16-chapter Pages build all passed.
+10. Verify: start bare `perl` in a real-BDS Web Terminal, enter
+    `print "final-tty\\n";`, then send Ctrl+D. Expect: `final-tty` once and one
+    restored shell prompt. — observed 2026-07-30 on Computer `c-r20rqv` with the
+    TypeScript CS486 engine and two bounded runtime workers. Chrome rendered the
+    exact output and prompt with no console diagnostics or horizontal overflow.
+    `man perl` and the Web Manual Perl section were also visibly inspected in
+    the preceding isolated real-BDS run.
 
-Focused command: `npm test -- tests/os/linuxPerl.test.ts` (39 cases).
+Focused verification: the 12-file Perl/Python/runtime/Computer/terminal/Web/BDS
+command passed 238 tests, including the Perl interpreter and shell-session
+suites, with no surviving Vitest process.
 
 ## Measured fidelity against upstream perl
 

@@ -67,6 +67,7 @@ interface ActiveSession {
   audioCursor: number;
   lastSnapshotMetadata?: string;
   lastTerminal?: ComputerRecord["terminal"];
+  lastReplacementEpoch?: number;
   lastTerminalRevision?: number;
   mouseButtons: number;
   mouseSequence: number;
@@ -86,9 +87,12 @@ interface SharedSnapshotFrame {
     readonly storage: ReturnType<typeof computerHost.storageStatus>;
     readonly terminal: ReturnType<ComputerRecord["terminal"]["snapshot"]> & {
       readonly interaction: TerminalInteractionDescriptor;
+      readonly replacementEpoch: number;
+      readonly terminalRevision: number;
     };
   };
   readonly terminal: ComputerRecord["terminal"];
+  readonly replacementEpoch: number;
   readonly terminalRevision: number;
 }
 
@@ -474,7 +478,7 @@ function handleInput(message: string): void {
   const sessionId = correlation[1] ?? "";
   const requestId = correlation[2] ?? "";
   const match =
-    /^([A-Za-z0-9_-]{12,32}) ([A-Za-z0-9_-]{6,20}) ([0-9]{1,16}) (abort-line|cancel|interrupt|line|keys|mouse) ([^\s]{0,180})$/u.exec(
+    /^([A-Za-z0-9_-]{12,32}) ([A-Za-z0-9_-]{6,20}) ([0-9]{1,16}) (?:(eof)|(abort-line|cancel|interrupt|line|keys|mouse) ([^\s]{0,180}))$/u.exec(
       message,
     );
   if (match === null) {
@@ -521,9 +525,24 @@ function handleInput(message: string): void {
     });
     return;
   }
+  const kind = match[4] ?? match[5];
+  if (kind === "eof") {
+    if (!interaction.eof) {
+      finalizeInputRequest(sessionId, requestId, {
+        outcome: "ignored",
+        reason: "input_mode_changed",
+      });
+      return;
+    }
+    const result = safeInputQueueResult(
+      computerHost.runtime.queueEvent(session.computerId, "terminal_eof"),
+    );
+    finalizeInputRequest(sessionId, requestId, result);
+    return;
+  }
   let value: string;
   try {
-    value = decodeURIComponent(match[5] ?? "");
+    value = decodeURIComponent(match[6] ?? "");
   } catch {
     finalizeInputRequest(
       sessionId,
@@ -532,7 +551,6 @@ function handleInput(message: string): void {
     );
     return;
   }
-  const kind = match[4];
   if (kind === "abort-line" || kind === "cancel" || kind === "interrupt") {
     if (interaction.ctrlCAction !== kind) {
       finalizeInputRequest(sessionId, requestId, {
@@ -1176,6 +1194,7 @@ function emitSnapshot(session: ActiveSession, force: boolean): boolean {
   );
   if (interaction.pointer !== "cell") releaseMouseButtons(session, true);
   const terminalRevision = record.terminal.revision;
+  const replacementEpoch = record.terminal.replacementEpoch;
   const frameMetadata = JSON.stringify({
     displayState,
     execution,
@@ -1191,6 +1210,7 @@ function emitSnapshot(session: ActiveSession, force: boolean): boolean {
     audio.events.length === 0 &&
     session.lastTerminal === record.terminal &&
     session.lastTerminalRevision === terminalRevision &&
+    session.lastReplacementEpoch === replacementEpoch &&
     session.lastSnapshotMetadata === metadata
   ) {
     return false;
@@ -1203,6 +1223,7 @@ function emitSnapshot(session: ActiveSession, force: boolean): boolean {
     lifecycle,
     storage,
     interaction,
+    replacementEpoch,
     terminalRevision,
     frameMetadata,
   );
@@ -1214,6 +1235,7 @@ function emitSnapshot(session: ActiveSession, force: boolean): boolean {
   console.warn(`${snapshotMarker}${serialized}`);
   session.lastTerminal = record.terminal;
   session.lastTerminalRevision = terminalRevision;
+  session.lastReplacementEpoch = replacementEpoch;
   session.lastSnapshotMetadata = metadata;
   session.audioCursor = audio.latestSequence;
   return true;
@@ -1227,6 +1249,7 @@ function getSharedSnapshotFrame(
   lifecycle: string,
   storage: ReturnType<typeof computerHost.storageStatus>,
   interaction: TerminalInteractionDescriptor,
+  replacementEpoch: number,
   terminalRevision: number,
   metadata: string,
 ): SharedSnapshotFrame {
@@ -1235,6 +1258,7 @@ function getSharedSnapshotFrame(
     cached !== undefined &&
     cached.terminal === record.terminal &&
     cached.terminalRevision === terminalRevision &&
+    cached.replacementEpoch === replacementEpoch &&
     cached.metadata === metadata
   ) {
     return cached;
@@ -1251,9 +1275,12 @@ function getSharedSnapshotFrame(
       terminal: {
         ...record.terminal.snapshot(),
         interaction,
+        replacementEpoch,
+        terminalRevision,
       },
     },
     terminal: record.terminal,
+    replacementEpoch,
     terminalRevision,
   };
   sharedSnapshotFrames.set(record.computerId, frame);
