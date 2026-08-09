@@ -145,11 +145,67 @@ describe("BusyBox shell syntax", (): void => {
     });
   });
 
+  it("lowers Linux &> into ordered stdout and stderr redirects", (): void => {
+    expect(parseShellProgram("probe &>combined")).toEqual({
+      chains: [
+        {
+          pipeline: {
+            commands: [
+              {
+                redirects: [
+                  {
+                    descriptor: 1,
+                    kind: "open",
+                    mode: "write",
+                    path: "combined",
+                  },
+                  { descriptor: 2, kind: "duplicate", target: 1 },
+                ],
+                words: ["probe"],
+              },
+            ],
+            operators: [],
+          },
+        },
+      ],
+    });
+  });
+
+  it("binds bounded literal here-documents to standard input", (): void => {
+    expect(parseShellProgram("cat <<EOF\none\ntwo\nEOF")).toEqual({
+      chains: [
+        {
+          pipeline: {
+            commands: [
+              {
+                redirects: [
+                  {
+                    content: "one\ntwo\n",
+                    delimiter: "EOF",
+                    descriptor: 0,
+                    kind: "here-document",
+                  },
+                ],
+                words: ["cat"],
+              },
+            ],
+            operators: [],
+          },
+        },
+      ],
+    });
+    expect(() => parseShellProgram("cat <<EOF\none")).toThrow(
+      /missing its terminating delimiter/u,
+    );
+  });
+
   it("rejects Linux-only descriptor syntax in DOS before execution", (): void => {
     for (const source of [
       "echo ok 2>err",
       "echo ok 2>>err",
       "echo ok 2>&1",
+      "echo ok &>all",
+      "echo ok <<EOF",
       "echo ok |& more",
     ]) {
       expect(() =>

@@ -1,0 +1,91 @@
+{
+  "date": "2026-07-31",
+  "provenance": {
+    "baseCommit": "a28f5972eed23aa9497f6d6f37a940381234a27f",
+    "change": "Issue #119 shared Python/Perl managed-runtime accounting worktree",
+    "environment": "isolated real BDS through MCP",
+    "computerIds": ["c-zdzh2d", "c-e7v51p", "c-3ccb1h", "c-chz0nf", "c-fkarcf"],
+    "hardware": "CS486DX2",
+    "clockMHz": 66,
+    "diagnostics": 0,
+    "serverStopped": true
+  },
+  "workload": "sum(i*i + 3*i + 7), i=1..1500",
+  "expectedChecksum": 1129513000,
+  "repetitions": 3,
+  "results": [
+    {
+      "language": "ASM",
+      "command": "run --stats /tmp/bench-asm",
+      "instructions": 15005,
+      "cpuCycles": [42099, 42099, 42099],
+      "virtualMicroseconds": 637.864,
+      "exitCodes": [0, 0, 0]
+    },
+    {
+      "language": "Perl",
+      "command": "perl /tmp/bench.pl",
+      "instructions": null,
+      "cpuCycles": [1052332, 1052332, 1052332],
+      "virtualMicroseconds": 15944.424,
+      "exitCodes": [0, 0, 0]
+    },
+    {
+      "language": "C",
+      "command": "run --stats /tmp/bench-c",
+      "instructions": 151584,
+      "cpuCycles": [323837, 323837, 323837],
+      "virtualMicroseconds": 4906.621,
+      "exitCodes": [0, 0, 0]
+    },
+    {
+      "language": "C++",
+      "command": "run --stats /tmp/bench-cpp",
+      "instructions": 151584,
+      "cpuCycles": [323837, 323837, 323837],
+      "virtualMicroseconds": 4906.621,
+      "exitCodes": [0, 0, 0]
+    },
+    {
+      "language": "Python",
+      "command": "python /tmp/bench.py",
+      "instructions": 52534,
+      "cpuCycles": [893439, 893439, 893439],
+      "virtualMicroseconds": 13536.955,
+      "exitCodes": [0, 0, 0]
+    }
+  ],
+  "supersededMeasurements": [
+    {
+      "language": "Perl",
+      "accounting": "interpreter steps multiplied by a fixed charge",
+      "chargedInterpreterSteps": 21012,
+      "cpuCycles": [168104, 168104, 168104],
+      "reason": "not executed by the production Cs486Process"
+    },
+    {
+      "language": "Perl",
+      "accounting": "Cs486Process with a fixed 8-cycle managed-operation charge",
+      "cpuCycles": [390640, 390640, 390640],
+      "reason": "replaced by the Python-style variable managed-operation cost model"
+    },
+    {
+      "language": "Perl",
+      "accounting": "Cs486Process with generic variable operation charges",
+      "cpuCycles": [612752, 612752, 612752],
+      "reason": "replaced by operation-specific 486-class tariffs and an aligned term assignment"
+    },
+    {
+      "language": "Python",
+      "accounting": "language-local managed-operation charges without load/store, iterator, or integer-limb costs",
+      "cpuCycles": [563307, 563307, 563307],
+      "reason": "replaced by the shared Python/Perl managed-runtime tariff"
+    },
+    {
+      "language": "Perl",
+      "accounting": "Perl-local operation tariffs before shared load/store and iterator costs",
+      "cpuCycles": [770276, 770276, 770276],
+      "reason": "replaced by the shared Python/Perl managed-runtime tariff"
+    }
+  ]
+}

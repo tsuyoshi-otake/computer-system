@@ -122,6 +122,50 @@ describe("bounded DOS batch control", (): void => {
     });
   });
 
+  it("suspends exactly once for terminal-owned input and resumes IF ERRORLEVEL", (): void => {
+    const engine = new DosBatchEngine();
+    const suspended = engine.execute(
+      {
+        name: "C:\\ASK.BAT",
+        source: [
+          "@ECHO OFF",
+          "CHOICE /C:YN Continue",
+          "IF ERRORLEVEL 2 ECHO NO",
+          "IF ERRORLEVEL 1 ECHO YES",
+        ].join("\r\n"),
+      },
+      createCallbacks({
+        execute: (commandLine): DosBatchCommandResult => {
+          if (/^CHOICE\b/iu.test(commandLine)) {
+            return {
+              exitCode: 0,
+              stdout: "Continue [Y,N]?",
+              suspended: true,
+            };
+          }
+          return echoCommand(commandLine);
+        },
+      }),
+    );
+
+    expect(suspended).toMatchObject({
+      kind: "suspended",
+      stdout: "Continue [Y,N]?",
+    });
+    if (suspended.kind !== "suspended")
+      throw new Error("expected a suspended batch");
+    const completed = suspended.resume({
+      exitCode: 2,
+      stdout: "N\r\n",
+    });
+    expect(completed).toMatchObject({
+      exitCode: 0,
+      kind: "completed",
+      stdout: "Continue [Y,N]?N\r\nNO\r\n",
+    });
+    expect(suspended.resume({ exitCode: 1, stdout: "Y\r\n" })).toBe(completed);
+  });
+
   it("terminates infinite jumps, recursive calls, arguments, and output", (): void => {
     const jump = new DosBatchEngine({
       maximumJumps: 3,

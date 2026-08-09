@@ -2029,6 +2029,7 @@ function setInputAvailable(available, state) {
 
 function interactionStateLabel() {
   if (terminalInteraction === undefined) return "WAIT";
+  if (terminalInteraction.context === "dos-prompt") return "INPUT";
   if (terminalInteraction.inputMode === "keys") return "EDIT";
   if (terminalInteraction.secretInput) return "SECRET";
   if (terminalInteraction.context === "login") return "LOGIN";

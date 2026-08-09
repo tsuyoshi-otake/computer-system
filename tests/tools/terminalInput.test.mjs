@@ -144,6 +144,25 @@ describe("Web terminal input helpers", () => {
     });
   });
 
+  it("accepts the key-only DOS CHOICE and PAUSE prompt interaction", () => {
+    expect(
+      terminalInteractionFromTerminal({
+        interaction: {
+          ...interactionForValidation(),
+          context: "dos-prompt",
+          ctrlCAction: "cancel",
+          history: false,
+          inputMode: "keys",
+        },
+      }),
+    ).toMatchObject({
+      context: "dos-prompt",
+      ctrlCAction: "cancel",
+      inputMode: "keys",
+      presentation: "terminal",
+    });
+  });
+
   it("accepts EOF only when the active source or REPL context advertises it", () => {
     expect(
       terminalInteractionFromTerminal({

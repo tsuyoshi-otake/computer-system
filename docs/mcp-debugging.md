@@ -11,6 +11,48 @@ managed runtime is `%USERPROFILE%\tmp\computer-system-bds\mcp-runtime`; it never
 recursively deletes `BDS_HOME`. Set `BDS_MCP_WORKDIR` only to a dedicated empty
 directory. A non-empty custom directory is never reset automatically.
 
+## Disposable run directories under `%USERPROFILE%\tmp`
+
+Any harness that materializes a BDS, MCP, benchmark, acceptance, or probe run
+directory owns that directory's whole lifetime. Disk reclamation is part of the
+run, not a chore left to the operator.
+
+- Do not copy a BDS installation per run. Keep exactly one shared read-only
+  install and give each run only its own writable state (worlds, server
+  properties, allowlist, logs). `bedrock_server.exe` is ~198 MB; copying it per
+  run is what turns a test loop into tens of gigabytes.
+- If a full copy is genuinely required, register its cleanup before creating it
+  and delete it in a `finally`/`trap` that also runs on failure, cancellation,
+  and timeout. A run that aborts must not leave its directory behind.
+- Reuse one directory name per purpose. Never create `-final`, `-final2`,
+  `-retry`, `-previous-<timestamp>`, or `-99b`-style siblings for a re-run.
+  Version the recorded evidence, not the working directory.
+- Cap retention explicitly. If run directories must be kept for evidence, keep a
+  fixed small number of the most recent and prune the rest at startup.
+- Always stop every spawned `bedrock_server.exe` in a `finally`, then confirm
+  the process actually exited. A survivor holds file locks that block cleanup,
+  keeps consuming CPU, and silently invalidates the next run's state.
+- Do not rely on an age-based sweep of `%USERPROFILE%\tmp` to reclaim this
+  space. Such sweeps reap top-level entries by their newest descendant, so one
+  active child keeps an entire stale tree alive indefinitely. Either place each
+  run directory at the top level with its own datestamp, or have the harness
+  prune its own children.
+
+`Verify:` run the BDS/MCP suites twice in a row, then measure
+`%USERPROFILE%\tmp` before and after. `Expect:` no new run directory survives
+the second run, no `bedrock_server.exe` remains running, and total size returns
+to its pre-run value.
+
+Measured 2026-07-31, before these rules existed: `computer-system-bds` held
+28.75 GB across 905,241 files, including 126 files of at least 100 MB. `.exe`
+alone accounted for 24.12 GB across 451 files, dominated by one 198 MB
+`bedrock_server.exe` copy per run directory. Sibling trees showed the same
+pattern: `computer-system-perl-probe` at 3.47 GB, thirteen
+`computer-system-benchmark-20260731*` directories at ~350 MB each, and ten
+`computer-system-acceptance-99*` directories at ~318 MB each. A leaked
+`bedrock_server.exe` from `computer-system-bds\mcp-runtime` was still running
+and blocked deletion.
+
 ## Codex setup
 
 The project-scoped [`.codex/config.toml`](../.codex/config.toml) registers the

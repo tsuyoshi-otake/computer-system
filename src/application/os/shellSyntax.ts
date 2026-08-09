@@ -1,3 +1,5 @@
+import { utf8ByteLength } from "../../domain/text/utf8.js";
+
 export type ChainOperator = "&&" | "||" | ";";
 export type RedirectMode = "append" | "read" | "write";
 export type ShellDescriptor = 0 | 1 | 2;
@@ -16,8 +18,20 @@ export interface ShellDuplicateRedirect {
   readonly target: 1;
 }
 
+export interface ShellHereDocumentRedirect {
+  readonly content: string;
+  readonly delimiter: string;
+  readonly descriptor: 0;
+  readonly kind: "here-document";
+}
+
 /** Redirections remain in source order because descriptor duplication is ordered. */
-export type ShellRedirect = ShellDuplicateRedirect | ShellOpenRedirect;
+export type ShellRedirect =
+  ShellDuplicateRedirect | ShellHereDocumentRedirect | ShellOpenRedirect;
+
+export type ShellInputRedirect =
+  | ShellHereDocumentRedirect
+  | (ShellOpenRedirect & { readonly descriptor: 0; readonly mode: "read" });
 
 export interface ShellCommandNode {
   readonly redirects: readonly ShellRedirect[];
@@ -46,8 +60,10 @@ export type ShellVariableResolver = (name: string) => string | undefined;
 export interface ShellSyntaxFeatures {
   readonly backgroundJobs: boolean;
   readonly chainOperators: ReadonlySet<ChainOperator>;
+  readonly combinedOutputRedirect: boolean;
   readonly comments: boolean;
   readonly descriptorRedirects: boolean;
+  readonly hereDocuments: boolean;
   readonly pipeStderr: boolean;
   readonly singleQuotes: boolean;
   readonly variables: boolean;
@@ -56,8 +72,10 @@ export interface ShellSyntaxFeatures {
 export const busyBoxShellSyntaxFeatures: ShellSyntaxFeatures = {
   backgroundJobs: true,
   chainOperators: new Set(["&&", "||", ";"]),
+  combinedOutputRedirect: true,
   comments: true,
   descriptorRedirects: true,
+  hereDocuments: true,
   pipeStderr: true,
   singleQuotes: true,
   variables: true,
@@ -66,13 +84,17 @@ export const busyBoxShellSyntaxFeatures: ShellSyntaxFeatures = {
 export const dosShellSyntaxFeatures: ShellSyntaxFeatures = {
   backgroundJobs: false,
   chainOperators: new Set(["&&", "||"]),
+  combinedOutputRedirect: false,
   comments: false,
   descriptorRedirects: false,
+  hereDocuments: false,
   pipeStderr: false,
   singleQuotes: false,
   variables: false,
 };
 
+const maximumHereDocumentBytes = 65_536;
+const maximumHereDocumentsPerCommand = 8;
 const maximumSourceLength = 4_096;
 const maximumTokens = 256;
 const maximumPipelines = 32;
@@ -95,7 +117,8 @@ export function parseShellProgram(
   resolveVariable: ShellVariableResolver = () => undefined,
   features: ShellSyntaxFeatures = busyBoxShellSyntaxFeatures,
 ): ShellProgram {
-  const tokens = tokenize(source, resolveVariable, features);
+  const prepared = prepareHereDocumentSource(source, resolveVariable, features);
+  const tokens = tokenize(prepared.header, resolveVariable, features);
   if (tokens.length === 0) return { chains: [] };
   const chains: ShellChainNode[] = [];
   let cursor = 0;
@@ -173,6 +196,172 @@ export function parseShellProgram(
     }
   }
 
+  const program = { chains };
+  return prepared.documents.length === 0
+    ? program
+    : bindHereDocuments(program, prepared.documents);
+}
+
+interface PreparedHereDocument {
+  readonly content: string;
+  readonly delimiter: string;
+}
+
+interface PreparedHereDocumentSource {
+  readonly documents: readonly PreparedHereDocument[];
+  readonly header: string;
+}
+
+/** Returns literal `<<WORD` delimiters from one command header. */
+export function shellHereDocumentDelimiters(
+  source: string,
+  resolveVariable: ShellVariableResolver = () => undefined,
+  features: ShellSyntaxFeatures = busyBoxShellSyntaxFeatures,
+): readonly string[] {
+  const tokens = tokenize(source, resolveVariable, features);
+  const delimiters: string[] = [];
+  for (let index = 0; index < tokens.length; index += 1) {
+    if (tokens[index]?.kind !== "operator" || tokens[index]?.value !== "<<") {
+      continue;
+    }
+    const delimiter = tokens[index + 1];
+    if (delimiter?.kind !== "word") {
+      throw new ShellSyntaxError("expected delimiter after '<<'");
+    }
+    delimiters.push(delimiter.value);
+  }
+  return delimiters;
+}
+
+function prepareHereDocumentSource(
+  source: string,
+  resolveVariable: ShellVariableResolver,
+  features: ShellSyntaxFeatures,
+): PreparedHereDocumentSource {
+  const normalized = source.replaceAll("\r\n", "\n");
+  const firstNewline = normalized.indexOf("\n");
+  const header =
+    firstNewline < 0 ? normalized : normalized.slice(0, firstNewline);
+  // Preserve ordinary multi-line quoted arguments.  Parsing a physical header
+  // on every newline would turn a valid quote containing a newline into an
+  // artificial unterminated quote before we know that `<<` is in use.
+  if (!hasHereDocumentOperator(header))
+    return { documents: [], header: source };
+  const delimiters = shellHereDocumentDelimiters(
+    header,
+    resolveVariable,
+    features,
+  );
+  if (delimiters.length === 0) return { documents: [], header: source };
+  if (delimiters.length > maximumHereDocumentsPerCommand) {
+    throw new ShellSyntaxError("too many here-documents");
+  }
+  if (firstNewline < 0) {
+    throw new ShellSyntaxError(
+      "here-document is missing its terminating delimiter",
+    );
+  }
+  const documents: PreparedHereDocument[] = [];
+  let cursor = firstNewline + 1;
+  let bytes = 0;
+  for (const delimiter of delimiters) {
+    let content = "";
+    let terminated = false;
+    while (cursor <= normalized.length) {
+      const newline = normalized.indexOf("\n", cursor);
+      const end = newline < 0 ? normalized.length : newline;
+      const line = normalized.slice(cursor, end);
+      cursor = newline < 0 ? normalized.length : newline + 1;
+      if (line === delimiter) {
+        terminated = true;
+        break;
+      }
+      content += line;
+      if (newline >= 0) content += "\n";
+      if (newline < 0) break;
+    }
+    if (!terminated) {
+      throw new ShellSyntaxError(
+        `here-document '${delimiter}' is missing its terminating delimiter`,
+      );
+    }
+    bytes += utf8ByteLength(content);
+    if (bytes > maximumHereDocumentBytes) {
+      throw new ShellSyntaxError("here-document byte limit exceeded");
+    }
+    documents.push({ content, delimiter });
+  }
+  if (normalized.slice(cursor).trim().length > 0) {
+    throw new ShellSyntaxError(
+      "here-document must terminate the submitted command source",
+    );
+  }
+  return { documents, header };
+}
+
+function hasHereDocumentOperator(source: string): boolean {
+  let quote: "double" | "single" | undefined;
+  for (let index = 0; index < source.length; index += 1) {
+    const character = source[index]!;
+    if (quote === "single") {
+      if (character === "'") quote = undefined;
+      continue;
+    }
+    if (quote === "double") {
+      if (character === "\\") {
+        index += 1;
+        continue;
+      }
+      if (character === '"') quote = undefined;
+      continue;
+    }
+    if (character === "\\") {
+      index += 1;
+      continue;
+    }
+    if (character === "'") {
+      quote = "single";
+      continue;
+    }
+    if (character === '"') {
+      quote = "double";
+      continue;
+    }
+    if (character === "<" && source[index + 1] === "<") return true;
+  }
+  return false;
+}
+
+function bindHereDocuments(
+  program: ShellProgram,
+  documents: readonly PreparedHereDocument[],
+): ShellProgram {
+  let cursor = 0;
+  const chains = program.chains.map((chain) => ({
+    ...chain,
+    pipeline: {
+      ...chain.pipeline,
+      commands: chain.pipeline.commands.map((command) => ({
+        ...command,
+        redirects: command.redirects.map((redirect) => {
+          if (redirect.kind !== "here-document") return redirect;
+          const document = documents[cursor++];
+          if (
+            document === undefined ||
+            document.delimiter !== redirect.delimiter
+          ) {
+            throw new ShellSyntaxError(
+              "here-document delimiter binding failed",
+            );
+          }
+          return { ...redirect, content: document.content };
+        }),
+      })),
+    },
+  }));
+  if (cursor !== documents.length) {
+    throw new ShellSyntaxError("here-document delimiter binding failed");
+  }
   return { chains };
 }
 
@@ -196,14 +385,24 @@ function parseCommand(
       token.value === ">" ||
       token.value === ">>" ||
       token.value === "2>" ||
-      token.value === "2>>"
+      token.value === "2>>" ||
+      token.value === "&>"
     ) {
       const target = tokens[cursor + 1];
       if (target?.kind !== "word") {
         throw new ShellSyntaxError(`expected path after '${token.value}'`);
       }
-      if (redirects.length >= maximumRedirectsPerCommand) {
+      const redirectCount = token.value === "&>" ? 2 : 1;
+      if (redirects.length + redirectCount > maximumRedirectsPerCommand) {
         throw new ShellSyntaxError("too many redirects");
+      }
+      if (token.value === "&>") {
+        redirects.push(
+          { descriptor: 1, kind: "open", mode: "write", path: target.value },
+          { descriptor: 2, kind: "duplicate", target: 1 },
+        );
+        cursor += 2;
+        continue;
       }
       const descriptor = token.value.startsWith("2")
         ? 2
@@ -220,6 +419,23 @@ function parseCommand(
               ? "append"
               : "write",
         path: target.value,
+      });
+      cursor += 2;
+      continue;
+    }
+    if (token.value === "<<") {
+      const target = tokens[cursor + 1];
+      if (target?.kind !== "word") {
+        throw new ShellSyntaxError("expected delimiter after '<<'");
+      }
+      if (redirects.length >= maximumRedirectsPerCommand) {
+        throw new ShellSyntaxError("too many redirects");
+      }
+      redirects.push({
+        content: "",
+        delimiter: target.value,
+        descriptor: 0,
+        kind: "here-document",
       });
       cursor += 2;
       continue;
@@ -341,6 +557,22 @@ function tokenize(
       if (pair === "&&" || pair === "||") {
         if (!features.chainOperators.has(pair))
           throw new ShellSyntaxError(`operator '${pair}' is not supported`);
+        pushOperator(pair);
+        index += 2;
+        continue;
+      }
+      if (pair === "&>") {
+        if (!features.combinedOutputRedirect) {
+          throw new ShellSyntaxError("operator '&>' is not supported");
+        }
+        pushOperator(pair);
+        index += 2;
+        continue;
+      }
+      if (pair === "<<") {
+        if (!features.hereDocuments) {
+          throw new ShellSyntaxError("operator '<<' is not supported");
+        }
         pushOperator(pair);
         index += 2;
         continue;

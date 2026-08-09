@@ -53,7 +53,8 @@ const priorDosImageId = "cs-dos-1.0-rootfs-v5";
 const dosImageId = "cs-dos-1.0-rootfs-v6";
 const dosV7ImageId = "cs-dos-1.0-rootfs-v7";
 const dosV8ImageId = "cs-dos-1.0-rootfs-v8";
-const currentDosImageId = "cs-dos-1.0-rootfs-v9";
+const dosV9ImageId = "cs-dos-1.0-rootfs-v9";
+const currentDosImageId = "cs-dos-1.0-rootfs-v10";
 export const installBaseImageTimestampMilliseconds = Date.UTC(2026, 6, 19);
 
 const previousLinuxImageDirectories = Object.freeze([
@@ -541,16 +542,36 @@ const currentV7DosCommands = Object.freeze([
   "pwb",
 ]);
 
+const dosV10CommandNames = new Set([
+  "choice",
+  "comp",
+  "fc",
+  "find",
+  "pause",
+  "sort",
+]);
+const currentV9DosCommands = Object.freeze(
+  commandExecutableNamesFor("dos").filter(
+    (command) => !dosV10CommandNames.has(command),
+  ),
+);
+
 const dosCommandSizes: Readonly<Record<string, number>> = Object.freeze({
   attrib: 11_112,
+  choice: 7_730,
   chkdsk: 12_241,
+  comp: 9_064,
   edit: 69_886,
+  fc: 18_124,
+  find: 12_288,
   format: 22_974,
   label: 9_390,
   mem: 32_502,
   move: 17_575,
   more: 10_240,
+  pause: 2_048,
   qbasic: 194_309,
+  sort: 13_824,
   tree: 6_945,
 });
 
@@ -1031,6 +1052,22 @@ export const dosFilesystemImage: FilesystemBaseImage = Object.freeze({
   ),
 });
 
+const currentV9DosFilesystemImage: FilesystemBaseImage = Object.freeze({
+  id: dosV9ImageId,
+  directories: dosV8ImageDirectories,
+  files: Object.freeze(
+    withInstallTimestamp([
+      ...commandFiles("dos", currentV9DosCommands, true),
+      imageFile("/drives/c/command.com", "command", 55_968),
+      dataFile("/drives/c/io.sys", "CS-DOS I/O system", 40_774),
+      dataFile("/drives/c/msdos.sys", "CS-DOS kernel", 38_138),
+      dataFile("/drives/c/dos/himem.sys", "CS-DOS XMS manager", 14_592),
+      dataFile("/drives/c/dos/emm386.exe", "CS-DOS UMB manager", 22_528),
+      ...cFamilyHeaders("dos"),
+    ]),
+  ),
+});
+
 const currentV8DosFilesystemImage: FilesystemBaseImage = Object.freeze({
   id: dosV8ImageId,
   directories: dosV8ImageDirectories,
@@ -1170,6 +1207,7 @@ export function registerOsFilesystemImages(): void {
   registerFilesystemBaseImage(preprocessorPriorDosFilesystemImage);
   registerFilesystemBaseImage(currentV7DosFilesystemImage);
   registerFilesystemBaseImage(currentV8DosFilesystemImage);
+  registerFilesystemBaseImage(currentV9DosFilesystemImage);
   registerFilesystemBaseImage(dosFilesystemImage);
 }
 
@@ -1367,7 +1405,11 @@ function dosExecutableName(command: string): string {
     return `${command}.exe`;
   }
   if (command === "systeminfo") return "sysinfo.com";
-  if (["attrib", "chkdsk", "label", "mem", "move"].includes(command)) {
+  if (
+    ["attrib", "chkdsk", "fc", "find", "label", "mem", "move", "sort"].includes(
+      command,
+    )
+  ) {
     return `${command.toLowerCase()}.exe`;
   }
   return `${command.toLowerCase()}.com`;

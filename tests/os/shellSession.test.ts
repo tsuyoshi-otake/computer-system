@@ -296,12 +296,47 @@ describe("Computer System Linux shell and editor", (): void => {
     ]);
   });
 
+  it("preserves multi-stage pipeline data, stderr separation, and final-stage status", (): void => {
+    const filesystem = new InMemoryFilesystem();
+    const shell = new ShellSession(filesystem);
+
+    const counted = shell.submit(
+      "printf 'warn: one\ninfo: two\nWARN: three\n' | grep -i warn | tee /tmp/warnings.log | wc -l",
+    );
+    expect(counted.exitCode).toBe(0);
+    expect(counted.stdout).toBe("      2\n");
+    expect(counted.stderr).toBe("");
+    expect(filesystem.readFile("/tmp/warnings.log")).toBe(
+      "warn: one\nWARN: three\n",
+    );
+
+    const failedFinalStage = shell.submit(
+      "printf 'ready\n' | grep missing && echo should-not-run",
+    );
+    expect(failedFinalStage).toMatchObject({
+      exitCode: 1,
+      stderr: "",
+      stdout: "",
+    });
+
+    const separatedError = shell.submit("cat /tmp/absent | wc -l");
+    expect(separatedError).toMatchObject({ exitCode: 0, stdout: "      0\n" });
+    expect(separatedError.stderr).toContain("/tmp/absent");
+
+    const pipedError = shell.submit("cat /tmp/absent 2>&1 | grep /tmp/absent");
+    expect(pipedError).toMatchObject({ exitCode: 0, stderr: "" });
+    expect(pipedError.stdout).toContain("/tmp/absent");
+  });
+
   it("applies Linux descriptor redirects in source order before execution", (): void => {
     const filesystem = new InMemoryFilesystem();
     const shell = new ShellSession(filesystem);
 
     expect(shell.submit("time echo out > /tmp/all 2>&1").lines).toEqual([]);
     expect(filesystem.readFile("/tmp/all")).toBe("out\nreal 0.000s\n");
+
+    expect(shell.submit("time echo out &> /tmp/combined").lines).toEqual([]);
+    expect(filesystem.readFile("/tmp/combined")).toBe("out\nreal 0.000s\n");
 
     expect(shell.submit("time echo out 2>&1 > /tmp/out").lines).toEqual([
       "real 0.000s",
@@ -318,6 +353,40 @@ describe("Computer System Linux shell and editor", (): void => {
       "real 0.000s",
     ]);
     expect(filesystem.readFile("/tmp/err")).toBe("");
+  });
+
+  it("feeds literal here-documents to Linux commands and scripts", (): void => {
+    const filesystem = new InMemoryFilesystem();
+    const shell = new ShellSession(filesystem);
+
+    expect(shell.submit("cat <<EOF\none\ntwo\nEOF").lines).toEqual([
+      "one",
+      "two",
+    ]);
+    expect(shell.submit("cat <<EOF | grep two\none\ntwo\nEOF").lines).toEqual([
+      "two",
+    ]);
+
+    filesystem.writeFile(
+      "/tmp/here.sh",
+      "cat <<EOF\nfrom script\nEOF\necho after\n",
+    );
+    expect(shell.submit("sh /tmp/here.sh").lines).toEqual([
+      "from script",
+      "after",
+    ]);
+    expect(shell.submit("cat <<EOF\nmissing")).toMatchObject({
+      exitCode: 2,
+      stderr:
+        "bash: syntax error: here-document 'EOF' is missing its terminating delimiter\n",
+    });
+
+    const dos = new ShellSession(new InMemoryFilesystem(), {
+      osProfile: "dos",
+    });
+    expect(dos.submit("TYPE <<EOF\nignored\nEOF")).toMatchObject({
+      exitCode: 2,
+    });
   });
 
   it("opens redirects before command reads and rejects Linux fd syntax on DOS", (): void => {
@@ -339,6 +408,7 @@ describe("Computer System Linux shell and editor", (): void => {
       osProfile: "dos",
     });
     expect(dos.submit("ECHO ok 2>C:\\SIDE.TXT")).toMatchObject({ exitCode: 2 });
+    expect(dos.submit("ECHO ok &>C:\\BOTH.TXT")).toMatchObject({ exitCode: 2 });
     expect(dos.submit("DIR |& MORE")).toMatchObject({ exitCode: 2 });
     expect(dos.submit("IF EXIST C:\\SIDE.TXT ECHO bad").stdout).toBe("");
   });

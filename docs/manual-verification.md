@@ -1087,7 +1087,22 @@ live pass. Record the exact `c-xxxxxx` identities and retain terminal captures.
      missing labels, unquoted Unix-style `&&`/`||`, and exhausted bounds fail
      explicitly without invoking native COMMAND.COM. Pipes/redirections, where
      used, remain documented safe-shell extensions rather than native behavior.
-10. On a disposable DOS Computer, record the current memory report, remove or
+10. On CS-DOS, create `C:\LOG.TXT` with mixed `INFO`, `WARN`, and `ERROR` lines.
+    Run `TYPE LOG.TXT | FIND /I "ERROR"`, `FIND /C /V "ERROR" LOG.TXT`, and
+    `SORT /R LOG.TXT`; compare matching and differing text and binary fixtures
+    with `FC` and `COMP`. Create `ASK.BAT` with `@ECHO OFF`,
+    `CHOICE /C:YN Continue`, and descending `IF ERRORLEVEL` branches. Select N,
+    then run `PAUSE` and cancel it with Ctrl+C.
+    - `Verify:` Confirm the only pipe input to FIND is TYPE standard output;
+      inspect the CRLF SORT result, comparison status, CHOICE selection key,
+      selected `ERRORLEVEL` branch, and the prompt after each completion/cancel.
+    - `Expect:` FIND returns the matching line and reports no match with status
+      1; SORT is deterministic; FC/COMP never invoke a host tool; CHOICE returns
+      one-based `ERRORLEVEL` and resumes the BAT file exactly once after the
+      selected key; PAUSE and Ctrl+C leave no latent batch continuation. `/T`,
+      wildcard text-utility operands, native COMMAND.COM behavior, and native
+      `.COM`/`.EXE` execution fail explicitly.
+11. On a disposable DOS Computer, record the current memory report, remove or
     corrupt the installed HIMEM/EMM386 guest driver referenced by `CONFIG.SYS`,
     and reboot once.
     - `Verify:` Compare the boot error and `MEM /C` plus `MEM /D` state with the
@@ -1097,7 +1112,7 @@ live pass. Record the exact `c-xxxxxx` identities and retain terminal captures.
       before enabling XMS/UMB state and boots the explicit 64 KiB degraded-low
       profile; no earlier directive is partially retained. Matching only the
       driver basename never executes or enables a native driver.
-11. Verify the non-claims: run `ip`, `ping`, and `ss` on Linux; inspect the FDD
+12. Verify the non-claims: run `ip`, `ping`, and `ss` on Linux; inspect the FDD
     indicator and `A:` on DOS; and try a native `.COM`/`.EXE` artifact.
     - `Expect:` Guest networking commands are unavailable, FDD/A: remains absent
       without an operator media adapter, and native DOS binaries do not execute.

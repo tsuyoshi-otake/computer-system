@@ -4,6 +4,7 @@ export type ShellTerminalState =
   | { readonly kind: "background" }
   | { readonly kind: "completed" }
   | { readonly kind: "foreground" }
+  | { readonly kind: "input" }
   | { readonly kind: "interactive" }
   | { readonly kind: "job-control" }
   | { readonly kind: "lifecycle"; readonly action: string }
@@ -20,6 +21,7 @@ export function shellTerminalStateOf(
   if (result.foreground !== undefined) states.push({ kind: "foreground" });
   if (result.sleepTicks !== undefined)
     states.push({ kind: "sleeping", ticks: result.sleepTicks });
+  if (result.terminalInput === true) states.push({ kind: "input" });
   if (result.terminalScreen !== undefined) states.push({ kind: "interactive" });
   if (result.jobControl !== undefined) states.push({ kind: "job-control" });
   if (result.resetTerminal === true) states.push({ kind: "reset-terminal" });

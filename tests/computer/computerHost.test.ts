@@ -80,6 +80,45 @@ describe("ComputerRuntime", (): void => {
     }
   });
 
+  it("reports deterministic Perl CPU work through the MCP debug path", (): void => {
+    const record = computer("c-000119", "import os\nos.pull_event()\n");
+    const runtime = runtimeWith(record);
+    runtime.powerOn(record.computerId);
+    completeBootCycle(runtime, record);
+    record.filesystem.writeFile(
+      "/tmp/work.pl",
+      'my $total = 0; for my $i (1..1500) { $total = $total + $i * $i + 3 * $i + 7; } die unless $total == 1129513000; print "ok\\n";',
+    );
+
+    const first = runtime.executeDebugShellCommand(
+      record.computerId,
+      "perl /tmp/work.pl",
+    );
+    const repeated = runtime.executeDebugShellCommand(
+      record.computerId,
+      "perl /tmp/work.pl",
+    );
+    const short = runtime.executeDebugShellCommand(
+      record.computerId,
+      `perl -e 'my $total = 0;'`,
+    );
+    expect(first).toMatchObject({
+      outcome: "completed",
+      exitCode: 0,
+      stderr: "",
+      stdout: "ok\n",
+    });
+    if (
+      first.outcome !== "completed" ||
+      repeated.outcome !== "completed" ||
+      short.outcome !== "completed"
+    )
+      return;
+    expect(first.cpuCycles).toBe(repeated.cpuCycles);
+    expect(first.cpuCycles).toBeGreaterThan(short.cpuCycles);
+    expect(first.cpuCycles).toBeGreaterThan(8);
+  });
+
   it("runs template strings through the production Python command and returns RAM to baseline", (): void => {
     const record = computer(
       "c-000096",
@@ -323,6 +362,38 @@ describe("ComputerRuntime", (): void => {
       exitCode: 0,
       stdout: "42\n",
     });
+  });
+
+  it("schedules MCP Perl work on CS486 and completes it from later ticks", (): void => {
+    const record = computer("c-000120", "import os\nos.pull_event()\n");
+    const runtime = runtimeWith(record);
+    runtime.powerOn(record.computerId);
+    completeBootCycle(runtime, record);
+    record.filesystem.writeFile(
+      "/tmp/deferred.pl",
+      "my $total = 0; for my $i (1..1500) { $total = $total + $i * $i + 3 * $i + 7; } die unless $total == 1129513000;",
+    );
+    let completion: DebugShellCommandCompletion | undefined;
+
+    runtime.enqueueDebugShellCommand(
+      record.computerId,
+      "perl /tmp/deferred.pl",
+      (result) => {
+        completion = result;
+      },
+    );
+
+    expect(completion).toBeUndefined();
+    runTicks(runtime, 20);
+    expect(completion).toMatchObject({
+      outcome: "completed",
+      exitCode: 0,
+      stdout: "",
+      stderr: "",
+    });
+    if (completion?.outcome === "completed") {
+      expect(completion.cpuCycles).toBeGreaterThan(8);
+    }
   });
 
   it("runs bounded inline Python through the MCP debug path", (): void => {

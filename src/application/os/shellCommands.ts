@@ -104,6 +104,12 @@ import {
   decodeSystemUtility,
 } from "./osFilesystemImages.js";
 import { DosCommandAdapter } from "./dosCommands.js";
+import {
+  executeDosComp,
+  executeDosFc,
+  executeDosFind,
+  executeDosSort,
+} from "./dosTextUtilities.js";
 import { filesystemExecute, type GuestFilesystem } from "./guestFilesystem.js";
 import type { LinuxAccountDatabase, LinuxUserRecord } from "./linuxAccounts.js";
 import type { ProcessCredentials } from "./linuxCredentials.js";
@@ -150,6 +156,8 @@ import {
   type LinuxPerlIo,
 } from "./linuxPerl.js";
 import { executeLinuxAwk, executeLinuxSed } from "./linuxTextProcessors.js";
+import { compileBoundedPattern, findBoundedPattern } from "./boundedPattern.js";
+import { executeLinuxJq } from "./linuxJq.js";
 import {
   executeLinuxGzip,
   executeLinuxTar,
@@ -2417,7 +2425,7 @@ export class ShellCommandRuntime {
           [
             "Computer System BusyBox shell",
             "files: pwd cd ls cat mkdir rmdir touch rm cp mv ln readlink realpath find du quota",
-            "text: echo printf head tail wc grep sed awk perl sort uniq tr nl",
+            "text: echo printf head tail wc grep rg jq sed awk perl sort uniq tr nl",
             "text+: tee cmp diff sha256sum md5sum base64 od hexdump xargs",
             "shell: sh bash source env printenv export unset alias unalias command read local shift getopts",
             "system: clear vi more less crontab shutdown reboot exit login logout passwd su sudo true false",
@@ -2430,7 +2438,7 @@ export class ShellCommandRuntime {
             "utility: history time sleep seq cut test [",
             "toolchain: as cc c++ ld make nm run objdump csdb",
             "version control: git (local repositories; remote transport unavailable)",
-            "syntax: |  |&  >  >>  <  2>  2>>  2>&1  &&  ||  ;  '...'  \"...\"  $VAR  $?",
+            "syntax: |  |&  >  >>  <  2>  2>>  2>&1  &>  <<WORD  &&  ||  ;  '...'  \"...\"  $VAR  $?",
           ].join("\n") + "\n",
         );
       case "pwd":
@@ -2479,6 +2487,10 @@ export class ShellCommandRuntime {
         return this.wordCount(arguments_, stdin);
       case "grep":
         return this.grep(arguments_, stdin);
+      case "rg":
+        return this.ripgrep(arguments_, stdin);
+      case "jq":
+        return this.linuxJq(arguments_, stdin);
       case "gzip":
       case "gunzip":
         return this.linuxArchiveCommand(command, arguments_);
@@ -3340,31 +3352,83 @@ export class ShellCommandRuntime {
     arguments_: readonly string[],
     stdin: string,
   ): ShellCommandResult {
+    return this.searchText("grep", arguments_, stdin);
+  }
+
+  private ripgrep(
+    arguments_: readonly string[],
+    stdin: string,
+  ): ShellCommandResult {
+    return this.searchText("rg", arguments_, stdin);
+  }
+
+  private searchText(
+    command: "grep" | "rg",
+    arguments_: readonly string[],
+    stdin: string,
+  ): ShellCommandResult {
     let ignoreCase = false;
     let numbered = false;
     let invert = false;
+    let fixed = false;
+    let listFiles = false;
+    let options = true;
     const values: string[] = [];
     for (const argument of arguments_) {
-      if (argument.startsWith("-") && argument !== "-" && values.length === 0) {
+      if (options && argument === "--") {
+        options = false;
+      } else if (
+        options &&
+        argument.startsWith("-") &&
+        argument !== "-" &&
+        values.length === 0
+      ) {
         for (const flag of argument.slice(1)) {
           if (flag === "i") ignoreCase = true;
           else if (flag === "n") numbered = true;
           else if (flag === "v") invert = true;
-          else if (flag !== "F")
-            return failure("grep", `invalid option -- '${flag}'`, 2);
+          else if (flag === "F") fixed = true;
+          else if (flag === "l" && command === "rg") listFiles = true;
+          else return failure(command, `invalid option -- '${flag}'`, 2);
         }
       } else values.push(argument);
     }
-    if (values.length === 0) return usage("grep [-Finv] <pattern> [file ...]");
+    const syntax =
+      command === "rg"
+        ? "rg [-Filnv] <pattern> [file ...]"
+        : "grep [-Finv] <pattern> [file ...]";
+    if (values.length === 0) return usage(syntax);
     const [rawPattern = "", ...paths] = values;
     const pattern = ignoreCase ? rawPattern.toLocaleLowerCase() : rawPattern;
+    let matcher: ReturnType<typeof compileBoundedPattern> | undefined;
+    if (!fixed && pattern.length > 0) {
+      try {
+        matcher = compileBoundedPattern(pattern);
+      } catch (error: unknown) {
+        return failure(
+          command,
+          error instanceof Error ? error.message : String(error),
+          2,
+        );
+      }
+    }
     const sources = paths.length === 0 ? ["-"] : paths;
     const matches: string[] = [];
     for (const path of sources) {
       const input = path === "-" ? stdin : this.readFile(path);
       for (const [index, line] of splitLines(input).entries()) {
         const candidate = ignoreCase ? line.toLocaleLowerCase() : line;
-        if (candidate.includes(pattern) === invert) continue;
+        const found =
+          pattern.length === 0
+            ? true
+            : fixed
+              ? candidate.includes(pattern)
+              : findBoundedPattern(matcher!, candidate) !== undefined;
+        if (found === invert) continue;
+        if (listFiles) {
+          matches.push(path);
+          break;
+        }
         const prefix = `${sources.length > 1 ? `${path}:` : ""}${numbered ? `${String(index + 1)}:` : ""}`;
         matches.push(`${prefix}${line}`);
       }
@@ -3430,6 +3494,16 @@ export class ShellCommandRuntime {
     arguments_: readonly string[],
     stdin: string,
   ): ShellCommandResult {
+    if (arguments_[0] === "-d") {
+      if (arguments_.length !== 2) return usage("tr -d <set>");
+      const removed = new Set(
+        expandCharacterSet(decodeEscapes(arguments_[1] ?? "")),
+      );
+      if (removed.size === 0) return failure("tr", "empty set", 2);
+      return success(
+        [...stdin].filter((character) => !removed.has(character)).join(""),
+      );
+    }
     if (arguments_.length !== 2) return usage("tr <set1> <set2>");
     const from = expandCharacterSet(decodeEscapes(arguments_[0]!));
     const to = expandCharacterSet(decodeEscapes(arguments_[1]!));
@@ -4276,6 +4350,26 @@ export class ShellCommandRuntime {
     );
   }
 
+  dosFind(arguments_: readonly string[], stdin: string): ShellCommandResult {
+    return executeDosFind(arguments_, stdin, (path) => this.readFile(path));
+  }
+
+  dosSort(arguments_: readonly string[], stdin: string): ShellCommandResult {
+    return executeDosSort(arguments_, stdin, (path) => this.readFile(path));
+  }
+
+  dosFc(arguments_: readonly string[]): ShellCommandResult {
+    return executeDosFc(
+      arguments_,
+      (path) => this.readFile(path),
+      (path) => this.readFileBytes(path),
+    );
+  }
+
+  dosComp(arguments_: readonly string[]): ShellCommandResult {
+    return executeDosComp(arguments_, (path) => this.readFileBytes(path));
+  }
+
   dosHelp(arguments_: readonly string[]): ShellCommandResult {
     if (arguments_.length > 1) {
       return status(2, "", "Invalid number of parameters.\r\n");
@@ -4358,6 +4452,63 @@ export class ShellCommandRuntime {
           ].join("\r\n"),
         );
       }
+      if (name === "FIND") {
+        return success(
+          [
+            "CS-DOS FIND 1.0",
+            'Usage: FIND [/V] [/C] [/N] [/I] "string" [file ...]',
+            'With no file, FIND filters standard input, so TYPE FILE | FIND "TEXT" works.',
+            "Switches select inverse, count, line-number, or ASCII case-insensitive matching.",
+            "Wildcards are unavailable; use one explicit strict-8.3 guest file name per operand.",
+            "",
+          ].join("\r\n"),
+        );
+      }
+      if (name === "SORT") {
+        return success(
+          [
+            "CS-DOS SORT 1.0",
+            "Usage: SORT [/R] [/+n] [file]",
+            "SORT accepts standard input or one explicit guest file and writes CRLF records to standard output.",
+            "Input is bounded to 64 KiB and 4,096 records; /R reverses and /+n starts the key at column n.",
+            "",
+          ].join("\r\n"),
+        );
+      }
+      if (name === "FC" || name === "COMP") {
+        return success(
+          [
+            "CS-DOS " + name + " 1.0",
+            name === "FC"
+              ? "Usage: FC [/A] [/B] [/C] [/L] [/N] [/T] [/W] file1 file2"
+              : "Usage: COMP [/D] [/A] [/L] [/N=offset] file1 file2",
+            "Comparison stays inside the guest filesystem and is bounded to 256,000 bytes per file.",
+            "Wildcards and interactive missing-file prompts are unavailable.",
+            "",
+          ].join("\r\n"),
+        );
+      }
+      if (name === "CHOICE") {
+        return success(
+          [
+            "CS-DOS CHOICE 1.0",
+            "Usage: CHOICE [/C[:]keys] [/N] [/S] [text]",
+            "Waits for one key and sets ERRORLEVEL to the one-based selected key position.",
+            "It is supported at the DOS prompt and in a batch file; /T timeout defaults are unavailable.",
+            "",
+          ].join("\r\n"),
+        );
+      }
+      if (name === "PAUSE") {
+        return success(
+          [
+            "CS-DOS PAUSE 1.0",
+            "Usage: PAUSE",
+            "Waits for one key at the DOS prompt or in a batch file.",
+            "",
+          ].join("\r\n"),
+        );
+      }
       if (!this.isKnownCommand(name)) {
         return status(1, "", `Help not available for ${name}.\r\n`);
       }
@@ -4369,13 +4520,13 @@ export class ShellCommandRuntime {
       [
         "Computer System DOS 1.0 Command Help",
         "",
-        "CD CHDIR CLS COPY DATE DEL DIR DOSKEY ECHO EDIT ERASE EXIT",
-        "MD MEM MKDIR MOVE PATH PROMPT RD REN RENAME RMDIR SET TIME",
+        "CD CHDIR CHOICE CLS COMP COPY DATE DEL DIR DOSKEY ECHO EDIT ERASE EXIT",
+        "FC FIND MD MEM MKDIR MOVE PATH PAUSE PROMPT RD REN RENAME RMDIR SET SORT TIME",
         "I2C SPI TIMER TREE TYPE VER VOL MORE",
         "",
         "Development: CS ASM 1.0 (AS/ASM/CSASM), CS C/C++ 1.0 (CC/C++/PWB)",
         "Also available: CS QBASIC 1.0, LD, NM, OBJDUMP, RUN, DEBUG, VI",
-        "Pipelines: DIR | MORE and TYPE file | MORE use strict-8.3 guest spools under C:\\TEMP.",
+        'Pipelines: DIR | MORE, TYPE file | MORE, TYPE file | FIND "text", and SORT use strict-8.3 guest spools under C:\\TEMP.',
         "Redirects: <, >, and >> are available; LESS, 2>, 2>>, 2>&1, and |& are not.",
         "Type HELP command for a short availability summary.",
         "",
@@ -4420,28 +4571,36 @@ export class ShellCommandRuntime {
     stdin: string,
   ): ShellCommandResult {
     let delimiter = "\t";
+    let characters: readonly number[] | undefined;
     let fields: readonly number[] | undefined;
     const paths: string[] = [];
     for (let index = 0; index < arguments_.length; index += 1) {
       const argument = arguments_[index]!;
       if (argument === "-d") delimiter = arguments_[++index] ?? "";
       else if (argument === "-f") {
-        const value = arguments_[++index] ?? "";
-        fields = value.split(",").map(Number);
+        fields = parseCutPositions(arguments_[++index] ?? "");
+      } else if (argument === "-c") {
+        characters = parseCutPositions(arguments_[++index] ?? "");
       } else paths.push(argument);
     }
+    const selected = characters ?? fields;
     if (
       delimiter.length !== 1 ||
-      fields === undefined ||
-      fields.some(
-        (field) => !Number.isSafeInteger(field) || field < 1 || field > 1_000,
-      )
+      selected === undefined ||
+      (characters !== undefined && fields !== undefined) ||
+      (characters !== undefined && delimiter !== "\t")
     ) {
-      return usage("cut [-d delimiter] -f fields [file ...]");
+      return usage("cut (-c characters | [-d delimiter] -f fields) [file ...]");
     }
     const output = splitLines(this.readInputs(paths, stdin)).map((line) => {
+      if (characters !== undefined) {
+        const input = [...line];
+        return characters
+          .map((character) => input[character - 1] ?? "")
+          .join("");
+      }
       const columns = line.split(delimiter);
-      return fields.map((field) => columns[field - 1] ?? "").join(delimiter);
+      return fields!.map((field) => columns[field - 1] ?? "").join(delimiter);
     });
     return success(output.length === 0 ? "" : `${output.join("\n")}\n`);
   }
@@ -8082,6 +8241,16 @@ export class ShellCommandRuntime {
     return status(result.exitCode, result.stdout, result.stderr);
   }
 
+  private linuxJq(
+    arguments_: readonly string[],
+    stdin: string,
+  ): ShellCommandResult {
+    const result = executeLinuxJq(arguments_, stdin, (path) =>
+      this.readFile(path),
+    );
+    return status(result.exitCode, result.stdout, result.stderr);
+  }
+
   private linuxPerl(
     arguments_: readonly string[],
     stdin: string,
@@ -8101,7 +8270,30 @@ export class ShellCommandRuntime {
   executePreparedLinuxPerl(
     prepared: LinuxPerlCommandPreparation,
     input: LinuxPerlExecutionInput,
+    forceDeferred = false,
   ): ShellCommandResult {
+    if (
+      (this.options.deferGuestExecution === true || forceDeferred) &&
+      prepared.kind !== "invalid" &&
+      prepared.kind !== "version" &&
+      !prepared.options.checkOnly
+    ) {
+      return {
+        exitCode: 0,
+        foreground: {
+          command: "perl",
+          credentials: this.options.credentials(),
+          input,
+          io: this.linuxPerlIo(),
+          kind: "perl",
+          prepared,
+          stats: false,
+          umask: this.filesystem.getUmask(),
+        },
+        stderr: "",
+        stdout: "",
+      };
+    }
     const result = executePreparedLinuxPerl(
       prepared,
       input,
@@ -8913,6 +9105,23 @@ function expandCharacterSet(value: string): string[] {
     expanded.push(start);
   }
   return expanded;
+}
+
+function parseCutPositions(value: string): readonly number[] | undefined {
+  if (value.length === 0) return undefined;
+  const positions: number[] = [];
+  for (const part of value.split(",")) {
+    const match = /^(\d{1,4})(?:-(\d{1,4}))?$/u.exec(part);
+    if (match === null) return undefined;
+    const first = Number(match[1]);
+    const last = Number(match[2] ?? match[1]);
+    if (first < 1 || last < first || last > 1_000) return undefined;
+    for (let position = first; position <= last; position += 1) {
+      positions.push(position);
+      if (positions.length > 1_000) return undefined;
+    }
+  }
+  return positions;
 }
 
 function parseLineCount(

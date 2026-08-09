@@ -2013,6 +2013,7 @@ function requirePublishedTerminalInteraction(payload) {
       "busy",
       "cs-abi",
       "csasm",
+      "dos-prompt",
       "edit",
       "less",
       "login",

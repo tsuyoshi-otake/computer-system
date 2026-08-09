@@ -48,14 +48,16 @@ export interface LinuxPerlIo {
 }
 
 export interface LinuxPerlResult {
+  /** Internal semantic-operation count used only to enforce the bounded subset. */
+  readonly executionSteps: number;
   readonly exitCode: number;
   readonly stderr: string;
   readonly stdout: string;
 }
 
-type PerlScalar = string | number | undefined;
+export type PerlScalar = string | number | undefined;
 
-interface PerlValue {
+export interface PerlValue {
   readonly items: readonly PerlScalar[];
   readonly kind: "aggregate" | "list" | "scalar";
 }
@@ -205,6 +207,7 @@ export function executePreparedLinuxPerl(
   if (prepared.kind === "stdin") {
     if (input.kind !== "source") {
       return {
+        executionSteps: 0,
         exitCode: 2,
         stderr: "perl: program source must be supplied explicitly\n",
         stdout: "",
@@ -219,6 +222,7 @@ export function executePreparedLinuxPerl(
   }
   if (input.kind !== "data") {
     return {
+      executionSteps: 0,
       exitCode: 2,
       stderr: "perl: source input is valid only for a stdin program\n",
       stdout: "",
@@ -247,6 +251,7 @@ export function executeLinuxPerl(
 
 function versionResult(): LinuxPerlResult {
   return {
+    executionSteps: 0,
     exitCode: 0,
     stderr: "",
     stdout:
@@ -264,6 +269,7 @@ function executePreparedProgram(
 ): LinuxPerlResult {
   if (utf8ByteLength(stdin) > linuxPerlLimits.maximumInputBytes) {
     return {
+      executionSteps: 0,
       exitCode: 2,
       stderr: "perl: input byte limit exceeded\n",
       stdout: "",
@@ -277,6 +283,7 @@ function executePreparedProgram(
     const detail =
       error instanceof PerlSyntaxError ? error.message : describe(error);
     return {
+      executionSteps: 0,
       exitCode: 255,
       stderr:
         `${detail.replace(" at line ", ` at ${options.programName} line `)}\n` +
@@ -286,6 +293,7 @@ function executePreparedProgram(
   }
   if (options.checkOnly) {
     return {
+      executionSteps: 0,
       exitCode: 0,
       stderr: `${options.programName} syntax OK\n`,
       stdout: "",
@@ -438,12 +446,14 @@ class PerlUsageError extends Error {}
 function failure(error: unknown, command: string): LinuxPerlResult {
   if (error instanceof PerlUsageError) {
     return {
+      executionSteps: 0,
       exitCode: 2,
       stderr: `${command}: ${error.message}\n${usageText}`,
       stdout: "",
     };
   }
   return {
+    executionSteps: 0,
     exitCode: 2,
     stderr: `${command}: ${describe(error)}\n`,
     stdout: "",
@@ -554,15 +564,27 @@ function booleanValue(value: boolean): PerlValue {
   return value ? trueValue : falseValue;
 }
 
-class PerlInterpreter {
+export class PerlInterpreter {
   private readonly argv: PerlScalar[];
   private callDepth = 0;
+  private compiledValues: ReadonlyMap<PerlExpression, PerlValue> | undefined;
   private captures: readonly (string | undefined)[] = [];
   private currentLine = 0;
   private currentSubArguments: PerlScalar[] | undefined;
   private evalError = "";
   private readonly globals: PerlScope;
   private readonly handles = new Map<string, PerlHandle>();
+  private readonly compiledForeach = new WeakMap<
+    object,
+    {
+      readonly aliasArray?: PerlScalar[];
+      index: number;
+      readonly items: PerlScalar[];
+      readonly name: string;
+      readonly previous: PerlScalar;
+      readonly restorePrevious: boolean;
+    }
+  >();
   private handleSequence = 0;
   private readonly hashIterators = new Map<Map<string, PerlScalar>, number>();
   /** Where the most recent match landed, which is what `$&` reports. */
@@ -643,7 +665,174 @@ class PerlInterpreter {
         throw error;
       }
     }
-    return { exitCode, stderr: this.stderr, stdout: this.stdout };
+    return {
+      executionSteps: this.steps,
+      exitCode,
+      stderr: this.stderr,
+      stdout: this.stdout,
+    };
+  }
+
+  /**
+   * Executes one compiler-selected expression operation. Direct child values
+   * are supplied by earlier CS486 operations, so the managed semantic helper
+   * cannot recursively walk those children at this boundary.
+   */
+  executeCompiledExpression(
+    expression: PerlExpression,
+    children: ReadonlyMap<PerlExpression, PerlValue>,
+  ): PerlValue {
+    this.compiledValues = children;
+    try {
+      return this.evaluate(expression);
+    } finally {
+      this.compiledValues = undefined;
+    }
+  }
+
+  executeCompiledCondition(
+    expression: PerlExpression,
+    children: ReadonlyMap<PerlExpression, PerlValue>,
+    looping: boolean,
+  ): boolean {
+    this.compiledValues = children;
+    try {
+      return isTrue(toScalar(this.evaluateCondition(expression, looping)));
+    } finally {
+      this.compiledValues = undefined;
+    }
+  }
+
+  beginCompiled(body: PerlBlock): void {
+    this.hoistSubroutines(body);
+  }
+
+  beginCompiledInputRecord(): boolean {
+    const line = this.readAnyInputLine();
+    if (line === undefined) return false;
+    let record = line;
+    if (this.options.lineEnding) record = chompText(record);
+    this.setScalar("_", record);
+    if (this.options.autosplit) {
+      this.globals.arrays.set(
+        "F",
+        this.splitRecord(record, this.options.fieldSeparator),
+      );
+    }
+    return true;
+  }
+
+  finishCompiledInputRecord(): void {
+    if (this.options.loop !== "print") return;
+    const current = toText(this.getScalar("_"));
+    this.writeOutput(this.options.lineEnding ? `${current}\n` : current);
+  }
+
+  pushCompiledScope(): void {
+    this.pushScope();
+  }
+
+  popCompiledScope(): void {
+    this.popScope();
+  }
+
+  executeCompiledStatement(statement: PerlStatement): void {
+    this.executeStatement(statement);
+  }
+
+  beginCompiledForeach(statement: PerlStatement & { kind: "foreach" }): number {
+    const aliasArray =
+      statement.list.kind === "array"
+        ? this.getArray(statement.list.name)
+        : undefined;
+    const items = aliasArray ?? [
+      ...toList(this.evaluateInListContext(statement.list)),
+    ];
+    const name = statement.variable ?? "_";
+    this.pushScope();
+    if (statement.declared || statement.variable === undefined)
+      this.scope.scalars.set(name, undefined);
+    this.compiledForeach.set(statement, {
+      ...(aliasArray === undefined ? {} : { aliasArray }),
+      index: 0,
+      items,
+      name,
+      previous:
+        statement.declared || statement.variable === undefined
+          ? undefined
+          : this.getScalar(name),
+      restorePrevious: !statement.declared && statement.variable !== undefined,
+    });
+    return items.length;
+  }
+
+  advanceCompiledForeach(
+    statement: PerlStatement & { kind: "foreach" },
+  ): boolean {
+    const state = this.compiledForeach.get(statement);
+    if (state === undefined) throw new Error("Perl foreach state is missing");
+    if (state.index >= state.items.length) return false;
+    this.consumeStep();
+    this.setScalar(state.name, state.items[state.index]);
+    return true;
+  }
+
+  finishCompiledForeachIteration(
+    statement: PerlStatement & { kind: "foreach" },
+  ): void {
+    const state = this.compiledForeach.get(statement);
+    if (state === undefined) throw new Error("Perl foreach state is missing");
+    if (state.aliasArray !== undefined)
+      state.aliasArray[state.index] = this.getScalar(state.name);
+    state.index += 1;
+  }
+
+  endCompiledForeach(statement: PerlStatement & { kind: "foreach" }): void {
+    const state = this.compiledForeach.get(statement);
+    if (state === undefined) throw new Error("Perl foreach state is missing");
+    if (state.restorePrevious) this.setScalar(state.name, state.previous);
+    this.compiledForeach.delete(statement);
+    this.popScope();
+  }
+
+  completeCompiled(error?: unknown): LinuxPerlResult {
+    let exitCode = 0;
+    try {
+      if (error !== undefined)
+        throw error instanceof Error ? error : new Error(describe(error));
+      this.flushHandles();
+    } catch (caught) {
+      if (caught instanceof PerlExitSignal) {
+        this.flushHandles();
+        exitCode = caught.code;
+      } else if (caught instanceof PerlDieError) {
+        this.writeError(caught.text);
+        exitCode = 255;
+      } else if (caught instanceof PerlFatalError) {
+        this.stderr += `perl: ${caught.message}\n`;
+        exitCode = 2;
+      } else if (caught instanceof PerlLoopSignal) {
+        this.stderr += `perl: ${caught.action} outside a loop\n`;
+        exitCode = 255;
+      } else if (caught instanceof PerlReturnSignal) {
+        this.stderr += "perl: return outside a subroutine\n";
+        exitCode = 255;
+      } else if (
+        caught instanceof PerlRegexError ||
+        caught instanceof RangeError
+      ) {
+        this.stderr += `perl: ${describe(caught)}\n`;
+        exitCode = 255;
+      } else {
+        throw caught;
+      }
+    }
+    return {
+      executionSteps: this.steps,
+      exitCode,
+      stderr: this.stderr,
+      stdout: this.stdout,
+    };
   }
 
   private runInputLoop(body: PerlBlock): void {
@@ -1060,6 +1249,9 @@ class PerlInterpreter {
   }
 
   private evaluate(expression: PerlExpression): PerlValue {
+    const compiled = this.compiledValues?.get(expression);
+    if (compiled !== undefined || this.compiledValues?.has(expression) === true)
+      return compiled!;
     this.consumeStep();
     switch (expression.kind) {
       case "number":

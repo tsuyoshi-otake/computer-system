@@ -13,6 +13,8 @@ export interface DosCommandHost {
   dosDelete(arguments_: readonly string[]): ShellCommandResult;
   dosDirectory(arguments_: readonly string[]): ShellCommandResult;
   dosEchoCommand(value: string): ShellCommandResult;
+  dosFc(arguments_: readonly string[]): ShellCommandResult;
+  dosFind(arguments_: readonly string[], stdin: string): ShellCommandResult;
   dosHelp(arguments_: readonly string[]): ShellCommandResult;
   dosLabel(arguments_: readonly string[]): ShellCommandResult;
   dosMemory(arguments_: readonly string[]): ShellCommandResult;
@@ -21,10 +23,12 @@ export interface DosCommandHost {
   dosRemoveDirectory(arguments_: readonly string[]): ShellCommandResult;
   dosRename(arguments_: readonly string[]): ShellCommandResult;
   dosSet(value: string): ShellCommandResult;
+  dosSort(arguments_: readonly string[], stdin: string): ShellCommandResult;
   dosSystemInfo(arguments_: readonly string[]): ShellCommandResult;
   dosTime(arguments_: readonly string[]): ShellCommandResult;
   dosTree(arguments_: readonly string[]): ShellCommandResult;
   dosVolume(arguments_: readonly string[]): ShellCommandResult;
+  dosComp(arguments_: readonly string[]): ShellCommandResult;
   dosFormat(arguments_: readonly string[]): ShellCommandResult;
   dosSystemDisk(arguments_: readonly string[]): ShellCommandResult;
   dosEject(arguments_: readonly string[]): ShellCommandResult;
@@ -58,6 +62,8 @@ export class DosCommandAdapter {
           : dosStatus(2, "Invalid number of parameters.\r\n");
       case "chkdsk":
         return this.host.dosCheckDisk(arguments_);
+      case "comp":
+        return this.host.dosComp(arguments_);
       case "copy":
         if (arguments_.some((value) => value.startsWith("/")))
           return dosStatus(2, "Invalid switch.\r\n");
@@ -71,6 +77,10 @@ export class DosCommandAdapter {
         return this.host.dosDirectory(arguments_);
       case "echo":
         return this.host.dosEchoCommand(arguments_.join(" "));
+      case "fc":
+        return this.host.dosFc(arguments_);
+      case "find":
+        return this.host.dosFind(arguments_, stdin);
       case "exit":
         return arguments_.length === 0
           ? dosSuccess("", { action: "shutdown" })
@@ -113,6 +123,8 @@ export class DosCommandAdapter {
         return dosSuccess();
       case "set":
         return this.host.dosSet(arguments_.join(" "));
+      case "sort":
+        return this.host.dosSort(arguments_, stdin);
       case "systeminfo":
         return this.host.dosSystemInfo(arguments_);
       case "time":

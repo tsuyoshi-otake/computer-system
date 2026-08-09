@@ -42,6 +42,11 @@ export interface DosBatchCommandResult {
   readonly exitCode: number;
   readonly stderr?: string;
   readonly stdout?: string;
+  /**
+   * The command accepted ownership of terminal input. The engine preserves its
+   * exact frame and resumes only through the result object's resume function.
+   */
+  readonly suspended?: boolean;
 }
 
 export interface DosBatchLoadedProgram {
@@ -113,8 +118,16 @@ export interface DosBatchFailedResult extends DosBatchMetrics {
   readonly stdout: string;
 }
 
+export interface DosBatchSuspendedResult extends DosBatchMetrics {
+  readonly exitCode: number;
+  readonly kind: "suspended";
+  readonly stderr: string;
+  readonly stdout: string;
+  resume(result: DosBatchCommandResult): DosBatchExecutionResult;
+}
+
 export type DosBatchExecutionResult =
-  DosBatchCompletedResult | DosBatchFailedResult;
+  DosBatchCompletedResult | DosBatchFailedResult | DosBatchSuspendedResult;
 
 interface CompiledDosBatchProgram {
   readonly labels: ReadonlyMap<string, number>;
@@ -145,6 +158,13 @@ interface DosBatchExecutionState {
 interface StatementLocation {
   readonly lineNumber: number;
   readonly programName: string;
+}
+
+class DosBatchSuspension extends Error {
+  constructor(readonly location: StatementLocation) {
+    super("DOS batch execution suspended");
+    this.name = "DosBatchSuspension";
+  }
 }
 
 /**
@@ -202,36 +222,7 @@ export class DosBatchEngine {
       program: compiled.program,
     });
 
-    while (state.frames.length > 0) {
-      const frame = state.frames.at(-1)!;
-      if (frame.instruction >= frame.program.lines.length) {
-        state.frames.pop();
-        continue;
-      }
-      const lineIndex = frame.instruction;
-      frame.instruction += 1;
-      const location = {
-        lineNumber: lineIndex + 1,
-        programName: frame.program.name,
-      };
-      const stepFailure = this.consumeStep(state, location);
-      if (stepFailure !== undefined) return this.failed(state, stepFailure);
-      const lineFailure = this.executeSourceLine(
-        state,
-        frame,
-        frame.program.lines[lineIndex]!,
-        location,
-      );
-      if (lineFailure !== undefined) return this.failed(state, lineFailure);
-    }
-
-    return Object.freeze({
-      ...this.metrics(state),
-      exitCode: state.errorLevel,
-      kind: "completed",
-      stderr: state.stderr.join(""),
-      stdout: state.stdout.join(""),
-    });
+    return this.run(state);
   }
 
   /** Executes one COMMAND /C payload through the same bounds and callbacks. */
@@ -243,6 +234,44 @@ export class DosBatchEngine {
       { name: "COMMAND.COM", source: `@COMMAND /C ${commandLine}` },
       callbacks,
     );
+  }
+
+  private run(state: DosBatchExecutionState): DosBatchExecutionResult {
+    try {
+      while (state.frames.length > 0) {
+        const frame = state.frames.at(-1)!;
+        if (frame.instruction >= frame.program.lines.length) {
+          state.frames.pop();
+          continue;
+        }
+        const lineIndex = frame.instruction;
+        frame.instruction += 1;
+        const location = {
+          lineNumber: lineIndex + 1,
+          programName: frame.program.name,
+        };
+        const stepFailure = this.consumeStep(state, location);
+        if (stepFailure !== undefined) return this.failed(state, stepFailure);
+        const lineFailure = this.executeSourceLine(
+          state,
+          frame,
+          frame.program.lines[lineIndex]!,
+          location,
+        );
+        if (lineFailure !== undefined) return this.failed(state, lineFailure);
+      }
+    } catch (error: unknown) {
+      if (error instanceof DosBatchSuspension)
+        return this.suspended(state, error.location);
+      throw error;
+    }
+    return Object.freeze({
+      ...this.metrics(state),
+      exitCode: state.errorLevel,
+      kind: "completed",
+      stderr: state.stderr.join(""),
+      stdout: state.stdout.join(""),
+    });
   }
 
   private executeSourceLine(
@@ -550,12 +579,35 @@ export class DosBatchEngine {
     } catch (error: unknown) {
       return callbackFailure(location, error);
     }
+    const outputFailure = this.applyCommandResult(
+      state,
+      result,
+      location,
+      true,
+    );
+    if (outputFailure !== undefined) return outputFailure;
+    if (result.suspended === true) throw new DosBatchSuspension(location);
+    state.errorLevel = result.exitCode;
+    return undefined;
+  }
+
+  private applyCommandResult(
+    state: DosBatchExecutionState,
+    result: DosBatchCommandResult,
+    location: StatementLocation,
+    allowSuspension: boolean,
+  ): DosBatchFailure | undefined {
     if (
+      typeof result !== "object" ||
+      result === null ||
       !Number.isSafeInteger(result.exitCode) ||
       result.exitCode < 0 ||
       result.exitCode > 255 ||
       (result.stdout !== undefined && typeof result.stdout !== "string") ||
-      (result.stderr !== undefined && typeof result.stderr !== "string")
+      (result.stderr !== undefined && typeof result.stderr !== "string") ||
+      (result.suspended !== undefined &&
+        typeof result.suspended !== "boolean") ||
+      (result.suspended === true && !allowSuspension)
     ) {
       return failure(
         "invalid_callback_result",
@@ -578,8 +630,38 @@ export class DosBatchEngine {
       location,
     );
     if (stderrFailure !== undefined) return stderrFailure;
-    state.errorLevel = result.exitCode;
     return undefined;
+  }
+
+  private suspended(
+    state: DosBatchExecutionState,
+    location: StatementLocation,
+  ): DosBatchSuspendedResult {
+    let resumed: DosBatchExecutionResult | undefined;
+    const resume = (result: DosBatchCommandResult): DosBatchExecutionResult => {
+      if (resumed !== undefined) return resumed;
+      const outputFailure = this.applyCommandResult(
+        state,
+        result,
+        location,
+        false,
+      );
+      if (outputFailure !== undefined) {
+        resumed = this.failed(state, outputFailure);
+        return resumed;
+      }
+      state.errorLevel = result.exitCode;
+      resumed = this.run(state);
+      return resumed;
+    };
+    return Object.freeze({
+      ...this.metrics(state),
+      exitCode: state.errorLevel,
+      kind: "suspended",
+      resume,
+      stderr: state.stderr.join(""),
+      stdout: state.stdout.join(""),
+    });
   }
 
   private expandVariables(

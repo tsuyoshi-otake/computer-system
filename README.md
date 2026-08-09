@@ -77,7 +77,7 @@ adapters, portable computer identity, integrated desktop displays, and bounded
 Bedrock probes are covered by host and Bedrock Dedicated Server verification.
 
 The latest public build is
-[v0.1.0-alpha.14](https://github.com/tsuyoshi-otake/computer-system/releases/tag/v0.1.0-alpha.14).
+[v0.1.0-alpha.15](https://github.com/tsuyoshi-otake/computer-system/releases/tag/v0.1.0-alpha.15).
 It is an alpha preview of the implemented Phase 2 slice, not the later Phase 6
 release-hardening milestone. Back up an existing world before testing it.
 
@@ -195,7 +195,7 @@ transport.
 ## Install the alpha preview
 
 1. Download
-   [`computer-system-0.1.0-alpha.14.mcaddon`](https://github.com/tsuyoshi-otake/computer-system/releases/download/v0.1.0-alpha.14/computer-system-0.1.0-alpha.14.mcaddon).
+   [`computer-system-0.1.0-alpha.15.mcaddon`](https://github.com/tsuyoshi-otake/computer-system/releases/download/v0.1.0-alpha.15/computer-system-0.1.0-alpha.15.mcaddon).
 2. Open the downloaded file with Minecraft for Windows to import both packs.
 3. In the target world's settings, activate the Computer System Behavior Pack.
    Its declared dependency activates the matching Resource Pack.
@@ -709,18 +709,18 @@ DOS-facing commands use CRLF and DOS-specific status/error text rather than
 leaking Linux applet output. The implemented compatibility surface includes
 `DIR`, `TYPE`, `COPY`, `DEL`/ `ERASE`, `MD`, `RD`, `MOVE`, `REN`/`RENAME`,
 `TREE`, `VOL`, `VER`, `TIME`, `TIMER`, `DOSKEY /HISTORY`, `MEM /F`, `ATTRIB`,
-`LABEL`, read-only `CHKDSK`, and the external `C:\DOS\MORE.COM`. Computer System
-DOS 1.0 (`CS-DOS 1.0`) reads a bounded `CONFIG.SYS` and runs `AUTOEXEC.BAT`;
-`SET`, `PATH`, `PROMPT`, `REM`, `@ECHO OFF`, `%0`…`%9`, `%VAR%`, and
-`%ERRORLEVEL%` are supported. Unsupported boot directives are parsed and
-resolved as one atomic plan. Any invalid line or driver rejects the whole plan,
-emits bounded diagnostics, and boots the explicit 64 KiB degraded-low profile
-before AUTOEXEC continues; no earlier line is partially retained.
-`DEVICE`/`DEVICEHIGH` enables the modeled HIMEM or EMM386 state only after the
-referenced installed guest file begins with the expected versioned CS-DOS driver
-capsule. A missing, deleted, or corrupt file fails before changing memory state.
-`DEVICEHIGH` tries one contiguous UMB block and reports when it falls back to
-conventional memory.
+`LABEL`, read-only `CHKDSK`, `FIND`, `SORT`, `FC`, `COMP`, `CHOICE`, `PAUSE`,
+and the external `C:\DOS\MORE.COM`. Computer System DOS 1.0 (`CS-DOS 1.0`) reads
+a bounded `CONFIG.SYS` and runs `AUTOEXEC.BAT`; `SET`, `PATH`, `PROMPT`, `REM`,
+`@ECHO OFF`, `%0`…`%9`, `%VAR%`, and `%ERRORLEVEL%` are supported. Unsupported
+boot directives are parsed and resolved as one atomic plan. Any invalid line or
+driver rejects the whole plan, emits bounded diagnostics, and boots the explicit
+64 KiB degraded-low profile before AUTOEXEC continues; no earlier line is
+partially retained. `DEVICE`/`DEVICEHIGH` enables the modeled HIMEM or EMM386
+state only after the referenced installed guest file begins with the expected
+versioned CS-DOS driver capsule. A missing, deleted, or corrupt file fails
+before changing memory state. `DEVICEHIGH` tries one contiguous UMB block and
+reports when it falls back to conventional memory.
 
 The DOS runtime owns A: and C:, the active drive, a separate current directory
 for each drive, media generations, volume labels, and FAT metadata. Production
@@ -779,10 +779,29 @@ disk-full/media failures abort unstarted stages, and no host temporary file is
 used. `DIR | MORE`, `TYPE file | MORE`, `MORE file`, and `MORE < file` are
 supported. `MORE` remains terminal-owned and is rejected by synchronous BAT; DOS
 deliberately rejects `LESS`, `2>`, `2>>`, `2>&1`, and `|&` before side effects.
+`FIND [/V /C /N /I] "text" [file ...]` filters standard input when no file is
+named, so `TYPE LOG.TXT | FIND /I "ERROR"` carries only standard output through
+the guest-owned spool. FIND returns 0 for a match, 1 for no match, and 2 for an
+invalid or bounded request; it accepts at most 256,000 input bytes and 4,096
+records. `SORT [/R] [/+n] [file]` accepts standard input or one explicit guest
+file, emits CRLF records, and is capped at 64 KiB and 4,096 records. `FC` and
+`COMP` compare only explicit guest files, never a host utility, and cap each
+input at 256,000 bytes. These text utilities deliberately reject wildcard
+operands instead of starting an unbounded directory traversal.
+
+`CHOICE [/C[:]keys] [/N] [/S] [text]` and `PAUSE` own the terminal's key-input
+state. CHOICE displays its bounded 1-16 distinct letter/digit choices and, once
+one valid key arrives, returns the one-based choice position as `ERRORLEVEL`; a
+BAT file resumes exactly once at its next statement rather than replaying the
+prompt command. `Ctrl+C` cancels the active prompt with status 130. Timeout
+defaults (`CHOICE /T`) and native `COMMAND.COM` binary behavior remain explicit
+non-features. Every utility is a versioned guest capsule under `C:\DOS`, so
+deleting it makes that command unavailable until restored; neither a capsule nor
+a downloaded `.COM`/`.EXE` is a native executable.
 
 ```text
 files:  pwd cd ls cat mkdir rmdir touch rm cp mv ln readlink realpath find stat
-text:   echo printf head tail wc grep sed awk perl sort uniq tr cut seq tee cmp diff xargs
+text:   echo printf head tail wc grep rg jq sed awk perl sort uniq tr cut seq tee cmp diff xargs
 archive: tar gzip gunzip zip unzip
 inspect: file sha256sum od hexdump df du quota mount dmesg
 shell:  sh bash source env printenv export unset alias unalias command read
@@ -792,7 +811,7 @@ process: ps top kill jobs fg bg wait nice nohup watch tty who w last service
 manual: man apropos
 info:   hostname uname date uptime cpuinfo free
 system: clear vi history time sleep crontab test [ umask sync shutdown reboot exit true false
-DOS:    EDIT MORE DIR ATTRIB LABEL CHKDSK TREE VOL TIME TIMER DOSKEY MEM DEBUG + aliases
+DOS:    EDIT MORE FIND SORT FC COMP CHOICE PAUSE DIR ATTRIB LABEL CHKDSK TREE VOL TIME TIMER DOSKEY MEM DEBUG + aliases
 toolchain: as cc c++ ld make nm run objdump csdb (make is Linux-only; QBASIC and DEBUG on DOS)
 version control: git (bounded local CS System Git repositories; Linux only)
 ```
@@ -802,21 +821,32 @@ utilities. `crontab -l` reads the single system `/etc/crontab`, while root
 `crontab -e` edits that same file with the existing `vi`; no per-user spool is
 created, and cron reloads the file on service start or restart. `sed` and `awk`
 use a guest-owned pattern/parser subset with explicit program, rule, input, and
-record ceilings. `perl` is a bounded Perl 5.40-surface interpreter written for
-the guest: `use strict`/`use warnings`/`use v5.40`/`say`, scalars, arrays,
-hashes, `my` scoping, subroutines, statement modifiers, `sort`/`grep`/`map`
-blocks, `sprintf`, `split`, `tr///cdrs`, `s///` including the `e` and `r`
-modifiers, here-documents, loop labels, `eval BLOCK` with `$@`, the
+record ceilings; `awk` also has bounded scalar accumulation and arithmetic.
+`grep` accepts bounded pattern alternatives such as `ERROR|WARN`, while `rg`
+adds `-l` for explicitly named guest files only—neither command recursively
+scans the host or starts a host process. `jq [-r]` provides a documented bounded
+JSON subset for field/index lookup, iteration, `length`, `keys`, collection, and
+simple `select`; it never delegates parsing or filters to host JavaScript.
+`cut -c` selects one-based character lists/ranges and `tr -d` removes a bounded
+character set. `perl` is a bounded Perl 5.40-surface interpreter written for the
+guest: `use strict`/`use warnings`/`use v5.40`/`say`, scalars, arrays, hashes,
+`my` scoping, subroutines, statement modifiers, `sort`/`grep`/`map` blocks,
+`sprintf`, `split`, `tr///cdrs`, `s///` including the `e` and `r` modifiers,
+here-documents, loop labels, `eval BLOCK` with `$@`, the
 `-e -n -p -l -a -F -c -v` switches, and bounded three-argument `open` against
 the guest filesystem only. It uses its own bounded backtracking matcher instead
 of host regular expressions, iterates hashes in insertion order so runs stay
-deterministic, and has no wall clock. Modules, references, `bless`,
-`eval STRING`, `fork`, `exec`, `system`, and backticks are rejected at compile
-time rather than approximated. `tar`, `gzip`, and `zip` use byte-preserving
-filesystem I/O; archive extraction is preflighted and transactional. Gzip emits
-and accepts stored-DEFLATE streams, and ZIP accepts unencrypted method-0
-archives; unsupported compression, ZIP64, traversal, and symlink pivots fail
-explicitly.
+deterministic, and has no wall clock. Perl control flow is compiled to ordinary
+CS486 instructions and runs as one scheduler-owned `Cs486Process`; bounded
+value, regex, and guest-I/O semantics are served by its allowlisted managed
+syscall ABI. Shell and MCP cycle reports now come from executed CS486
+instructions rather than a converted interpreter-step estimate. Modules,
+references, `bless`, `eval STRING`, `fork`, `exec`, `system`, and backticks are
+rejected at compile time rather than approximated. `tar`, `gzip`, and `zip` use
+byte-preserving filesystem I/O; archive extraction is preflighted and
+transactional. Gzip emits and accepts stored-DEFLATE streams, and ZIP accepts
+unencrypted method-0 archives; unsupported compression, ZIP64, traversal, and
+symlink pivots fail explicitly.
 
 With no `-e` program or script path, `perl` reads its program from standard
 input. A pipe or `<` redirect supplies the bounded 64 KiB source immediately; at
@@ -833,23 +863,31 @@ bounded interval, a default count of 300, and an upper count of 3,600.
 
 The CS-Linux parser supports single and double quotes, backslash escapes,
 environment variables, `$?`, foreground pipelines (`|` and `|&`), ordered
-redirection (`<`, `>`, `>>`, `2>`, `2>>`, and `2>&1`), and control operators
-(`&&`, `||`, `;`). Pipeline stages are scheduler-owned PIDs in one process group
-and exchange bytes through fixed 4 KiB rings with backpressure, EOF, and SIGPIPE
-status 141; the pipeline reports the final stage status. `less` and `more`
-consume a live final-stage stream with 64 KiB bounded history, and `q` closes
-the reader before the saved command-chain continuation resumes. Hosted CS ABI fd
-0/1/2 and Computer System Python output use the same endpoints rather than
-terminal replay. Parent-mutating commands, TUI commands outside the final pager,
-background pipelines, and `pipefail` are rejected explicitly. Computer System
-Bash also adds shebangs, positional parameters, conditionals, bounded loops,
-functions, `break`/`continue`/`return`, `source`, aliases, `command`, `read`,
-function-local variables, `shift`, and basic `getopts`. After authentication it
-loads `/etc/profile`, `/etc/bash.bashrc`, and then that account's `~/.bashrc`
-without replacing existing user files. Command length, tokens, pipeline stages,
-script depth/lines/iterations, and intermediate output are limited so shell work
-cannot become an unbounded server load path. This is a sandbox implementation
-and never invokes host Bash.
+redirection (`<`, `>`, `>>`, `2>`, `2>>`, `2>&1`, and `&>`), literal
+here-documents (`<<WORD`), and control operators (`&&`, `||`, `;`). Standard
+input, output, and error are guest fd 0, 1, and 2: `|` connects fd 1 to the next
+command's fd 0, while `|&` connects fd 1 and fd 2. Redirects are processed from
+left to right, so `command >result 2>&1` combines both streams, but
+`command 2>&1 >result` leaves stderr on the preceding destination. `tee` keeps
+pipeline stdout visible while writing it to a guest file. A literal
+here-document supplies fd 0 without a file; submitted interactive sources end at
+its terminator, and scripts continue with their next line. Pipeline stages are
+scheduler-owned PIDs in one process group and exchange bytes through fixed 4 KiB
+rings with backpressure, EOF, and SIGPIPE status 141; the pipeline reports the
+final stage status. `less` and `more` consume a live final-stage stream with 64
+KiB bounded history, and `q` closes the reader before the saved command-chain
+continuation resumes. Hosted CS ABI fd 0/1/2 and Computer System Python output
+use the same endpoints rather than terminal replay. Parent-mutating commands,
+TUI commands outside the final pager, background pipelines, and `pipefail` are
+rejected explicitly. Computer System Bash also adds shebangs, positional
+parameters, conditionals, bounded loops, functions, `break`/`continue`/`return`,
+`source`, aliases, `command`, `read`, function-local variables, `shift`, and
+basic `getopts`. After authentication it loads `/etc/profile`,
+`/etc/bash.bashrc`, and then that account's `~/.bashrc` without replacing
+existing user files. Command length, tokens, pipeline stages, script
+depth/lines/iterations, and intermediate output are limited so shell work cannot
+become an unbounded server load path. This is a sandbox implementation and never
+invokes host Bash.
 
 Linux-facing output follows the CS-Linux contract: LF line endings, Linux-style
 `uname`, `date`, `uptime`, `ls -la`, `stat`, `df -h`, `du -h`, `free -h`, and

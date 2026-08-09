@@ -7,6 +7,11 @@ import type { GuestToolchainResult } from "../toolchain/guestToolchainTranscript
 import type { Cs486LinkInput } from "../toolchain/cs486Archive.js";
 import type { Cs486DataModel } from "../../domain/cpu/cs486Compatibility.js";
 import type { CsAbiStandardIo } from "../runtime/csAbi.js";
+import type {
+  LinuxPerlCommandPreparation,
+  LinuxPerlExecutionInput,
+  LinuxPerlIo,
+} from "./linuxPerl.js";
 
 interface ShellProcessContext {
   /** Immutable credentials captured when the shell admits the process. */
@@ -27,6 +32,16 @@ export interface ShellForegroundPython extends ShellProcessContext {
   readonly path: string;
   /** Returns true when stdout still targets the controlling terminal. */
   readonly routeOutput?: (descriptor: 1 | 2, text: string) => boolean;
+  readonly stats: boolean;
+}
+
+/** One bounded Perl invocation compiled onto the production CS486 process. */
+export interface ShellForegroundPerl extends ShellProcessContext {
+  readonly command: "perl";
+  readonly input: LinuxPerlExecutionInput;
+  readonly io: LinuxPerlIo;
+  readonly kind: "perl";
+  readonly prepared: LinuxPerlCommandPreparation;
   readonly stats: boolean;
 }
 
@@ -181,6 +196,7 @@ export type ShellForegroundRequest =
   | ShellForegroundCs486
   | ShellForegroundDebugger
   | ShellForegroundPipeline
+  | ShellForegroundPerl
   | ShellForegroundPython
   | ShellForegroundPythonRepl;
 
@@ -226,6 +242,11 @@ export interface ShellCommandResult {
   readonly stderr: string;
   readonly stdout: string;
   readonly sleepTicks?: number;
+  /**
+   * A non-screen terminal key prompt owns input until it completes or cancels.
+   * It is distinct from a full-screen editor/pager terminalScreen state.
+   */
+  readonly terminalInput?: boolean;
   readonly terminalScreen?: EditorScreen;
   readonly resetTerminal?: boolean;
   readonly cpuCycles?: number;

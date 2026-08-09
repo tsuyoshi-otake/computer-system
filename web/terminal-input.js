@@ -50,6 +50,7 @@ const terminalInteractionContexts = new Set([
   "busy",
   "cs-abi",
   "csasm",
+  "dos-prompt",
   "edit",
   "less",
   "login",

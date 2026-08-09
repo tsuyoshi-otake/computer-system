@@ -15,6 +15,10 @@ import {
   type PythonCs486Repl,
 } from "../runtime/pythonCs486.js";
 import {
+  preparePerlCs486Program,
+  type PerlCs486Program,
+} from "../runtime/perlCs486.js";
+import {
   RoundRobinScheduler,
   type SchedulerLimits,
   type SchedulerWorkObserver,
@@ -1293,6 +1297,12 @@ export class ComputerRuntime {
           this.executeDebugPython(entry, request),
         );
       }
+      if (result.foreground?.kind === "perl") {
+        const request = result.foreground;
+        return this.executeSynchronousOsProcess(entry, request, () =>
+          this.executeDebugPerl(entry, request),
+        );
+      }
       if (result.foreground?.kind === "debugger") {
         const request = result.foreground;
         return this.executeSynchronousOsProcess(entry, request, () =>
@@ -1466,6 +1476,10 @@ export class ComputerRuntime {
         );
         return;
       }
+      if (result.foreground?.kind === "perl") {
+        this.enqueueDebugPerl(entry, result.foreground, onComplete);
+        return;
+      }
       if (result.foreground?.kind === "debugger") {
         this.enqueueDebugDebugger(entry, result.foreground, onComplete);
         return;
@@ -1617,6 +1631,29 @@ export class ComputerRuntime {
         memoryGrant: granted.grant,
         onComplete,
         process: granted.process,
+        runtimeId,
+        stats: request.stats,
+      },
+      { command: request.command, credentials: request.credentials },
+    );
+  }
+
+  private enqueueDebugPerl(
+    entry: RuntimeEntry,
+    request: Extract<ShellForegroundRequest, { readonly kind: "perl" }>,
+    onComplete: (result: DebugShellCommandCompletion) => void,
+  ): void {
+    const runtimeId = this.nextRuntimeId++;
+    const granted = this.createForegroundPerlProcess(entry, request, runtimeId);
+    this.startDebugJob(
+      entry,
+      {
+        compileCycles: 0,
+        kind: "perl",
+        memoryGrant: granted.memoryGrant,
+        onComplete,
+        perlProgram: granted.program,
+        process: granted.program.process,
         runtimeId,
         stats: request.stats,
       },
@@ -1787,6 +1824,42 @@ export class ComputerRuntime {
           exitCode: 1,
           stderr: `debugger: ${normalized.name}: ${normalized.message}\n`,
           stdout: "",
+          cpuCycles: Math.max(1, job.cpuCycles),
+        };
+      }
+      this.completeOsProcess(
+        entry,
+        job.osPid,
+        result.exitCode,
+        result.cpuCycles,
+        state.kind === "terminated" ? job.terminationSignal : undefined,
+      );
+      entry.shell?.completeForegroundProcess(result.exitCode);
+      job.onComplete(result);
+      return;
+    }
+    if (job.kind === "perl") {
+      const perlResult = job.perlProgram?.result();
+      let result: DebugShellCommandCompletion;
+      if (perlResult !== undefined) {
+        result = {
+          outcome: "completed",
+          exitCode: perlResult.exitCode,
+          stdout: perlResult.stdout,
+          stderr: perlResult.stderr,
+          cpuCycles: Math.max(1, job.cpuCycles),
+        };
+      } else {
+        result = {
+          outcome: "completed",
+          exitCode: state.kind === "terminated" ? 130 : 1,
+          stdout: "",
+          stderr:
+            job.termination === "cpu_limit"
+              ? "Perl/CS486: MCP debug CPU cycle limit exceeded\n"
+              : state.kind === "crashed"
+                ? `${state.error.name}: ${state.error.message}\n`
+                : "perl: process completed without a runtime result\n",
           cpuCycles: Math.max(1, job.cpuCycles),
         };
       }
@@ -2388,6 +2461,7 @@ export class ComputerRuntime {
     let process: CpuProcess | undefined;
     let memoryGrant: GuestProcessMemoryGrant | undefined;
     let pythonRepl: PythonCs486Repl | undefined;
+    let perlProgram: PerlCs486Program | undefined;
     let csAbi: CsAbiRuntime | undefined;
     let osPid: number | undefined;
     let osPids: number[] = [];
@@ -2404,6 +2478,15 @@ export class ComputerRuntime {
         );
         process = granted.process;
         memoryGrant = granted.memoryGrant;
+      } else if (request.kind === "perl") {
+        const granted = this.createForegroundPerlProcess(
+          entry,
+          request,
+          runtimeId,
+        );
+        process = granted.program.process;
+        memoryGrant = granted.memoryGrant;
+        perlProgram = granted.program;
       } else if (request.kind === "python-repl") {
         const granted = this.createForegroundPythonRepl(
           entry,
@@ -2525,6 +2608,7 @@ export class ComputerRuntime {
               replBannerPending: true,
               replBoundaryPending: true,
             }),
+        ...(perlProgram === undefined ? {} : { perlProgram }),
         ...(csAbi === undefined ? {} : { csAbi }),
         runtimeId,
         stats:
@@ -3821,6 +3905,114 @@ export class ComputerRuntime {
     }
   }
 
+  private executeDebugPerl(
+    entry: RuntimeEntry,
+    request: Extract<ShellForegroundRequest, { readonly kind: "perl" }>,
+  ): DebugShellCommandResult {
+    const granted = this.createForegroundPerlProcess(
+      entry,
+      request,
+      this.nextRuntimeId++,
+    );
+    try {
+      const maximumCpuCycles = 100_000_000;
+      let cpuCycles = 0;
+      while (
+        (granted.program.process.state.kind === "ready" ||
+          granted.program.process.hasPendingCpuCycles) &&
+        cpuCycles < maximumCpuCycles
+      ) {
+        const slice = granted.program.process.runCpuSlice(
+          Math.min(1_000_000, maximumCpuCycles - cpuCycles),
+        );
+        if (slice.cpuCycles === 0 && slice.executedInstructions === 0) break;
+        cpuCycles += slice.cpuCycles;
+      }
+      const result = granted.program.result();
+      if (result !== undefined) {
+        entry.shell?.completeForegroundProcess(result.exitCode);
+        return {
+          outcome: "completed",
+          exitCode: result.exitCode,
+          stderr: result.stderr,
+          stdout: result.stdout,
+          cpuCycles,
+        };
+      }
+      granted.program.process.terminate(
+        "MCP debug Perl execution exceeded its synchronous CPU limit",
+      );
+      entry.shell?.completeForegroundProcess(2);
+      return {
+        outcome: "completed",
+        exitCode: 2,
+        stderr: `Perl/${cpuModelSpecification(entry.record.hardware.cpuModel).runtimeName}: CPU cycle limit ${String(maximumCpuCycles)} exceeded\n`,
+        stdout: "",
+        cpuCycles,
+      };
+    } finally {
+      releaseGuestProcessMemory(granted.memoryGrant);
+    }
+  }
+
+  private createForegroundPerlProcess(
+    entry: RuntimeEntry,
+    request: Extract<ShellForegroundRequest, { readonly kind: "perl" }>,
+    runtimeId: number,
+  ): {
+    readonly memoryGrant: GuestProcessMemoryGrant;
+    readonly program: PerlCs486Program;
+  } {
+    if (
+      request.prepared.kind === "invalid" ||
+      request.prepared.kind === "version"
+    )
+      throw new Error(
+        "non-executable Perl request crossed the foreground boundary",
+      );
+    const source =
+      request.prepared.kind === "stdin"
+        ? request.input.kind === "source"
+          ? request.input.source
+          : undefined
+        : request.prepared.options.source;
+    const stdin =
+      request.prepared.kind === "stdin"
+        ? ""
+        : request.input.kind === "data"
+          ? request.input.stdin
+          : undefined;
+    if (source === undefined || stdin === undefined)
+      throw new Error("Perl source/data input kind does not match the command");
+    const prepared = preparePerlCs486Program({
+      collectMicroarchitectureStats: this.shouldCollectMicroarchitectureStats(
+        request.stats,
+      ),
+      cpuModel: entry.record.hardware.cpuModel,
+      io: request.io,
+      options: { ...request.prepared.options, source },
+      scriptArguments: request.prepared.scriptArguments,
+      stdin,
+    });
+    const memoryGrant = grantCs486MemoryRequirements(
+      prepared.requirements,
+      guestProcessMemoryAdmission(
+        entry,
+        request.command,
+        `runtime-${String(runtimeId)}`,
+      ),
+    );
+    try {
+      return {
+        memoryGrant,
+        program: prepared.create(memoryGrant.memoryBytes),
+      };
+    } catch (error: unknown) {
+      releaseGuestProcessMemory(memoryGrant);
+      throw error;
+    }
+  }
+
   private createForegroundPythonRepl(
     entry: RuntimeEntry,
     request: Extract<ShellForegroundRequest, { readonly kind: "python-repl" }>,
@@ -4074,6 +4266,30 @@ export class ComputerRuntime {
         entry.runtimeId,
         foreground.completionEvent,
         result.exitCode,
+      );
+      return;
+    }
+
+    if (foreground.kind === "perl") {
+      const result = foreground.perlProgram?.result();
+      const completed = result ?? {
+        exitCode: 1,
+        stderr: "perl: process completed without a runtime result\n",
+        stdout: "",
+      };
+      this.completeOsProcess(
+        entry,
+        foreground.osPid,
+        completed.exitCode,
+        foreground.cpuCycles,
+        state.kind === "terminated" ? foreground.terminationSignal : undefined,
+      );
+      writeShellCommandOutput(entry.record.terminal, completed);
+      entry.shell?.completeForegroundProcess(completed.exitCode);
+      this.scheduler.queueEvent(
+        entry.runtimeId,
+        foreground.completionEvent,
+        completed.exitCode,
       );
       return;
     }
@@ -5695,11 +5911,12 @@ interface DebugGuestJob {
   cpuCycles: number;
   executedInstructions: number;
   readonly instructionLimit?: number;
-  readonly kind: "cs486" | "debugger" | "python";
+  readonly kind: "cs486" | "debugger" | "perl" | "python";
   readonly memoryGrant?: GuestProcessMemoryGrant;
   readonly onComplete: (result: DebugShellCommandCompletion) => void;
   readonly osPid: number;
   readonly process: CpuProcess;
+  readonly perlProgram?: PerlCs486Program;
   readonly runtimeId: number;
   readonly startedHostMilliseconds?: number;
   readonly shellCompletion?: () => ShellCommandResult;
@@ -5723,6 +5940,7 @@ interface ForegroundGuestProcess {
     | "csdb"
     | "debug"
     | "micropython"
+    | "perl"
     | "pipeline"
     | "python"
     | "qbasic"
@@ -5740,7 +5958,13 @@ interface ForegroundGuestProcess {
   readonly instructionLimit?: number;
   readonly jobId?: number;
   readonly kind:
-    "cs486" | "debugger" | "pipeline" | "python" | "python-repl" | "sleep";
+    | "cs486"
+    | "debugger"
+    | "perl"
+    | "pipeline"
+    | "python"
+    | "python-repl"
+    | "sleep";
   lastPagerRevision?: number;
   limitReached?: boolean;
   readonly memoryGrant?: GuestProcessMemoryGrant;
@@ -5748,6 +5972,7 @@ interface ForegroundGuestProcess {
   readonly osPids?: readonly number[];
   readonly pipelineCompletion?: () => ShellCommandResult;
   readonly pipelineStageExitCodes?: () => readonly number[];
+  readonly perlProgram?: PerlCs486Program;
   readonly process: CpuProcess;
   readonly pythonRepl?: PythonCs486Repl;
   replBannerPending?: boolean;

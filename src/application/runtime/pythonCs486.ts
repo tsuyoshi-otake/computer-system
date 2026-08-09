@@ -84,6 +84,15 @@ import {
 } from "../toolchain/cs486Linker.js";
 import type { NativeEnvironment } from "./nativeModules.js";
 import {
+  managedBinaryWorkCycles,
+  managedCollectionWorkCycles,
+  managedCompareWorkCycles,
+  managedLoadWorkCycles,
+  managedRuntimeCost,
+  managedStoreWorkCycles,
+  managedStringWorkCycles,
+} from "./managedRuntimeCost.js";
+import {
   PythonHeapAccounting,
   type PythonHeapRoots,
 } from "./python/heapAccounting.js";
@@ -5744,7 +5753,7 @@ export class PythonCs486Runtime {
     operation: PythonOperation,
     context: Cs486SyscallContext,
   ): Cs486SyscallResult {
-    const baseCycles = 16;
+    const baseCycles = managedRuntimeCost.dispatch;
     switch (operation.kind) {
       case "load_const":
         this.push(operation.value, operation.span);
@@ -5762,7 +5771,9 @@ export class PythonCs486Runtime {
           this.loadedConstantIntegers.add(operation.value);
           this.noteRuntimeValue(operation.value);
         }
-        return continued(baseCycles);
+        return continued(
+          baseCycles + managedLoadWorkCycles(operation.value, "python_integer"),
+        );
       case "repl_display": {
         const value = this.pop(operation.span);
         if (value !== null)
@@ -5795,23 +5806,31 @@ export class PythonCs486Runtime {
             );
           }
         }
-        this.push(
-          this.loadName(operation.binding, operation.name, operation.span),
+        const value = this.loadName(
+          operation.binding,
+          operation.name,
           operation.span,
         );
-        return continued(baseCycles);
+        this.push(value, operation.span);
+        return continued(
+          baseCycles + managedLoadWorkCycles(value, "python_integer"),
+        );
       }
-      case "store_name":
+      case "store_name": {
+        const value = this.pop(operation.span);
         this.storeName(
           operation.binding,
           operation.name,
-          this.pop(operation.span),
+          value,
           operation.span,
         );
-        return continued(baseCycles);
+        return continued(
+          baseCycles + managedStoreWorkCycles(value, "python_integer"),
+        );
+      }
       case "delete_name":
         this.deleteName(operation.binding, operation.name, operation.span);
-        return continued(baseCycles);
+        return continued(baseCycles + managedRuntimeCost.store);
       case "store_definition": {
         const value = this.pop(operation.span);
         const frame = this.frame();
@@ -5822,7 +5841,9 @@ export class PythonCs486Runtime {
           operation.span,
           frame,
         );
-        return continued(baseCycles);
+        return continued(
+          baseCycles + managedStoreWorkCycles(value, "python_integer"),
+        );
       }
       case "pop":
         this.pop(operation.span);
@@ -5902,8 +5923,9 @@ export class PythonCs486Runtime {
         );
         return continued(
           baseCycles +
-            (operation.kind === "build_set" ? setEntries.size : values.length) *
-              2,
+            managedCollectionWorkCycles(
+              operation.kind === "build_set" ? setEntries.size : values.length,
+            ),
         );
       }
       case "build_dict": {
@@ -5937,7 +5959,9 @@ export class PythonCs486Runtime {
         }
         this.push({ kind: "dictionary", entries }, operation.span);
         this.noteAllocation(48 + entries.size * 24);
-        return continued(baseCycles + entries.size * 4);
+        return continued(
+          baseCycles + managedCollectionWorkCycles(entries.size) * 2,
+        );
       }
       case "comprehension_add": {
         if (operation.containerKind === "dictionary") {
@@ -5994,7 +6018,7 @@ export class PythonCs486Runtime {
             }
           }
         }
-        return continued(baseCycles + 4);
+        return continued(baseCycles + managedRuntimeCost.store);
       }
       case "unpack": {
         const source = this.pop(operation.span);
@@ -6029,7 +6053,9 @@ export class PythonCs486Runtime {
         for (let index = unpacked.length - 1; index >= 0; index -= 1) {
           this.push(unpacked[index]!, operation.span);
         }
-        return continued(baseCycles + values.length * 2);
+        return continued(
+          baseCycles + managedCollectionWorkCycles(values.length),
+        );
       }
       case "format": {
         const operands = this.popMany(operation.operandCount, operation.span);
@@ -6053,7 +6079,7 @@ export class PythonCs486Runtime {
         this.checkString(value, operation.span);
         this.push(value, operation.span);
         this.noteAllocation(16 + utf8ByteLength(value));
-        return continued(baseCycles + Math.ceil(value.length / 4));
+        return continued(baseCycles + managedStringWorkCycles(value.length));
       }
       case "build_template": {
         this.checkCollection(operation.strings.length, operation.span);
@@ -6124,7 +6150,16 @@ export class PythonCs486Runtime {
         );
         this.push(value, operation.span);
         this.noteRuntimeValue(value);
-        return continued(baseCycles + (operation.operator === "**" ? 20 : 4));
+        return continued(
+          baseCycles +
+            managedBinaryWorkCycles(
+              operation.operator,
+              left,
+              right,
+              value,
+              "python_integer",
+            ),
+        );
       }
       case "unary": {
         const value = this.pop(operation.span);
@@ -6146,19 +6181,29 @@ export class PythonCs486Runtime {
           operation.operators.length + 1,
           operation.span,
         );
-        this.push(
-          operation.operators.every((operator, index) =>
-            compare(
+        let workCycles = 0;
+        let matched = true;
+        for (let index = 0; index < operation.operators.length; index += 1) {
+          workCycles += managedCompareWorkCycles(
+            values[index],
+            values[index + 1],
+            "python_integer",
+          );
+          if (
+            !compare(
               values[index]!,
               values[index + 1]!,
-              operator,
+              operation.operators[index]!,
               operation.span,
               this.options.limits.maxStringLength,
-            ),
-          ),
-          operation.span,
-        );
-        return continued(baseCycles + operation.operators.length * 4);
+            )
+          ) {
+            matched = false;
+            break;
+          }
+        }
+        this.push(matched, operation.span);
+        return continued(baseCycles + workCycles);
       }
       case "compare_chain": {
         const right = this.pop(operation.span);
@@ -6172,14 +6217,16 @@ export class PythonCs486Runtime {
         );
         this.push(matched ? right : false, operation.span);
         context.writeRegister("eax", matched ? 1 : 0);
-        return continued(baseCycles + 4);
+        return continued(
+          baseCycles + managedCompareWorkCycles(left, right, "python_integer"),
+        );
       }
       case "truthy": {
         const value = operation.keep
           ? this.peek(operation.span)
           : this.pop(operation.span);
         context.writeRegister("eax", truthy(value) ? 1 : 0);
-        return continued(baseCycles);
+        return continued(baseCycles + managedRuntimeCost.typeCheck);
       }
       case "record_annotation": {
         const annotations = this.frame().annotations;
@@ -6218,7 +6265,7 @@ export class PythonCs486Runtime {
         };
         this.push(dictionary, operation.span);
         this.noteAllocation(48);
-        return continued(baseCycles);
+        return continued(baseCycles + managedRuntimeCost.store);
       }
       case "annotation_is_active": {
         const annotations = this.frame().annotations;
@@ -6487,7 +6534,7 @@ export class PythonCs486Runtime {
         if (iterator !== source && isIterator(iterator)) {
           this.noteAllocation(32 + iterator.values.length * 8);
         }
-        return continued(baseCycles);
+        return continued(baseCycles + managedRuntimeCost.iteratorAcquire);
       }
       case "get_async_iter": {
         const source = this.pop(operation.span);
@@ -6593,7 +6640,7 @@ export class PythonCs486Runtime {
           this.push(step.value, operation.span);
           context.writeRegister("eax", 1);
         }
-        return continued(baseCycles);
+        return continued(baseCycles + managedRuntimeCost.iteratorStep);
       }
       case "async_for_iter": {
         const iterator = this.peek(operation.span);

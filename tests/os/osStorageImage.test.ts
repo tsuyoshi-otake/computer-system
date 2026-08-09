@@ -143,7 +143,7 @@ describe("OS filesystem images and disk profiles", (): void => {
     expect(filesystem.exists("/drives/c/command")).toBe(false);
   });
 
-  it("migrates v8 DOS overlays to v9 without replacing custom files or tombstones", (): void => {
+  it("migrates v8 DOS overlays to the current image without replacing custom files or tombstones", (): void => {
     registerOsFilesystemImages();
     const filesystem = new InMemoryFilesystem();
     filesystem.restore({
@@ -158,10 +158,16 @@ describe("OS filesystem images and disk profiles", (): void => {
 
     new ShellSession(filesystem, { osProfile: "dos" });
 
-    expect(filesystem.baseImageId).toBe("cs-dos-1.0-rootfs-v9");
+    expect(filesystem.baseImageId).toBe("cs-dos-1.0-rootfs-v10");
     expect(filesystem.readFile("/drives/c/dos/user.com")).toBe("user command");
     expect(filesystem.exists("/drives/c/dos/tree.com")).toBe(false);
     expect(filesystem.exists("/drives/c/dos/more.com")).toBe(true);
+    expect(filesystem.exists("/drives/c/dos/choice.com")).toBe(true);
+    expect(filesystem.exists("/drives/c/dos/comp.com")).toBe(true);
+    expect(filesystem.exists("/drives/c/dos/fc.exe")).toBe(true);
+    expect(filesystem.exists("/drives/c/dos/find.exe")).toBe(true);
+    expect(filesystem.exists("/drives/c/dos/pause.com")).toBe(true);
+    expect(filesystem.exists("/drives/c/dos/sort.exe")).toBe(true);
 
     const customized = new InMemoryFilesystem();
     customized.restore({
@@ -183,6 +189,29 @@ describe("OS filesystem images and disk profiles", (): void => {
     new ShellSession(deleted, { osProfile: "dos" });
     expect(deleted.exists("/drives/c/dos/more.com")).toBe(false);
     expect(deleted.snapshot().tombstones).toContain("/drives/c/dos/more.com");
+  });
+
+  it("upgrades the v9 DOS image without replacing a custom text utility", (): void => {
+    registerOsFilesystemImages();
+    const filesystem = new InMemoryFilesystem();
+    filesystem.restore({
+      baseImageId: "cs-dos-1.0-rootfs-v9",
+      blobs: [],
+      directories: [],
+      files: [],
+      schema: 2,
+    });
+    expect(filesystem.exists("/drives/c/dos/find.exe")).toBe(false);
+    filesystem.writeFile("/drives/c/dos/find.exe", "custom FIND wrapper");
+
+    new ShellSession(filesystem, { osProfile: "dos" });
+
+    expect(filesystem.baseImageId).toBe("cs-dos-1.0-rootfs-v10");
+    expect(filesystem.readFile("/drives/c/dos/find.exe")).toBe(
+      "custom FIND wrapper",
+    );
+    expect(filesystem.exists("/drives/c/dos/choice.com")).toBe(true);
+    expect(filesystem.exists("/drives/c/dos/sort.exe")).toBe(true);
   });
 
   it("restores a hard-link group spanning an immutable base file and an overlay path", (): void => {
@@ -282,13 +311,19 @@ describe("OS filesystem images and disk profiles", (): void => {
       "typedef unsigned char uint8_t;",
     );
 
-    expect(dos.baseImageId).toBe("cs-dos-1.0-rootfs-v9");
+    expect(dos.baseImageId).toBe("cs-dos-1.0-rootfs-v10");
     expect(dos.exists("/drives/c/command")).toBe(false);
     expect(dos.exists("/drives/c/dos/basic.com")).toBe(false);
     expect(dos.exists("/drives/c/dos/basicc.com")).toBe(false);
     expect(dos.exists("/drives/c/dos/qbasic.exe")).toBe(true);
     expect(dos.getSize("/drives/c/dos/qbasic.exe")).toBe(194_309);
     expect(dos.getSize("/drives/c/dos/more.com")).toBe(10_240);
+    expect(dos.exists("/drives/c/dos/choice.com")).toBe(true);
+    expect(dos.exists("/drives/c/dos/comp.com")).toBe(true);
+    expect(dos.exists("/drives/c/dos/fc.exe")).toBe(true);
+    expect(dos.exists("/drives/c/dos/find.exe")).toBe(true);
+    expect(dos.exists("/drives/c/dos/pause.com")).toBe(true);
+    expect(dos.exists("/drives/c/dos/sort.exe")).toBe(true);
     for (const launcher of ["csasm", "cscc", "cscpp", "pwb"]) {
       expect(dos.exists(`/drives/c/dos/${launcher}.exe`)).toBe(true);
     }

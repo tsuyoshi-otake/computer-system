@@ -165,11 +165,14 @@ import {
 } from "./qbasicCommandLine.js";
 import {
   parseShellProgram,
+  shellHereDocumentDelimiters,
   ShellSyntaxError,
   type ShellCommandNode,
   type ShellChainNode,
+  type ShellInputRedirect,
   type ShellOpenRedirect,
   type ShellPipelineNode,
+  type ShellRedirect,
 } from "./shellSyntax.js";
 import { shellFrontendFor } from "./createShellFrontend.js";
 import type { ShellFrontend } from "./shellFrontend.js";
@@ -179,7 +182,16 @@ import {
   executeStreamingLinuxPipeline,
 } from "./linuxPipeline.js";
 import { OsRuntimeState, type OsProcessSignal } from "./osRuntimeState.js";
-import { DosBatchEngine } from "./dosBatch.js";
+import {
+  DosBatchEngine,
+  type DosBatchExecutionResult,
+  type DosBatchSuspendedResult,
+} from "./dosBatch.js";
+import {
+  parseDosChoice,
+  parseDosPause,
+  type DosPrompt,
+} from "./dosTextUtilities.js";
 import {
   DosDriveError,
   DosRuntimeStateError,
@@ -196,6 +208,7 @@ export interface ShellResult {
   readonly stderr: string;
   readonly stdout: string;
   readonly sleepTicks?: number;
+  readonly terminalInput?: boolean;
   readonly terminalScreen?: EditorScreen;
   readonly resetTerminal?: boolean;
   readonly cpuCycles?: number;
@@ -203,6 +216,13 @@ export interface ShellResult {
   readonly ioWaitEvent?: string;
   readonly jobControl?: ShellJobControlRequest;
   readonly outputEvents?: readonly ShellOutputEvent[];
+}
+
+interface PendingDosBatch {
+  readonly stderrLength: number;
+  readonly steps: number;
+  readonly stdoutLength: number;
+  readonly resume: DosBatchSuspendedResult["resume"];
 }
 
 export interface ShellSessionOptions {
@@ -474,6 +494,10 @@ export class ShellSession {
   private readonly loginSessionId = "tty1";
   private shellProcessId: number | undefined;
   private nextDosPipeSpoolId = 1;
+  private dosPrompt: DosPrompt | undefined;
+  private pendingDosBatch: PendingDosBatch | undefined;
+  private pendingDosPromptContinuation:
+    ((exitCode: number) => ShellResult) | undefined;
   private pendingPagerContinuation: (() => ShellResult) | undefined;
   private readonly deferGuestExecution: boolean;
   private perlSourceCollection: PerlSourceCollection | undefined;
@@ -676,6 +700,7 @@ export class ShellSession {
       this.vi !== undefined ||
       this.editor !== undefined ||
       this.pager !== undefined ||
+      this.dosPrompt !== undefined ||
       this.perlSourceCollection !== undefined
     )
       return "";
@@ -694,6 +719,29 @@ export class ShellSession {
         cursorShape: "underline",
         history: false,
         inputMode: "none",
+        pointer: "none",
+        presentation: "terminal",
+        secretInput: false,
+      });
+    }
+    if (this.dosPrompt !== undefined) {
+      const choice = this.dosPrompt.kind === "choice";
+      return createTerminalInteractionDescriptor({
+        context: "dos-prompt",
+        ctrlCAction: "cancel",
+        cursorShape: profileCursorShape(this.frontend.id),
+        helpTopicId: choice ? "choice" : "pause",
+        hints: choice
+          ? [
+              { key: "Choice", label: "Select" },
+              { key: "Ctrl+C", label: "Cancel" },
+            ]
+          : [
+              { key: "Any key", label: "Continue" },
+              { key: "Ctrl+C", label: "Cancel" },
+            ],
+        history: false,
+        inputMode: "keys",
         pointer: "none",
         presentation: "terminal",
         secretInput: false,
@@ -779,6 +827,13 @@ export class ShellSession {
 
   cancelTerminalInteraction(): boolean {
     if (this.disconnected) return false;
+    if (this.dosPrompt !== undefined) {
+      this.dosPrompt = undefined;
+      this.pendingDosBatch = undefined;
+      this.pendingDosPromptContinuation = undefined;
+      this.lastExitCode = 130;
+      return true;
+    }
     const perlSource = this.takePerlSourceCollection();
     if (perlSource !== undefined) {
       perlSource.memory.release();
@@ -838,6 +893,9 @@ export class ShellSession {
     this.vi = undefined;
     this.editor = undefined;
     this.pager = undefined;
+    this.dosPrompt = undefined;
+    this.pendingDosBatch = undefined;
+    this.pendingDosPromptContinuation = undefined;
     this.pendingPagerContinuation = undefined;
     this.pendingEditorCommand = undefined;
     const perlSource = this.takePerlSourceCollection();
@@ -898,7 +956,13 @@ export class ShellSession {
     this.cpuCyclesValue = 0;
     this.commands.beginFilesystemIo();
     let result: ShellResult;
-    if (this.vi !== undefined) result = this.submitViLine(line);
+    if (this.dosPrompt !== undefined)
+      result = resultFromStreams(
+        "",
+        "COMMAND: key input is active; use a key or Ctrl+C.\r\n",
+        2,
+      );
+    else if (this.vi !== undefined) result = this.submitViLine(line);
     else if (this.editor !== undefined) result = this.submitEditor(line);
     else if (this.pager !== undefined) result = this.submitPager(line);
     else if (this.perlSourceCollection !== undefined)
@@ -1064,6 +1128,13 @@ export class ShellSession {
         this.perlSourceCollection === undefined
           ? "debug: interactive editor session is active\n"
           : "debug: interactive Perl source collection is active\n",
+        2,
+      );
+    }
+    if (this.dosPrompt !== undefined) {
+      return resultFromStreams(
+        "",
+        "debug: interactive DOS key input is active\n",
         2,
       );
     }
@@ -1334,6 +1405,15 @@ export class ShellSession {
     this.cpuCyclesValue = keys.length;
     if (!this.isAuthenticated())
       return this.withCpuCycles(resultFromStreams("", "", 0));
+    if (this.dosPrompt !== undefined) {
+      if (keys.length > 32) {
+        return this.withCpuCycles({
+          ...resultFromStreams("", "CHOICE: key batch limit exceeded\r\n", 2),
+          terminalInput: true,
+        });
+      }
+      return this.withCpuCycles(this.dosPromptKeys(keys));
+    }
     if (
       this.vi === undefined &&
       this.editor === undefined &&
@@ -1383,6 +1463,96 @@ export class ShellSession {
     return this.withCpuCycles(result);
   }
 
+  private dosPromptKeys(keys: readonly string[]): ShellResult {
+    const prompt = this.dosPrompt;
+    if (prompt === undefined) return resultFromStreams("", "", 0);
+    let ignored = "";
+    for (const key of keys) {
+      const completed = dosPromptCompletion(prompt, key);
+      if (completed === undefined) {
+        ignored += "\u0007";
+        continue;
+      }
+      this.dosPrompt = undefined;
+      const pendingBatch = this.pendingDosBatch;
+      if (pendingBatch !== undefined) {
+        this.pendingDosBatch = undefined;
+        const resumed = this.resumeDosBatch(pendingBatch, completed);
+        const prefixed =
+          ignored.length === 0
+            ? resumed
+            : shellResultFromCommand(
+                mergeCommandResults(
+                  { exitCode: 0, stderr: "", stdout: ignored },
+                  toCommandResult(resumed),
+                ),
+              );
+        return this.continueAfterDosPrompt(prefixed);
+      }
+      this.lastExitCode = completed.exitCode;
+      const resumed = resultFromStreams(
+        ignored + completed.stdout,
+        "",
+        completed.exitCode,
+      );
+      return this.continueAfterDosPrompt(resumed);
+    }
+    return { ...resultFromStreams(ignored, "", 0), terminalInput: true };
+  }
+
+  private continueAfterDosPrompt(result: ShellResult): ShellResult {
+    if (result.terminalInput === true) return result;
+    const continuation = this.pendingDosPromptContinuation;
+    this.pendingDosPromptContinuation = undefined;
+    if (continuation === undefined) return result;
+    return shellResultFromCommand(
+      mergeCommandResults(
+        toCommandResult(result),
+        toCommandResult(continuation(result.exitCode)),
+      ),
+    );
+  }
+
+  private resumeDosBatch(
+    pending: PendingDosBatch,
+    completion: { readonly exitCode: number; readonly stdout: string },
+  ): ShellResult {
+    return this.dosBatchResult(
+      pending.resume({
+        exitCode: completion.exitCode,
+        stderr: "",
+        stdout: completion.stdout,
+      }),
+      pending,
+    );
+  }
+
+  private dosBatchResult(
+    result: DosBatchExecutionResult,
+    previous?: Pick<PendingDosBatch, "stderrLength" | "steps" | "stdoutLength">,
+  ): ShellResult {
+    this.commands.setDosEchoEnabled(result.echoEnabled);
+    this.cpuCyclesValue += Math.max(0, result.steps - (previous?.steps ?? 0));
+    this.lastExitCode = result.exitCode;
+    const stdout = result.stdout.slice(previous?.stdoutLength ?? 0);
+    const stderr = result.stderr.slice(previous?.stderrLength ?? 0);
+    if (result.kind === "suspended") {
+      this.pendingDosBatch = {
+        resume: (completion): DosBatchExecutionResult =>
+          result.resume(completion),
+        stderrLength: result.stderr.length,
+        steps: result.steps,
+        stdoutLength: result.stdout.length,
+      };
+      return {
+        ...resultFromStreams(stdout, stderr, result.exitCode),
+        terminalInput: true,
+      };
+    }
+    this.pendingDosBatch = undefined;
+    return resultFromStreams(stdout, stderr, result.exitCode);
+  }
+
   mouse(encoded: string): ShellResult {
     this.armTerminalSession();
     this.cpuCyclesValue = 1;
@@ -1398,6 +1568,29 @@ export class ShellSession {
         resultFromStreams("", `editor: ${message(error)}\n`, 2),
       );
     }
+  }
+
+  private startDosChoice(arguments_: readonly string[]): ShellCommandResult {
+    const parsed = parseDosChoice(arguments_);
+    return "exitCode" in parsed ? parsed : this.startDosPrompt(parsed);
+  }
+
+  private startDosPause(arguments_: readonly string[]): ShellCommandResult {
+    const parsed = parseDosPause(arguments_);
+    return "exitCode" in parsed ? parsed : this.startDosPrompt(parsed);
+  }
+
+  private startDosPrompt(prompt: DosPrompt): ShellCommandResult {
+    if (this.dosPrompt !== undefined) {
+      return commandFailure("COMMAND", "key input is already active", 2);
+    }
+    this.dosPrompt = prompt;
+    return {
+      exitCode: 0,
+      stderr: "",
+      stdout: prompt.display,
+      terminalInput: true,
+    };
   }
 
   private startPerlSourceCollection(
@@ -1482,6 +1675,7 @@ export class ShellSession {
             source: collection.sourceChunks.join(""),
           }),
       );
+      this.cpuCyclesValue += executed.cpuCycles ?? 0;
     } catch (error: unknown) {
       executed = commandFailure("perl", message(error), 1);
     }
@@ -1562,6 +1756,7 @@ export class ShellSession {
         }
       }
       return {
+        cpuCycles: result.cpuCycles,
         exitCode,
         outputEvents: terminalEvents,
         stderr: terminalEvents
@@ -1782,6 +1977,31 @@ export class ShellSession {
             outputEvents,
           ),
           jobControl: executed.jobControl,
+        };
+      }
+      if (executed.terminalInput === true) {
+        if (chainIndex + 1 < chains.length) {
+          const remaining = chains.slice(chainIndex + 1);
+          this.pendingDosPromptContinuation = (
+            selectedExitCode: number,
+          ): ShellResult =>
+            this.executeProgramChains(
+              remaining,
+              depth,
+              interactiveAllowed,
+              selectedExitCode,
+            );
+        }
+        return {
+          ...resultFromStreams(
+            stdout,
+            stderr,
+            exitCode,
+            action,
+            undefined,
+            outputEvents,
+          ),
+          terminalInput: true,
         };
       }
       if (executed.terminalScreen !== undefined || executed.resetTerminal) {
@@ -2084,8 +2304,8 @@ export class ShellSession {
             stdout: "",
           });
     };
-    const redirectedInput = new Map<ShellOpenRedirect, string>();
-    const inputRedirects: ShellOpenRedirect[] = [];
+    const redirectedInput = new Map<ShellInputRedirect, string>();
+    const inputRedirects: ShellInputRedirect[] = [];
     try {
       dosSpoolPaths =
         this.frontend.id === "dos"
@@ -2095,11 +2315,11 @@ export class ShellSession {
           : [];
       for (const command of expandedCommands) {
         for (const redirect of command.redirects) {
-          if (
-            redirect.kind === "open" &&
-            redirect.descriptor === 0 &&
-            redirect.mode === "read"
-          ) {
+          if (redirect.kind === "here-document") {
+            inputRedirects.push(redirect);
+            continue;
+          }
+          if (isShellInputRedirect(redirect)) {
             // Validate every input before committing output setup. The value is
             // read again after `>` truncation so same-file input/output does
             // not retain a pre-open snapshot.
@@ -2131,7 +2351,12 @@ export class ShellSession {
       if (requiresSetupTransaction) this.commands.transaction(prepareOutputs);
       for (const path of dosSpoolPaths) ownedDosSpools.add(path);
       for (const redirect of inputRedirects) {
-        redirectedInput.set(redirect, this.commands.readFile(redirect.path));
+        redirectedInput.set(
+          redirect,
+          redirect.kind === "here-document"
+            ? redirect.content
+            : this.commands.readFile(redirect.path),
+        );
       }
     } catch (error: unknown) {
       return finalizeDosSpools({
@@ -2150,16 +2375,14 @@ export class ShellSession {
     let exitCode = 0;
     let action: ShellAction | undefined;
     let sleepTicks: number | undefined;
+    let terminalInput = false;
     let terminalScreen: EditorScreen | undefined;
     let resetTerminal = false;
     let foreground: ShellForegroundRequest | undefined;
     let jobControl: ShellJobControlRequest | undefined;
     for (let index = 0; index < expandedCommands.length; index += 1) {
       const expanded = expandedCommands[index]!;
-      const inputRedirect = expanded.redirects.findLast(
-        (redirect): redirect is ShellOpenRedirect =>
-          redirect.kind === "open" && redirect.descriptor === 0,
-      );
+      const inputRedirect = expanded.redirects.findLast(isShellInputRedirect);
       let stdin: string;
       try {
         stdin =
@@ -2198,9 +2421,9 @@ export class ShellSession {
       for (const redirect of expanded.redirects) {
         if (redirect.kind === "duplicate") {
           stderrSink = stdoutSink;
-        } else if (redirect.descriptor === 1) {
+        } else if (redirect.kind === "open" && redirect.descriptor === 1) {
           stdoutSink = { kind: "file", path: redirect.path };
-        } else if (redirect.descriptor === 2) {
+        } else if (redirect.kind === "open" && redirect.descriptor === 2) {
           stderrSink = { kind: "file", path: redirect.path };
         }
       }
@@ -2245,6 +2468,7 @@ export class ShellSession {
       exitCode = executed.exitCode;
       action = executed.action;
       sleepTicks = executed.sleepTicks;
+      terminalInput = executed.terminalInput === true;
       terminalScreen = executed.terminalScreen;
       resetTerminal = executed.resetTerminal ?? false;
       foreground = executed.foreground;
@@ -2264,7 +2488,9 @@ export class ShellSession {
           throw new Error("hosted CS ABI pipe endpoint was not admitted");
         };
         const hasDescriptorRouting = expanded.redirects.some(
-          (redirect) => redirect.kind !== "open" || redirect.descriptor !== 0,
+          (redirect) =>
+            redirect.kind === "duplicate" ||
+            (redirect.kind === "open" && redirect.descriptor !== 0),
         );
         foreground = {
           ...foreground,
@@ -2354,6 +2580,7 @@ export class ShellSession {
       }
       if (action !== undefined) break;
       if (sleepTicks !== undefined) break;
+      if (terminalInput) break;
       if (foreground !== undefined) break;
       if (jobControl !== undefined) break;
     }
@@ -2372,6 +2599,7 @@ export class ShellSession {
       outputEvents: terminalEvents,
       stdout,
       ...(sleepTicks === undefined ? {} : { sleepTicks }),
+      ...(terminalInput ? { terminalInput: true } : {}),
       ...(terminalScreen === undefined ? {} : { terminalScreen }),
       ...(resetTerminal ? { resetTerminal: true } : {}),
       ...(foreground === undefined ? {} : { foreground }),
@@ -2944,6 +3172,21 @@ export class ShellSession {
           : { background: { ...nested.background, niceValue } }),
       };
     }
+    if (sessionCommand === "dos-choice" || sessionCommand === "dos-pause") {
+      if (!interactiveAllowed || command.redirects.length > 0) {
+        return commandFailure(name, "cannot run in a pipeline or redirect", 2);
+      }
+      if (this.debugSubmission) {
+        return commandFailure(
+          name,
+          "interactive key input is unavailable through MCP debug commands",
+          2,
+        );
+      }
+      return sessionCommand === "dos-choice"
+        ? this.startDosChoice(arguments_)
+        : this.startDosPause(arguments_);
+    }
     if (sessionCommand === "dos-history") {
       if (arguments_.length === 0) {
         this.doskeyLoaded = true;
@@ -3074,10 +3317,23 @@ export class ShellSession {
         if (mayCollectFromTerminal) {
           return this.startPerlSourceCollection({ ...prepared, kind: "stdin" });
         }
-        return this.commands.executePreparedLinuxPerl(prepared, {
-          kind: "source",
-          source: stdin,
-        });
+        const result = this.commands.executePreparedLinuxPerl(
+          prepared,
+          {
+            kind: "source",
+            source: stdin,
+          },
+          this.debugSubmission,
+        );
+        this.cpuCyclesValue += result.cpuCycles ?? 0;
+        return result;
+      }
+      if (this.debugSubmission) {
+        return this.commands.executePreparedLinuxPerl(
+          prepared,
+          { kind: "data", stdin },
+          true,
+        );
       }
     }
     const result = this.commands.execute(command.words, stdin);
@@ -5325,6 +5581,14 @@ export class ShellSession {
             };
           }
           const executed = this.executeLine(commandLine, depth + 1, true);
+          if (executed.terminalInput === true) {
+            return {
+              exitCode: executed.exitCode,
+              stderr: executed.stderr,
+              stdout: executed.stdout,
+              suspended: true,
+            };
+          }
           if (
             executed.action !== undefined ||
             executed.sleepTicks !== undefined ||
@@ -5356,14 +5620,7 @@ export class ShellSession {
         },
       },
     );
-    this.commands.setDosEchoEnabled(result.echoEnabled);
-    this.cpuCyclesValue += result.steps;
-    this.lastExitCode = result.exitCode;
-    return {
-      exitCode: result.exitCode,
-      stderr: result.stderr,
-      stdout: result.stdout,
-    };
+    return toCommandResult(this.dosBatchResult(result));
   }
 
   private configureDosMemory(path: string): ShellCommandResult {
@@ -5461,6 +5718,44 @@ export class ShellSession {
         .join(""),
       stdout: "",
     };
+  }
+
+  /**
+   * A script is normally executed one physical line at a time.  Keep a Linux
+   * here-document's body together with its header so its content is never
+   * interpreted as subsequent shell commands.
+   */
+  private collectScriptHereDocument(
+    lines: readonly string[],
+    start: number,
+    header: string,
+  ): { readonly end: number; readonly source: string } | undefined {
+    if (this.frontend.id !== "linux") return undefined;
+    const delimiters = shellHereDocumentDelimiters(
+      header,
+      (name) => `${variableMarkerStart}${name}${variableMarkerEnd}`,
+    );
+    if (delimiters.length === 0) return undefined;
+
+    const source = [header];
+    let cursor = start + 1;
+    for (const delimiter of delimiters) {
+      let terminated = false;
+      while (cursor < lines.length) {
+        const bodyLine = lines[cursor++]!.replace(/\r$/u, "");
+        source.push(bodyLine);
+        if (bodyLine === delimiter) {
+          terminated = true;
+          break;
+        }
+      }
+      if (!terminated) {
+        throw new ShellSyntaxError(
+          `here-document '${delimiter}' is missing its terminating delimiter`,
+        );
+      }
+    }
+    return { end: cursor - 1, source: source.join("\n") };
   }
 
   private executeScriptLines(
@@ -5613,9 +5908,23 @@ export class ShellSession {
         const code = Math.min(255, Number(returnMatch[1] ?? combined.exitCode));
         return { flow: "return", result: { ...combined, exitCode: code } };
       }
-      const result = this.executeLine(line, depth);
+      let source = line;
+      let hereDocumentEnd: number | undefined;
+      try {
+        const hereDocument = this.collectScriptHereDocument(lines, index, line);
+        if (hereDocument !== undefined) {
+          source = hereDocument.source;
+          hereDocumentEnd = hereDocument.end;
+        }
+      } catch (error: unknown) {
+        const detail =
+          error instanceof ShellSyntaxError ? error.message : message(error);
+        return scriptFailure(label, this.frontend.syntaxError(detail).trim());
+      }
+      const result = this.executeLine(source, depth);
       if (!append(toCommandResult(result)))
         return scriptFailure(label, "script output or wait limit exceeded");
+      if (hereDocumentEnd !== undefined) index = hereDocumentEnd;
     }
     return { flow: "normal", result: combined };
   }
@@ -7557,6 +7866,7 @@ function toCommandResult(result: ShellResult): ShellCommandResult {
     ...(result.sleepTicks === undefined
       ? {}
       : { sleepTicks: result.sleepTicks }),
+    ...(result.terminalInput === true ? { terminalInput: true } : {}),
     ...(result.terminalScreen === undefined
       ? {}
       : { terminalScreen: result.terminalScreen }),
@@ -7590,6 +7900,7 @@ function mergeCommandResults(
       ...commandOutputEvents(next),
     ],
     ...(next.sleepTicks === undefined ? {} : { sleepTicks: next.sleepTicks }),
+    ...(next.terminalInput === true ? { terminalInput: true } : {}),
     ...(next.terminalScreen === undefined
       ? {}
       : { terminalScreen: next.terminalScreen }),
@@ -7599,6 +7910,17 @@ function mergeCommandResults(
 
 function scriptFailure(label: string, detail: string): ScriptExecution {
   return { flow: "normal", result: commandFailure(label, detail) };
+}
+
+function isShellInputRedirect(
+  redirect: ShellRedirect,
+): redirect is ShellInputRedirect {
+  return (
+    redirect.kind === "here-document" ||
+    (redirect.kind === "open" &&
+      redirect.descriptor === 0 &&
+      redirect.mode === "read")
+  );
 }
 
 function resultFromStreams(
@@ -7674,6 +7996,7 @@ function shellResultFromCommand(result: ShellCommandResult): ShellResult {
     ...(result.jobControl === undefined
       ? {}
       : { jobControl: result.jobControl }),
+    ...(result.terminalInput === true ? { terminalInput: true } : {}),
     ...(result.terminalScreen === undefined
       ? {}
       : { terminalScreen: result.terminalScreen }),
@@ -7727,6 +8050,27 @@ function limitHistoryLine(value: string): string {
     bytes += size;
   }
   return result;
+}
+
+function dosPromptCompletion(
+  prompt: DosPrompt,
+  key: string,
+): { readonly exitCode: number; readonly stdout: string } | undefined {
+  if (prompt.kind === "pause") {
+    return key === "Ctrl+C" ? undefined : { exitCode: 0, stdout: "\r\n" };
+  }
+  if ([...key].length !== 1) return undefined;
+  const candidate = prompt.caseSensitive ? key : key.toUpperCase();
+  const index = prompt.choices.findIndex(
+    (choice) =>
+      (prompt.caseSensitive ? choice : choice.toUpperCase()) === candidate,
+  );
+  return index < 0
+    ? undefined
+    : {
+        exitCode: index + 1,
+        stdout: prompt.choices[index]! + "\r\n",
+      };
 }
 
 function dosBatchCommandRequiresInteractiveOwner(commandLine: string): boolean {

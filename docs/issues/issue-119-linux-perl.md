@@ -40,6 +40,15 @@ collects source until Ctrl+D and lets Ctrl+C cancel without compiling or
 executing it. Source bytes are never replayed as the executed program's data
 stdin.
 
+### CS486 execution extension (2026-07-31)
+
+`src/application/runtime/perlCs486.ts` compiles Perl branches, loops, and
+expression operations to the production CS486 instruction set. The resulting
+single `Cs486Process` owns the instruction pointer, cycle debt, scheduler
+slices, PID, and RAM grant. Bounded Perl value, regex, and guest-I/O semantics
+cross one allowlisted managed syscall boundary. There is no host Perl process
+and no second CPU implementation.
+
 ### Determinism
 
 - Hash iteration is insertion-ordered, not randomized as in upstream perl, so a
@@ -48,6 +57,18 @@ stdin.
   leaking host time into a guest run.
 - File I/O routes through the same credentialed guest filesystem as every other
   command. Host paths never appear in guest-visible errors.
+- The semantic step counter remains only as a hard safety limit. It is not CPU
+  accounting. Normal terminal and MCP execution report the instructions and
+  cycles produced by the sole `Cs486Process`, including deterministic syscall
+  service cycles.
+- Python and Perl use one shared bounded instruction-equivalent tariff for
+  managed dispatch, type checks, loads, stores, iterator acquisition/steps,
+  collections, and string traversal. Add/compare, multiply, divide/modulo, and
+  power retain distinct 486-class ordering. Python arbitrary-precision integer
+  work scales by 30-bit limb count; Perl follows its documented scalar-double
+  representation. A fixed per-language or benchmark-specific multiplier is not
+  used, and the model does not claim cycle-exact upstream CPython/perl
+  internals.
 
 ### Limits
 
@@ -140,6 +161,26 @@ on `while`, `until`, `for`, and `foreach`; anywhere else it fails explicitly.
     exact output and prompt with no console diagnostics or horizontal overflow.
     `man perl` and the Web Manual Perl section were also visibly inspected in
     the preceding isolated real-BDS run.
+11. Verify: execute the same bounded Perl workload twice through MCP, then a
+    shorter Perl workload. Expect: the repeated runs return the same CPU cycles,
+    the longer workload returns more than the shorter workload, and neither is
+    the shell-only 8-cycle placeholder. Covered by `tests/os/linuxPerl.test.ts`
+    and `tests/computer/computerHost.test.ts`. Observed 2026-07-31 on an
+    isolated real BDS, CS486DX2 at 66 MHz, after applying the shared managed
+    tariff: the aligned 1,500-iteration checksum returned 893,439 Python cycles
+    and 1,052,332 Perl cycles in all three repetitions, exit 0, with no BDS
+    diagnostics. The aligned 100-iteration workloads returned 23,119 Python
+    cycles and 36,161 Perl cycles. This proves that both languages scale under
+    their production `Cs486Process` accounting without a ranking-specific
+    multiplier. The isolated BDS stopped afterward while the normal development
+    server remained running. Earlier accounting captures remain only as
+    superseded provenance in the benchmark JSON.
+
+Current focused verification passed 105 tests across the shared cost model,
+Python CS486/numeric, Perl, and ComputerHost suites. `npm run validate` then
+passed formatting, ESLint, TypeScript, all 2,693 Vitest tests in 314 files, the
+Bedrock pack build, and the 16-chapter Pages build. No Vitest process survived
+either run.
 
 Focused verification: the 12-file Perl/Python/runtime/Computer/terminal/Web/BDS
 command passed 238 tests, including the Perl interpreter and shell-session

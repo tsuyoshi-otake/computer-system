@@ -66,11 +66,78 @@ describe("bounded CS-Linux awk", (): void => {
     });
   });
 
+  it("keeps bounded scalar totals through records into an END expression", (): void => {
+    const session = new ShellSession(new InMemoryFilesystem(), {
+      osProfile: "linux",
+    });
+
+    expect(
+      session.submit(
+        "printf 'alice 3\\nbob 4\\n' | awk '{ sum += $2; count++ } END { print sum, sum / count }'",
+      ),
+    ).toMatchObject({ exitCode: 0, stdout: "7 3.5\n" });
+  });
+
   it("rejects one record beyond the configured bound", (): void => {
     const input = `${"x\n".repeat(linuxTextProcessorLimits.maximumRecords)}x\n`;
     const result = executeLinuxAwk(["{ print }"], input, () => "");
 
     expect(result.exitCode).toBe(2);
     expect(result.stderr).toContain("record count limit exceeded");
+  });
+});
+
+describe("bounded CS-Linux search utilities", (): void => {
+  it("matches alternation in grep and explicit rg files without a host scan", (): void => {
+    const filesystem = new InMemoryFilesystem();
+    const session = new ShellSession(filesystem, { osProfile: "linux" });
+    filesystem.writeFile("/tmp/first.log", "ERROR first\ninfo\n");
+    filesystem.writeFile("/tmp/second.log", "warn later\nWARN second\n");
+
+    expect(
+      session.submit("printf 'INFO\\nERROR\\nWARN\\n' | grep 'ERROR|WARN'"),
+    ).toMatchObject({
+      exitCode: 0,
+      stdout: "ERROR\nWARN\n",
+    });
+    expect(
+      session.submit("rg -in 'ERROR|WARN' /tmp/first.log /tmp/second.log"),
+    ).toMatchObject({
+      exitCode: 0,
+      stdout:
+        "/tmp/first.log:1:ERROR first\n/tmp/second.log:1:warn later\n/tmp/second.log:2:WARN second\n",
+    });
+    expect(
+      session.submit("rg -l 'ERROR|WARN' /tmp/first.log /tmp/second.log"),
+    ).toMatchObject({
+      exitCode: 0,
+      stdout: "/tmp/first.log\n/tmp/second.log\n",
+    });
+    expect(session.submit("rg -F 'ERROR|WARN' /tmp/first.log")).toMatchObject({
+      exitCode: 1,
+      stdout: "",
+    });
+  });
+});
+
+describe("practical CS-Linux text selections", (): void => {
+  it("selects bounded character ranges and removes a bounded character set", (): void => {
+    const session = new ShellSession(new InMemoryFilesystem(), {
+      osProfile: "linux",
+    });
+
+    expect(session.submit("printf 'alphabet\\n' | cut -c 1,3-5")).toMatchObject(
+      {
+        exitCode: 0,
+        stdout: "apha\n",
+      },
+    );
+    expect(session.submit("printf 'abaac\\n' | tr -d ab")).toMatchObject({
+      exitCode: 0,
+      stdout: "c\n",
+    });
+    const invalidRange = session.submit("cut -c 5-3");
+    expect(invalidRange.exitCode).toBe(2);
+    expect(invalidRange.stderr).toContain("Usage:");
   });
 });

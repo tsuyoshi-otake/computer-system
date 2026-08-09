@@ -177,8 +177,8 @@ synchronized.
 - #113: One `terminal_keys` wakeup owner, bounded atomic CPU sub-slices, and
   unsaturated cumulative CPU accounting.
 - #118: Deferred terminal writes suspend instead of discarding guest stdout.
-- #119/#122: Bounded guest-owned Perl 5.40 and a persistent bare Python REPL on
-  one production CS486 process, PID, scheduler entry, runtime, and RAM grant.
+- #119/#122: Bounded Perl 5.40 and persistent Python REPL share CS486.
+- #126: Bounded MS-DOS 6.2-style CS-DOS CLI essentials.
 
 Use English commit messages with useful detail and reference every applicable
 Issue. Issue #4 remains relevant while Phase 2 work is in scope.

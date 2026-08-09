@@ -250,8 +250,8 @@ while True:
     id: "shell",
     html: `
       <header class="manual-page-header"><p class="manual-kicker">Chapter 04 · Command environment</p><h2>Computer System Bash</h2><p class="manual-lead">A bounded compatibility shell implemented inside the application layer. It is not host Bash and cannot escape to a native process.</p></header>
-      <section class="manual-section"><h3>4.1 Grammar</h3><table><thead><tr><th>Feature</th><th>Syntax</th></tr></thead><tbody><tr><td>Pipeline</td><td><code>a | b</code>, <code>a |&amp; b</code></td></tr><tr><td>Redirection</td><td><code>&lt;</code>, <code>&gt;</code>, <code>&gt;&gt;</code>, <code>2&gt;</code>, <code>2&gt;&gt;</code>, <code>2&gt;&amp;1</code></td></tr><tr><td>Control</td><td><code>&amp;&amp;</code>, <code>||</code>, <code>;</code></td></tr><tr><td>Expansion</td><td><code>$VAR</code>, <code>$?</code>, positional parameters</td></tr><tr><td>Scripts</td><td>if/else, for, while, functions, break, continue, return, source</td></tr></tbody></table><p>Redirections are applied from left to right. Thus <code>probe &gt;all 2&gt;&amp;1</code> shares one destination, while <code>probe 2&gt;&amp;1 &gt;out</code> leaves stderr on the original stdout destination. An explicit redirect can override a pipe; <code>|&amp;</code> performs its implicit stderr duplication after explicit redirects.</p></section>
-      <section class="manual-section"><h3>4.2 Command families</h3><div class="manual-command-bank"><p><b>Files</b> pwd cd ls cat mkdir touch rm cp mv find stat df du quota</p><p><b>Text</b> echo printf head tail wc grep sed awk perl sort uniq tr cut seq nl md5sum base64</p><p><b>Archives</b> tar gzip gunzip zip unzip</p><p><b>Viewers</b> more less</p><p><b>Shell</b> sh bash source env export unset which type history time umask</p><p><b>Identity</b> whoami id groups login logout passwd su sudo getent</p><p><b>Accounts</b> useradd userdel usermod groupadd groupdel</p><p><b>Processes and sessions</b> ps top kill pgrep pkill killall jobs fg bg wait nice nohup watch tty who w last</p><p><b>System</b> hostname uname date uptime vmstat sleep crontab service telinit runlevel man apropos sync shutdown reboot</p></div></section>
+      <section class="manual-section"><h3>4.1 Grammar</h3><table><thead><tr><th>Feature</th><th>Syntax</th></tr></thead><tbody><tr><td>Descriptors</td><td>stdin <code>0</code>, stdout <code>1</code>, stderr <code>2</code></td></tr><tr><td>Pipeline</td><td><code>a | b</code>, <code>a |&amp; b</code></td></tr><tr><td>Redirection</td><td><code>&lt;</code>, <code>&gt;</code>, <code>&gt;&gt;</code>, <code>2&gt;</code>, <code>2&gt;&gt;</code>, <code>2&gt;&amp;1</code>, <code>&amp;&gt;</code>, <code>&lt;&lt;WORD</code></td></tr><tr><td>Control</td><td><code>&amp;&amp;</code>, <code>||</code>, <code>;</code></td></tr><tr><td>Expansion</td><td><code>$VAR</code>, <code>$?</code>, positional parameters</td></tr><tr><td>Scripts</td><td>if/else, for, while, functions, break, continue, return, source</td></tr></tbody></table><p>At a terminal, stdin (fd 0), stdout (fd 1), and stderr (fd 2) begin at the guest terminal. <code>|</code> passes only stdout to the next command's stdin; <code>|&amp;</code> passes stdout and stderr. Redirections are applied from left to right. Thus <code>probe &gt;all 2&gt;&amp;1</code> or <code>probe &amp;&gt;all</code> shares one destination, while <code>probe 2&gt;&amp;1 &gt;out</code> leaves stderr on the original stdout destination. An explicit redirect can override a pipe; <code>|&amp;</code> performs its implicit stderr duplication after explicit redirects. <code>tee log</code> retains pipeline stdout on screen while writing the same bytes to a guest file. A literal <code>&lt;&lt;WORD</code> here-document supplies stdin without a file; submitted input ends at its terminator and scripts continue with the following line.</p></section>
+      <section class="manual-section"><h3>4.2 Command families</h3><div class="manual-command-bank"><p><b>Files</b> pwd cd ls cat mkdir touch rm cp mv find stat df du quota</p><p><b>Text</b> echo printf head tail wc grep rg jq sed awk perl sort uniq tr cut seq tee nl md5sum base64 xargs</p><p><b>Archives</b> tar gzip gunzip zip unzip</p><p><b>Viewers</b> more less</p><p><b>Shell</b> sh bash source env export unset which type history time umask</p><p><b>Identity</b> whoami id groups login logout passwd su sudo getent</p><p><b>Accounts</b> useradd userdel usermod groupadd groupdel</p><p><b>Processes and sessions</b> ps top kill pgrep pkill killall jobs fg bg wait nice nohup watch tty who w last</p><p><b>System</b> hostname uname date uptime vmstat sleep crontab service telinit runlevel man apropos sync shutdown reboot</p></div></section>
       <section class="manual-section manual-grid-2"><div><h3>4.3 Startup</h3><pre><code>/etc/profile
 /etc/bash.bashrc
 ~/.bashrc</code></pre><p>Files are created non-destructively and loaded in that order only after authentication succeeds.</p></div><div><h3>4.4 Example</h3><pre><code>for name in alpha beta alpha; do
@@ -330,7 +330,22 @@ cp /usr/src/nethack/* ~/nethack/
 cd ~/nethack &amp;&amp; make
 sudo make install PREFIX=/usr/local
 nethack</code></pre><p>The game has ten bounded dungeon depths, the Amulet goal, depth-gated monsters and items, hunger and experience, deterministic random state, and a 78 by 21 dungeon view. Move with <code>hjklyubn</code>; items remain on the floor until <code>,</code> picks them up. The full 80 by 25 inventory keeps stable <code>a</code>–<code>p</code> slots: <code>i</code> displays it, <code>e</code> eats, <code>q</code> quaffs, <code>r</code> reads, <code>w</code> wields (<code>w-</code> unwields), <code>W</code> wears armor, <code>T</code> takes armor off, and <code>d</code> drops a stack. In a selector, <code>?</code> or <code>*</code> redisplays the inventory and Esc cancels. Display, cancel, invalid choices, and rejected capacity changes spend no turn; each successful item mutation spends exactly one. Use <code>&lt;</code>/<code>&gt;</code> for stairs, press <code>?</code> for the in-game key help screen, press uppercase <code>S</code> to save and exit, and enter the complete <code>#quit</code> command to abandon unsaved progress. The bottom row is a persistent status line showing Dlvl, HP, Lv, XP, turn count, hunger stage, and Amulet possession, and explored walls render as <code>-</code> and <code>|</code>.</p><p>Only explicit <code>S</code> saves. The path comes from the immutable hosted-process <code>HOME</code> snapshot and is <code>~/.nethack.sav</code>, mode 0600. Save version 3 retains stable inventory slots, stack quantities, and equipped weapon and armor. Exact version 2 records remain loadable and migrate on the next explicit save; malformed records are rejected before live game state changes. A sibling temporary file is closed and atomically renamed over the canonical record; missing or invalid HOME, malformed records, disk capacity, DAC, interruption, disconnect, and terminal close never become an implicit save. Each account resolves its own HOME with its launch credentials. User PATH checks <code>/usr/local/games</code> before <code>/usr/games</code>, so an administrator-installed guest build shadows the stock binary. Use <code>sha256sum</code> to compare the clean guest build with the shipped artifact.</p></section>
-      <section class="manual-section"><h3>4.17 Byte pipelines, descriptors, and pagers</h3><pre><code>dmesg | less
+      <section class="manual-section"><h3>4.17 Standard streams, pipes, redirects, and practical filters</h3><table><thead><tr><th>Stream</th><th>Descriptor</th><th>Normal terminal destination</th></tr></thead><tbody><tr><td>stdin</td><td><code>0</code></td><td>command input</td></tr><tr><td>stdout</td><td><code>1</code></td><td>normal results</td></tr><tr><td>stderr</td><td><code>2</code></td><td>errors and warnings</td></tr></tbody></table><pre><code># Search normal output and diagnostics together
+command 2&gt;&amp;1 | rg 'ERROR|WARN'
+
+# Keep stdout on screen and save it in the guest filesystem
+./run.sh 2&gt;&amp;1 | tee run.log
+
+# Keep results and errors separate
+./run.sh &gt; success.log 2&gt; error.log
+
+# Feed literal data to stdin
+cat &lt;&lt;EOF
+one
+two
+EOF</code></pre><p><code>|</code> sends stdout to the next command's stdin; stderr stays at its current destination. <code>2&gt;&amp;1 |</code> and <code>|&amp;</code> send both streams through the pipeline. <code>&gt;</code> overwrites, <code>&gt;&gt;</code> appends, <code>2&gt;</code> redirects only stderr, and <code>&amp;&gt;</code> is ordered shorthand for stdout followed by stderr-to-stdout. Use <code>2&gt; /dev/null</code> to discard diagnostics, or <code>&gt; /dev/null 2&gt;&amp;1</code> to discard both streams. A literal shell here-document is capped at eight documents and 64 KiB per command; unsupported substitutions and syntax fail before execution.</p><p><code>grep</code> supports bounded alternatives and <code>-F -i -n -v</code>. <code>rg</code> adds <code>-l</code>, but reads only stdin or explicitly named guest files; it never performs recursive discovery. <code>jq [-r]</code> supports the documented bounded JSON lookup, iteration, collection, and simple selection subset. <code>cut -c 1,3-5</code> extracts characters, <code>cut -d : -f 1,3</code> extracts fields, and <code>tr -d '\r'</code> removes a character set. <code>find</code>, <code>which</code>, <code>type</code>, <code>xargs</code>, and <code>tee</code> all run inside the guest filesystem and shell; none dispatches a host shell or utility.</p></section>
+      <aside class="manual-callout"><b>Guest-only text processing</b><p>The <code>jq</code> parser and filter subset, the matcher behind <code>grep</code>/<code>rg</code>, and every listed shell utility execute over bounded guest data. They do not call host JavaScript evaluation, host ripgrep, PowerShell, or a native shell.</p></aside>
+      <section class="manual-section"><h3>4.18 Byte pipelines, descriptors, and pagers</h3><pre><code>dmesg | less
 yes | head -n 10
 probe &gt;all 2&gt;&amp;1
 probe 2&gt;&amp;1 &gt;out
@@ -1062,8 +1077,36 @@ const terminalLineHandoffAnchor =
   '<section class="manual-section manual-grid-2"><div><h3>3.3 Normal mode</h3>';
 const terminalLineHandoffCallout =
   '<aside class="manual-callout"><b>Submitted-line handoff</b><p>After physical Enter, the Web Terminal keeps one non-secret CS-Linux or CS-DOS line visible at its prompt position until the authoritative guest cells echo that exact line or the guest actually clears, scrolls, resizes, restores, or replaces the screen. Input admission and unrelated output alone do not erase the line. The handoff is atomic when NetHack, EDIT, or another full-screen program takes ownership, so there is no blank frame or duplicate echo. Passwords and every other secret-input line are excluded and cleared immediately.</p></aside>';
+const dosTextUtilityAnchor =
+  '<aside class="manual-callout"><b>Default DOS environment</b>';
+const dosTextUtilityCallout =
+  '<aside class="manual-callout"><b>Practical DOS text work and key prompts</b><p><code>FIND</code> accepts <code>/V /C /N /I</code> and reads standard input when no guest file is named: <code>TYPE LOG.TXT | FIND /I &quot;error&quot;</code>. <code>SORT [/R] [/+n] [file]</code> sorts standard input or one explicit guest file. Both preserve CRLF output; FIND accepts at most 256,000 input bytes and 4,096 records, while SORT accepts 64 KiB and 4,096 records.</p><p><code>FC</code> and <code>COMP</code> compare two explicit guest files only, with a 256,000-byte limit per file. <code>CHOICE [/C[:]keys] [/N] [/S] [text]</code> and <code>PAUSE</code> enter a bounded terminal-owned key prompt. The selected CHOICE position becomes one-based <code>ERRORLEVEL</code>; Ctrl+C cancels with 130. <code>CHOICE /T</code>, arbitrary native DOS binaries, wildcards for these utilities, and host execution remain explicitly unavailable.</p></aside>';
+const dosBatchPromptBoundary =
+  "<p><code>CHOICE</code> and native COMMAND.COM binary behavior are not implemented. Missing or duplicate labels, recursion, and exhausted bounds terminate explicitly without invoking a host or native DOS process.</p>";
+const dosBatchPromptBoundaryUpdate =
+  "<p><code>CHOICE</code> and <code>PAUSE</code> are terminal-owned BAT commands: each suspends the bounded script once, resumes after one accepted key, and writes CHOICE selection as one-based <code>ERRORLEVEL</code>. Ctrl+C ends the command or batch with status 130. <code>CHOICE /T</code> and native COMMAND.COM binary behavior are not implemented. Missing or duplicate labels, recursion, and exhausted bounds terminate explicitly without invoking a host or native DOS process.</p>";
+const dosImageReleaseStatement =
+  "The current CS-DOS v9 image adds <code>C:\\DOS\\MORE.COM</code>, while CS-Linux is rootfs v19.";
+const dosImageReleaseStatementUpdate =
+  "The current CS-DOS v10 image adds <code>C:\\DOS\\CHOICE.COM</code>, <code>COMP.COM</code>, <code>FC.EXE</code>, <code>FIND.EXE</code>, <code>PAUSE.COM</code>, and <code>SORT.EXE</code>, while CS-Linux is rootfs v20.";
 
 function authoredChapterHtml(id, html) {
+  if (id === "dos-profile") {
+    if (
+      !html.includes(dosTextUtilityAnchor) ||
+      !html.includes(dosBatchPromptBoundary) ||
+      !html.includes(dosImageReleaseStatement)
+    ) {
+      throw new Error("Missing DOS text utility manual insertion anchor");
+    }
+    return html
+      .replace(
+        dosTextUtilityAnchor,
+        dosTextUtilityCallout + dosTextUtilityAnchor,
+      )
+      .replace(dosBatchPromptBoundary, dosBatchPromptBoundaryUpdate)
+      .replace(dosImageReleaseStatement, dosImageReleaseStatementUpdate);
+  }
   if (id !== "terminal-editor") return html;
   if (!html.includes(terminalLineHandoffAnchor)) {
     throw new Error("Missing terminal submitted-line manual insertion anchor");

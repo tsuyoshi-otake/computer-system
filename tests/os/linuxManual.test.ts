@@ -59,6 +59,8 @@ describe("CS-Linux manual metadata", (): void => {
     expect(shell).toContain("|& connects stdout and stderr");
     expect(shell).toContain("Redirects are applied from left to right");
     expect(shell).toContain("probe 2>&1 >out");
+    expect(shell).toContain("stdin, descriptor 0");
+    expect(shell).toContain("cat <<EOF");
     const less = renderLinuxManualPage(linuxManualPage("less")!);
     expect(less).toContain("COMMAND | less");
     expect(less).toContain("live pipe input");
@@ -85,6 +87,11 @@ describe("CS-Linux manual metadata", (): void => {
     });
     expect(shell.submit("help").stdout).toContain(
       "|&  >  >>  <  2>  2>>  2>&1",
+    );
+    expect(shell.submit("help").stdout).toContain("&>  <<WORD");
+    expect(shell.submit("man rg").stdout).toContain("RG(1)");
+    expect(shell.submit("man jq").stdout).toContain(
+      "host JavaScript evaluation",
     );
     expect(shell.submit("man less").stdout).toContain("COMMAND | less");
     expect(shell.submit("man perl").stdout).toContain(

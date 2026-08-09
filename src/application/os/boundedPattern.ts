@@ -16,10 +16,19 @@ interface PatternAtom {
   readonly repeated: boolean;
 }
 
-export interface BoundedPattern {
+interface BoundedPatternBranch {
   readonly anchoredEnd: boolean;
   readonly anchoredStart: boolean;
   readonly atoms: readonly PatternAtom[];
+}
+
+/**
+ * A deliberately small regular-expression subset shared by guest utilities.
+ * Alternatives are kept as independently anchored branches so `^a|b` retains
+ * its conventional meaning instead of accidentally anchoring the whole source.
+ */
+export interface BoundedPattern {
+  readonly branches: readonly BoundedPatternBranch[];
 }
 
 export interface BoundedPatternMatch {
@@ -39,6 +48,18 @@ export function compileBoundedPattern(source: string): BoundedPattern {
   if (source.length > boundedPatternLimits.maximumPatternCharacters) {
     throw new BoundedPatternError("pattern character limit exceeded");
   }
+  const branches = splitAlternatives(source).map(parseBoundedPatternBranch);
+  const atoms = branches.reduce(
+    (count, branch) => count + branch.atoms.length,
+    0,
+  );
+  if (atoms > boundedPatternLimits.maximumAtoms) {
+    throw new BoundedPatternError("pattern atom limit exceeded");
+  }
+  return Object.freeze({ branches: Object.freeze(branches) });
+}
+
+function parseBoundedPatternBranch(source: string): BoundedPatternBranch {
   let cursor = 0;
   const anchoredStart = source.startsWith("^");
   if (anchoredStart) cursor += 1;
@@ -75,9 +96,6 @@ export function compileBoundedPattern(source: string): BoundedPattern {
     const repeated = source[cursor] === "*";
     if (repeated) cursor += 1;
     atoms.push(Object.freeze({ ...atom, repeated }));
-    if (atoms.length > boundedPatternLimits.maximumAtoms) {
-      throw new BoundedPatternError("pattern atom limit exceeded");
-    }
   }
   if (atoms.length === 0) throw new BoundedPatternError("empty pattern");
   return Object.freeze({
@@ -85,6 +103,46 @@ export function compileBoundedPattern(source: string): BoundedPattern {
     anchoredStart,
     atoms: Object.freeze(atoms),
   });
+}
+
+function splitAlternatives(source: string): readonly string[] {
+  const alternatives: string[] = [];
+  let current = "";
+  let characterClass = false;
+  let escaped = false;
+  for (const character of source) {
+    if (escaped) {
+      current += character;
+      escaped = false;
+      continue;
+    }
+    if (character === "\\") {
+      current += character;
+      escaped = true;
+      continue;
+    }
+    if (character === "[") {
+      characterClass = true;
+      current += character;
+      continue;
+    }
+    if (character === "]" && characterClass) {
+      characterClass = false;
+      current += character;
+      continue;
+    }
+    if (character === "|" && !characterClass) {
+      if (current.length === 0)
+        throw new BoundedPatternError("empty alternative");
+      alternatives.push(current);
+      current = "";
+      continue;
+    }
+    current += character;
+  }
+  if (current.length === 0) throw new BoundedPatternError("empty alternative");
+  alternatives.push(current);
+  return alternatives;
 }
 
 export function findBoundedPattern(
@@ -96,18 +154,18 @@ export function findBoundedPattern(
     throw new RangeError("invalid pattern search offset");
   }
   const counter = { steps: 0 };
-  const first = pattern.anchoredStart ? 0 : from;
-  const last = pattern.anchoredStart ? 0 : input.length;
-  for (let start = first; start <= last; start += 1) {
-    if (start < from) continue;
-    const end = matchAt(pattern, input, start, counter);
-    if (end !== undefined) return { end, start };
+  for (let start = from; start <= input.length; start += 1) {
+    for (const branch of pattern.branches) {
+      if (branch.anchoredStart && start !== 0) continue;
+      const end = matchAt(branch, input, start, counter);
+      if (end !== undefined) return { end, start };
+    }
   }
   return undefined;
 }
 
 function matchAt(
-  pattern: BoundedPattern,
+  pattern: BoundedPatternBranch,
   input: string,
   start: number,
   counter: { steps: number },

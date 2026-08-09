@@ -22,7 +22,9 @@ import {
 import type {
   PipelineOperator,
   ShellCommandNode,
+  ShellInputRedirect,
   ShellOpenRedirect,
+  ShellRedirect,
 } from "./shellSyntax.js";
 import type {
   ShellCommandResult,
@@ -236,17 +238,13 @@ class StreamingLinuxPipelineProcess implements CpuProcess {
     this.writers = pipes.map((pipe) => pipe.writer());
 
     try {
-      const redirectedInput = new Map<ShellOpenRedirect, Uint8Array>();
+      const redirectedInput = new Map<ShellInputRedirect, Uint8Array>();
       let redirectedInputBytes = 0;
-      const inputRedirects: ShellOpenRedirect[] = [];
+      const inputRedirects: ShellInputRedirect[] = [];
       for (const command of commands) {
         for (const redirect of command.redirects) {
-          if (
-            redirect.kind === "open" &&
-            redirect.descriptor === 0 &&
-            redirect.mode === "read"
-          ) {
-            const value = host.readRedirectBytes(redirect);
+          if (isShellInputRedirect(redirect)) {
+            const value = readInputRedirectBytes(redirect, host);
             redirectedInputBytes += value.byteLength;
             if (
               redirectedInputBytes > linuxPipelineLimits.aggregateCollectedBytes
@@ -271,7 +269,7 @@ class StreamingLinuxPipelineProcess implements CpuProcess {
       // `<file >file` observes the already-truncated object just like a real
       // shell rather than replaying a pre-setup snapshot.
       for (const redirect of inputRedirects) {
-        redirectedInput.set(redirect, host.readRedirectBytes(redirect));
+        redirectedInput.set(redirect, readInputRedirectBytes(redirect, host));
       }
       this.stages = commands.map((command, index) =>
         this.createStage(
@@ -447,12 +445,12 @@ class StreamingLinuxPipelineProcess implements CpuProcess {
     command: ShellCommandNode,
     index: number,
     operators: readonly PipelineOperator[],
-    redirectedInput: ReadonlyMap<ShellOpenRedirect, Uint8Array>,
+    redirectedInput: ReadonlyMap<ShellInputRedirect, Uint8Array>,
     externalRequest?: ShellForegroundCs486 | ShellForegroundPython,
   ): Stage {
     const inputRedirect = command.redirects.findLast(
-      (redirect): redirect is ShellOpenRedirect =>
-        redirect.kind === "open" && redirect.descriptor === 0,
+      (redirect): redirect is ShellInputRedirect =>
+        isShellInputRedirect(redirect),
     );
     const input = index === 0 ? undefined : this.readers[index - 1];
     if (inputRedirect !== undefined) input?.close();
@@ -464,8 +462,10 @@ class StreamingLinuxPipelineProcess implements CpuProcess {
     let stderr: Sink = captureSink(2);
     for (const redirect of command.redirects) {
       if (redirect.kind === "duplicate") stderr = stdout;
-      else if (redirect.descriptor === 1) stdout = fileSink(redirect.path);
-      else if (redirect.descriptor === 2) stderr = fileSink(redirect.path);
+      else if (redirect.kind === "open" && redirect.descriptor === 1)
+        stdout = fileSink(redirect.path);
+      else if (redirect.kind === "open" && redirect.descriptor === 2)
+        stderr = fileSink(redirect.path);
     }
     if (operators[index] === "pipe-stdout-and-stderr") {
       if (basePipe === undefined) throw new Error("missing |& pipe endpoint");
@@ -1128,6 +1128,26 @@ class StreamingLinuxPipelineProcess implements CpuProcess {
     }
     this.lease.release();
   }
+}
+
+function isShellInputRedirect(
+  redirect: ShellRedirect,
+): redirect is ShellInputRedirect {
+  return (
+    redirect.kind === "here-document" ||
+    (redirect.kind === "open" &&
+      redirect.descriptor === 0 &&
+      redirect.mode === "read")
+  );
+}
+
+function readInputRedirectBytes(
+  redirect: ShellInputRedirect,
+  host: LinuxPipelineHost,
+): Uint8Array {
+  return redirect.kind === "here-document"
+    ? encodeUtf8(redirect.content)
+    : host.readRedirectBytes(redirect);
 }
 
 function captureSink(descriptor: 1 | 2): CaptureSink {

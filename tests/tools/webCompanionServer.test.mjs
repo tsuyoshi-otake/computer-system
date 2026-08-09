@@ -1244,6 +1244,30 @@ describe("Web companion HTTP server", () => {
     expect(eofValue.status).toBe(400);
     expect(bds.commands.at(-1)).toMatch(/ 1 eof$/u);
 
+    bds.log(
+      `CS_WEB_TERMINAL ${JSON.stringify(
+        tuiSnapshot(sessionId, {
+          interaction: {
+            ...shellInteraction(),
+            context: "dos-prompt",
+            ctrlCAction: "cancel",
+            history: false,
+            inputMode: "keys",
+            hints: [{ key: "Choice", label: "Select" }],
+          },
+        }),
+      )}`,
+    );
+    const choiceKey = await post(status.origin, "/api/input", token, {
+      interactionGeneration: 1,
+      kind: "keys",
+      value: ["N"],
+    });
+    expect(choiceKey.status).toBe(202);
+    expect(bds.commands.at(-1)).toMatch(
+      /^scriptevent computer_system:web-input [A-Za-z0-9_-]+ [A-Za-z0-9_-]{6,20} 1 keys %5B%22N%22%5D$/u,
+    );
+
     bds.log(`CS_WEB_TERMINAL ${JSON.stringify(tuiSnapshot(sessionId))}`);
 
     const keys = await fetch(`${status.origin}/api/input`, {

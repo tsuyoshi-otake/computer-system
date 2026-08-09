@@ -14,6 +14,7 @@ export type TerminalInteractionContext =
   | "busy"
   | "cs-abi"
   | "csasm"
+  | "dos-prompt"
   | "edit"
   | "less"
   | "login"

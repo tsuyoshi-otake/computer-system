@@ -13,6 +13,7 @@ import { CredentialedFilesystem } from "../../src/application/os/credentialedFil
 import { rootCredentials } from "../../src/application/os/linuxCredentials.js";
 import { ShellSession } from "../../src/application/os/shellSession.js";
 import { InMemoryFilesystem } from "../../src/domain/filesystem/inMemoryFilesystem.js";
+import { preparePerlCs486Program } from "../../src/application/runtime/perlCs486.js";
 
 interface PerlRun {
   readonly code: number;
@@ -618,7 +619,131 @@ describe("bounded CS-Linux perl limits", (): void => {
   });
 });
 
+describe("CS-Linux Perl CS486 execution", (): void => {
+  it("executes compiled loop control on the single Cs486Process", (): void => {
+    const io = hostedIo(new Map());
+    const command = prepareLinuxPerlCommand(
+      [
+        "-e",
+        "my $s = 0; for (my $i = 1; $i <= 1500; $i++) { $s += $i*$i + 3*$i + 7; } say $s;",
+      ],
+      io,
+    );
+    if (command.kind === "invalid" || command.kind === "version")
+      throw new Error("expected an executable Perl command");
+    const prepared = preparePerlCs486Program({
+      cpuModel: "cs486dx2",
+      io,
+      options: command.options,
+      scriptArguments: command.scriptArguments,
+      stdin: "",
+    });
+    if (prepared.requirements.kind !== "declared")
+      throw new Error("expected declared Perl memory requirements");
+    const program = prepared.create(
+      prepared.requirements.linearAddressSpaceBytes,
+    );
+    let instructions = 0;
+    let cycles = 0;
+    while (program.process.state.kind === "ready") {
+      const slice = program.process.runCpuSlice(4096);
+      instructions += slice.executedInstructions;
+      cycles += slice.cpuCycles;
+    }
+    expect(program.process.constructor.name).toBe("Cs486Process");
+    expect(program.result()).toMatchObject({
+      exitCode: 0,
+      stderr: "",
+      stdout: "1129513000\n",
+    });
+    expect(instructions).toBeGreaterThan(10_000);
+    expect(cycles).toBeGreaterThan(instructions);
+    expect(
+      prepared.executable.instructions.some(
+        (instruction) => instruction.op === "jmp",
+      ),
+    ).toBe(true);
+    expect(
+      prepared.executable.instructions.some(
+        (instruction) => instruction.op === "syscall",
+      ),
+    ).toBe(true);
+  });
+
+  it("charges the shared managed-runtime tariff plus operation work", (): void => {
+    const cyclesFor = (source: string): number => {
+      const io = hostedIo(new Map());
+      const command = prepareLinuxPerlCommand(["-e", source], io);
+      if (command.kind === "invalid" || command.kind === "version")
+        throw new Error("expected an executable Perl command");
+      const prepared = preparePerlCs486Program({
+        cpuModel: "cs486dx2",
+        io,
+        options: command.options,
+        scriptArguments: command.scriptArguments,
+        stdin: "",
+      });
+      if (prepared.requirements.kind !== "declared")
+        throw new Error("expected declared Perl memory requirements");
+      const program = prepared.create(
+        prepared.requirements.linearAddressSpaceBytes,
+      );
+      let cycles = 0;
+      while (program.process.state.kind === "ready") {
+        cycles += program.process.runCpuSlice(4096).cpuCycles;
+      }
+      expect(program.result()?.exitCode).toBe(0);
+      return cycles;
+    };
+
+    const smallRange = cyclesFor("my @values = (1..2);");
+    const largeRange = cyclesFor("my @values = (1..200);");
+    const literal = cyclesFor("my $value = 3;");
+    const addition = cyclesFor("my $value = 12 + 3;");
+    const multiplication = cyclesFor("my $value = 12 * 3;");
+    const division = cyclesFor("my $value = 12 / 3;");
+
+    expect(largeRange).toBeGreaterThan(smallRange + 300);
+    expect(addition).toBeGreaterThan(literal);
+    expect(multiplication).toBeGreaterThan(addition);
+    expect(division).toBeGreaterThan(multiplication);
+  });
+});
+
 describe("CS-Linux perl shell integration", (): void => {
+  it("keeps the legacy semantic step counter out of shell CPU accounting", (): void => {
+    const io = hostedIo(new Map());
+    const source =
+      "my $total = 0; for my $i (1..1500) { $total = $total + $i * $i + 3 * $i + 7; }";
+    const first = executeLinuxPerl(["-e", source], "", io);
+    const repeated = executeLinuxPerl(["-e", source], "", io);
+    const short = executeLinuxPerl(["-e", "my $total = 0;"], "", io);
+
+    expect(first.executionSteps).toBe(repeated.executionSteps);
+    expect(first.executionSteps).toBeGreaterThan(short.executionSteps);
+    expect(first.executionSteps).toBeGreaterThan(0);
+
+    const session = linuxSession();
+    const shellShort = session.submit(`perl -e 'my $total = 0;'`);
+    const shellLoop = session.submit(`perl -e '${source}'`);
+    expect(shellShort.cpuCycles).toBe(8);
+    expect(shellLoop.cpuCycles).toBe(8);
+
+    const filesystem = new InMemoryFilesystem();
+    const stdinSession = new ShellSession(filesystem, { osProfile: "linux" });
+    filesystem.writeFile("/tmp/work.pl", source);
+    const redirected = stdinSession.submit("perl < /tmp/work.pl");
+    expect(redirected.cpuCycles).toBe(8);
+
+    expect(stdinSession.submit("perl").exitCode).toBe(0);
+    expect(stdinSession.submit(source).exitCode).toBe(0);
+    const interactive = stdinSession.eof();
+    expect(interactive.cpuCycles).toBe(1);
+
+    const debug = stdinSession.submitDebugCommand(`perl -e '${source}'`);
+    expect(debug.cpuCycles).toBe(shellLoop.cpuCycles);
+  });
+
   it("runs one-liners and pipelines from the guest shell", (): void => {
     const session = linuxSession();
 

@@ -135,6 +135,44 @@ describe("Web terminal field manual", () => {
     }
   });
 
+  it("documents standard streams and the bounded practical text-tool subset", () => {
+    const shell = manualChapters.find(({ id }) => id === "shell")?.html ?? "";
+    for (const required of [
+      "4.17 Standard streams, pipes, redirects, and practical filters",
+      "stdin",
+      "stdout",
+      "stderr",
+      "command 2&gt;&amp;1 | rg",
+      "A literal shell here-document is capped at eight documents and 64 KiB",
+      "jq [-r]",
+      "host JavaScript evaluation",
+      "find</code>, <code>which</code>, <code>type</code>, <code>xargs</code>, and <code>tee</code>",
+    ]) {
+      expect(shell).toContain(required);
+    }
+  });
+
+  it("documents bounded MS-DOS-style text utilities and key prompts", () => {
+    const dos =
+      manualChapters.find(({ id }) => id === "dos-profile")?.html ?? "";
+    for (const required of [
+      "Practical DOS text work and key prompts",
+      "TYPE LOG.TXT | FIND /I",
+      "FIND accepts at most 256,000 input bytes and 4,096 records",
+      "SORT [/R] [/+n] [file]",
+      "FC</code> and <code>COMP</code> compare two explicit guest files only",
+      "CHOICE [/C[:]keys] [/N] [/S] [text]",
+      "one-based <code>ERRORLEVEL</code>",
+      "CHOICE /T",
+      "CS-DOS v10 image adds",
+    ]) {
+      expect(dos).toContain(required);
+    }
+    expect(dos).not.toContain(
+      "CHOICE</code> and native COMMAND.COM binary behavior are not implemented",
+    );
+  });
+
   it("documents the authoritative Linux and DOS submitted-line handoff", () => {
     const terminal =
       manualChapters.find(({ id }) => id === "terminal-editor")?.html ?? "";
@@ -670,8 +708,8 @@ describe("Web terminal field manual", () => {
       "ATTRIB +R +H SECRET.TXT",
       "DIR /A:H",
       "Cold DOS persistence preserves C:",
-      "current CS-DOS v9 image adds",
-      "CS-Linux is rootfs v19",
+      "current CS-DOS v10 image adds",
+      "CS-Linux is rootfs v20",
       "including DOS v8",
       "guest C/C++ include roots",
       "DOS v5 retains CS QBASIC 1.0 without the WorkBench launchers",

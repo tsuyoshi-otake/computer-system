@@ -62,6 +62,8 @@ export class DosShellFrontend implements ShellFrontend {
   sessionCommand(name: string): SessionCommandKind | undefined {
     if (name === "doskey") return "dos-history";
     if (name === "timer") return "dos-timer";
+    if (name === "choice") return "dos-choice";
+    if (name === "pause") return "dos-pause";
     if (name === "edit") return "dos-editor";
     if (name === "qbasic") return "dos-qbasic";
     if (["csasm", "cscc", "cscpp", "pwb"].includes(name)) {
